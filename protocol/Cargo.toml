@@ -1,0 +1,10 @@
+[package]
+name = "crucible-protocol"
+version = "0.0.0"
+authors = ["Joshua M. Clulow <jmc@oxide.computer>"]
+edition = "2018"
+
+[dependencies]
+tokio-util = { version = "0.6", features = [ "codec" ] }
+bytes = "1"
+anyhow = "1"
