@@ -39,12 +39,17 @@ fn deadline_secs(secs: u64) -> Instant {
 }
 
 async fn proc_frame(
+    target: &SocketAddrV4,
     _u: &Arc<Upstairs>,
     m: &Message,
     _fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
 ) -> Result<()> {
     match m {
         Message::Imok => Ok(()),
+        Message::ExtentVersions(versions) => {
+            println!("{:?}: versions: {:?}", target, versions);
+            Ok(())
+        }
         x => bail!("unexpected frame {:?}", x),
     }
 }
@@ -119,6 +124,11 @@ async fn proc(
                         .unwrap();
 
                         println!("{}: version {}", target, version);
+
+                        /*
+                         * Ask for the current version of all extents.
+                         */
+                        fw.send(Message::ExtentVersionsPlease).await?;
                     }
                     Some(m) => {
                         if !negotiated {
@@ -126,7 +136,7 @@ async fn proc(
                         }
 
                         println!("{} --recv--> {:?}", target, m);
-                        proc_frame(u, &m, &mut fw).await?;
+                        proc_frame(&target, u, &m, &mut fw).await?;
                         deadline = deadline_secs(5);
                         pingat = deadline_secs(1);
                         needping = true;
@@ -217,8 +227,7 @@ async fn looper(
  * work to do backing up in here means we need to do something like mark the
  * target as behind or institute some kind of back pressure, etc.
  */
-struct Upstairs {
-}
+struct Upstairs {}
 
 struct Target {
     #[allow(dead_code)]
@@ -275,6 +284,66 @@ async fn main() -> Result<()> {
     loop {
         let c = crx.recv().await.unwrap();
 
+        /*
+         * XXX NOTES ON INTENDED STATE MACHINE
+         *
+         * From cold start:
+         *
+         * When we transition from 0 -> 1 connected Downstairs, nothing happens
+         * yet.
+         *
+         * When we transition from 1 -> 2 connected Downstairs, we must assess
+         * the contents of both.  First, the mundane book-keeping: ensure they
+         * all have the same block size, extent size, and extent count.  Then,
+         * for each extent we get the extent Version and the extent Checksum.
+         * If those values are the same on both Downstairs, then we can move on
+         * to the next extent.  If they are not the same, the highest Version
+         * wins and we replace the contents of the Extent on the other
+         * Downstairs; if they ARE the same, it doesn't matter which we select
+         * as long as they both end up the same.  Once both Downstairs have an
+         * identical set of extents, we are up for WRITES.  It is not
+         * anticipated that this will take very long, as there should only be
+         * around one flush worth of outstanding data to reconcile.
+         *
+         * When we transition from 2 -> 3 connected Downstairs, we must perform
+         * the same reconciliation, with the added complexity that we are also
+         * generally trying to write to the volume.  This process can be
+         * incremental, one extent at a time, and it seems likely that we can
+         * ourselves just hold writes to that extent while verifying the
+         * contents.  If an extent is small, this won't take long.  Writes can
+         * start flowing to the synced subset of extents on the 3rd Downstairs
+         * as soon as they are synced up -- we should keep a bitmap of which
+         * extents are OK on which Downstairs in memory.
+         *
+         * During regular WRITE operation, we will issue each write to each
+         * connected Downstairs.  As soon as two Downstairs have acknowledged
+         * it, we can complete in the guest.  A subsequent guest write that
+         * overlaps another write that has not yet been acknowledged by all
+         * Downstairs will need to "happen after" the first, whether by stalling
+         * the second write, or by somehow making it dependent on the first in
+         * the protocol request itself.
+         *
+         * A flush is issued to all Downstairs simultaneously, and all
+         * previously issued writes to the Downstairs must be stable on disk
+         * (fsync) before the Downstairs completes the flush.  A flush includes
+         * a version number, which will be applied to an extents that have been
+         * modified since the last flush and itself made stable.  The flush
+         * invariant that a disk must expose to the guest is: any write that
+         * completed before the flush was issued must be stable on disk; any
+         * write that completed after the flush was issued is not stable until
+         * another flush.
+         *
+         * From a warm start:
+         *
+         * There probably should not be a situation where Upstairs reboots
+         * without also rebooting the guest.  As long as Upstairs continues to
+         * run, it can remember which I/O requests were in flight when a
+         * connection to any particular Downstairs is interrupted.  If that
+         * state is dropped on the floor, the guest will need to be told about
+         * it somehow -- but we likely don't have a good way to inform the guest
+         * of, say, a Virtio Block device malfunction that drops all I/O that
+         * was previously inflight, leaving the disk in an indeterminate state.
+         */
         if c.connected {
             println!("{:?} #### CONNECTED ########", c.target);
         } else {

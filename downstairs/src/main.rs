@@ -13,6 +13,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+mod disk;
+use disk::Disk;
+
 #[derive(Debug, StructOpt)]
 #[structopt(about = "disk-side storage component")]
 struct Opt {
@@ -45,12 +48,15 @@ fn deadline_secs(secs: u64) -> Instant {
 
 async fn proc_frame(
     _id: u64,
-    _d: &Arc<Downstairs>,
+    d: &Arc<Downstairs>,
     m: &Message,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
 ) -> Result<()> {
     match m {
         Message::Ruok => fw.send(Message::Imok).await,
+        Message::ExtentVersionsPlease => {
+            fw.send(Message::ExtentVersions(d.disk.versions())).await
+        }
         x => bail!("unexpected frame {:?}", x),
     }
 }
@@ -107,13 +113,21 @@ async fn proc(id: u64, d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
     }
 }
 
-struct Downstairs {}
+struct Downstairs {
+    disk: Disk,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = opts()?;
 
-    let d = Arc::new(Downstairs {});
+    /*
+     * Open the disk for which we will be responsible.
+     */
+    let mut disk = Disk::open(&opt.data, Default::default())?;
+    disk.extend(10)?;
+
+    let d = Arc::new(Downstairs { disk });
 
     /*
      * Establish a listen server on the port.

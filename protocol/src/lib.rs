@@ -10,6 +10,8 @@ pub enum Message {
     YesItsMe(u32),
     Ruok,
     Imok,
+    ExtentVersionsPlease,
+    ExtentVersions(Vec<u64>),
     Unknown(u32, BytesMut),
 }
 
@@ -75,6 +77,25 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
+            Message::ExtentVersionsPlease => {
+                dst.reserve(8);
+                dst.put_u32_le(8);
+                dst.put_u32_le(5);
+
+                Ok(())
+            }
+            Message::ExtentVersions(versions) => {
+                let len = 8 + 4 + versions.len() * 8;
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(6);
+                dst.put_u32_le(versions.len() as u32);
+                for v in versions.iter() {
+                    dst.put_u64_le(*v);
+                }
+
+                Ok(())
+            }
         }
     }
 }
@@ -112,7 +133,6 @@ impl Decoder for CrucibleDecoder {
         if len > MAX_FRM_LEN {
             bail!("frame is {} bytes, more than maximum {}", len, MAX_FRM_LEN);
         }
-        let bodylen = len - 8;
 
         if src.len() < len {
             /*
@@ -123,9 +143,9 @@ impl Decoder for CrucibleDecoder {
         }
         src.advance(4);
 
-        let chklen = |n: usize| -> Result<(), Self::Error> {
-            if *&bodylen != len - 8 {
-                bail!("message length {}, expected {} bytes", bodylen, n);
+        let chklen = |src: &BytesMut, n: usize| -> Result<(), Self::Error> {
+            if src.len() < n {
+                bail!("expected at least {} bytes, have {}", n, src.len());
             }
             Ok(())
         };
@@ -133,24 +153,38 @@ impl Decoder for CrucibleDecoder {
         Ok(match src.get_u32_le() {
             0 => bail!("message code must be non-zero"),
             1 => {
-                chklen(4)?;
+                chklen(&src, 4)?;
 
                 let version = src.get_u32_le();
                 Some(Message::HereIAm(version))
             }
             2 => {
-                chklen(4)?;
+                chklen(&src, 4)?;
 
                 let version = src.get_u32_le();
                 Some(Message::YesItsMe(version))
             }
             3 => {
-                chklen(0)?;
+                chklen(&src, 0)?;
                 Some(Message::Ruok)
             }
             4 => {
-                chklen(0)?;
+                chklen(&src, 0)?;
                 Some(Message::Imok)
+            }
+            5 => {
+                chklen(&src, 0)?;
+                Some(Message::ExtentVersionsPlease)
+            }
+            6 => {
+                chklen(&src, 4)?;
+                let extent_count = src.get_u32_le() as usize;
+                chklen(&src, extent_count.checked_mul(8).unwrap())?;
+                let mut versions = Vec::new();
+                for _ in 0..extent_count {
+                    versions.push(src.get_u64_le());
+                }
+                Some(Message::ExtentVersions(versions))
             }
             code => {
                 let buf = src.split_to(len - 2 * 4);
@@ -250,6 +284,27 @@ mod tests {
     #[test]
     fn rt_imok() -> Result<()> {
         let input = Message::Imok;
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_evp() -> Result<()> {
+        let input = Message::ExtentVersionsPlease;
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_ev_0() -> Result<()> {
+        let input = Message::ExtentVersions(vec![]);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_ev_7() -> Result<()> {
+        let input = Message::ExtentVersions(vec![1, 2, 3, 4, u64::MAX, 1, 0]);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

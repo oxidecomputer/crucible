@@ -3,4 +3,5 @@ members = [
 	"protocol",
 	"downstairs",
 	"upstairs",
+	"common",
 ]
