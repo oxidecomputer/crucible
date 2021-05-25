@@ -219,8 +219,8 @@ impl Extent {
                 }
             };
 
-        let old_buf = ExtentMeta::default();
-        let mut encoded: Vec<u8> = bincode::serialize(&old_buf).unwrap();
+        let size = bincode::serialized_size(&ExtentMeta::default()).unwrap();
+        let mut encoded: Vec<u8> = vec![0; size as usize];
         file.read_exact(&mut encoded)?;
         let buf: ExtentMeta = bincode::deserialize(&encoded[..]).unwrap();
 
@@ -317,7 +317,7 @@ impl Extent {
         Ok(())
     }
 
-    pub fn flush(&self, new_version: u64) -> Result<()> {
+    pub fn flush(&self, new_flush: u64) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         if !inner.meta.dirty {
             /*
@@ -343,21 +343,22 @@ impl Extent {
         /*
          * When we write out the new flush number, the dirty bit in the file
          * should be set back to false
-         * Now, we may be able to do this without having to create a new
-         * ExtentMeta struct for it, but we want to be sure that if there is
-         * an error, we have reset the in memory dirty bit before we can
-         * confirm that the new flush number is on disk.
+         * We create a new ExtentMeta structure and write that out first,
+         * before we update our internal structure.  This gives us a
+         * chance to recover if the write or fsync fail.
          */
         let new_meta = ExtentMeta {
             ext_version: inner.meta.ext_version,
             gen: inner.meta.gen,
-            flush_number: inner.meta.flush_number + 1,
+            flush_number: new_flush,
             dirty: false,
         };
         let encoded: Vec<u8> = bincode::serialize(&new_meta).unwrap();
         inner.file.write_all(&encoded)?;
         inner.file.flush()?;
-        // Fsync the metadata update
+        /*
+         * Fsync the metadata update
+         */
         if unsafe { fsync(inner.file.as_raw_fd()) } == -1 {
             let e = std::io::Error::last_os_error();
             /*
@@ -366,8 +367,7 @@ impl Extent {
             bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
         }
 
-        inner.meta.flush_number += 1;
-        inner.meta.dirty = false;
+        inner.meta = new_meta;
         Ok(())
     }
 }
