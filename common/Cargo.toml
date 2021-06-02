@@ -1,7 +1,7 @@
 [package]
 name = "crucible-common"
 version = "0.0.0"
-authors = ["Joshua M. Clulow <jmc@oxide.computer>"]
+authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer>"]
 edition = "2018"
 
 [dependencies]

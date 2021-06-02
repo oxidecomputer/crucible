@@ -102,8 +102,43 @@ pub struct Extent {
 
 pub struct Inner {
     file: File,
+    meta: ExtentMeta,
+}
+
+/*
+ * Warning, changing this struct will change what is written to and expected
+ * from the physical storage device.
+ */
+#[derive(Deserialize, Serialize)]
+pub struct ExtentMeta {
+    ext_version: u32, // XXX Not currently connected to anything.
+    /**
+     * Increasing value provided from upstairs every time it connects to
+     * a downstairs.  Used to help break ties if flash numbers are the same
+     * on extents.
+     */
+    gen: u64, // XXX Not currently connected to anything.
+    /**
+     * Increasing value incremented on every write to an extent.
+     * All mirrors of an extent should have the same value.
+     */
     flush_number: u64,
+    /**
+     * Used to indicate data was written to disk, but not yet flushed
+     * Should be set back to false once data has been flushed.
+     */
     dirty: bool,
+}
+
+impl Default for ExtentMeta {
+    fn default() -> ExtentMeta {
+        ExtentMeta {
+            ext_version: 1,
+            gen: 0,
+            flush_number: 0,
+            dirty: false,
+        }
+    }
 }
 
 /**
@@ -139,22 +174,55 @@ impl Extent {
         /*
          * Leave a block at the beginning of the file as a place to scribble
          * metadata.
+         * XXX Assert somewhere (compile time?)  that struct ExtentMeta
+         * size is always < one block?
          */
         let bcount = def.extent_size.checked_add(1).unwrap();
         let size = def.block_size.checked_mul(bcount).unwrap();
 
         mkdir_for_file(&path)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)?;
+        /*
+         * If the extent file exists, just open it and move forward.
+         * If it does not, then create it and set zero flush number.
+         * If the extent should have existed, we rely on the upper layers to
+         * check the flush number and restore missing contents.
+         */
+        let mut file =
+            match OpenOptions::new().read(true).write(true).open(&path) {
+                Err(_e) => {
+                    /*
+                     * XXX Should we check or log the error here?
+                     * We should know if it's expected to find a file and we
+                     * do not.  Also might want to identify other possible
+                     * errors like bad permissions, out of space, etc.
+                     */
+                    let mut new_file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(&path)?;
 
-        file.set_len(size)?;
-        file.seek(SeekFrom::Start(0))?;
-        let mut buf = [0u8; 8];
-        file.read_exact(&mut buf)?;
-        let flush_number = u64::from_le_bytes(buf);
+                    new_file.set_len(size)?;
+                    new_file.seek(SeekFrom::Start(0))?;
+                    new_file
+                }
+                Ok(f) => {
+                    let cur_size = f.metadata().unwrap().len();
+                    if size != cur_size {
+                        bail!(
+                            "File size {:?} does not match expected {:?}",
+                            size,
+                            cur_size
+                        );
+                    }
+                    f
+                }
+            };
+
+        let size = bincode::serialized_size(&ExtentMeta::default()).unwrap();
+        let mut encoded: Vec<u8> = vec![0; size as usize];
+        file.read_exact(&mut encoded)?;
+        let buf: ExtentMeta = bincode::deserialize(&encoded[..]).unwrap();
 
         /*
          * Read the flush number from the first block:
@@ -166,19 +234,22 @@ impl Extent {
             extent_size: def.extent_size,
             inner: Mutex::new(Inner {
                 file,
-                flush_number,
-                dirty: false,
+                meta: ExtentMeta {
+                    ext_version: buf.ext_version,
+                    gen: buf.gen,
+                    flush_number: buf.flush_number,
+                    dirty: false,
+                },
             }),
         })
     }
 
     fn flush_number(&self) -> u64 {
-        self.inner.lock().unwrap().flush_number
+        self.inner.lock().unwrap().meta.flush_number
     }
 
     pub fn read_block(&self, block_offset: u64, data: &mut [u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.dirty = true;
 
         if block_offset > self.extent_size {
             bail!("block offset {} is past end of extent", block_offset);
@@ -197,7 +268,7 @@ impl Extent {
          */
         let file_offset = self.block_size.checked_mul(block_offset).unwrap();
 
-        inner.file.seek(SeekFrom::Start(file_offset));
+        inner.file.seek(SeekFrom::Start(file_offset))?;
         inner.file.read_exact(data)?;
 
         Ok(())
@@ -205,13 +276,28 @@ impl Extent {
 
     pub fn write_block(&self, block_offset: u64, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.dirty = true;
 
         if block_offset > self.extent_size {
             bail!("block offset {} is past end of extent", block_offset);
         }
         if data.len() != self.block_size as usize {
             bail!("block size {}, buffer is {}", self.block_size, data.len());
+        }
+
+        if !inner.meta.dirty {
+            inner.file.seek(SeekFrom::Start(0))?;
+            let encoded: Vec<u8> = bincode::serialize(&inner.meta).unwrap();
+            inner.file.write_all(&encoded)?;
+            inner.file.flush()?;
+
+            if unsafe { fsync(inner.file.as_raw_fd()) } == -1 {
+                let e = std::io::Error::last_os_error();
+                /*
+                 * XXX Retry?  Mark extent as broken?
+                 */
+                bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
+            }
+            inner.meta.dirty = true;
         }
 
         /*
@@ -224,17 +310,16 @@ impl Extent {
          */
         let file_offset = self.block_size.checked_mul(block_offset).unwrap();
 
-        inner.file.seek(SeekFrom::Start(file_offset));
+        inner.file.seek(SeekFrom::Start(file_offset))?;
         inner.file.write_all(data)?;
         inner.file.flush()?;
 
         Ok(())
     }
 
-    pub fn flush(&self, new_version: u64) -> Result<()> {
+    pub fn flush(&self, new_flush: u64) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-
-        if !inner.dirty {
+        if !inner.meta.dirty {
             /*
              * If we have made no writes to this extent since the last flush, we
              * do not need to update it on disk.
@@ -254,11 +339,26 @@ impl Extent {
             bail!("extent {}: fsync 1 failure: {:?}", self.number, e);
         }
 
-        inner.file.seek(SeekFrom::Start(0));
-        let buf = new_version.to_le_bytes();
-        inner.file.write_all(&buf)?;
+        inner.file.seek(SeekFrom::Start(0))?;
+        /*
+         * When we write out the new flush number, the dirty bit in the file
+         * should be set back to false
+         * We create a new ExtentMeta structure and write that out first,
+         * before we update our internal structure.  This gives us a
+         * chance to recover if the write or fsync fail.
+         */
+        let new_meta = ExtentMeta {
+            ext_version: inner.meta.ext_version,
+            gen: inner.meta.gen,
+            flush_number: new_flush,
+            dirty: false,
+        };
+        let encoded: Vec<u8> = bincode::serialize(&new_meta).unwrap();
+        inner.file.write_all(&encoded)?;
         inner.file.flush()?;
-
+        /*
+         * Fsync the metadata update
+         */
         if unsafe { fsync(inner.file.as_raw_fd()) } == -1 {
             let e = std::io::Error::last_os_error();
             /*
@@ -267,8 +367,7 @@ impl Extent {
             bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
         }
 
-        inner.flush_number = new_version;
-        inner.dirty = false;
+        inner.meta = new_meta;
         Ok(())
     }
 }
@@ -331,10 +430,11 @@ impl Disk {
             );
         }
 
-        self.def.extent_count = newsize;
-        write_json(config_path(&self.dir), &self.def, true)?;
-
-        self.open_extents()?;
+        if newsize > self.def.extent_count {
+            self.def.extent_count = newsize;
+            write_json(config_path(&self.dir), &self.def, true)?;
+            self.open_extents()?;
+        }
         Ok(())
     }
 
