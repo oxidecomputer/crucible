@@ -11,7 +11,11 @@ pub enum Message {
     Ruok,
     Imok,
     ExtentVersionsPlease,
-    ExtentVersions(Vec<u64>),
+    ExtentVersions(u64, u64, u32, Vec<u64>),
+    Write(u64, u64, bytes::Bytes), // XXX Still needs a depend
+    WriteAck(u64),
+    Flush(u64, Vec<u64>, Vec<u64>),
+    FlushAck(u64),
     Unknown(u32, BytesMut),
 }
 
@@ -84,15 +88,89 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::ExtentVersions(versions) => {
-                let len = 8 + 4 + versions.len() * 8;
+            Message::ExtentVersions(bs, es, ec, versions) => {
+                let len = 4 + 8 + 8 + 4 + 4 + versions.len() * 8;
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(6);
+                dst.put_u64_le(bs);
+                dst.put_u64_le(es);
+                dst.put_u32_le(ec);
                 dst.put_u32_le(versions.len() as u32);
                 for v in versions.iter() {
                     dst.put_u64_le(*v);
                 }
+
+                Ok(())
+            }
+            Message::Write(rn, block_offset, data) => {
+                /*
+                 * Total size is:
+                 * length field + rn + message ID + block offset
+                 * + buf len + buf
+                 */
+                let len = 4 + 8 + 4 + 8 + 4 + data.len();
+                println!(
+                    "M:[{:3}] Write len:{} block_offset:{} data_len:{}",
+                    rn,
+                    len,
+                    block_offset,
+                    data.len()
+                );
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(7);
+                dst.put_u64_le(rn);
+                dst.put_u64_le(block_offset);
+                dst.put_u32_le(data.len() as u32);
+                dst.extend_from_slice(&data);
+
+                Ok(())
+            }
+            Message::WriteAck(rn) => {
+                let len = 4 + 4 + 8;
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(8);
+                dst.put_u64_le(rn);
+
+                Ok(())
+            }
+            Message::Flush(rn, dependencies, flush) => {
+                /*
+                 * Total size is all of these:
+                 * length field, message ID, rn,
+                 * dep vector length, dep vector
+                 * flush vector length, flush vector
+                 */
+                let len = 4
+                    + 4
+                    + 8
+                    + 4
+                    + dependencies.len() * 8
+                    + 4
+                    + flush.len() * 8;
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(9);
+                dst.put_u64_le(rn);
+                dst.put_u32_le(dependencies.len() as u32);
+                for v in dependencies.iter() {
+                    dst.put_u64_le(*v);
+                }
+                dst.put_u32_le(flush.len() as u32);
+                for v in flush.iter() {
+                    dst.put_u64_le(*v);
+                }
+
+                Ok(())
+            }
+            Message::FlushAck(rn) => {
+                let len = 4 + 4 + 8;
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(10);
+                dst.put_u64_le(rn);
 
                 Ok(())
             }
@@ -177,14 +255,62 @@ impl Decoder for CrucibleDecoder {
                 Some(Message::ExtentVersionsPlease)
             }
             6 => {
-                chklen(&src, 4)?;
+                chklen(&src, 8 + 8 + 4 + 4)?;
+                let bs = src.get_u64_le();
+                let es = src.get_u64_le();
+                let ec = src.get_u32_le();
                 let extent_count = src.get_u32_le() as usize;
                 chklen(&src, extent_count.checked_mul(8).unwrap())?;
                 let mut versions = Vec::new();
                 for _ in 0..extent_count {
                     versions.push(src.get_u64_le());
                 }
-                Some(Message::ExtentVersions(versions))
+                Some(Message::ExtentVersions(bs, es, ec, versions))
+            }
+            7 => {
+                // Write
+                chklen(&src, 8 + 8 + 4)?;
+                let rn = src.get_u64_le();
+                let block_offset = src.get_u64_le();
+                let data_len = src.get_u32_le() as usize;
+                chklen(&src, data_len)?;
+                println!(
+                    "[{:3}] Write len:{} offset:{} data_len:{} src_len:{}",
+                    rn,
+                    len,
+                    block_offset,
+                    data_len,
+                    src.len()
+                );
+                let data = src.split_to(data_len).freeze();
+                Some(Message::Write(rn, block_offset, data))
+            }
+            8 => {
+                chklen(&src, 8)?;
+                let rn = src.get_u64_le();
+                Some(Message::WriteAck(rn))
+            }
+            9 => {
+                chklen(&src, 8 + 4)?;
+                let rn = src.get_u64_le();
+                let depend_count = src.get_u32_le() as usize;
+                chklen(&src, depend_count.checked_mul(8).unwrap())?;
+                let mut dependencies = Vec::new();
+                for _ in 0..depend_count {
+                    dependencies.push(src.get_u64_le());
+                }
+                let flush_count = src.get_u32_le() as usize;
+                chklen(&src, flush_count.checked_mul(8).unwrap())?;
+                let mut flush = Vec::new();
+                for _ in 0..flush_count {
+                    flush.push(src.get_u64_le());
+                }
+                Some(Message::Flush(rn, dependencies, flush))
+            }
+            10 => {
+                chklen(&src, 8)?;
+                let rn = src.get_u64_le();
+                Some(Message::FlushAck(rn))
             }
             code => {
                 let buf = src.split_to(len - 2 * 4);
@@ -297,14 +423,15 @@ mod tests {
 
     #[test]
     fn rt_ev_0() -> Result<()> {
-        let input = Message::ExtentVersions(vec![]);
+        let input = Message::ExtentVersions(2, 4, 6, vec![]);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
 
     #[test]
     fn rt_ev_7() -> Result<()> {
-        let input = Message::ExtentVersions(vec![1, 2, 3, 4, u64::MAX, 1, 0]);
+        let input =
+            Message::ExtentVersions(2, 4, 6, vec![1, 2, 3, 4, u64::MAX, 1, 0]);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
