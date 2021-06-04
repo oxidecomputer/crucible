@@ -55,7 +55,22 @@ async fn proc_frame(
     match m {
         Message::Ruok => fw.send(Message::Imok).await,
         Message::ExtentVersionsPlease => {
-            fw.send(Message::ExtentVersions(d.disk.versions())).await
+            let (bs, es, ec) = d.disk.disk_def();
+            fw.send(Message::ExtentVersions(bs, es, ec, d.disk.versions()))
+                .await
+        }
+        Message::Write(rn, block_offset, data) => {
+            d.disk.disk_write(*block_offset, data)?;
+            fw.send(Message::WriteAck(*rn)).await
+        }
+        Message::Flush(rn, dependencies, flush) => {
+            println!(
+                "Received flush rn:{} dep:{:?} fl:{:?}",
+                rn, dependencies, flush
+            );
+            //let dep = Vec::new();
+            d.disk.disk_flush(dependencies.to_vec(), flush.to_vec())?;
+            fw.send(Message::FlushAck(*rn)).await
         }
         x => bail!("unexpected frame {:?}", x),
     }
@@ -70,7 +85,7 @@ async fn proc(id: u64, d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
      * Don't wait more than 5 seconds to hear from the other side.
      * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
      */
-    let mut deadline = deadline_secs(5);
+    let mut deadline = deadline_secs(50);
     let mut negotiated = false;
 
     loop {
@@ -105,7 +120,7 @@ async fn proc(id: u64, d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                         }
 
                         proc_frame(id, d, &m, &mut fw).await?;
-                        deadline = deadline_secs(5);
+                        deadline = deadline_secs(50);
                     }
                 }
             }
@@ -127,6 +142,7 @@ async fn main() -> Result<()> {
     let mut disk = Disk::open(&opt.data, Default::default())?;
     disk.extend(10)?;
 
+    println!("Startup Extent values: {:?}", disk.versions());
     let d = Arc::new(Downstairs { disk });
 
     /*
