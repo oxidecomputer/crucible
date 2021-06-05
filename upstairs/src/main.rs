@@ -113,6 +113,100 @@ fn _eid_from_offset(u: &Arc<Upstairs>, offset: u64) -> usize {
     eid as usize
 }
 
+/*
+ * Decide what to do with a downstairs that has just connected and has
+ * sent us information about its extents.
+ *
+ * This will eventually need to message the main thread so it knows
+ * when it can starting doing I/O.
+ */
+fn process_downstairs(
+    target: &SocketAddrV4,
+    u: &Arc<Upstairs>,
+    bs: u64,
+    es: u64,
+    ec: u32,
+    versions: Vec<u64>,
+) -> Result<()> {
+    println!(
+        "{} process: bs:{} es:{} ec:{} versions: {:?}",
+        target, bs, es, ec, versions
+    );
+
+    let mut v = u.versions.lock().unwrap();
+    if v.len() == 0 {
+        /*
+         * This is the first version list we have, so
+         * we will make it the original and compare
+         * whatever comes next.
+         */
+        *v = versions;
+        println!("Setting inital Extent versions to {:?}", v);
+
+        /*
+         * Create the dirty vector with the same length as our version list.
+         * XXX Not used yet.
+         */
+        let mut d = u.dirty.lock().unwrap();
+        *d = vec![false; v.len()];
+    } else if v.len() != versions.len() {
+        /*
+         * I don't think there is much we can do here, the expected number
+         * of flush numbers does not match.  Possibly we have grown one but
+         * not the rest of the downstairs?
+         */
+        panic!(
+            "Expected downstairs version \
+              len:{:?} does not match new \
+              downstairs:{:?}",
+            v.len(),
+            versions.len()
+        );
+    } else {
+        /*
+         * We already have a list of versions to compare with.  Make that
+         * comparision now against this new list
+         */
+        let ver_cmp = v.iter().eq(versions.iter());
+        if !ver_cmp {
+            // XXX Recovery process should start here
+            panic!(
+                "{} MISMATCH process: v: {:?} != versions: {:?}",
+                target, v, versions
+            );
+        }
+    }
+
+    /*
+     * XXX Here we have another workaround.  We don't know
+     * the disk info until after we connect to each
+     * downstairs, but we share the ARC Upstairs before we
+     * know what to expect.  For now I'm using zero as an
+     * indication that we don't yet know the valid values
+     * and non-zero meaning we have at least one downstairs
+     * to compare with.  We might want to consider breaking
+     * out the static config info into something different
+     * that is updated on initial downstairs setup from the
+     * structures we use for work submission.
+     */
+    let mut ddef = u.ddef.lock().unwrap();
+    if ddef.block_size == 0 {
+        ddef.block_size = bs;
+        ddef.extent_size = es;
+        ddef.extent_count = ec;
+        println!("Global using: bs:{} es:{} ec:{}", bs, es, ec);
+    }
+
+    if ddef.block_size != bs
+        || ddef.extent_size != es
+        || ddef.extent_count != ec
+    {
+        // XXX Figure out if we can hande this error.  Possibly not.
+        panic!("New downstaris disk info mismatch");
+    }
+    Ok(())
+}
+
 async fn proc(
     target: &SocketAddrV4,
     input: &mut watch::Receiver<u64>,
@@ -235,7 +329,7 @@ async fn proc(
                         }
                         negotiated = true;
                         needping = true;
-                        println!("{} p: version {}", target, version);
+                        println!("{} is version {}", target, version);
 
                         deadline = deadline_secs(50);
 
@@ -245,66 +339,10 @@ async fn proc(
                         fw.send(Message::ExtentVersionsPlease).await?;
                     }
                     Some(Message::ExtentVersions(bs, es, ec, versions)) => {
-                        println!("{} sent: bs:{} es:{} ec:{} versions: {:?}",
-                                target, bs, es, ec, versions);
-
-                        {
-                            /*
-                             * This requires its own scope because we call
-                             * await below and even if we drop(v), the
-                             * compiler is only checking for out of scope
-                             * and not a drop.
-                             */
-                            let mut v = u.versions.lock().unwrap();
-                            if v.len() == 0 {
-                                *v = versions;
-                                let mut d = u.dirty.lock().unwrap();
-                                *d = vec![false; v.len()];
-                            } else if v.len() != versions.len() {
-                                bail!("Expected downstairs version len:{:?} does not match new downstairs:{:?}", v.len(), versions.len());
-                            }
-                            println!("Global Extent versions is {:?}", v);
-                        }
+                        process_downstairs(target, u, bs, es, ec, versions)?;
 
                         /*
-                         * XXX Here we have another workaround.  We don't know
-                         * the disk info until after we connect to each
-                         * downstairs, but we share the ARC Upstairs before we
-                         * know what to expect.  For now I'm using zero as an
-                         * indication that we don't yet know the valid values
-                         * and non-zero meaning we have at least one downstairs
-                         * to compare with.  We might want to consider breaking
-                         * out the static config info into something different
-                         * that is updated on initial downstairs setup from the
-                         * structures we use for work submission.
-                         */
-                        {
-                            /*
-                             * See above why this requires its own scope
-                             */
-                            let mut ddef = u.ddef.lock().unwrap();
-                            println!("{} sent: bs:{} es:{} ec:{}",
-                                target, bs, es, ec);
-
-                            if ddef.block_size == 0 {
-                                ddef.block_size = bs;
-                                ddef.extent_size = es;
-                                ddef.extent_count = ec;
-                                println!("Global using: bs:{} es:{} ec:{}",
-                                        bs, es, ec);
-                            }
-
-                            if ddef.block_size != bs ||
-                                ddef.extent_size != es ||
-                                ddef.extent_count != ec {
-                                bail!("New downstaris disk info mismatch");
-                                // XXX Hande this error.
-                            }
-                        }
-
-                        /*
-                         *  XXX
-                         * I moved this here for now so we can use this
+                         *  XXX I moved this here for now so we can use this
                          * signal to move forward with I/O.  Eventually this
                          * connected being true state should be sent from the
                          * initial YesItsMe case, and we send something else

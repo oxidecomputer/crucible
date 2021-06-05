@@ -469,7 +469,7 @@ impl Disk {
 
     pub fn versions(&self) -> Vec<u64> {
         println!(
-            "Current flush_numbers {:?}",
+            "Current flush_numbers: {:?}",
             self.extents
                 .iter()
                 .map(|e| e.flush_number())
