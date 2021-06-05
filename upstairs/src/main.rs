@@ -129,7 +129,7 @@ fn process_downstairs(
     versions: Vec<u64>,
 ) -> Result<()> {
     println!(
-        "{} process: bs:{} es:{} ec:{} versions: {:?}",
+        "{} Evaluate new: bs:{} es:{} ec:{} versions: {:?}",
         target, bs, es, ec, versions
     );
 
@@ -171,7 +171,7 @@ fn process_downstairs(
         if !ver_cmp {
             // XXX Recovery process should start here
             panic!(
-                "{} MISMATCH process: v: {:?} != versions: {:?}",
+                "{} MISMATCH expected: {:?} != new: {:?}",
                 target, v, versions
             );
         }
@@ -188,6 +188,8 @@ fn process_downstairs(
      * out the static config info into something different
      * that is updated on initial downstairs setup from the
      * structures we use for work submission.
+     *
+     * 0 should never be a valid block size
      */
     let mut ddef = u.ddef.lock().unwrap();
     if ddef.block_size == 0 {
@@ -256,10 +258,10 @@ async fn proc(
                  * This case is for when the main task has something it
                  * wants us to do.
                  */
-                let new_ri: u64;
+                let request_id: u64;
                 let job: IOop;
                 {
-                    new_ri = *input.borrow();
+                    request_id = *input.borrow();
                 }
 
                 /*
@@ -270,20 +272,19 @@ async fn proc(
                  */
                 {
                     let hm = &*u.work.lock().unwrap();
-                    job = match hm.get(&new_ri) {
+                    job = match hm.get(&request_id) {
                         Some(job) => {
-                            assert_eq!(new_ri, job.request_id);
+                            assert_eq!(request_id, job.request_id);
                             job.work.clone()
                         }
                         None => {
-                            bail!("Missing job hashmap entry {}", new_ri);
+                            bail!("Missing job hashmap entry {}", request_id);
                         }
                     };
                 }
 
                 match job {
-                    IOop::Write{request_id, dependencies, data, offset} => {
-                        assert_eq!(request_id, new_ri);
+                    IOop::Write{dependencies, data, offset} => {
                         /*
                          * XXX Before we write, we should set the dirty bit
                          * {
@@ -295,9 +296,7 @@ async fn proc(
                                                offset,
                                                data.clone())).await?;
                     }
-                    IOop::Flush{request_id, dependencies, flush_numbers} => {
-                        assert_eq!(request_id, new_ri);
-                        //let dep = Vec::new();
+                    IOop::Flush{dependencies, flush_numbers} => {
                         println!("sending flush with dep:{:?} fl:{:?}",
                                 dependencies, flush_numbers);
                         fw.send(Message::Flush(request_id,
@@ -339,6 +338,9 @@ async fn proc(
                         fw.send(Message::ExtentVersionsPlease).await?;
                     }
                     Some(Message::ExtentVersions(bs, es, ec, versions)) => {
+                        if !negotiated {
+                            bail!("expected YesItsMe first");
+                        }
                         process_downstairs(target, u, bs, es, ec, versions)?;
 
                         /*
@@ -385,8 +387,6 @@ async fn looper(
     u: &Arc<Upstairs>,
     client_id: u8,
 ) {
-    println!("{0:?} {1} looper start for {0:?}", target, client_id);
-
     let mut firstgo = true;
     let mut connected = false;
 
@@ -475,6 +475,9 @@ struct Upstairs {
     ddef: Mutex<DiskDefinition>,
 }
 
+/*
+ * A unit of work that is put into the hashmap.
+ */
 #[derive(Debug)]
 struct IOWork {
     request_id: u64,       // This MUST match our hash index
@@ -485,7 +488,6 @@ struct IOWork {
 #[derive(Debug, Clone)]
 pub enum IOop {
     Write {
-        request_id: u64,
         dependencies: Vec<u64>, // Other writes that need to come before this
         data: bytes::Bytes,
         offset: u64,
@@ -495,7 +497,6 @@ pub enum IOop {
         length: u32,
     },
     Flush {
-        request_id: u64,
         dependencies: Vec<u64>, // List of write requests that must finish first
         flush_numbers: Vec<u64>,
     },
@@ -689,7 +690,6 @@ fn create_write(ri: u64, offset: u64, data_seed: u8) -> IOWork {
     let data = data.freeze();
 
     let awrite = IOop::Write {
-        request_id: ri,
         dependencies: Vec::new(), // XXX Coming soon
         data,
         offset,
@@ -704,7 +704,6 @@ fn create_write(ri: u64, offset: u64, data_seed: u8) -> IOWork {
 
 fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
     let flush = IOop::Flush {
-        request_id: ri,
         dependencies: Vec::new(), // XXX coming soon
         flush_numbers: fln,
     };
@@ -719,7 +718,7 @@ fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
 fn create_work(u: &Arc<Upstairs>, mut ri: u64) -> Result<()> {
     let mut m = u.work.lock().unwrap();
 
-    let w = create_write(ri, 102400, 0xBB);
+    let w = create_write(ri, 204800, 0xBB);
     m.insert(ri, w);
     ri += 1;
 
