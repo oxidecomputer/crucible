@@ -7,10 +7,9 @@ A prototype storage service.  There are two components:
 * `crucible-upstairs`: will reside with the machine using the storage,
   making requests across the network to some number of downstairs replicas
 
-At present, all that is implemented is a skeletal framed TCP protocol with
-basic version negotiation and some heartbeating.  The `upstairs` program
-accepts a list of target addresses and will maintain a persistent connection to
-each `downstairs` in that list.
+As this is under active development, this space is subject to change.
+The steps below still work, but may give slightly different output as
+more code is written.
 
 To give it a burl, first build the workspace with `cargo build`.  Then run
 a set of Downstairs processes:

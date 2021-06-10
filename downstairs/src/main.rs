@@ -6,6 +6,7 @@ use std::time::Duration;
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
+use bytes::{BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
 use structopt::StructOpt;
 use tokio::net::tcp::WriteHalf;
@@ -71,6 +72,23 @@ async fn proc_frame(
             //let dep = Vec::new();
             d.disk.disk_flush(dependencies.to_vec(), flush.to_vec())?;
             fw.send(Message::FlushAck(*rn)).await
+        }
+        Message::ReadRequest(rn, eid, block_offset) => {
+            /*
+             * XXX Some thought will need to be given to where the read
+             * data buffer is created, both on this side and the remote.
+             * Also, we (I) need to figure out how to read data into an
+             * uninitialized buffer.  Until then, we have this workaround.
+             */
+            let mut data = BytesMut::with_capacity(512);
+            data.put(&[1; 512][..]);
+            println!(
+                "Read rn:{} eid:{} block_offset:{}",
+                rn, eid, block_offset
+            );
+            d.disk.disk_read(*eid, *block_offset, &mut data)?;
+            let data = data.freeze();
+            fw.send(Message::ReadResponse(*rn, data.clone())).await
         }
         x => bail!("unexpected frame {:?}", x),
     }
