@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{stdin, stdout, Read, Write};
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{thread, time::Duration};
 
 use crucible_protocol::*;
 
@@ -85,7 +85,7 @@ async fn proc_frame(
     match m {
         Message::Imok => Ok(()),
         Message::WriteAck(rn) => {
-            println!("{} Write {} acked", target, rn);
+            println!("{} Write rn:{} acked", target, rn);
             // XXX put this on the completed list for this downstairs
             // We might need to include more so we know which target
             // completed, and know when to ack back to the host
@@ -95,8 +95,14 @@ async fn proc_frame(
             // XXX put this on the completed list for this downstairs
             // We might need to include more so we know which target
             // completed, and know when to ack back to the host
-            println!("{} flush {} acked", target, rn);
+            println!("{} flush rn:{} acked", target, rn);
             // XXX Clear dirty bit, but we need the job info for that.
+            Ok(())
+        }
+        Message::ReadResponse(rn, data) => {
+            // XXX put this on the completed list for this downstairs
+            // We might need to include which target responded
+            println!("{} read rn:{} {:#?}", target, rn, data);
             Ok(())
         }
         x => bail!("unexpected frame {:?}", x),
@@ -104,15 +110,17 @@ async fn proc_frame(
 }
 
 // XXX This should move to some common lib.  This will be used when
-// the upstairs switches to sending write requests using extent EID and
+// the upstairs needs to translate a read/write offset in to the extent
+// eid and the block offset in the extent.
 // block offset.
-fn _eid_from_offset(u: &Arc<Upstairs>, offset: u64) -> usize {
+fn _extent_from_offset(u: &Arc<Upstairs>, offset: u64) -> Result<(usize, u64)> {
     let ddef = u.ddef.lock().unwrap();
     let space_per_extent = ddef.block_size * ddef.extent_size;
     let eid: u64 = offset / space_per_extent;
-    eid as usize
+    let block_in_extent: u64 =
+        (offset - (eid * space_per_extent)) / ddef.block_size;
+    Ok((eid as usize, block_in_extent))
 }
-
 /*
  * Decide what to do with a downstairs that has just connected and has
  * sent us information about its extents.
@@ -129,7 +137,7 @@ fn process_downstairs(
     versions: Vec<u64>,
 ) -> Result<()> {
     println!(
-        "{} Evaluate new: bs:{} es:{} ec:{} versions: {:?}",
+        "{} Evaluate new downstairs : bs:{} es:{} ec:{} versions: {:?}",
         target, bs, es, ec, versions
     );
 
@@ -170,7 +178,7 @@ fn process_downstairs(
         let ver_cmp = v.iter().eq(versions.iter());
         if !ver_cmp {
             // XXX Recovery process should start here
-            panic!(
+            println!(
                 "{} MISMATCH expected: {:?} != new: {:?}",
                 target, v, versions
             );
@@ -303,8 +311,12 @@ async fn proc(
                                                dependencies.clone(),
                                                flush_numbers.clone())).await?;
                     }
-                    _ => {
-                        println!("No action for that");
+                    IOop::Read{eid, block_offset} => {
+                        println!("sending read with eid:{:?} bo:{:?}",
+                                eid, block_offset);
+                        fw.send(Message::ReadRequest(request_id,
+                                               eid,
+                                               block_offset)).await?;
                     }
                 }
 
@@ -405,7 +417,7 @@ async fn looper(
         /*
          * Set a connect timeout, and connect to the target:
          */
-        println!("{0} connecting to {0}", target);
+        println!("{0}[{1}] connecting to {0}", target, client_id);
         let deadline = tokio::time::sleep_until(deadline_secs(10));
         tokio::pin!(deadline);
         let tcp = sock.connect(target.into());
@@ -493,8 +505,8 @@ pub enum IOop {
         offset: u64,
     },
     Read {
-        offset: u64,
-        length: u32,
+        eid: u64,
+        block_offset: u64,
     },
     Flush {
         dependencies: Vec<u64>, // List of write requests that must finish first
@@ -643,33 +655,24 @@ async fn main() -> Result<()> {
     }
 
     println!("#### Connected all async tasks");
-    test_pause();
-
-    create_work(&u, 1)?;
-    println!("#### Created a write and a flush, put on work queue");
+    println!("#### Create work, put on work queue");
+    create_work(&u, 1, 97, 0)?;
     test_pause();
 
     println!("#### next_id {} sending IO work", next_id);
     t.iter().for_each(|t| t.input.send(next_id).unwrap());
-    test_pause();
-
     next_id += 1;
+    test_pause();
+
     println!("#### next_id {} sending IO work", next_id);
     t.iter().for_each(|t| t.input.send(next_id).unwrap());
-    test_pause();
-
-    create_work(&u, 3)?;
-    println!("#### Created another write and flush, put on work queue");
-    test_pause();
-
     next_id += 1;
-    println!("#### next_id {} sending IO work", next_id);
-    t.iter().for_each(|t| t.input.send(next_id).unwrap());
-
     test_pause();
-    next_id += 1;
+
     println!("#### next_id {} sending IO work", next_id);
     t.iter().for_each(|t| t.input.send(next_id).unwrap());
+    // next_id += 1;  Uncomment if you add more
+    test_pause();
 
     println!();
     println!("#### Main loop will now exit");
@@ -715,21 +718,49 @@ fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
     }
 }
 
-fn create_work(u: &Arc<Upstairs>, mut ri: u64) -> Result<()> {
+fn create_read(ri: u64, eid: u64, offset: u64) -> IOWork {
+    let aread = IOop::Read {
+        eid: eid,
+        block_offset: offset,
+    };
+
+    IOWork {
+        request_id: ri,
+        completed_by: [0; 3],
+        work: aread,
+    }
+}
+
+fn create_work(
+    u: &Arc<Upstairs>,
+    mut ri: u64,
+    seed: u8,
+    eid: u64,
+) -> Result<()> {
     let mut m = u.work.lock().unwrap();
 
-    let w = create_write(ri, 204800, 0xBB);
+    // let w = create_write(ri, 204800, 0xBB);
+    // XXX This eid is not yet an extent id, it's still a real file offset.
+    // Coming soon, this will become a real EID and it will be up to the
+    // creater of work to do the translation from LBA offset into the proper
+    // eid, and block offset in that eid (like read does)
+    let w = create_write(ri, eid, seed);
     m.insert(ri, w);
     ri += 1;
 
     let v = u.versions.lock().unwrap();
     let w = create_flush(ri, v.clone());
     m.insert(ri, w);
+    ri += 1;
+
+    let r = create_read(ri, eid, 0);
+    m.insert(ri, r);
     Ok(())
 }
 
 fn test_pause() {
     let mut stdout = stdout();
+    thread::sleep(Duration::from_secs(1));
     stdout.write_all(b"Press Enter to continue...\n").unwrap();
     stdout.flush().unwrap();
     stdin().read_exact(&mut [0]).unwrap();

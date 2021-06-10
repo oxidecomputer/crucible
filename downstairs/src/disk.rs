@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{bail, Result};
+use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 
 use crucible_common::*;
@@ -248,14 +249,22 @@ impl Extent {
         self.inner.lock().unwrap().meta.flush_number
     }
 
-    pub fn read_block(&self, block_offset: u64, data: &mut [u8]) -> Result<()> {
+    pub fn read_block(
+        &self,
+        block_offset: u64,
+        data: &mut BytesMut,
+    ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
         if block_offset > self.extent_size {
             bail!("block offset {} is past end of extent", block_offset);
         }
-        if data.len() != self.block_size as usize {
-            bail!("block size {}, buffer is {}", self.block_size, data.len());
+        if data.capacity() != self.block_size as usize {
+            bail!(
+                "block size {}, buffer is {}",
+                self.block_size,
+                data.capacity()
+            );
         }
 
         /*
@@ -269,8 +278,21 @@ impl Extent {
         let file_offset = self.block_size.checked_mul(block_offset).unwrap();
 
         inner.file.seek(SeekFrom::Start(file_offset))?;
+        /*
+         * XXX This read_exact only works because we have filled our buffer
+         * with data ahead of time.  If we want to use an uninitialized
+         * buffer, then we need a different read or type for the destination
+         */
         inner.file.read_exact(data)?;
 
+        println!(
+            "read_block  eid:{} b_offset:{} f_offset:{} len:{} data:{:?}",
+            self.number,
+            block_offset,
+            file_offset,
+            data.len(),
+            data
+        );
         Ok(())
     }
 
@@ -315,8 +337,8 @@ impl Extent {
         inner.file.flush()?;
 
         println!(
-            "Just did a write_block at {}/{} (actual + 1)",
-            file_offset, block_offset
+            "write_block eid:{} b_offset:{} f_offset:{}",
+            self.number, block_offset, file_offset
         );
 
         Ok(())
@@ -507,6 +529,22 @@ impl Disk {
         Ok(())
     }
 
+    pub fn disk_read(
+        &self,
+        eid: u64,
+        block_offset: u64,
+        data: &mut BytesMut,
+    ) -> Result<()> {
+        /*
+         * XXX Handle the case where the read length can span more than
+         * one extent.  Soon!  This means we will also need to handle the
+         * case where a read covers two extents.  So we will need to
+         * recombine buffers from two extent.read_block() calls.
+         */
+        let extent = &self.extents[eid as usize];
+        extent.read_block(block_offset, data)?;
+        Ok(())
+    }
     /*
      * Perhaps this can be a list of extents that need flush instead of
      * sending the whole Vec.  Something to think about XXX

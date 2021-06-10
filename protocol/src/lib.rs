@@ -16,6 +16,8 @@ pub enum Message {
     WriteAck(u64),
     Flush(u64, Vec<u64>, Vec<u64>),
     FlushAck(u64),
+    ReadRequest(u64, u64, u64),
+    ReadResponse(u64, bytes::Bytes),
     Unknown(u32, BytesMut),
 }
 
@@ -110,13 +112,6 @@ impl Encoder<Message> for CrucibleEncoder {
                  * + buf len + buf
                  */
                 let len = 4 + 8 + 4 + 8 + 4 + data.len();
-                println!(
-                    "M:[{:3}] Write len:{} block_offset:{} data_len:{}",
-                    rn,
-                    len,
-                    block_offset,
-                    data.len()
-                );
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(7);
@@ -171,6 +166,32 @@ impl Encoder<Message> for CrucibleEncoder {
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(10);
                 dst.put_u64_le(rn);
+
+                Ok(())
+            }
+            Message::ReadRequest(rn, eid, block_offset) => {
+                let len = 4 + 4 + 8 + 8 + 8;
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(11);
+                dst.put_u64_le(rn);
+                dst.put_u64_le(eid);
+                dst.put_u64_le(block_offset);
+
+                Ok(())
+            }
+            Message::ReadResponse(rn, data) => {
+                /*
+                 * Total size is:
+                 * length field + message ID + rn + buf len + buf
+                 */
+                let len = 4 + 4 + 8 + 4 + data.len();
+                dst.reserve(len);
+                dst.put_u32_le(len as u32);
+                dst.put_u32_le(12);
+                dst.put_u64_le(rn);
+                dst.put_u32_le(data.len() as u32);
+                dst.extend_from_slice(&data);
 
                 Ok(())
             }
@@ -274,14 +295,6 @@ impl Decoder for CrucibleDecoder {
                 let block_offset = src.get_u64_le();
                 let data_len = src.get_u32_le() as usize;
                 chklen(&src, data_len)?;
-                println!(
-                    "[{:3}] Write len:{} offset:{} data_len:{} src_len:{}",
-                    rn,
-                    len,
-                    block_offset,
-                    data_len,
-                    src.len()
-                );
                 let data = src.split_to(data_len).freeze();
                 Some(Message::Write(rn, block_offset, data))
             }
@@ -311,6 +324,21 @@ impl Decoder for CrucibleDecoder {
                 chklen(&src, 8)?;
                 let rn = src.get_u64_le();
                 Some(Message::FlushAck(rn))
+            }
+            11 => {
+                chklen(&src, 24)?;
+                let rn = src.get_u64_le();
+                let eid = src.get_u64_le();
+                let block_offset = src.get_u64_le();
+                Some(Message::ReadRequest(rn, eid, block_offset))
+            }
+            12 => {
+                chklen(&src, 8 + 4)?;
+                let rn = src.get_u64_le();
+                let data_len = src.get_u32_le() as usize;
+                chklen(&src, data_len)?;
+                let data = src.split_to(data_len).freeze();
+                Some(Message::ReadResponse(rn, data))
             }
             code => {
                 let buf = src.split_to(len - 2 * 4);
