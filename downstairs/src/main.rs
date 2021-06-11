@@ -60,8 +60,8 @@ async fn proc_frame(
             fw.send(Message::ExtentVersions(bs, es, ec, d.disk.versions()))
                 .await
         }
-        Message::Write(rn, block_offset, data) => {
-            d.disk.disk_write(*block_offset, data)?;
+        Message::Write(rn, eid, block_offset, data) => {
+            d.disk.disk_write(*eid, *block_offset, data)?;
             fw.send(Message::WriteAck(*rn)).await
         }
         Message::Flush(rn, dependencies, flush) => {

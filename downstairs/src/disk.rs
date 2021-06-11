@@ -504,28 +504,15 @@ impl Disk {
             .collect::<Vec<_>>()
     }
 
-    /*
-     * Figure out the Extent that holds an offset, then the new offset
-     * specific to that extent.
-     *
-     * XXX Can we assert offset will always be multiple of block size?
-     */
-    pub fn extent_from_offset(&self, offset: u64) -> Result<(usize, u64)> {
-        let space_per_extent = self.def.block_size * self.def.extent_size;
-        let eid: u64 = offset / space_per_extent;
-        let block_in_extent: u64 = (offset - (eid * space_per_extent)) / 512;
-        Ok((eid as usize, block_in_extent))
-    }
-
-    /*
-     * XXX This logic will move up into the upstairs. The downstairs will
-     * just get the extent EID and the block offset in that extent.
-     */
-    pub fn disk_write(&self, offset: u64, data: &[u8]) -> Result<()> {
-        let (eid, newoff) = self.extent_from_offset(offset).unwrap();
+    pub fn disk_write(
+        &self,
+        eid: u64,
+        block_offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
         let extent = &self.extents[eid as usize];
-        println!("disk_write of {}, eid:{}, newoff:{}", offset, eid, newoff);
-        extent.write_block(newoff, data)?;
+        println!("disk_write eid:{}, b_offset:{}", eid, block_offset);
+        extent.write_block(block_offset, data)?;
         Ok(())
     }
 
@@ -584,29 +571,6 @@ mod test {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
-    }
-
-    #[test]
-    fn extent_offset() {
-        let def = DiskDefinition {
-            block_size: 512,
-            extent_size: 100,
-            extent_count: 10,
-        };
-        let disk = Disk {
-            dir: p("/dev/null"),
-            def,
-            extents: Vec::new(),
-        };
-        assert_eq!(disk.extent_from_offset(0).unwrap(), (0, 0));
-        assert_eq!(disk.extent_from_offset(512).unwrap(), (0, 1));
-        assert_eq!(disk.extent_from_offset(1024).unwrap(), (0, 2));
-        assert_eq!(disk.extent_from_offset(1024 + 512).unwrap(), (0, 3));
-        assert_eq!(disk.extent_from_offset(51200).unwrap(), (1, 0));
-        assert_eq!(disk.extent_from_offset(51200 + 512).unwrap(), (1, 1));
-        assert_eq!(disk.extent_from_offset(51200 + 1024).unwrap(), (1, 2));
-        assert_eq!(disk.extent_from_offset(102400 - 512).unwrap(), (1, 99));
-        assert_eq!(disk.extent_from_offset(102400).unwrap(), (2, 0));
     }
 
     #[test]

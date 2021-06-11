@@ -292,7 +292,7 @@ async fn proc(
                 }
 
                 match job {
-                    IOop::Write{dependencies, data, offset} => {
+                    IOop::Write{dependencies, eid, block_offset, data} => {
                         /*
                          * XXX Before we write, we should set the dirty bit
                          * {
@@ -301,7 +301,8 @@ async fn proc(
                          *}
                          */
                         fw.send(Message::Write(request_id,
-                                               offset,
+                                               eid,
+                                               block_offset,
                                                data.clone())).await?;
                     }
                     IOop::Flush{dependencies, flush_numbers} => {
@@ -501,8 +502,9 @@ struct IOWork {
 pub enum IOop {
     Write {
         dependencies: Vec<u64>, // Other writes that need to come before this
+        eid: u64,
+        block_offset: u64,
         data: bytes::Bytes,
-        offset: u64,
     },
     Read {
         eid: u64,
@@ -550,7 +552,6 @@ async fn main() -> Result<()> {
      */
     let (ctx, mut crx) = mpsc::channel::<Condition>(32);
 
-    let mut next_id = 1;
     let mut client_id = 0;
     let t = opt
         .target
@@ -559,9 +560,9 @@ async fn main() -> Result<()> {
             /*
              * Create the channel that we will use to request that the loop
              * check for work to do in the central structure.
-             * XXX Not quite wired up yet.
+             * XXX Not sure if anyone reads this first value
              */
-            let (itx, irx) = watch::channel(next_id);
+            let (itx, irx) = watch::channel(0);
 
             let u = Arc::clone(&u);
             let ctx = ctx.clone();
@@ -655,24 +656,24 @@ async fn main() -> Result<()> {
     }
 
     println!("#### Connected all async tasks");
-    println!("#### Create work, put on work queue");
-    create_work(&u, 1, 97, 0)?;
+    /*
+     * This is just test code that should move elsewhere.  For now
+     * it is just used to test the initial prototype of R/W/F commands
+     * and everything is hard coded while we figure out what the exact
+     * interface Propolis (and a test program) will use.  Once that is
+     * finished, all this stuff will go away
+     */
+    println!("#### Create test work, put on work queue");
+    create_work(&u, 1, 97, 5, 0)?; // job id, data_seed, eid, block_offset
+    create_work(&u, 4, 99, 7, 2)?; // job id, data_seed, eid, block_offset
+    println!("#### Ready to run tests with 6 jobs");
     test_pause();
 
-    println!("#### next_id {} sending IO work", next_id);
-    t.iter().for_each(|t| t.input.send(next_id).unwrap());
-    next_id += 1;
-    test_pause();
-
-    println!("#### next_id {} sending IO work", next_id);
-    t.iter().for_each(|t| t.input.send(next_id).unwrap());
-    next_id += 1;
-    test_pause();
-
-    println!("#### next_id {} sending IO work", next_id);
-    t.iter().for_each(|t| t.input.send(next_id).unwrap());
-    // next_id += 1;  Uncomment if you add more
-    test_pause();
+    for id in 1..7 {
+        println!("#### Sending work id:{}", id);
+        t.iter().for_each(|t| t.input.send(id).unwrap());
+        test_pause();
+    }
 
     println!();
     println!("#### Main loop will now exit");
@@ -687,15 +688,16 @@ async fn main() -> Result<()> {
 /*
  * These are some simple functions to create IO work for testing
  */
-fn create_write(ri: u64, offset: u64, data_seed: u8) -> IOWork {
+fn create_write(ri: u64, eid: u64, block_offset: u64, data_seed: u8) -> IOWork {
     let mut data = BytesMut::with_capacity(512);
     data.put(&[data_seed; 512][..]);
     let data = data.freeze();
 
     let awrite = IOop::Write {
         dependencies: Vec::new(), // XXX Coming soon
+        eid,
+        block_offset,
         data,
-        offset,
     };
 
     IOWork {
@@ -718,11 +720,8 @@ fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
     }
 }
 
-fn create_read(ri: u64, eid: u64, offset: u64) -> IOWork {
-    let aread = IOop::Read {
-        eid: eid,
-        block_offset: offset,
-    };
+fn create_read(ri: u64, eid: u64, block_offset: u64) -> IOWork {
+    let aread = IOop::Read { eid, block_offset };
 
     IOWork {
         request_id: ri,
@@ -736,15 +735,11 @@ fn create_work(
     mut ri: u64,
     seed: u8,
     eid: u64,
+    block_offset: u64,
 ) -> Result<()> {
     let mut m = u.work.lock().unwrap();
 
-    // let w = create_write(ri, 204800, 0xBB);
-    // XXX This eid is not yet an extent id, it's still a real file offset.
-    // Coming soon, this will become a real EID and it will be up to the
-    // creater of work to do the translation from LBA offset into the proper
-    // eid, and block offset in that eid (like read does)
-    let w = create_write(ri, eid, seed);
+    let w = create_write(ri, eid, block_offset, seed);
     m.insert(ri, w);
     ri += 1;
 
@@ -753,7 +748,7 @@ fn create_work(
     m.insert(ri, w);
     ri += 1;
 
-    let r = create_read(ri, eid, 0);
+    let r = create_read(ri, eid, block_offset);
     m.insert(ri, r);
     Ok(())
 }
@@ -764,4 +759,35 @@ fn test_pause() {
     stdout.write_all(b"Press Enter to continue...\n").unwrap();
     stdout.flush().unwrap();
     stdin().read_exact(&mut [0]).unwrap();
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn offset_to_extent() {
+        let def = DiskDefinition {
+            block_size: 512,
+            extent_size: 100,
+            extent_count: 10,
+        };
+
+        let u = Arc::new(Upstairs {
+            work: Mutex::new(HashMap::new()),
+            versions: Mutex::new(Vec::new()),
+            dirty: Mutex::new(Vec::new()),
+            ddef: Mutex::new(def),
+        });
+
+        assert_eq!(_extent_from_offset(&u, 0).unwrap(), (0, 0));
+        assert_eq!(_extent_from_offset(&u, 512).unwrap(), (0, 1));
+        assert_eq!(_extent_from_offset(&u, 1024).unwrap(), (0, 2));
+        assert_eq!(_extent_from_offset(&u, 1024 + 512).unwrap(), (0, 3));
+        assert_eq!(_extent_from_offset(&u, 51200).unwrap(), (1, 0));
+        assert_eq!(_extent_from_offset(&u, 51200 + 512).unwrap(), (1, 1));
+        assert_eq!(_extent_from_offset(&u, 51200 + 1024).unwrap(), (1, 2));
+        assert_eq!(_extent_from_offset(&u, 102400 - 512).unwrap(), (1, 99));
+        assert_eq!(_extent_from_offset(&u, 102400).unwrap(), (2, 0));
+    }
 }
