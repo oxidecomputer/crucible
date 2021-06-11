@@ -12,7 +12,7 @@ pub enum Message {
     Imok,
     ExtentVersionsPlease,
     ExtentVersions(u64, u64, u32, Vec<u64>),
-    Write(u64, u64, bytes::Bytes), // XXX Still needs a depend
+    Write(u64, u64, u64, bytes::Bytes), // XXX Still needs a depend
     WriteAck(u64),
     Flush(u64, Vec<u64>, Vec<u64>),
     FlushAck(u64),
@@ -105,17 +105,18 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::Write(rn, block_offset, data) => {
+            Message::Write(rn, eid, block_offset, data) => {
                 /*
                  * Total size is:
-                 * length field + rn + message ID + block offset
+                 * length field + message ID + rn + eid + block offset
                  * + buf len + buf
                  */
-                let len = 4 + 8 + 4 + 8 + 4 + data.len();
+                let len = 4 + 8 + 4 + 8 + 8 + 4 + data.len();
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(7);
                 dst.put_u64_le(rn);
+                dst.put_u64_le(eid);
                 dst.put_u64_le(block_offset);
                 dst.put_u32_le(data.len() as u32);
                 dst.extend_from_slice(&data);
@@ -292,11 +293,12 @@ impl Decoder for CrucibleDecoder {
                 // Write
                 chklen(&src, 8 + 8 + 4)?;
                 let rn = src.get_u64_le();
+                let eid = src.get_u64_le();
                 let block_offset = src.get_u64_le();
                 let data_len = src.get_u32_le() as usize;
                 chklen(&src, data_len)?;
                 let data = src.split_to(data_len).freeze();
-                Some(Message::Write(rn, block_offset, data))
+                Some(Message::Write(rn, eid, block_offset, data))
             }
             8 => {
                 chklen(&src, 8)?;
