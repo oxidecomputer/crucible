@@ -217,6 +217,87 @@ fn process_downstairs(
     Ok(())
 }
 
+/*
+ * This fn is for when the main task has added work to the hashmap
+ * and the task for a downstairs has received the notification that there
+ * is new work to do.
+ */
+async fn new_work(
+    input: &mut watch::Receiver<u64>,
+    u: &Arc<Upstairs>,
+    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+) -> Result<()> {
+    let request_id: u64;
+    let job: IOop;
+    {
+        request_id = *input.borrow();
+    }
+    /*
+     * We can't hold the hashmap mutex into the await send
+     * below, so make a scope to get our next piece of work
+     * from the hashmap and release the lock when we leave
+     * this scope.
+     */
+    {
+        let hm = &*u.work.lock().unwrap();
+        job = match hm.get(&request_id) {
+            Some(job) => {
+                assert_eq!(request_id, job.request_id);
+                job.work.clone()
+            }
+            None => {
+                bail!("Missing job hashmap entry {}", request_id);
+            }
+        };
+    }
+
+    match job {
+        IOop::Write {
+            dependencies,
+            eid,
+            block_offset,
+            data,
+        } => {
+            /*
+             * XXX Before we write, we should set the dirty bit
+             * {
+             *    let eid = eid_from_offset(u, offset);
+             *    let dirt = u.dirty.lock().unwrap();
+             *}
+             */
+            fw.send(Message::Write(request_id, eid, block_offset, data.clone()))
+                .await
+        }
+        IOop::Flush {
+            dependencies,
+            flush_numbers,
+        } => {
+            println!(
+                "sending flush with dep:{:?} fl:{:?}",
+                dependencies, flush_numbers
+            );
+            fw.send(Message::Flush(
+                request_id,
+                dependencies.clone(),
+                flush_numbers.clone(),
+            ))
+            .await
+        }
+        IOop::Read { eid, block_offset } => {
+            println!("sending read with eid:{:?} bo:{:?}", eid, block_offset);
+            fw.send(Message::ReadRequest(request_id, eid, block_offset))
+                .await
+        }
+    }
+}
+
+/*
+ * Once we have a connection to a downstairs, this task takes over and
+ * handles both the initial negotiation and then watches the input for
+ * changes, indicating that new work in on the work hashmap.  We will
+ * walk the hashmap on the input signal and get any new work for this
+ * specific downstairs and mark that job as in progress.
+ */
 async fn proc(
     target: &SocketAddrV4,
     input: &mut watch::Receiver<u64>,
@@ -249,6 +330,11 @@ async fn proc(
     let mut needping = false;
 
     loop {
+        /*
+         * XXX Just a thought here, could we send so much input that the
+         * select would always have input.changed() and starve out the
+         * fr.next() select?  Does this select ever work that way?
+         */
         tokio::select! {
             _ = sleep_until(deadline) => {
                 if !negotiated {
@@ -262,65 +348,12 @@ async fn proc(
                 needping = false;
             }
             _ = input.changed() => {
-                /*
-                 * This case is for when the main task has something it
-                 * wants us to do.
-                 */
-                let request_id: u64;
-                let job: IOop;
-                {
-                    request_id = *input.borrow();
-                }
 
                 /*
-                 * We can't hold the hashmap mutex into the await send
-                 * below, so make a scope to get our next piece of work
-                 * from the hashmap and release the lock when we leave
-                 * this scope.
+                 * Something new on the work hashmap.  Go off and figure
+                 * out what we need to do.
                  */
-                {
-                    let hm = &*u.work.lock().unwrap();
-                    job = match hm.get(&request_id) {
-                        Some(job) => {
-                            assert_eq!(request_id, job.request_id);
-                            job.work.clone()
-                        }
-                        None => {
-                            bail!("Missing job hashmap entry {}", request_id);
-                        }
-                    };
-                }
-
-                match job {
-                    IOop::Write{dependencies, eid, block_offset, data} => {
-                        /*
-                         * XXX Before we write, we should set the dirty bit
-                         * {
-                         *    let eid = eid_from_offset(u, offset);
-                         *    let dirt = u.dirty.lock().unwrap();
-                         *}
-                         */
-                        fw.send(Message::Write(request_id,
-                                               eid,
-                                               block_offset,
-                                               data.clone())).await?;
-                    }
-                    IOop::Flush{dependencies, flush_numbers} => {
-                        println!("sending flush with dep:{:?} fl:{:?}",
-                                dependencies, flush_numbers);
-                        fw.send(Message::Flush(request_id,
-                                               dependencies.clone(),
-                                               flush_numbers.clone())).await?;
-                    }
-                    IOop::Read{eid, block_offset} => {
-                        println!("sending read with eid:{:?} bo:{:?}",
-                                eid, block_offset);
-                        fw.send(Message::ReadRequest(request_id,
-                                               eid,
-                                               block_offset)).await?;
-                    }
-                }
-
+                new_work(input, u, &mut fw).await?;
             }
             f = fr.next() => {
                 /*
@@ -341,8 +374,6 @@ async fn proc(
                         }
                         negotiated = true;
                         needping = true;
-                        println!("{} is version {}", target, version);
-
                         deadline = deadline_secs(50);
 
                         /*
@@ -362,7 +393,7 @@ async fn proc(
                          * connected being true state should be sent from the
                          * initial YesItsMe case, and we send something else
                          * through a different watcher that tells the main
-                         * task the list of versions, or something like that
+                         * task the list of versions, or something like that.
                          */
                         *connected = true;
                         output.send(Condition {
@@ -376,7 +407,6 @@ async fn proc(
                             bail!("expected YesItsMe first");
                         }
 
-                        // println!("{} --recv--> {:?}", target, m);
                         proc_frame(&target, u, &m, &mut fw).await?;
                         deadline = deadline_secs(50);
                         pingat = deadline_secs(10);
@@ -433,7 +463,9 @@ async fn looper(
                 tcp = &mut tcp => {
                     match tcp {
                         Ok(tcp) => {
-                            println!("{0} ok, connected to {0}", target);
+                            println!("{0}[{1}] ok, connected to {0}",
+                                target,
+                                client_id);
                             break tcp;
                         }
                         Err(e) => {

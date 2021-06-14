@@ -82,10 +82,6 @@ async fn proc_frame(
              */
             let mut data = BytesMut::with_capacity(512);
             data.put(&[1; 512][..]);
-            println!(
-                "Read rn:{} eid:{} block_offset:{}",
-                rn, eid, block_offset
-            );
             d.disk.disk_read(*eid, *block_offset, &mut data)?;
             let data = data.freeze();
             fw.send(Message::ReadResponse(*rn, data.clone())).await
@@ -129,7 +125,6 @@ async fn proc(id: u64, d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                             bail!("expected version 1, got {}", version);
                         }
                         negotiated = true;
-                        println!("{}: version {}", id, version);
                         fw.send(Message::YesItsMe(1)).await?;
                     }
                     Some(m) => {
