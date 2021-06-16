@@ -66,7 +66,7 @@ async fn proc_frame(
         }
         Message::Flush(rn, dependencies, flush) => {
             println!(
-                "Received flush rn:{} dep:{:?} fl:{:?}",
+                "flush       rn:{} dep:{:?} fl:{:?}",
                 rn, dependencies, flush
             );
             //let dep = Vec::new();
