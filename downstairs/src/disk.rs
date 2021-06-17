@@ -285,13 +285,16 @@ impl Extent {
          */
         inner.file.read_exact(data)?;
 
+        // XXX Debug
+        let mut snip: [u8; 4] = [0; 4];
+        snip[..4].copy_from_slice(&data[0..4]);
         println!(
-            "read_block  eid:{} b_offset:{} f_offset:{} len:{} data:{:?}",
+            "read  eid:{} b_offset:{} f_offset:{} len:{} data:0x{:x?}",
             self.number,
             block_offset,
             file_offset,
             data.len(),
-            data
+            snip
         );
         Ok(())
     }
@@ -336,9 +339,12 @@ impl Extent {
         inner.file.write_all(data)?;
         inner.file.flush()?;
 
+        // XXX Debug
+        let mut snip: [u8; 4] = [0; 4];
+        snip[..4].copy_from_slice(&data[0..4]);
         println!(
-            "write_block eid:{} b_offset:{} f_offset:{}",
-            self.number, block_offset, file_offset
+            "write eid:{} b_offset:{} f_offset:{} data:0x{:x?}",
+            self.number, block_offset, file_offset, snip
         );
 
         Ok(())
@@ -511,7 +517,6 @@ impl Disk {
         data: &[u8],
     ) -> Result<()> {
         let extent = &self.extents[eid as usize];
-        println!("disk_write eid:{}, b_offset:{}", eid, block_offset);
         extent.write_block(block_offset, data)?;
         Ok(())
     }
