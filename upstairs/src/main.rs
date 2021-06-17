@@ -10,6 +10,7 @@ use crucible_protocol::*;
 use anyhow::{bail, Result};
 use bytes::{BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
+use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use structopt::StructOpt;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpSocket, TcpStream};
@@ -222,6 +223,15 @@ fn process_downstairs(
     Ok(())
 }
 
+/*
+ * This function is called when the upstairs task is notified that
+ * a downstairs has completed an IO request.
+ *
+ * We do the work here to decide if the IO is completed, or if we
+ * are still waiting for other downstairs to respond.  If the IO is
+ * completed, then we can add it to the completed ringbuf and take it
+ * off of the active hashmap where new and in progress IOs are.
+ */
 fn io_completed(
     u: &Arc<Upstairs>,
     request_number: u64,
@@ -229,15 +239,44 @@ fn io_completed(
 ) -> Result<()> {
     let mut hm = u.work.lock().unwrap();
     let job = hm.get_mut(&request_number);
+    let mut in_progress = 0;
     match job {
         Some(job) => {
             assert_eq!(request_number, job.request_id);
             // XXX assert job in progress?  Not completed?
-            job.state.insert(client_id, IOState::Completed);
+            job.state.insert(client_id, IOState::Done);
+            for (_, state) in job.state.iter() {
+                if *state == IOState::New || *state == IOState::InProgress {
+                    in_progress += 1;
+                }
+            }
         }
         None => {
             bail!("Missing job hashmap entry {}", request_number);
         }
+    }
+    /*
+     * for a read, we can send the results to the caller once we get
+     * one answer.
+     * For a write or flush, we need at least two "finsihed" states
+     * before we can send results to the caller.
+     *
+     * XXX How do we deal with a write error, or a write that never
+     * comes back?  We will need to update states to include an error
+     * as a result.
+     */
+    if in_progress == 0 {
+        println!("Remove job {}", request_number);
+        hm.remove(&request_number);
+        /*
+         * We are getting the completed lock while holding hashmap lock.
+         * We do need to hold the work HM lock so a request ID will transition
+         * from active to completed and not have a window where a completed job
+         * has left the work HM but not yet arrived on the completed list where
+         * some other actor could go looking for it, such as a flush.
+         */
+        let mut completed = u.completed.lock().unwrap();
+        completed.push(request_number);
     }
     Ok(())
 }
@@ -263,11 +302,8 @@ async fn io_send(
         let mut hm = u.work.lock().unwrap();
         for (id, job) in hm.iter_mut() {
             let state = job.state.get(&client_id);
-            match state {
-                Some(IOState::New) => {
-                    new_work.push(*id);
-                }
-                _ => {}
+            if let Some(IOState::New) = state {
+                new_work.push(*id);
             }
         }
     }
@@ -297,6 +333,10 @@ async fn io_send(
             job = match hm.get_mut(&new_id) {
                 Some(job) => {
                     assert_eq!(*new_id, job.request_id);
+                    assert_eq!(
+                        job.state.get(&client_id).unwrap(),
+                        &IOState::New
+                    );
                     job.state.insert(client_id, IOState::InProgress);
                     job.work.clone()
                 }
@@ -319,6 +359,10 @@ async fn io_send(
                  *    let dirt = u.dirty.lock().unwrap();
                  *}
                  */
+                println!(
+                    "Write rn:{} eid:{:?} bo:{:?}",
+                    *new_id, eid, block_offset
+                );
                 fw.send(Message::Write(
                     *new_id,
                     eid,
@@ -332,8 +376,8 @@ async fn io_send(
                 flush_numbers,
             } => {
                 println!(
-                    "sending flush with dep:{:?} fl:{:?}",
-                    dependencies, flush_numbers
+                    "Flush rn:{} dep:{:?} fl:{:?}",
+                    *new_id, dependencies, flush_numbers
                 );
                 fw.send(Message::Flush(
                     *new_id,
@@ -344,8 +388,8 @@ async fn io_send(
             }
             IOop::Read { eid, block_offset } => {
                 println!(
-                    "sending read with eid:{:?} bo:{:?}",
-                    eid, block_offset
+                    "Read  rn:{} eid:{:?} bo:{:?}",
+                    *new_id, eid, block_offset
                 );
                 fw.send(Message::ReadRequest(*new_id, eid, block_offset))
                     .await?
@@ -583,11 +627,18 @@ async fn looper(
  */
 #[derive(Debug)]
 struct Upstairs {
+    /*
+     * A IOWork struct is added to this hashmap when the upstairs receives
+     * a new work request from a client.  See details about the IOWork
+     * structure where it is defined.
+     */
     work: Mutex<HashMap<u64, IOWork>>,
-    // Completed jobs ring buffer
-    // Last flush ID?
+    // XXX Might need to consider some arrangement between the work and
+    // completed lists to prevent deadlocks.  This may require deeper thought
+    completed: Mutex<AllocRingBuffer<u64>>,
     // The versions vec is not enough to solve a mismatch.  We really need
-    // Generation number, flush number, and dirty bit for every extent.
+    // Generation number, flush number, and dirty bit for every extent
+    // when resolving conflicts.
     versions: Mutex<Vec<u64>>,
     dirty: Mutex<Vec<bool>>,
     ddef: Mutex<DiskDefinition>,
@@ -598,8 +649,17 @@ struct Upstairs {
  */
 #[derive(Debug)]
 struct IOWork {
-    request_id: u64, // This MUST match our hash index
+    request_id: u64, // This MUST match our hashmap index
     work: IOop,
+    /*
+     * Hash of work status where key is the downstairs "client id" and the
+     * hash value is the current state of the IO request with respect to the
+     * upstairs.
+     * The length and keys on this hashmap will be used to determine which
+     * downstairs will receive the IO request.
+     * XXX Determine if it is required for all downstairs to get an entry
+     * or if by not putting a downstars in the hash, if that is valid.
+     */
     state: HashMap<u8, IOState>,
 }
 
@@ -620,11 +680,28 @@ pub enum IOop {
         flush_numbers: Vec<u64>,
     },
 }
-#[derive(Debug, Clone)]
+
+/*
+ * The various states an IO can be in when it is on the work hashmap.
+ * There is a state that is unique to each downstairs task we have and
+ * they operate independent of each other.
+ *
+ * New:  A new IO request.
+ * InProgress:  The request has been sent to this tasks downstairs.
+ * Done:        The response came back from downstairs.
+ * Skipped:     The IO request should be ignored.  This situation could be
+ *              A read that only needs one downstairs to answer, or we are
+ *              doing recovery and we only want a specific downstairs to
+ *              do that work.
+ * Error:       The IO returned some error.
+ */
+#[derive(Debug, Clone, PartialEq)]
 pub enum IOState {
-    New, // XXX Maybe name this Ready, or Available, or something else?
+    New, // XXX Maybe name the Ready, or Available, or something else?
     InProgress,
-    Completed,
+    Done,
+    Skipped,
+    Error,
 }
 
 impl fmt::Display for IOState {
@@ -636,8 +713,14 @@ impl fmt::Display for IOState {
             IOState::InProgress => {
                 write!(f, "Sent")
             }
-            IOState::Completed => {
+            IOState::Done => {
                 write!(f, "Done")
+            }
+            IOState::Skipped => {
+                write!(f, "Skip")
+            }
+            IOState::Error => {
+                write!(f, " Err")
             }
         }
     }
@@ -659,8 +742,10 @@ async fn main() -> Result<()> {
     let opt = opts()?;
 
     let hm = Mutex::new(HashMap::new());
-    let u = Arc::new(Upstairs {
+    let completed = Mutex::new(AllocRingBuffer::with_capacity(2048));
+    let up = Arc::new(Upstairs {
         work: hm,
+        completed,
         versions: Mutex::new(Vec::new()),
         dirty: Mutex::new(Vec::new()),
         ddef: Mutex::new(DiskDefinition::default()),
@@ -690,11 +775,11 @@ async fn main() -> Result<()> {
              */
             let (itx, irx) = watch::channel(0);
 
-            let u = Arc::clone(&u);
+            let up = Arc::clone(&up);
             let ctx = ctx.clone();
             let t0 = *t;
             tokio::spawn(async move {
-                looper(t0, irx, ctx, &u, client_id).await;
+                looper(t0, irx, ctx, &up, client_id).await;
             });
             client_id += 1;
 
@@ -789,9 +874,10 @@ async fn main() -> Result<()> {
      * interface Propolis (and a test program) will use.  Once that is
      * finished, all this stuff will go away
      */
+    let mut ri = 1;
     println!("#### Create test work, put on work queue");
-    create_work(&u, 1, 0x21, 9, 10)?; // job id, data_seed, eid, block_offset
-    show_work(&u)?;
+    ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
+    show_work(&up)?;
 
     println!("#### ready to submit work one");
     test_pause();
@@ -799,8 +885,8 @@ async fn main() -> Result<()> {
     test_pause();
 
     println!("#### Create more test work, put on work queue");
-    create_work(&u, 4, 0x33, 1, 20)?; // job id, data_seed, eid, block_offset
-    show_work(&u)?;
+    ri = create_more_work(&up, ri).unwrap();
+    show_work(&up)?;
 
     println!("#### ready to submit work two");
     test_pause();
@@ -808,8 +894,8 @@ async fn main() -> Result<()> {
     test_pause();
 
     println!("#### Create third test work, put on work queue");
-    create_work(&u, 7, 0x44, 5, 15)?; // job id, data_seed, eid, block_offset
-    show_work(&u)?;
+    ri = create_work(&up, ri, 0x44, 5, 15).unwrap();
+    show_work(&up)?;
     test_pause();
 
     println!("#### ready to submit work three");
@@ -817,8 +903,8 @@ async fn main() -> Result<()> {
     t.iter().for_each(|t| t.input.send(4).unwrap());
     test_pause();
 
-    println!("#### Final work list");
-    show_work(&u)?;
+    println!("#### Final work list, last job ID {}", ri);
+    show_work(&up)?;
     println!();
     println!("#### Main loop will now exit");
     test_pause();
@@ -890,10 +976,10 @@ fn create_read(ri: u64, eid: u64, block_offset: u64) -> IOWork {
  * Debug function to display the work hashmap with status for all three of
  * the clients.
  */
-fn show_work(u: &Arc<Upstairs>) -> Result<()> {
-    let mut hm = u.work.lock().unwrap();
+fn show_work(up: &Arc<Upstairs>) -> Result<()> {
+    let mut hm = up.work.lock().unwrap();
     for (id, job) in hm.iter_mut() {
-        print!("JOB:[{}] ", id);
+        print!("JOB:[{:04}] ", id);
         for cid in 0..3 {
             let state = job.state.get(&cid);
             match state {
@@ -907,30 +993,64 @@ fn show_work(u: &Arc<Upstairs>) -> Result<()> {
         }
         println!();
     }
+    let done = up.completed.lock().unwrap();
+    let done_vec = done.to_vec();
+    println!("Done: {:?}", done_vec);
     Ok(())
 }
 
+fn create_more_work(up: &Arc<Upstairs>, start_ri: u64) -> Result<u64> {
+    let mut hm = up.work.lock().unwrap();
+    let mut ri = start_ri;
+    let mut seed = 1;
+
+    for eid in 0..10 {
+        seed += 1;
+        for bo in 0..100 {
+            let wr = create_write(ri, eid, bo, seed);
+            hm.insert(ri, wr);
+            ri += 1;
+        }
+    }
+
+    let ver = up.versions.lock().unwrap();
+    let fl = create_flush(ri, ver.clone());
+    hm.insert(ri, fl);
+    ri += 1;
+
+    for eid in 0..10 {
+        for bo in 0..100 {
+            let re = create_read(ri, eid, bo);
+            hm.insert(ri, re);
+            ri += 1;
+        }
+    }
+    Ok(ri)
+}
+
 fn create_work(
-    u: &Arc<Upstairs>,
-    mut ri: u64,
+    up: &Arc<Upstairs>,
+    start_ri: u64,
     seed: u8,
     eid: u64,
     block_offset: u64,
-) -> Result<()> {
-    let mut m = u.work.lock().unwrap();
+) -> Result<u64> {
+    let mut hm = up.work.lock().unwrap();
 
-    let w = create_write(ri, eid, block_offset, seed);
-    m.insert(ri, w);
+    let mut ri = start_ri;
+    let wr = create_write(ri, eid, block_offset, seed);
+    hm.insert(ri, wr);
     ri += 1;
 
-    let v = u.versions.lock().unwrap();
-    let w = create_flush(ri, v.clone());
-    m.insert(ri, w);
+    let ver = up.versions.lock().unwrap();
+    let fl = create_flush(ri, ver.clone());
+    hm.insert(ri, fl);
     ri += 1;
 
-    let r = create_read(ri, eid, block_offset);
-    m.insert(ri, r);
-    Ok(())
+    let re = create_read(ri, eid, block_offset);
+    hm.insert(ri, re);
+    ri += 1;
+    Ok(ri)
 }
 
 fn test_pause() {
@@ -953,21 +1073,21 @@ mod test {
             extent_count: 10,
         };
 
-        let u = Arc::new(Upstairs {
+        let up = Arc::new(Upstairs {
             work: Mutex::new(HashMap::new()),
             versions: Mutex::new(Vec::new()),
             dirty: Mutex::new(Vec::new()),
             ddef: Mutex::new(def),
         });
 
-        assert_eq!(_extent_from_offset(&u, 0).unwrap(), (0, 0));
-        assert_eq!(_extent_from_offset(&u, 512).unwrap(), (0, 1));
-        assert_eq!(_extent_from_offset(&u, 1024).unwrap(), (0, 2));
-        assert_eq!(_extent_from_offset(&u, 1024 + 512).unwrap(), (0, 3));
-        assert_eq!(_extent_from_offset(&u, 51200).unwrap(), (1, 0));
-        assert_eq!(_extent_from_offset(&u, 51200 + 512).unwrap(), (1, 1));
-        assert_eq!(_extent_from_offset(&u, 51200 + 1024).unwrap(), (1, 2));
-        assert_eq!(_extent_from_offset(&u, 102400 - 512).unwrap(), (1, 99));
-        assert_eq!(_extent_from_offset(&u, 102400).unwrap(), (2, 0));
+        assert_eq!(_extent_from_offset(&up, 0).unwrap(), (0, 0));
+        assert_eq!(_extent_from_offset(&up, 512).unwrap(), (0, 1));
+        assert_eq!(_extent_from_offset(&up, 1024).unwrap(), (0, 2));
+        assert_eq!(_extent_from_offset(&up, 1024 + 512).unwrap(), (0, 3));
+        assert_eq!(_extent_from_offset(&up, 51200).unwrap(), (1, 0));
+        assert_eq!(_extent_from_offset(&up, 51200 + 512).unwrap(), (1, 1));
+        assert_eq!(_extent_from_offset(&up, 51200 + 1024).unwrap(), (1, 2));
+        assert_eq!(_extent_from_offset(&up, 102400 - 512).unwrap(), (1, 99));
+        assert_eq!(_extent_from_offset(&up, 102400).unwrap(), (2, 0));
     }
 }
