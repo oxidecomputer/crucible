@@ -48,7 +48,6 @@ fn deadline_secs(secs: u64) -> Instant {
 }
 
 async fn proc_frame(
-    _id: u64,
     d: &Arc<Downstairs>,
     m: &Message,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
@@ -90,7 +89,7 @@ async fn proc_frame(
     }
 }
 
-async fn proc(id: u64, d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
+async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
     let (r, w) = sock.split();
     let mut fr = FramedRead::new(r, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(w, CrucibleEncoder::new());
@@ -132,7 +131,7 @@ async fn proc(id: u64, d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                             bail!("expected HereIAm first");
                         }
 
-                        proc_frame(id, d, &m, &mut fw).await?;
+                        proc_frame(d, &m, &mut fw).await?;
                         deadline = deadline_secs(50);
                     }
                 }
@@ -164,25 +163,28 @@ async fn main() -> Result<()> {
     let listen_on = SocketAddrV4::new(opt.address, opt.port);
     let listener = TcpListener::bind(&listen_on).await?;
 
-    let mut next_id: u64 = 1;
+    /*
+     * We now loop listening for a connection from the Upstairs.
+     * When we get one, we then call the proc() function to handle
+     * it and wait on that function to finish.  If it does, we loop
+     * and wait for another connection.
+     *
+     * XXX We may want to consider taking special action when an upstairs
+     * has gone away, like perhaps flushing all outstanding writes?
+     */
     println!("listening on {}", listen_on);
+    let mut connections: u64 = 1;
     loop {
-        let id = next_id;
-        next_id += 1;
 
         let (sock, raddr) = listener.accept().await?;
-        println!("connection {} from {:?}", id, raddr);
+        println!("connection from {:?}  connections count:{}",
+            raddr, connections);
 
-        /*
-         * Spawn a task to deal with this connection.
-         */
-        let d = Arc::clone(&d);
-        tokio::spawn(async move {
-            if let Err(e) = proc(id, &d, sock).await {
-                println!("ERROR: proc({}): {:?}", id, e);
-            } else {
-                println!("OK: proc({}): all done", id);
-            }
-        });
+        if let Err(e) = proc(&d, sock).await {
+            println!("ERROR: connection({}): {:?}", connections, e);
+        } else {
+            println!("OK: connection({}): all done", connections);
+        }
+        connections += 1;
     }
 }
