@@ -19,6 +19,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+mod interact;
+use interact::Interact;
+
 /*
  * XXX This is temp, this DiskDefinition needs to live in some common
  * area where both upstairs and downstaris can use it.  To get things
@@ -831,10 +834,12 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
+    let ia = Arc::new(Interact::new());
+
     /*
      * This one shows the hang on one task.
      */
-    runtime.spawn(up_main(opt));
+    runtime.spawn(up_main(opt, ia));
     println!("runtime is spawned: ");
 
 
@@ -884,7 +889,7 @@ fn send_work(t: &[Target], val: u64) {
  * it into a crucible IO, then sending it on to be processed to the mux
  * portion of crucible.
  */
-async fn up_main(opt: Opt) -> Result<()> {
+async fn up_main(opt: Opt, ia: Arc<Interact>) -> Result<()> {
     let up = Arc::new(Upstairs {
         work: Mutex::new(Work {
             active: HashMap::new(),
@@ -947,22 +952,23 @@ async fn up_main(opt: Opt) -> Result<()> {
             // Can we look at what we have spawned?
             // Can we use the input or crx to tell if something as gone away.
             // Where do we handle more than one mirror going away?
-            test_pause("create test work, put on work queue");
+            ia.wait_for("create test work, put on work queue").await;
 
             create_work(&up, 0x44, 5, 15).unwrap();
             //ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
             show_work(&up);
 
-            test_pause("ready to submit work one");
+            ia.wait_for("ready to submit work one").await;
 
             t.iter().for_each(|t| t.input.send(lastcast).unwrap());
             lastcast += 1;
+
             //send_work(&t, 2);
 
-            test_pause("work submitted, now show work queue");
+            ia.wait_for("work submitted, now show work queue").await;
             show_work(&up);
 
-            test_pause("bottom of loop, go again");
+            ia.wait_for("bottom of loop, go again").await;
         }
     });
 
@@ -1159,16 +1165,6 @@ fn create_work(
     work.enqueue(re);
 
     Ok(())
-}
-
-fn test_pause(msg: &str) {
-    let msg = format!(
-        "\x1b[7m#### {} ### Press Enter to continue...\x1b[0m\n",
-        msg);
-    let mut stdout = stdout();
-    stdout.write_all(msg.as_bytes()).unwrap();
-    stdout.flush().unwrap();
-    stdin().read_exact(&mut [0]).unwrap();
 }
 
 #[cfg(test)]
