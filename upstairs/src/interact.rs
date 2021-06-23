@@ -1,5 +1,5 @@
+use std::io::{BufRead, Write};
 use std::sync::Mutex;
-use std::io::{Write, BufRead};
 
 struct InteractPrompt {
     id: u64,
@@ -55,10 +55,7 @@ impl Interact {
         });
 
         Interact {
-            inner: Mutex::new(InteractInner {
-                next_id: 1,
-                tx,
-            }),
+            inner: Mutex::new(InteractInner { next_id: 1, tx }),
             brx,
         }
     }

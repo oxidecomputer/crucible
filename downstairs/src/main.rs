@@ -175,10 +175,11 @@ async fn main() -> Result<()> {
     println!("listening on {}", listen_on);
     let mut connections: u64 = 1;
     loop {
-
         let (sock, raddr) = listener.accept().await?;
-        println!("connection from {:?}  connections count:{}",
-            raddr, connections);
+        println!(
+            "connection from {:?}  connections count:{}",
+            raddr, connections
+        );
 
         if let Err(e) = proc(&d, sock).await {
             println!("ERROR: connection({}): {:?}", connections, e);
