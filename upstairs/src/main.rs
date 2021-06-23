@@ -7,17 +7,20 @@ use std::{thread, time::Duration};
 
 use crucible_protocol::*;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::{BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use structopt::StructOpt;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio::runtime::Builder;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
+
+mod interact;
+use interact::Interact;
 
 /*
  * XXX This is temp, this DiskDefinition needs to live in some common
@@ -127,6 +130,7 @@ fn _extent_from_offset(u: &Arc<Upstairs>, offset: u64) -> Result<(usize, u64)> {
         (offset - (eid * space_per_extent)) / ddef.block_size;
     Ok((eid as usize, block_in_extent))
 }
+
 /*
  * Decide what to do with a downstairs that has just connected and has
  * sent us information about its extents.
@@ -237,24 +241,8 @@ fn io_completed(
     request_number: u64,
     client_id: u8,
 ) -> Result<()> {
-    let mut hm = u.work.lock().unwrap();
-    let job = hm.get_mut(&request_number);
-    let mut in_progress = 0;
-    match job {
-        Some(job) => {
-            assert_eq!(request_number, job.request_id);
-            // XXX assert job in progress?  Not completed?
-            job.state.insert(client_id, IOState::Done);
-            for (_, state) in job.state.iter() {
-                if *state == IOState::New || *state == IOState::InProgress {
-                    in_progress += 1;
-                }
-            }
-        }
-        None => {
-            bail!("Missing job hashmap entry {}", request_number);
-        }
-    }
+    let mut work = u.work.lock().unwrap();
+
     /*
      * for a read, we can send the results to the caller once we get
      * one answer.
@@ -265,18 +253,11 @@ fn io_completed(
      * comes back?  We will need to update states to include an error
      * as a result.
      */
-    if in_progress == 0 {
+    let counts = work.complete(request_number, client_id)?;
+
+    if counts.active == 0 {
         println!("Remove job {}", request_number);
-        hm.remove(&request_number);
-        /*
-         * We are getting the completed lock while holding hashmap lock.
-         * We do need to hold the work HM lock so a request ID will transition
-         * from active to completed and not have a window where a completed job
-         * has left the work HM but not yet arrived on the completed list where
-         * some other actor could go looking for it, such as a flush.
-         */
-        let mut completed = u.completed.lock().unwrap();
-        completed.push(request_number);
+        work.retire(request_number);
     }
     Ok(())
 }
@@ -292,21 +273,13 @@ async fn io_send(
     client_id: u8,
 ) -> Result<()> {
     let mut job: IOop;
-    let mut new_work: Vec<u64> = Vec::new();
 
     /*
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
      */
-    {
-        let mut hm = u.work.lock().unwrap();
-        for (id, job) in hm.iter_mut() {
-            let state = job.state.get(&client_id);
-            if let Some(IOState::New) = state {
-                new_work.push(*id);
-            }
-        }
-    }
+    println!("[{}] io_send", client_id);
+    let mut new_work = u.work.lock().unwrap().new_work(client_id);
 
     /*
      * Now we have a list of all the job IDs that are new for our client id.
@@ -320,7 +293,9 @@ async fn io_send(
      * were put into the hashmap, though I don't think that is required.
      */
     new_work.sort();
-    println!("new_work_vector: {:?}", new_work);
+    if !new_work.is_empty() {
+        println!("[{}] new_work_vector: {:?}", client_id, new_work);
+    }
     for new_id in new_work.iter() {
         /*
          * We can't hold the hashmap mutex into the await send
@@ -328,23 +303,8 @@ async fn io_send(
          * from the hashmap and release the lock when we leave
          * this scope.
          */
-        {
-            let mut hm = u.work.lock().unwrap();
-            job = match hm.get_mut(&new_id) {
-                Some(job) => {
-                    assert_eq!(*new_id, job.request_id);
-                    assert_eq!(
-                        job.state.get(&client_id).unwrap(),
-                        &IOState::New
-                    );
-                    job.state.insert(client_id, IOState::InProgress);
-                    job.work.clone()
-                }
-                None => {
-                    bail!("Missing job hashmap entry {}", *new_id);
-                }
-            };
-        }
+        let job = u.work.lock().unwrap().in_progress(*new_id, client_id);
+
         match job {
             IOop::Write {
                 dependencies,
@@ -437,13 +397,21 @@ async fn proc(
      */
     let mut pingat = deadline_secs(10);
     let mut needping = false;
+    let mut lastrun = std::time::Instant::now();
 
     loop {
+        let thisrun = std::time::Instant::now();
+        let delta = thisrun.saturating_duration_since(lastrun);
+        lastrun = thisrun;
+
         /*
          * XXX Just a thought here, could we send so much input that the
          * select would always have input.changed() and starve out the
          * fr.next() select?  Does this select ever work that way?
          */
+        println!("{}[{}] tokio select (delta ms {})",
+            target, client_id, delta.as_millis());
+
         tokio::select! {
             _ = sleep_until(deadline) => {
                 if !negotiated {
@@ -453,24 +421,27 @@ async fn proc(
                 }
             }
             _ = sleep_until(pingat), if needping => {
+                println!("{}[{}] ping", target, client_id);
                 fw.send(Message::Ruok).await?;
                 needping = false;
             }
             _ = input.changed() => {
-                /*
-                 * Something new on the work hashmap.  Go off and figure
-                 * out what we need to do.  If there is new work for us then
-                 * do that work, marking it as in progress.
-                 */
+                let iv = *input.borrow();
+                println!("{}[{}] wakeup {} from main", target, client_id, iv);
                 io_send(u, &mut fw, client_id).await?;
             }
             f = fr.next() => {
                 /*
                  * Negotiate protocol before we get into specifics.
                  */
+                println!("{}[{}] frnext", target, client_id);
                 match f.transpose()? {
-                    None => return Ok(()),
+                    None => {
+                        println!("{}[{}] None", target, client_id);
+                        return Ok(())
+                    }
                     Some(Message::YesItsMe(version)) => {
+                        println!("{}[{}] yim", target, client_id);
                         if negotiated {
                             bail!("negotiated already!");
                         }
@@ -491,6 +462,7 @@ async fn proc(
                         fw.send(Message::ExtentVersionsPlease).await?;
                     }
                     Some(Message::ExtentVersions(bs, es, ec, versions)) => {
+                        println!("{}[{}] extv", target, client_id);
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
@@ -504,6 +476,10 @@ async fn proc(
                          * through a different watcher that tells the main
                          * task the list of versions, or something like that.
                          */
+
+                        /*
+                         * If we get here, we are ready to receive IO
+                         */
                         *connected = true;
                         output.send(Condition {
                             target: *target,
@@ -515,6 +491,7 @@ async fn proc(
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
+                        println!("{}[{}] some", target, client_id);
 
                         proc_frame(&target, u, &m, &mut fw, client_id).await?;
                         deadline = deadline_secs(50);
@@ -618,6 +595,99 @@ async fn looper(
     }
 }
 
+#[derive(Debug)]
+struct Work {
+    active: HashMap<u64, IOWork>,
+    next_id: u64,
+    completed: AllocRingBuffer<u64>,
+}
+
+#[derive(Debug, Default)]
+struct WorkCounts {
+    active: u64,
+    done: u64,
+}
+
+impl Work {
+    /**
+     * Assign a new request ID.
+     */
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /**
+     * Mark this request as in progress for this client, and return a copy
+     * of the details of the request.
+     */
+    fn in_progress(&mut self, reqid: u64, client_id: u8) -> IOop {
+        let job = self.active.get_mut(&reqid).unwrap();
+        let oldstate = job.state.insert(client_id, IOState::InProgress);
+        assert_eq!(oldstate, Some(IOState::New));
+        job.work.clone()
+    }
+
+    /**
+     * Return a list of request IDs that represent unissued requests for this
+     * client.
+     */
+    fn new_work(&self, client_id: u8) -> Vec<u64> {
+        self.active.values().filter_map(|job| {
+            if let Some(IOState::New) = job.state.get(&client_id) {
+                Some(job.request_id)
+            } else {
+                None
+            }
+        }).collect()
+    }
+
+    /**
+     * Enqueue a new request.
+     */
+    fn enqueue(&mut self, io: IOWork) {
+        self.active.insert(io.request_id, io);
+    }
+
+    /**
+     * Mark this request as complete for this client.  Returns counts clients
+     * for which this request is still active or has been completed already.
+     */
+    fn complete(&mut self, reqid: u64, client_id: u8) -> Result<WorkCounts> {
+        let job = self.active.get_mut(&reqid)
+            .ok_or_else(|| anyhow!("reqid {} is not active", reqid))?;
+        let oldstate = job.state.insert(client_id, IOState::Done);
+        assert_ne!(oldstate, Some(IOState::Done));
+        
+        /*
+         * Check to see if all I/O is completed:
+         */
+        let mut wc: WorkCounts = Default::default();
+        for state in job.state.values() {
+            match state {
+                IOState::New | IOState::InProgress => wc.active += 1,
+                IOState::Done | IOState::Skipped | IOState::Error => {
+                    wc.done += 1;
+                }
+            }
+        }
+
+        Ok(wc)
+    }
+
+    /**
+     * This request is now complete on all peers.  Remove it from the active set
+     * and mark it in the completed ring buffer.
+     */
+    fn retire(&mut self, reqid: u64) {
+        assert!(!self.completed.contains(&reqid));
+        let old = self.active.remove(&reqid);
+        assert!(old.is_some());
+        self.completed.push(reqid);
+    }
+}
+
 /*
  * XXX Track scheduled storage work in the central structure.  Have the
  * target management task check for work to do here by changing the value in
@@ -632,16 +702,33 @@ struct Upstairs {
      * a new work request from a client.  See details about the IOWork
      * structure where it is defined.
      */
-    work: Mutex<HashMap<u64, IOWork>>,
-    // XXX Might need to consider some arrangement between the work and
-    // completed lists to prevent deadlocks.  This may require deeper thought
-    completed: Mutex<AllocRingBuffer<u64>>,
+    work: Mutex<Work>,
     // The versions vec is not enough to solve a mismatch.  We really need
     // Generation number, flush number, and dirty bit for every extent
     // when resolving conflicts.
     versions: Mutex<Vec<u64>>,
     dirty: Mutex<Vec<bool>>,
+    /*
+     * The global description of the downstairs region we are using.
+     * This allows us to verify each downstairs is the same, as well as
+     * enables us to tranlate an LBA to an extent and block offset.
+     */
     ddef: Mutex<DiskDefinition>,
+    /*
+     * The state of a downstairs connection, based on client ID
+     * Ready here indicates it can receive IO.
+     */
+    downstairs: Mutex<Vec<DownstairsState>>,
+}
+
+/*
+ * I think we will have more states.  If not, then this should just become
+ * a bool.
+ */
+#[derive(Debug, Clone)]
+pub enum DownstairsState {
+    NotReady,
+    Ready,
 }
 
 /*
@@ -737,18 +824,82 @@ struct Condition {
     connected: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let opt = opts()?;
 
-    let hm = Mutex::new(HashMap::new());
-    let completed = Mutex::new(AllocRingBuffer::with_capacity(2048));
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("crucible-tokio")
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let ia = Arc::new(Interact::new());
+
+    /*
+     * This one shows the hang on one task.
+     */
+    runtime.spawn(up_main(opt, ia));
+    println!("runtime is spawned: ");
+
+
+    /*
+     *  This fails the same way.
+    runtime.block_on(async {
+        println!("This is the task 1");
+        tokio::spawn(up_main(opt));
+    });
+    */
+
+    /* If I switch main to start with tokio runtime, this works
+
+    up_main(opt).await?;
+
+    */
+    loop {};
+    Ok(())
+}
+
+/*
+ * Send work to all the targets on this vector.
+ * This can be much simpler, but we need to (eventually) take special action
+ * when we fail to send a message to a task.
+ */
+fn send_work(t: &[Target], val: u64) {
+    for d_client in t.iter() {
+        println!("#### send to client {:?}", d_client.target);
+        let res = d_client.input.send(val);
+        if let Err(e) = res {
+            println!("#### error {:#?} sending work to {:?}",
+                    e, d_client.target);
+            /*
+             * XXX
+             * Write more code for this error,  If one downstairs
+             * never receives a request, it may get picked up on the
+             * next request.  However, if the downstairs has gone away,
+             * then action will need to be taken, and soon.
+             */
+        }
+    }
+}
+
+/*
+ * This is the main upstairs task that is responsible for accepting
+ * work from propolis (or whomever) and taking that work and converting
+ * it into a crucible IO, then sending it on to be processed to the mux
+ * portion of crucible.
+ */
+async fn up_main(opt: Opt, ia: Arc<Interact>) -> Result<()> {
     let up = Arc::new(Upstairs {
-        work: hm,
-        completed,
+        work: Mutex::new(Work {
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2048),
+            next_id: 1000,
+        }),
         versions: Mutex::new(Vec::new()),
         dirty: Mutex::new(Vec::new()),
         ddef: Mutex::new(DiskDefinition::default()),
+        downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
     });
 
     println!(
@@ -790,73 +941,44 @@ async fn main() -> Result<()> {
         })
         .collect::<Vec<_>>();
 
+    /*
+     * Create a task to drive test cases.
+     */
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut lastcast = 1;
+
+        loop {
+            // Can we look at what we have spawned?
+            // Can we use the input or crx to tell if something as gone away.
+            // Where do we handle more than one mirror going away?
+            ia.wait_for("create test work, put on work queue").await;
+
+            create_work(&up, 0x44, 5, 15).unwrap();
+            //ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
+            show_work(&up);
+
+            ia.wait_for("ready to submit work one").await;
+
+            t.iter().for_each(|t| t.input.send(lastcast).unwrap());
+            lastcast += 1;
+
+            //send_work(&t, 2);
+
+            ia.wait_for("work submitted, now show work queue").await;
+            show_work(&up);
+
+            ia.wait_for("bottom of loop, go again").await;
+        }
+    });
+
     // async tasks need to tell us they are alive, but they also need to
     // tell us the extent list from any attached downstairs.
     // That part is not connected yet.
-    let mut connected = 0;
-    while connected < opt.target.len() {
+    let mut connected = 0u32;
+    let mut ri = 1;
+    loop {
         let c = crx.recv().await.unwrap();
-
-        /*
-         * XXX NOTES ON INTENDED STATE MACHINE
-         *
-         * From cold start:
-         *
-         * When we transition from 0 -> 1 connected Downstairs, nothing happens
-         * yet.
-         *
-         * When we transition from 1 -> 2 connected Downstairs, we must assess
-         * the contents of both.  First, the mundane book-keeping: ensure they
-         * all have the same block size, extent size, and extent count.  Then,
-         * for each extent we get the extent Version and the extent Checksum.
-         * If those values are the same on both Downstairs, then we can move on
-         * to the next extent.  If they are not the same, the highest Version
-         * wins and we replace the contents of the Extent on the other
-         * Downstairs; if they ARE the same, it doesn't matter which we select
-         * as long as they both end up the same.  Once both Downstairs have an
-         * identical set of extents, we are up for WRITES.  It is not
-         * anticipated that this will take very long, as there should only be
-         * around one flush worth of outstanding data to reconcile.
-         *
-         * When we transition from 2 -> 3 connected Downstairs, we must perform
-         * the same reconciliation, with the added complexity that we are also
-         * generally trying to write to the volume.  This process can be
-         * incremental, one extent at a time, and it seems likely that we can
-         * ourselves just hold writes to that extent while verifying the
-         * contents.  If an extent is small, this won't take long.  Writes can
-         * start flowing to the synced subset of extents on the 3rd Downstairs
-         * as soon as they are synced up -- we should keep a bitmap of which
-         * extents are OK on which Downstairs in memory.
-         *
-         * During regular WRITE operation, we will issue each write to each
-         * connected Downstairs.  As soon as two Downstairs have acknowledged
-         * it, we can complete in the guest.  A subsequent guest write that
-         * overlaps another write that has not yet been acknowledged by all
-         * Downstairs will need to "happen after" the first, whether by stalling
-         * the second write, or by somehow making it dependent on the first in
-         * the protocol request itself.
-         *
-         * A flush is issued to all Downstairs simultaneously, and all
-         * previously issued writes to the Downstairs must be stable on disk
-         * (fsync) before the Downstairs completes the flush.  A flush includes
-         * a version number, which will be applied to an extents that have been
-         * modified since the last flush and itself made stable.  The flush
-         * invariant that a disk must expose to the guest is: any write that
-         * completed before the flush was issued must be stable on disk; any
-         * write that completed after the flush was issued is not stable until
-         * another flush.
-         *
-         * From a warm start:
-         *
-         * There probably should not be a situation where Upstairs reboots
-         * without also rebooting the guest.  As long as Upstairs continues to
-         * run, it can remember which I/O requests were in flight when a
-         * connection to any particular Downstairs is interrupted.  If that
-         * state is dropped on the floor, the guest will need to be told about
-         * it somehow -- but we likely don't have a good way to inform the guest
-         * of, say, a Virtio Block device malfunction that drops all I/O that
-         * was previously inflight, leaving the disk in an indeterminate state.
-         */
         if c.connected {
             println!("#### {:?} #### CONNECTED ########", c.target);
             connected += 1;
@@ -864,50 +986,47 @@ async fn main() -> Result<()> {
             println!("#### {:?} #### DISCONNECTED! ####", c.target);
             connected -= 1;
         }
+
+//        while connected < opt.target.len() {
+//            println!("Wait for all tasks to report connected {}/{}",
+//                connected, opt.target.len());
+//            let c = crx.recv().await.unwrap();
+//            if c.connected {
+//                println!("#### {:?} #### CONNECTED ########", c.target);
+//                connected += 1;
+//            } else {
+//                println!("#### {:?} #### DISCONNECTED! ####", c.target);
+//                connected -= 1;
+//            }
+//        }
+//        /*
+//         * To work like this, we need to do stuff here and then go back
+//         * and watch for clients going away and decide how to take action
+//         * on that.  I think too much might be done at the individual
+//         * downstairs level and not enough here in this "mux" task.
+//         */
+//
+//        // Can we look at what we have spawned?
+//        // Can we use the input or crx to tell if something as gone away.
+//        // Where do we handle more than one mirror going away?
+//        println!("#### Create test work, put on work queue");
+//        test_pause();
+//        ri = create_work(&up, ri, 0x44, 5, 15).unwrap();
+//        //ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
+//        show_work(&up)?;
+//
+//        println!("#### ready to submit work one");
+//        test_pause();
+//        t.iter().for_each(|t| t.input.send(2).unwrap());
+//        t.iter().for_each(|t| t.input.send(1).unwrap());
+//        t.iter().for_each(|t| t.input.send(2).unwrap());
+//        t.iter().for_each(|t| t.input.send(1).unwrap());
+//        //send_work(&t, 2);
+//        println!("#### work submitted, now show work queue");
+//        test_pause();
+//        show_work(&up)?;
+//        test_pause();
     }
-
-    println!("#### Connected all async tasks");
-    /*
-     * This is just test code that should move elsewhere.  For now
-     * it is just used to test the initial prototype of R/W/F commands
-     * and everything is hard coded while we figure out what the exact
-     * interface Propolis (and a test program) will use.  Once that is
-     * finished, all this stuff will go away
-     */
-    let mut ri = 1;
-    println!("#### Create test work, put on work queue");
-    ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
-    show_work(&up)?;
-
-    println!("#### ready to submit work one");
-    test_pause();
-    t.iter().for_each(|t| t.input.send(2).unwrap());
-    test_pause();
-
-    println!("#### Create more test work, put on work queue");
-    ri = create_more_work(&up, ri).unwrap();
-    show_work(&up)?;
-
-    println!("#### ready to submit work two");
-    test_pause();
-    t.iter().for_each(|t| t.input.send(3).unwrap());
-    test_pause();
-
-    println!("#### Create third test work, put on work queue");
-    ri = create_work(&up, ri, 0x44, 5, 15).unwrap();
-    show_work(&up)?;
-    test_pause();
-
-    println!("#### ready to submit work three");
-    test_pause();
-    t.iter().for_each(|t| t.input.send(4).unwrap());
-    test_pause();
-
-    println!("#### Final work list, last job ID {}", ri);
-    show_work(&up)?;
-    println!();
-    println!("#### Main loop will now exit");
-    test_pause();
 
     /*
      * XXX Need to cleanup async tasks and close connections.
@@ -976,9 +1095,9 @@ fn create_read(ri: u64, eid: u64, block_offset: u64) -> IOWork {
  * Debug function to display the work hashmap with status for all three of
  * the clients.
  */
-fn show_work(up: &Arc<Upstairs>) -> Result<()> {
-    let mut hm = up.work.lock().unwrap();
-    for (id, job) in hm.iter_mut() {
+fn show_work(up: &Arc<Upstairs>) {
+    let mut work = up.work.lock().unwrap();
+    for (id, job) in work.active.iter_mut() {
         print!("JOB:[{:04}] ", id);
         for cid in 0..3 {
             let state = job.state.get(&cid);
@@ -993,72 +1112,59 @@ fn show_work(up: &Arc<Upstairs>) -> Result<()> {
         }
         println!();
     }
-    let done = up.completed.lock().unwrap();
-    let done_vec = done.to_vec();
-    println!("Done: {:?}", done_vec);
-    Ok(())
+    let done = work.completed.to_vec();
+    println!("Done: {:?}", done);
 }
 
-fn create_more_work(up: &Arc<Upstairs>, start_ri: u64) -> Result<u64> {
-    let mut hm = up.work.lock().unwrap();
-    let mut ri = start_ri;
+fn create_more_work(up: &Arc<Upstairs>) -> Result<()> {
     let mut seed = 1;
 
     for eid in 0..10 {
         seed += 1;
         for bo in 0..100 {
-            let wr = create_write(ri, eid, bo, seed);
-            hm.insert(ri, wr);
-            ri += 1;
+            let mut work = up.work.lock().unwrap();
+            let wr = create_write(work.next_id(), eid, bo, seed);
+            work.enqueue(wr);
         }
     }
 
-    let ver = up.versions.lock().unwrap();
-    let fl = create_flush(ri, ver.clone());
-    hm.insert(ri, fl);
-    ri += 1;
+    {
+        let mut work = up.work.lock().unwrap();
+        let ver = up.versions.lock().unwrap();
+        let fl = create_flush(work.next_id(), ver.clone());
+        work.enqueue(fl);
+    }
 
     for eid in 0..10 {
         for bo in 0..100 {
-            let re = create_read(ri, eid, bo);
-            hm.insert(ri, re);
-            ri += 1;
+            let mut work = up.work.lock().unwrap();
+            let re = create_read(work.next_id(), eid, bo);
+            work.enqueue(re);
         }
     }
-    Ok(ri)
+
+    Ok(())
 }
 
 fn create_work(
     up: &Arc<Upstairs>,
-    start_ri: u64,
     seed: u8,
     eid: u64,
     block_offset: u64,
-) -> Result<u64> {
-    let mut hm = up.work.lock().unwrap();
+) -> Result<()> {
+    let mut work = up.work.lock().unwrap();
 
-    let mut ri = start_ri;
-    let wr = create_write(ri, eid, block_offset, seed);
-    hm.insert(ri, wr);
-    ri += 1;
+    let wr = create_write(work.next_id(), eid, block_offset, seed);
+    work.enqueue(wr);
 
-    let ver = up.versions.lock().unwrap();
-    let fl = create_flush(ri, ver.clone());
-    hm.insert(ri, fl);
-    ri += 1;
+    let ver = up.versions.lock().unwrap().clone();
+    let fl = create_flush(work.next_id(), ver);
+    work.enqueue(fl);
 
-    let re = create_read(ri, eid, block_offset);
-    hm.insert(ri, re);
-    ri += 1;
-    Ok(ri)
-}
+    let re = create_read(work.next_id(), eid, block_offset);
+    work.enqueue(re);
 
-fn test_pause() {
-    let mut stdout = stdout();
-    thread::sleep(Duration::from_secs(1));
-    stdout.write_all(b"Press Enter to continue...\n").unwrap();
-    stdout.flush().unwrap();
-    stdin().read_exact(&mut [0]).unwrap();
+    Ok(())
 }
 
 #[cfg(test)]
