@@ -293,7 +293,10 @@ async fn io_send(
     new_work.sort();
     if !new_work.is_empty() {
         println!("[{}] new_work_vector: {:?}", client_id, new_work);
+    } else {
+        println!("[{}] new_work_vector is empty", client_id);
     }
+
     for new_id in new_work.iter() {
         /*
          * We can't hold the hashmap mutex into the await send
@@ -423,7 +426,6 @@ async fn proc(
                 }
             }
             _ = sleep_until(pingat), if needping => {
-                println!("{}[{}] ping", target, client_id);
                 fw.send(Message::Ruok).await?;
                 needping = false;
             }
@@ -436,14 +438,11 @@ async fn proc(
                 /*
                  * Negotiate protocol before we get into specifics.
                  */
-                println!("{}[{}] frnext", target, client_id);
                 match f.transpose()? {
                     None => {
-                        println!("{}[{}] None", target, client_id);
                         return Ok(())
                     }
                     Some(Message::YesItsMe(version)) => {
-                        println!("{}[{}] yim", target, client_id);
                         if negotiated {
                             bail!("negotiated already!");
                         }
@@ -464,7 +463,6 @@ async fn proc(
                         fw.send(Message::ExtentVersionsPlease).await?;
                     }
                     Some(Message::ExtentVersions(bs, es, ec, versions)) => {
-                        println!("{}[{}] extv", target, client_id);
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
@@ -493,7 +491,6 @@ async fn proc(
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
-                        println!("{}[{}] some", target, client_id);
 
                         proc_frame(&target, up, &m, &mut fw, client_id).await?;
                         deadline = deadline_secs(50);
