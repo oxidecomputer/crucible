@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{stdin, stdout, Read, Write};
+use std::io::Read;
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
-use std::{thread, time::Duration};
+use std::time::Duration;
 
 use crucible_protocol::*;
 
@@ -272,8 +272,6 @@ async fn io_send(
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
     client_id: u8,
 ) -> Result<()> {
-    let mut job: IOop;
-
     /*
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
@@ -370,7 +368,7 @@ async fn proc(
     target: &SocketAddrV4,
     input: &mut watch::Receiver<u64>,
     output: &mpsc::Sender<Condition>,
-    u: &Arc<Upstairs>,
+    up: &Arc<Upstairs>,
     mut sock: TcpStream,
     connected: &mut bool,
     client_id: u8,
@@ -409,8 +407,12 @@ async fn proc(
          * select would always have input.changed() and starve out the
          * fr.next() select?  Does this select ever work that way?
          */
-        println!("{}[{}] tokio select (delta ms {})",
-            target, client_id, delta.as_millis());
+        println!(
+            "{}[{}] tokio select (delta ms {})",
+            target,
+            client_id,
+            delta.as_millis()
+        );
 
         tokio::select! {
             _ = sleep_until(deadline) => {
@@ -428,7 +430,7 @@ async fn proc(
             _ = input.changed() => {
                 let iv = *input.borrow();
                 println!("{}[{}] wakeup {} from main", target, client_id, iv);
-                io_send(u, &mut fw, client_id).await?;
+                io_send(up, &mut fw, client_id).await?;
             }
             f = fr.next() => {
                 /*
@@ -466,7 +468,7 @@ async fn proc(
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
-                        process_downstairs(target, u, bs, es, ec, versions)?;
+                        process_downstairs(target, up, bs, es, ec, versions)?;
 
                         /*
                          *  XXX I moved this here for now so we can use this
@@ -493,7 +495,7 @@ async fn proc(
                         }
                         println!("{}[{}] some", target, client_id);
 
-                        proc_frame(&target, u, &m, &mut fw, client_id).await?;
+                        proc_frame(&target, up, &m, &mut fw, client_id).await?;
                         deadline = deadline_secs(50);
                         pingat = deadline_secs(10);
                         needping = true;
@@ -634,13 +636,16 @@ impl Work {
      * client.
      */
     fn new_work(&self, client_id: u8) -> Vec<u64> {
-        self.active.values().filter_map(|job| {
-            if let Some(IOState::New) = job.state.get(&client_id) {
-                Some(job.request_id)
-            } else {
-                None
-            }
-        }).collect()
+        self.active
+            .values()
+            .filter_map(|job| {
+                if let Some(IOState::New) = job.state.get(&client_id) {
+                    Some(job.request_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /**
@@ -655,11 +660,13 @@ impl Work {
      * for which this request is still active or has been completed already.
      */
     fn complete(&mut self, reqid: u64, client_id: u8) -> Result<WorkCounts> {
-        let job = self.active.get_mut(&reqid)
+        let job = self
+            .active
+            .get_mut(&reqid)
             .ok_or_else(|| anyhow!("reqid {} is not active", reqid))?;
         let oldstate = job.state.insert(client_id, IOState::Done);
         assert_ne!(oldstate, Some(IOState::Done));
-        
+
         /*
          * Check to see if all I/O is completed:
          */
@@ -842,7 +849,6 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(opt, ia));
     println!("runtime is spawned: ");
 
-
     /*
      *  This fails the same way.
     runtime.block_on(async {
@@ -856,7 +862,7 @@ fn main() -> Result<()> {
     up_main(opt).await?;
 
     */
-    loop {};
+    loop {}
     Ok(())
 }
 
@@ -870,8 +876,10 @@ fn send_work(t: &[Target], val: u64) {
         println!("#### send to client {:?}", d_client.target);
         let res = d_client.input.send(val);
         if let Err(e) = res {
-            println!("#### error {:#?} sending work to {:?}",
-                    e, d_client.target);
+            println!(
+                "#### error {:#?} sending work to {:?}",
+                e, d_client.target
+            );
             /*
              * XXX
              * Write more code for this error,  If one downstairs
@@ -975,57 +983,26 @@ async fn up_main(opt: Opt, ia: Arc<Interact>) -> Result<()> {
     // async tasks need to tell us they are alive, but they also need to
     // tell us the extent list from any attached downstairs.
     // That part is not connected yet.
-    let mut connected = 0u32;
-    let mut ri = 1;
+    let mut ds_count = 0u32;
     loop {
         let c = crx.recv().await.unwrap();
         if c.connected {
-            println!("#### {:?} #### CONNECTED ########", c.target);
-            connected += 1;
+            ds_count += 1;
+            println!(
+                "#### {:?} #### CONNECTED ######## {}/{}",
+                c.target,
+                ds_count,
+                opt.target.len()
+            );
         } else {
             println!("#### {:?} #### DISCONNECTED! ####", c.target);
-            connected -= 1;
+            ds_count -= 1;
         }
-
-//        while connected < opt.target.len() {
-//            println!("Wait for all tasks to report connected {}/{}",
-//                connected, opt.target.len());
-//            let c = crx.recv().await.unwrap();
-//            if c.connected {
-//                println!("#### {:?} #### CONNECTED ########", c.target);
-//                connected += 1;
-//            } else {
-//                println!("#### {:?} #### DISCONNECTED! ####", c.target);
-//                connected -= 1;
-//            }
-//        }
-//        /*
-//         * To work like this, we need to do stuff here and then go back
-//         * and watch for clients going away and decide how to take action
-//         * on that.  I think too much might be done at the individual
-//         * downstairs level and not enough here in this "mux" task.
-//         */
-//
-//        // Can we look at what we have spawned?
-//        // Can we use the input or crx to tell if something as gone away.
-//        // Where do we handle more than one mirror going away?
-//        println!("#### Create test work, put on work queue");
-//        test_pause();
-//        ri = create_work(&up, ri, 0x44, 5, 15).unwrap();
-//        //ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
-//        show_work(&up)?;
-//
-//        println!("#### ready to submit work one");
-//        test_pause();
-//        t.iter().for_each(|t| t.input.send(2).unwrap());
-//        t.iter().for_each(|t| t.input.send(1).unwrap());
-//        t.iter().for_each(|t| t.input.send(2).unwrap());
-//        t.iter().for_each(|t| t.input.send(1).unwrap());
-//        //send_work(&t, 2);
-//        println!("#### work submitted, now show work queue");
-//        test_pause();
-//        show_work(&up)?;
-//        test_pause();
+        /*
+         * We need some additional way to indicate that this upstairs is ready
+         * to receive work.  Just connecting to n downstairs is not enough,
+         * we need to also know that they all have the same data.
+         */
     }
 
     /*
