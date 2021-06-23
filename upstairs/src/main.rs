@@ -394,14 +394,20 @@ async fn proc(
      */
     let mut pingat = deadline_secs(10);
     let mut needping = false;
+    let mut lastrun = std::time::Instant::now();
 
     loop {
+        let thisrun = std::time::Instant::now();
+        let delta = thisrun.saturating_duration_since(lastrun);
+        lastrun = thisrun;
+
         /*
          * XXX Just a thought here, could we send so much input that the
          * select would always have input.changed() and starve out the
          * fr.next() select?  Does this select ever work that way?
          */
-        println!("{}[{}] tokio select", target, client_id);
+        println!("{}[{}] tokio select (delta ms {})",
+            target, client_id, delta.as_millis());
 
         tokio::select! {
             _ = sleep_until(deadline) => {
@@ -417,12 +423,8 @@ async fn proc(
                 needping = false;
             }
             _ = input.changed() => {
-                println!("{}[{}] input changed", target, client_id);
-                /*
-                 * Something new on the work hashmap.  Go off and figure
-                 * out what we need to do.  If there is new work for us then
-                 * do that work, marking it as in progress.
-                 */
+                let iv = *input.borrow();
+                println!("{}[{}] wakeup {} from main", target, client_id, iv);
                 io_send(u, &mut fw, client_id).await?;
             }
             f = fr.next() => {
@@ -820,7 +822,6 @@ struct Condition {
 }
 
 fn main() -> Result<()> {
-
     let opt = opts()?;
 
     let runtime = Builder::new_multi_thread()
