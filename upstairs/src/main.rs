@@ -859,8 +859,13 @@ fn main() -> Result<()> {
     up_main(opt).await?;
 
     */
-    loop {}
-    Ok(())
+
+    loop {
+        /*
+         * Sleep forever to avoid spinning in this thread.
+         */
+        std::thread::sleep(std::time::Duration::from_secs(86400));
+    }
 }
 
 /*
