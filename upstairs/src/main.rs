@@ -19,9 +19,6 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-mod interact;
-use interact::Interact;
-
 /*
  * XXX This is temp, this DiskDefinition needs to live in some common
  * area where both upstairs and downstaris can use it.  To get things
@@ -838,12 +835,10 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
-    let ia = Arc::new(Interact::new());
-
     /*
      * This one shows the hang on one task.
      */
-    runtime.spawn(up_main(opt, ia));
+    runtime.spawn(up_main(opt));
     println!("runtime is spawned: ");
 
     /*
@@ -899,7 +894,10 @@ fn send_work(t: &[Target], val: u64) {
  * it into a crucible IO, then sending it on to be processed to the mux
  * portion of crucible.
  */
-async fn up_main(opt: Opt, ia: Arc<Interact>) -> Result<()> {
+async fn up_main(opt: Opt) -> Result<()> {
+    let scope =
+        crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
+
     let up = Arc::new(Upstairs {
         work: Mutex::new(Work {
             active: HashMap::new(),
@@ -962,23 +960,23 @@ async fn up_main(opt: Opt, ia: Arc<Interact>) -> Result<()> {
             // Can we look at what we have spawned?
             // Can we use the input or crx to tell if something as gone away.
             // Where do we handle more than one mirror going away?
-            ia.wait_for("create test work, put on work queue").await;
+            scope.wait_for("create test work, put on work queue").await;
 
             create_work(&up, 0x44, 5, 15).unwrap();
             //ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
             show_work(&up);
 
-            ia.wait_for("ready to submit work one").await;
+            scope.wait_for("ready to submit work one").await;
 
             t.iter().for_each(|t| t.input.send(lastcast).unwrap());
             lastcast += 1;
 
             //send_work(&t, 2);
 
-            ia.wait_for("work submitted, now show work queue").await;
+            scope.wait_for("work submitted, now show work queue").await;
             show_work(&up);
 
-            ia.wait_for("bottom of loop, go again").await;
+            scope.wait_for("bottom of loop, go again").await;
         }
     });
 
