@@ -731,8 +731,8 @@ pub enum BlockOp {
 }
 
 /*
- * This is the structure we use to pass work from outside Crucible into the upstairs
- * main task.
+ * This is the structure we use to pass work from outside Crucible into the
+ * upstairs main task.
  */
 #[derive(Debug)]
 struct PropWork {
@@ -928,42 +928,31 @@ fn _send_work(t: &[Target], val: u64) {
 }
 
 /*
- * This is basically just a test loop that generates a workload then sends the workload
- * to Crucible.
+ * This is basically just a test loop that generates a workload then sends the
+ * workload to Crucible.
  */
 async fn run_scope(pw: Arc<PropWork>) -> Result<()> {
     let scope =
         crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
     loop {
-        scope.wait_for("create write work, put on work queue").await;
-        pw.send(BlockOp::WriteStep);
-        scope.wait_for("read step").await;
-        pw.send(BlockOp::ReadStep);
-        scope.wait_for("flush step").await;
-        pw.send(BlockOp::FlushStep);
-        scope.wait_for("show step").await;
-        pw.send(BlockOp::ShowWork);
-        scope.wait_for("commit step").await;
-        pw.send(BlockOp::Commit);
-        scope.wait_for("show step").await;
-        pw.send(BlockOp::ShowWork);
-        scope.wait_for("send write ").await;
+        scope.wait_for("write").await;
         pw.send(BlockOp::Write);
-        scope.wait_for("send read ").await;
-        pw.send(BlockOp::Read);
-        scope.wait_for("send read ").await;
-        pw.send(BlockOp::Read);
-        scope.wait_for("send read ").await;
-        pw.send(BlockOp::Read);
+        scope.wait_for("Flush step").await;
+        pw.send(BlockOp::Flush);
         scope.wait_for("show step").await;
         pw.send(BlockOp::ShowWork);
+        scope.wait_for("send Read ").await;
+        pw.send(BlockOp::Read);
+        scope.wait_for("send read ").await;
+        pw.send(BlockOp::Read);
     }
 }
 
 /*
- * This task will loop forever and watch the PropWork structure for new IO operations
- * showing up.  When one is detected, the type is checked and the operation is translated
- * into the corresponding upstairs IO type and put on the internal upstairs queue.
+ * This task will loop forever and watch the PropWork structure for new IO
+ * operations showing up.  When one is detected, the type is checked and the
+ * operation is translated into the corresponding upstairs IO type and put on
+ * the internal upstairs queue.
  */
 async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
     /*
@@ -973,10 +962,11 @@ async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     /*
-     * XXX At the moment we are making up the actual work that upstairs does.  We use the
-     * command coming in as a starting point, but then provide our own values to create a
-     * real IOop.  Eventually (soon dammit) this should change to actually sending the values
-     * that we will (eventually) be receiving from outside instead of making our own.
+     * XXX At the moment we are making up the actual work that upstairs does.
+     * We use the command coming in as a starting point, but then provide our
+     * own values to create a real IOop.  Eventually (soon dammit) this should
+     * change to actually sending the values that we will (eventually) be
+     * receiving from outside instead of making our own.
      */
     let mut lastcast = 1;
     let mut eid = 0;
