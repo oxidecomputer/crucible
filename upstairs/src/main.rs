@@ -1,6 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::io::Read;
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +14,7 @@ use structopt::StructOpt;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::runtime::Builder;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -395,25 +394,13 @@ async fn proc(
      */
     let mut pingat = deadline_secs(10);
     let mut needping = false;
-    let mut lastrun = std::time::Instant::now();
 
     loop {
-        let thisrun = std::time::Instant::now();
-        let delta = thisrun.saturating_duration_since(lastrun);
-        lastrun = thisrun;
-
         /*
          * XXX Just a thought here, could we send so much input that the
          * select would always have input.changed() and starve out the
          * fr.next() select?  Does this select ever work that way?
          */
-        println!(
-            "{}[{}] tokio select (delta ms {})",
-            target,
-            client_id,
-            delta.as_millis()
-        );
-
         tokio::select! {
             _ = sleep_until(deadline) => {
                 if !negotiated {
@@ -509,7 +496,7 @@ async fn looper(
     target: SocketAddrV4,
     mut input: watch::Receiver<u64>,
     output: mpsc::Sender<Condition>,
-    u: &Arc<Upstairs>,
+    up: &Arc<Upstairs>,
     client_id: u8,
 ) {
     let mut firstgo = true;
@@ -568,7 +555,7 @@ async fn looper(
             &target,
             &mut input,
             &output,
-            u,
+            up,
             tcp,
             &mut connected,
             client_id,
@@ -723,6 +710,63 @@ struct Upstairs {
 }
 
 /*
+ * Inspired from Propolis block.rs
+ *
+ * The following are the operations that Crucible supports from outside callers.
+ * We have extended this to cover a bunch of test operations as well.
+ * The first three are the supported operations, the other operations
+ * tell the upstaris to behave in specific ways.
+ */
+#[derive(Copy, Clone, Debug)]
+pub enum BlockOp {
+    Read,
+    Write,
+    Flush,
+    // Begin testing options.
+    ReadStep, // Put a read operaion on the upstairs internal work hashmap.
+    WriteStep, // Put a write operaion on the upstairs internal work hashmap.
+    FlushStep, // Put a flush operaion on the upstairs internal work hashmap.
+    Commit,   // Send update to all tasks that there is work on the queue.
+    ShowWork, // Show the status of the internal work hashmap and done Vec.
+}
+
+/*
+ * This is the structure we use to pass work from outside Crucible into the upstairs
+ * main task.
+ */
+#[derive(Debug)]
+struct PropWork {
+    reqs: Mutex<VecDeque<BlockOp>>,
+    notify: Notify,
+}
+
+/*
+ * These methods are how to add or checking for new work on the PropWork struct
+ */
+impl PropWork {
+    pub fn new() -> PropWork {
+        PropWork {
+            reqs: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+        }
+    }
+    pub fn send(&self, req: BlockOp) {
+        self.reqs.lock().unwrap().push_back(req);
+
+        self.notify.notify_one();
+    }
+
+    pub async fn recv(&self) -> BlockOp {
+        loop {
+            if let Some(req) = self.reqs.lock().unwrap().pop_front() {
+                return req;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
+/*
  * I think we will have more states.  If not, then this should just become
  * a bool.
  */
@@ -829,31 +873,26 @@ fn main() -> Result<()> {
     let opt = opts()?;
 
     let runtime = Builder::new_multi_thread()
-        .worker_threads(4)
+        .worker_threads(10)
         .thread_name("crucible-tokio")
         .enable_all()
         .build()
         .unwrap();
 
     /*
-     * This one shows the hang on one task.
+     * The structure we use to send work from outside crucible into the
+     * Upstairs main task.
      */
-    runtime.spawn(up_main(opt));
-    println!("runtime is spawned: ");
+    let prop_work = Arc::new(PropWork::new());
+
+    runtime.spawn(up_main(opt, prop_work.clone()));
+    println!("runtime is spawned");
 
     /*
-     *  This fails the same way.
-    runtime.block_on(async {
-        println!("This is the task 1");
-        tokio::spawn(up_main(opt));
-    });
-    */
-
-    /* If I switch main to start with tokio runtime, this works
-
-    up_main(opt).await?;
-
-    */
+     * Create the interactive input scope that will generate and send
+     * work to the Crucible thread that listens to work from outside (Propolis).
+     */
+    runtime.spawn(run_scope(prop_work));
 
     loop {
         /*
@@ -868,7 +907,7 @@ fn main() -> Result<()> {
  * This can be much simpler, but we need to (eventually) take special action
  * when we fail to send a message to a task.
  */
-fn send_work(t: &[Target], val: u64) {
+fn _send_work(t: &[Target], val: u64) {
     for d_client in t.iter() {
         println!("#### send to client {:?}", d_client.target);
         let res = d_client.input.send(val);
@@ -889,14 +928,121 @@ fn send_work(t: &[Target], val: u64) {
 }
 
 /*
+ * This is basically just a test loop that generates a workload then sends the workload
+ * to Crucible.
+ */
+async fn run_scope(pw: Arc<PropWork>) -> Result<()> {
+    let scope =
+        crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
+    loop {
+        scope.wait_for("create write work, put on work queue").await;
+        pw.send(BlockOp::WriteStep);
+        scope.wait_for("read step").await;
+        pw.send(BlockOp::ReadStep);
+        scope.wait_for("flush step").await;
+        pw.send(BlockOp::FlushStep);
+        scope.wait_for("show step").await;
+        pw.send(BlockOp::ShowWork);
+        scope.wait_for("commit step").await;
+        pw.send(BlockOp::Commit);
+        scope.wait_for("show step").await;
+        pw.send(BlockOp::ShowWork);
+        scope.wait_for("send write ").await;
+        pw.send(BlockOp::Write);
+        scope.wait_for("send read ").await;
+        pw.send(BlockOp::Read);
+        scope.wait_for("send read ").await;
+        pw.send(BlockOp::Read);
+        scope.wait_for("send read ").await;
+        pw.send(BlockOp::Read);
+        scope.wait_for("show step").await;
+        pw.send(BlockOp::ShowWork);
+    }
+}
+
+/*
+ * This task will loop forever and watch the PropWork structure for new IO operations
+ * showing up.  When one is detected, the type is checked and the operation is translated
+ * into the corresponding upstairs IO type and put on the internal upstairs queue.
+ */
+async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
+    /*
+     * XXX Once we move this function to being called after all downstairs are
+     * online, we can remove this sleep
+     */
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    /*
+     * XXX At the moment we are making up the actual work that upstairs does.  We use the
+     * command coming in as a starting point, but then provide our own values to create a
+     * real IOop.  Eventually (soon dammit) this should change to actually sending the values
+     * that we will (eventually) be receiving from outside instead of making our own.
+     */
+    let mut lastcast = 1;
+    let mut eid = 0;
+    let mut block_offset = 0;
+    loop {
+        let req = pw.recv().await;
+        println!("UMT received {:#?}", req);
+        match req {
+            BlockOp::Read => {
+                let mut work = up.work.lock().unwrap();
+                let re = create_read(work.next_id(), eid, block_offset);
+                work.enqueue(re);
+                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
+                lastcast += 1;
+            }
+            BlockOp::Write => {
+                let mut work = up.work.lock().unwrap();
+                let wr = create_write(work.next_id(), eid, block_offset, 0x55);
+                work.enqueue(wr);
+                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
+                lastcast += 1;
+            }
+            BlockOp::Flush => {
+                let mut work = up.work.lock().unwrap();
+                let ver = up.versions.lock().unwrap();
+                let fl = create_flush(work.next_id(), ver.clone());
+                work.enqueue(fl);
+                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
+                lastcast += 1;
+            }
+            BlockOp::WriteStep => {
+                let mut work = up.work.lock().unwrap();
+                let wr = create_write(work.next_id(), eid, block_offset, 0x55);
+                work.enqueue(wr);
+            }
+            BlockOp::ReadStep => {
+                let mut work = up.work.lock().unwrap();
+                let re = create_read(work.next_id(), eid, block_offset);
+                work.enqueue(re);
+            }
+            BlockOp::FlushStep => {
+                let mut work = up.work.lock().unwrap();
+                let ver = up.versions.lock().unwrap();
+                let fl = create_flush(work.next_id(), ver.clone());
+                work.enqueue(fl);
+            }
+            BlockOp::ShowWork => {
+                show_work(&up);
+            }
+            BlockOp::Commit => {
+                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
+                lastcast += 1;
+            }
+        }
+        eid = (eid + 1) % 10;
+        block_offset = (block_offset + 1) % 100;
+    }
+}
+
+/*
  * This is the main upstairs task that is responsible for accepting
  * work from propolis (or whomever) and taking that work and converting
  * it into a crucible IO, then sending it on to be processed to the mux
  * portion of crucible.
  */
-async fn up_main(opt: Opt) -> Result<()> {
-    let scope =
-        crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
+async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
 
     let up = Arc::new(Upstairs {
         work: Mutex::new(Work {
@@ -910,74 +1056,55 @@ async fn up_main(opt: Opt) -> Result<()> {
         downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
     });
 
-    println!(
-        "#### target list: {:#?} len:{}",
-        opt.target,
-        opt.target.len()
-    );
-
     /*
-     * Use this channel to receive updates on target status from each target
-     * management task.
+     * Use this channel to receive updates on target status from each task
+     * we create to connect to a downstairs.
      */
     let (ctx, mut crx) = mpsc::channel::<Condition>(32);
 
     let mut client_id = 0;
-    let t = opt
+    /*
+     * Create one downstaris task (dst) for each target in the opt
+     * structure that was passed to us.
+     */
+    let dst = opt
         .target
         .iter()
-        .map(|t| {
+        .map(|dst| {
             /*
              * Create the channel that we will use to request that the loop
              * check for work to do in the central structure.
-             * XXX Not sure if anyone reads this first value
              */
             let (itx, irx) = watch::channel(0);
 
             let up = Arc::clone(&up);
             let ctx = ctx.clone();
-            let t0 = *t;
+            let t0 = *dst;
             tokio::spawn(async move {
                 looper(t0, irx, ctx, &up, client_id).await;
             });
             client_id += 1;
 
             Target {
-                target: *t,
+                target: *dst,
                 input: itx,
             }
         })
         .collect::<Vec<_>>();
 
     /*
-     * Create a task to drive test cases.
+     * Create a task to listen for work from outside.
+     *
+     * The role of this task will be to move work between the outside
+     * work queue and the internal Upstairs work queue, as well as send
+     * completion messages and/or copy data back to the outside.
+     *
+     * XXX This needs a little more work.  We should not start to listen
+     * to the outside until we know that all our downstairs are ready to
+     * take IO operations.
      */
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let mut lastcast = 1;
-
-        loop {
-            // Can we look at what we have spawned?
-            // Can we use the input or crx to tell if something as gone away.
-            // Where do we handle more than one mirror going away?
-            scope.wait_for("create test work, put on work queue").await;
-
-            create_work(&up, 0x44, 5, 15).unwrap();
-            //ri = create_more_work(&up, ri).unwrap(); // job id, data_seed, eid, block_offset
-            show_work(&up);
-
-            scope.wait_for("ready to submit work one").await;
-
-            t.iter().for_each(|t| t.input.send(lastcast).unwrap());
-            lastcast += 1;
-
-            //send_work(&t, 2);
-
-            scope.wait_for("work submitted, now show work queue").await;
-            show_work(&up);
-
-            scope.wait_for("bottom of loop, go again").await;
-        }
+        up_listen(&up, pw, dst).await;
     });
 
     // async tasks need to tell us they are alive, but they also need to
@@ -1008,11 +1135,10 @@ async fn up_main(opt: Opt) -> Result<()> {
     /*
      * XXX Need to cleanup async tasks and close connections.
      */
-    Ok(())
 }
 
 /*
- * These are some simple functions to create IO work for testing
+ * A test function to create a write IOWork structure.
  */
 fn create_write(ri: u64, eid: u64, block_offset: u64, data_seed: u8) -> IOWork {
     let mut data = BytesMut::with_capacity(512);
@@ -1037,6 +1163,9 @@ fn create_write(ri: u64, eid: u64, block_offset: u64, data_seed: u8) -> IOWork {
     }
 }
 
+/*
+ * A test function to create a flush IOWork structure.
+ */
 fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
     let flush = IOop::Flush {
         dependencies: Vec::new(), // XXX coming soon
@@ -1054,6 +1183,9 @@ fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
     }
 }
 
+/*
+ * A test function to create a read IOWork structure.
+ */
 fn create_read(ri: u64, eid: u64, block_offset: u64) -> IOWork {
     let aread = IOop::Read { eid, block_offset };
 
@@ -1067,15 +1199,28 @@ fn create_read(ri: u64, eid: u64, block_offset: u64) -> IOWork {
         state,
     }
 }
-
 /*
  * Debug function to display the work hashmap with status for all three of
  * the clients.
  */
+#[allow(unused_variables)]
 fn show_work(up: &Arc<Upstairs>) {
     let mut work = up.work.lock().unwrap();
     for (id, job) in work.active.iter_mut() {
-        print!("JOB:[{:04}] ", id);
+        let job_type = match &job.work {
+            IOop::Read { eid, block_offset } => "Read ".to_string(),
+            IOop::Write {
+                dependencies,
+                eid,
+                block_offset,
+                data,
+            } => "Flush".to_string(),
+            IOop::Flush {
+                dependencies,
+                flush_numbers,
+            } => "Write".to_string(),
+        };
+        print!("JOB:[{:04}] {} ", id, job_type);
         for cid in 0..3 {
             let state = job.state.get(&cid);
             match state {
@@ -1093,7 +1238,7 @@ fn show_work(up: &Arc<Upstairs>) {
     println!("Done: {:?}", done);
 }
 
-fn create_more_work(up: &Arc<Upstairs>) -> Result<()> {
+fn _create_more_work(up: &Arc<Upstairs>) -> Result<()> {
     let mut seed = 1;
 
     for eid in 0..10 {
@@ -1123,7 +1268,7 @@ fn create_more_work(up: &Arc<Upstairs>) -> Result<()> {
     Ok(())
 }
 
-fn create_work(
+fn _create_work(
     up: &Arc<Upstairs>,
     seed: u8,
     eid: u64,
