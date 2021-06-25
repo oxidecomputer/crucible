@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
     let sockpath = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow!("need sockpath"))?;
+
     println!("\x1b[7m *** waiting for socket: {}\x1b[0m", sockpath);
 
     /*

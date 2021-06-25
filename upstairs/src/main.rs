@@ -1043,6 +1043,7 @@ async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
  * portion of crucible.
  */
 async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
+
     let up = Arc::new(Upstairs {
         work: Mutex::new(Work {
             active: HashMap::new(),
