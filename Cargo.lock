@@ -121,16 +121,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-scope"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
 name = "crucible-upstairs"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "bytes",
  "crucible-protocol",
+ "crucible-scope",
  "futures",
  "futures-core",
  "ringbuffer",
  "serde",
+ "serde_json",
  "structopt",
  "tokio",
  "tokio-util",
