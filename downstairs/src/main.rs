@@ -14,8 +14,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-mod disk;
-use disk::Disk;
+mod region;
+use region::Region;
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "disk-side storage component")]
@@ -55,12 +55,12 @@ async fn proc_frame(
     match m {
         Message::Ruok => fw.send(Message::Imok).await,
         Message::ExtentVersionsPlease => {
-            let (bs, es, ec) = d.disk.disk_def();
-            fw.send(Message::ExtentVersions(bs, es, ec, d.disk.versions()))
+            let (bs, es, ec) = d.region.region_def();
+            fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
                 .await
         }
         Message::Write(rn, eid, block_offset, data) => {
-            d.disk.disk_write(*eid, *block_offset, data)?;
+            d.region.region_write(*eid, *block_offset, data)?;
             fw.send(Message::WriteAck(*rn)).await
         }
         Message::Flush(rn, dependencies, flush) => {
@@ -69,7 +69,7 @@ async fn proc_frame(
                 rn, dependencies, flush
             );
             //let dep = Vec::new();
-            d.disk.disk_flush(dependencies.to_vec(), flush.to_vec())?;
+            d.region.region_flush(dependencies.to_vec(), flush.to_vec())?;
             fw.send(Message::FlushAck(*rn)).await
         }
         Message::ReadRequest(rn, eid, block_offset, blocks) => {
@@ -85,7 +85,7 @@ async fn proc_frame(
             for _ in 0..*blocks {
                 data.put(&[1; 512][..]);
             }
-            d.disk.disk_read(*eid, *block_offset, &mut data)?;
+            d.region.region_read(*eid, *block_offset, &mut data)?;
             let data = data.freeze();
             fw.send(Message::ReadResponse(*rn, data.clone())).await
         }
@@ -145,7 +145,7 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
 }
 
 struct Downstairs {
-    disk: Disk,
+    region: Region,
 }
 
 #[tokio::main]
@@ -153,13 +153,13 @@ async fn main() -> Result<()> {
     let opt = opts()?;
 
     /*
-     * Open the disk for which we will be responsible.
+     * Open the region for which we will be responsible.
      */
-    let mut disk = Disk::open(&opt.data, Default::default())?;
-    disk.extend(10)?;
+    let mut region = Region::open(&opt.data, Default::default())?;
+    region.extend(10)?;
 
-    println!("Startup Extent values: {:?}", disk.versions());
-    let d = Arc::new(Downstairs { disk });
+    println!("Startup Extent values: {:?}", region.versions());
+    let d = Arc::new(Downstairs { region });
 
     /*
      * Establish a listen server on the port.

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crucible_common::*;
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct DiskDefinition {
+pub struct RegionDefinition {
     /**
      * The size of each block in bytes.  Must be a power of 2, minimum 512.
      */
@@ -24,15 +24,15 @@ pub struct DiskDefinition {
     extent_size: u64,
 
     /**
-     * How many whole extents comprise this disk?
+     * How many whole extents comprise this region?
      */
     extent_count: u32,
 }
 
-impl DiskDefinition {
-    fn from_options(opts: &DiskOptions) -> Result<Self> {
+impl RegionDefinition {
+    fn from_options(opts: &RegionOptions) -> Result<Self> {
         opts.validate()?;
-        Ok(DiskDefinition {
+        Ok(RegionDefinition {
             block_size: opts.block_size,
             extent_size: opts.extent_size,
             extent_count: 0,
@@ -41,7 +41,7 @@ impl DiskDefinition {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct DiskOptions {
+pub struct RegionOptions {
     /**
      * The size of each block in bytes.  Must be a power of 2, minimum 512.
      */
@@ -53,7 +53,7 @@ pub struct DiskOptions {
     extent_size: u64,
 }
 
-impl DiskOptions {
+impl RegionOptions {
     fn validate(&self) -> Result<()> {
         if !self.block_size.is_power_of_two() {
             bail!("block size must be a power of two, not {}", self.block_size);
@@ -85,9 +85,9 @@ impl DiskOptions {
     }
 }
 
-impl Default for DiskOptions {
+impl Default for RegionOptions {
     fn default() -> Self {
-        DiskOptions {
+        RegionOptions {
             block_size: 512,  /* XXX bigger? */
             extent_size: 100, /* XXX bigger? */
         }
@@ -156,14 +156,14 @@ fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 
 fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
-    out.push("disk.json");
+    out.push("region.json");
     out
 }
 
 impl Extent {
     fn open<P: AsRef<Path>>(
         dir: P,
-        def: &DiskDefinition,
+        def: &RegionDefinition,
         number: u32,
     ) -> Result<Extent> {
         /*
@@ -463,40 +463,39 @@ extern "C" {
     fn fsync(fildes: i32) -> i32;
 }
 
-// XXX This name and all things "disk" probably need a new name.
-pub struct Disk {
+pub struct Region {
     dir: PathBuf,
-    def: DiskDefinition,
+    def: RegionDefinition,
     extents: Vec<Extent>,
 }
 
-impl Disk {
-    pub fn open<P: AsRef<Path>>(dir: P, options: DiskOptions) -> Result<Disk> {
+impl Region {
+    pub fn open<P: AsRef<Path>>(dir: P, options: RegionOptions) -> Result<Region> {
         options.validate()?;
 
         let cp = config_path(dir.as_ref());
         let def = if let Some(def) = read_json_maybe(&cp)? {
-            println!("opened existing disk file {:?}", cp);
+            println!("opened existing region file {:?}", cp);
             def
         } else {
-            let def = DiskDefinition::from_options(&options)?;
+            let def = RegionDefinition::from_options(&options)?;
             write_json(&cp, &def, false)?;
-            println!("created new disk file {:?}", cp);
+            println!("created new region file {:?}", cp);
             def
         };
 
         /*
          * Open every extent that presently exists.
          */
-        let mut disk = Disk {
+        let mut region = Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
         };
 
-        disk.open_extents()?;
+        region.open_extents()?;
 
-        Ok(disk)
+        Ok(region)
     }
 
     fn open_extents(&mut self) -> Result<()> {
@@ -526,7 +525,7 @@ impl Disk {
         Ok(())
     }
 
-    pub fn disk_def(&self) -> (u64, u64, u32) {
+    pub fn region_def(&self) -> (u64, u64, u32) {
         (
             self.def.block_size,
             self.def.extent_size,
@@ -549,7 +548,7 @@ impl Disk {
             .collect::<Vec<_>>()
     }
 
-    pub fn disk_write(
+    pub fn region_write(
         &self,
         eid: u64,
         block_offset: u64,
@@ -560,7 +559,7 @@ impl Disk {
         Ok(())
     }
 
-    pub fn disk_read(
+    pub fn region_read(
         &self,
         eid: u64,
         block_offset: u64,
@@ -580,7 +579,7 @@ impl Disk {
      * Perhaps this can be a list of extents that need flush instead of
      * sending the whole Vec.  Something to think about XXX
      */
-    pub fn disk_flush(
+    pub fn region_flush(
         &self,
         dep: Vec<u64>,
         flush_numbers: Vec<u64>,
@@ -718,31 +717,31 @@ mod test {
     #[test]
     fn extent_path_min() {
         assert_eq!(
-            extent_path("/var/disk", u32::MIN),
-            p("/var/disk/00/000/000")
+            extent_path("/var/region", u32::MIN),
+            p("/var/region/00/000/000")
         );
     }
 
     #[test]
     fn extent_path_three() {
-        assert_eq!(extent_path("/var/disk", 3), p("/var/disk/00/000/003"));
+        assert_eq!(extent_path("/var/region", 3), p("/var/region/00/000/003"));
     }
 
     #[test]
     fn extent_path_mid_hi() {
-        assert_eq!(extent_path("/var/disk", 65536), p("/var/disk/00/010/000"));
+        assert_eq!(extent_path("/var/region", 65536), p("/var/region/00/010/000"));
     }
 
     #[test]
     fn extent_path_mid_lo() {
-        assert_eq!(extent_path("/var/disk", 65535), p("/var/disk/00/00F/FFF"));
+        assert_eq!(extent_path("/var/region", 65535), p("/var/region/00/00F/FFF"));
     }
 
     #[test]
     fn extent_path_max() {
         assert_eq!(
-            extent_path("/var/disk", u32::MAX),
-            p("/var/disk/FF/FFF/FFF")
+            extent_path("/var/region", u32::MAX),
+            p("/var/region/FF/FFF/FFF")
         );
     }
 }
