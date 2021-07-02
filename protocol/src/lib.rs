@@ -16,7 +16,7 @@ pub enum Message {
     WriteAck(u64),
     Flush(u64, Vec<u64>, Vec<u64>),
     FlushAck(u64),
-    ReadRequest(u64, u64, u64),
+    ReadRequest(u64, u64, u64, u32),
     ReadResponse(u64, bytes::Bytes),
     Unknown(u32, BytesMut),
 }
@@ -170,14 +170,15 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::ReadRequest(rn, eid, block_offset) => {
-                let len = 4 + 4 + 8 + 8 + 8;
+            Message::ReadRequest(rn, eid, block_offset, blocks) => {
+                let len = 4 + 4 + 8 + 8 + 8 + 4;
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(11);
                 dst.put_u64_le(rn);
                 dst.put_u64_le(eid);
                 dst.put_u64_le(block_offset);
+                dst.put_u32_le(blocks);
 
                 Ok(())
             }
@@ -328,11 +329,12 @@ impl Decoder for CrucibleDecoder {
                 Some(Message::FlushAck(rn))
             }
             11 => {
-                chklen(&src, 24)?;
+                chklen(&src, 28)?;
                 let rn = src.get_u64_le();
                 let eid = src.get_u64_le();
                 let block_offset = src.get_u64_le();
-                Some(Message::ReadRequest(rn, eid, block_offset))
+                let blocks = src.get_u32_le();
+                Some(Message::ReadRequest(rn, eid, block_offset, blocks))
             }
             12 => {
                 chklen(&src, 8 + 4)?;
