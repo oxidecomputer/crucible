@@ -20,14 +20,14 @@ use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 /*
- * XXX This is temp, this DiskDefinition needs to live in some common
+ * XXX This is temp, this RegionDefinition needs to live in some common
  * area where both upstairs and downstaris can use it.  To get things
- * to work, the struct here is a copy of what lives in downstairs disk.rs
+ * to work, the struct here is a copy of what lives in downstairs region.rs
  * file, which should also be renamed, but that is the subject of another
  * XXX in that file.
  */
 #[derive(Debug)]
-pub struct DiskDefinition {
+pub struct RegionDefinition {
     /**
      * The size of each block in bytes.  Must be a power of 2, minimum 512.
      */
@@ -39,14 +39,14 @@ pub struct DiskDefinition {
     extent_size: u64,
 
     /**
-     * How many whole extents comprise this disk?
+     * How many whole extents comprise this region?
      */
     extent_count: u32,
 }
 
-impl Default for DiskDefinition {
-    fn default() -> DiskDefinition {
-        DiskDefinition {
+impl Default for RegionDefinition {
+    fn default() -> RegionDefinition {
+        RegionDefinition {
             block_size: 0,
             extent_size: 0,
             extent_count: 0,
@@ -194,7 +194,7 @@ fn process_downstairs(
 
     /*
      * XXX Here we have another workaround.  We don't know
-     * the disk info until after we connect to each
+     * the region info until after we connect to each
      * downstairs, but we share the ARC Upstairs before we
      * know what to expect.  For now I'm using zero as an
      * indication that we don't yet know the valid values
@@ -219,7 +219,7 @@ fn process_downstairs(
         || ddef.extent_count != ec
     {
         // XXX Figure out if we can hande this error.  Possibly not.
-        panic!("New downstaris disk info mismatch");
+        panic!("New downstaris region info mismatch");
     }
     Ok(())
 }
@@ -711,7 +711,7 @@ struct Upstairs {
      * This allows us to verify each downstairs is the same, as well as
      * enables us to tranlate an LBA to an extent and block offset.
      */
-    ddef: Mutex<DiskDefinition>,
+    ddef: Mutex<RegionDefinition>,
     /*
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
@@ -751,7 +751,7 @@ struct PropWork {
 }
 
 /*
- * These methods are how to add or checking for new work on the PropWork struct
+ * These methods are how to add or check for new work on the PropWork struct
  */
 impl PropWork {
     pub fn new() -> PropWork {
@@ -1062,7 +1062,7 @@ async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
         }),
         versions: Mutex::new(Vec::new()),
         dirty: Mutex::new(Vec::new()),
-        ddef: Mutex::new(DiskDefinition::default()),
+        ddef: Mutex::new(RegionDefinition::default()),
         downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
     });
 
@@ -1323,7 +1323,7 @@ mod test {
 
     #[test]
     fn offset_to_extent() {
-        let def = DiskDefinition {
+        let def = RegionDefinition {
             block_size: 512,
             extent_size: 100,
             extent_count: 10,
