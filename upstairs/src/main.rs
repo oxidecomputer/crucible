@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::convert::TryInto;
 use std::fmt;
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
@@ -343,13 +344,22 @@ async fn io_send(
                 ))
                 .await?
             }
-            IOop::Read { eid, block_offset } => {
+            IOop::Read {
+                eid,
+                block_offset,
+                blocks,
+            } => {
                 println!(
-                    "Read  rn:{} eid:{:?} bo:{:?}",
-                    *new_id, eid, block_offset
+                    "Read  rn:{} eid:{:?} bo:{:?} blocks:{}",
+                    *new_id, eid, block_offset, blocks,
                 );
-                fw.send(Message::ReadRequest(*new_id, eid, block_offset))
-                    .await?
+                fw.send(Message::ReadRequest(
+                    *new_id,
+                    eid,
+                    block_offset,
+                    blocks,
+                ))
+                .await?
             }
         }
     }
@@ -806,6 +816,7 @@ pub enum IOop {
     Read {
         eid: u64,
         block_offset: u64,
+        blocks: u32,
     },
     Flush {
         dependencies: Vec<u64>, // List of write requests that must finish first
@@ -941,10 +952,10 @@ async fn run_scope(pw: Arc<PropWork>) -> Result<()> {
         pw.send(BlockOp::Flush);
         scope.wait_for("show step").await;
         pw.send(BlockOp::ShowWork);
-        scope.wait_for("send Read ").await;
-        pw.send(BlockOp::Read);
-        scope.wait_for("send read ").await;
-        pw.send(BlockOp::Read);
+        loop {
+            scope.wait_for("send Read ").await;
+            pw.send(BlockOp::Read);
+        }
     }
 }
 
@@ -969,25 +980,34 @@ async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
      * receiving from outside instead of making our own.
      */
     let mut lastcast = 1;
-    let mut eid = 0;
+    let eid = 4;
     let mut block_offset = 0;
+    let mut blocks: usize = 100;
     loop {
         let req = pw.recv().await;
         println!("UMT received {:#?}", req);
         match req {
             BlockOp::Read => {
                 let mut work = up.work.lock().unwrap();
-                let re = create_read(work.next_id(), eid, block_offset);
+                let re = create_read(work.next_id(), eid, block_offset, blocks);
                 work.enqueue(re);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
+                block_offset = (block_offset + 1) % 100;
             }
             BlockOp::Write => {
                 let mut work = up.work.lock().unwrap();
-                let wr = create_write(work.next_id(), eid, block_offset, 0x55);
+                let wr = create_write(
+                    work.next_id(),
+                    eid,
+                    block_offset,
+                    blocks,
+                    0x3a,
+                );
                 work.enqueue(wr);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
+                blocks = 1;
             }
             BlockOp::Flush => {
                 let mut work = up.work.lock().unwrap();
@@ -999,12 +1019,13 @@ async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
             }
             BlockOp::WriteStep => {
                 let mut work = up.work.lock().unwrap();
-                let wr = create_write(work.next_id(), eid, block_offset, 0x55);
+                let wr =
+                    create_write(work.next_id(), eid, block_offset, 1, 0x55);
                 work.enqueue(wr);
             }
             BlockOp::ReadStep => {
                 let mut work = up.work.lock().unwrap();
-                let re = create_read(work.next_id(), eid, block_offset);
+                let re = create_read(work.next_id(), eid, block_offset, blocks);
                 work.enqueue(re);
             }
             BlockOp::FlushStep => {
@@ -1021,8 +1042,8 @@ async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
                 lastcast += 1;
             }
         }
-        eid = (eid + 1) % 10;
-        block_offset = (block_offset + 1) % 100;
+        //eid = (eid + 1) % 10;
+        //block_offset = (block_offset + 1) % 100;
     }
 }
 
@@ -1033,7 +1054,6 @@ async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
  * portion of crucible.
  */
 async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
-
     let up = Arc::new(Upstairs {
         work: Mutex::new(Work {
             active: HashMap::new(),
@@ -1130,9 +1150,18 @@ async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
 /*
  * A test function to create a write IOWork structure.
  */
-fn create_write(ri: u64, eid: u64, block_offset: u64, data_seed: u8) -> IOWork {
-    let mut data = BytesMut::with_capacity(512);
-    data.put(&[data_seed; 512][..]);
+fn create_write(
+    ri: u64,
+    eid: u64,
+    block_offset: u64,
+    blocks: usize, // Number of blocks total
+    data_seed: u8,
+) -> IOWork {
+    assert!(blocks > 0);
+    let mut data = BytesMut::with_capacity(blocks * 512);
+    for _ in 0..blocks {
+        data.put(&[data_seed; 512][..]);
+    }
     let data = data.freeze();
 
     let awrite = IOop::Write {
@@ -1176,8 +1205,13 @@ fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
 /*
  * A test function to create a read IOWork structure.
  */
-fn create_read(ri: u64, eid: u64, block_offset: u64) -> IOWork {
-    let aread = IOop::Read { eid, block_offset };
+fn create_read(ri: u64, eid: u64, block_offset: u64, blocks: usize) -> IOWork {
+    let blocks: u32 = blocks.try_into().unwrap();
+    let aread = IOop::Read {
+        eid,
+        block_offset,
+        blocks,
+    };
 
     let mut state = HashMap::new();
     for cl in 0..3 {
@@ -1198,17 +1232,21 @@ fn show_work(up: &Arc<Upstairs>) {
     let mut work = up.work.lock().unwrap();
     for (id, job) in work.active.iter_mut() {
         let job_type = match &job.work {
-            IOop::Read { eid, block_offset } => "Read ".to_string(),
+            IOop::Read {
+                eid,
+                block_offset,
+                blocks,
+            } => "Read ".to_string(),
             IOop::Write {
                 dependencies,
                 eid,
                 block_offset,
                 data,
-            } => "Flush".to_string(),
+            } => "Write".to_string(),
             IOop::Flush {
                 dependencies,
                 flush_numbers,
-            } => "Write".to_string(),
+            } => "Flush".to_string(),
         };
         print!("JOB:[{:04}] {} ", id, job_type);
         for cid in 0..3 {
@@ -1235,7 +1273,7 @@ fn _create_more_work(up: &Arc<Upstairs>) -> Result<()> {
         seed += 1;
         for bo in 0..100 {
             let mut work = up.work.lock().unwrap();
-            let wr = create_write(work.next_id(), eid, bo, seed);
+            let wr = create_write(work.next_id(), eid, bo, 1, seed);
             work.enqueue(wr);
         }
     }
@@ -1250,7 +1288,7 @@ fn _create_more_work(up: &Arc<Upstairs>) -> Result<()> {
     for eid in 0..10 {
         for bo in 0..100 {
             let mut work = up.work.lock().unwrap();
-            let re = create_read(work.next_id(), eid, bo);
+            let re = create_read(work.next_id(), eid, bo, 1);
             work.enqueue(re);
         }
     }
@@ -1266,14 +1304,14 @@ fn _create_work(
 ) -> Result<()> {
     let mut work = up.work.lock().unwrap();
 
-    let wr = create_write(work.next_id(), eid, block_offset, seed);
+    let wr = create_write(work.next_id(), eid, block_offset, 1, seed);
     work.enqueue(wr);
 
     let ver = up.versions.lock().unwrap().clone();
     let fl = create_flush(work.next_id(), ver);
     work.enqueue(fl);
 
-    let re = create_read(work.next_id(), eid, block_offset);
+    let re = create_read(work.next_id(), eid, block_offset, 1);
     work.enqueue(re);
 
     Ok(())
@@ -1292,10 +1330,15 @@ mod test {
         };
 
         let up = Arc::new(Upstairs {
-            work: Mutex::new(HashMap::new()),
+            work: Mutex::new(Work {
+                active: HashMap::new(),
+                completed: AllocRingBuffer::with_capacity(2),
+                next_id: 1000,
+            }),
             versions: Mutex::new(Vec::new()),
             dirty: Mutex::new(Vec::new()),
             ddef: Mutex::new(def),
+            downstairs: Mutex::new(Vec::with_capacity(1)),
         });
 
         assert_eq!(_extent_from_offset(&up, 0).unwrap(), (0, 0));

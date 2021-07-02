@@ -256,16 +256,7 @@ impl Extent {
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        if block_offset > self.extent_size {
-            bail!("block offset {} is past end of extent", block_offset);
-        }
-        if data.capacity() != self.block_size as usize {
-            bail!(
-                "block size {}, buffer is {}",
-                self.block_size,
-                data.capacity()
-            );
-        }
+        self.check_input(block_offset, data)?;
 
         /*
          * Skip metadata block:
@@ -289,7 +280,7 @@ impl Extent {
         let mut snip: [u8; 4] = [0; 4];
         snip[..4].copy_from_slice(&data[0..4]);
         println!(
-            "read  eid:{} b_offset:{} f_offset:{} len:{} data:0x{:x?}",
+            "read  eid:{:02} b_off:{:03} f_off:{:05} len:{:03} data:0x{:x?}",
             self.number,
             block_offset,
             file_offset,
@@ -299,15 +290,63 @@ impl Extent {
         Ok(())
     }
 
+    /*
+     * Verify that the requested block offset and size of the buffer
+     * will fit within the extent.
+     *
+     * Note that the checks here do take into account that the first block
+     * is the metadata block.
+     */
+    fn check_input(&self, block_offset: u64, data: &[u8]) -> Result<()> {
+        if block_offset >= self.extent_size {
+            bail!(
+                "block offset {} is past end of extent {}",
+                block_offset,
+                self.extent_size
+            );
+        }
+        if data.len() < self.block_size as usize {
+            bail!(
+                "buffer {} is less than block size {}",
+                data.len(),
+                self.block_size
+            );
+        }
+
+        let rem = data.len() % self.block_size as usize;
+        if rem != 0 {
+            bail!(
+                "buffer {} is not mutliple of block size {}",
+                data.len(),
+                self.block_size
+            );
+        }
+
+        let data_blocks = data.len() as u64 / self.block_size as u64;
+        if data_blocks + block_offset > self.extent_size {
+            bail!(
+                "Start block offset + blocks {} is > extent size {}",
+                data_blocks + block_offset,
+                self.extent_size
+            );
+        }
+
+        println!(
+            "start_block:{}, buf_len:{} blocks:{} es:{} final_block:{}",
+            block_offset,
+            data.len(),
+            data_blocks,
+            self.extent_size,
+            data_blocks + block_offset,
+        );
+
+        Ok(())
+    }
+
     pub fn write_block(&self, block_offset: u64, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        if block_offset > self.extent_size {
-            bail!("block offset {} is past end of extent", block_offset);
-        }
-        if data.len() != self.block_size as usize {
-            bail!("block size {}, buffer is {}", self.block_size, data.len());
-        }
+        self.check_input(block_offset, data)?;
 
         if !inner.meta.dirty {
             inner.file.seek(SeekFrom::Start(0))?;
@@ -572,10 +611,108 @@ impl Disk {
 mod test {
     use super::extent_path;
     use super::*;
+    use bytes::BufMut;
     use std::path::PathBuf;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    fn new_extent() -> Extent {
+        let ff = File::open("/dev/null").unwrap();
+        let em = ExtentMeta::default();
+
+        let inn = Inner { file: ff, meta: em };
+
+        /*
+         * Note:  All the tests expext 512 and 100, so if you change
+         * these, then change the tests!
+         */
+        Extent {
+            number: 0,
+            block_size: 512,
+            extent_size: 100,
+            inner: Mutex::new(inn),
+        }
+    }
+
+    #[test]
+    fn extent_io_valid() {
+        let ext = new_extent();
+        let mut data = BytesMut::with_capacity(512);
+        data.put(&[1; 512][..]);
+
+        assert_eq!((), ext.check_input(0, &data).unwrap());
+        assert_eq!((), ext.check_input(99, &data).unwrap());
+    }
+
+    #[test]
+    fn extent_io_valid2() {
+        let mut data = BytesMut::with_capacity(1024);
+        data.put(&[1; 1024][..]);
+
+        let ext = new_extent();
+
+        assert_eq!((), ext.check_input(0, &data).unwrap());
+        assert_eq!((), ext.check_input(98, &data).unwrap());
+    }
+
+    #[test]
+    fn extent_io_valid_large() {
+        let mut data = BytesMut::with_capacity(512 * 100);
+        data.put(&[1; 512 * 100][..]);
+
+        let ext = new_extent();
+        assert_eq!((), ext.check_input(0, &data).unwrap());
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_invalid_size() {
+        let mut data = BytesMut::with_capacity(513);
+        data.put(&[1; 513][..]);
+
+        let ext = new_extent();
+        ext.check_input(0, &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_invalid_size_small() {
+        let mut data = BytesMut::with_capacity(511);
+        data.put(&[1; 511][..]);
+
+        let ext = new_extent();
+        ext.check_input(0, &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_bad_block() {
+        let mut data = BytesMut::with_capacity(512);
+        data.put(&[1; 512][..]);
+
+        let ext = new_extent();
+        ext.check_input(100, &data).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn extent_io_invalid_block_buf() {
+        let mut data = BytesMut::with_capacity(1024);
+        data.put(&[1; 1024][..]);
+
+        let ext = new_extent();
+        assert_eq!((), ext.check_input(99, &data).unwrap());
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_invalid_large() {
+        let mut data = BytesMut::with_capacity(512 * 100);
+        data.put(&[1; 512 * 100][..]);
+
+        let ext = new_extent();
+        assert_eq!((), ext.check_input(1, &data).unwrap());
     }
 
     #[test]

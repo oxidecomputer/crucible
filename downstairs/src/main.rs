@@ -72,15 +72,19 @@ async fn proc_frame(
             d.disk.disk_flush(dependencies.to_vec(), flush.to_vec())?;
             fw.send(Message::FlushAck(*rn)).await
         }
-        Message::ReadRequest(rn, eid, block_offset) => {
+        Message::ReadRequest(rn, eid, block_offset, blocks) => {
             /*
              * XXX Some thought will need to be given to where the read
              * data buffer is created, both on this side and the remote.
              * Also, we (I) need to figure out how to read data into an
              * uninitialized buffer.  Until then, we have this workaround.
+             *
+             * Also, the 512's here should be block_size  XXX for that.
              */
-            let mut data = BytesMut::with_capacity(512);
-            data.put(&[1; 512][..]);
+            let mut data = BytesMut::with_capacity(*blocks as usize * 512);
+            for _ in 0..*blocks {
+                data.put(&[1; 512][..]);
+            }
             d.disk.disk_read(*eid, *block_offset, &mut data)?;
             let data = data.freeze();
             fw.send(Message::ReadResponse(*rn, data.clone())).await
