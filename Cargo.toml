@@ -1,8 +1,8 @@
 [workspace]
 members = [
-	"protocol",
-	"downstairs",
-	"upstairs",
 	"common",
+	"downstairs",
+	"protocol",
 	"scope",
+	"upstairs",
 ]

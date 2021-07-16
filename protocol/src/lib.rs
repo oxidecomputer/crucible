@@ -32,6 +32,11 @@ impl CrucibleEncoder {
 impl Encoder<Message> for CrucibleEncoder {
     type Error = anyhow::Error;
 
+    /*
+     * XXX Is there some Rusty way to auto generate this?  It seems like
+     * there could be some code generator that will produce the desired
+     * sequence, as it is the same for every command.
+     */
     fn encode(
         &mut self,
         m: Message,
