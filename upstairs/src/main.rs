@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::convert::TryInto;
 use std::fmt;
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
@@ -88,44 +87,85 @@ async fn proc_frame(
     match m {
         Message::Imok => Ok(()),
         Message::WriteAck(rn) => {
-            println!("{} Write rn:{} acked", target, rn);
             // XXX put this on the completed list for this downstairs
             // We might need to include more so we know which target
             // completed, and know when to ack back to the host
-            io_completed(u, *rn, client_id)
+            io_write_completed(target, u, *rn, client_id)
         }
         Message::FlushAck(rn) => {
             // XXX put this on the completed list for this downstairs
             // We might need to include more so we know which target
             // completed, and know when to ack back to the host
-            println!("{} Flush rn:{} acked", target, rn);
             // XXX Clear dirty bit, but we need the job info for that.
-            io_completed(u, *rn, client_id)
+            io_write_completed(target, u, *rn, client_id)
         }
         Message::ReadResponse(rn, data) => {
             // XXX put this on the completed list for this downstairs
             // We might need to include which target responded
-            let l = data.len();
-            let mut snip = [0; 4];
-            snip[..4].copy_from_slice(&data[0..4]);
-            println!("{} Read  rn:{} len:{} data:0x{:x?}", target, rn, l, snip);
-            io_completed(u, *rn, client_id)
+            save_read_buffer(target, u, *rn, data.clone())?;
+            io_read_completed(target, u, *rn, client_id)
         }
         x => bail!("unexpected frame {:?}", x),
     }
 }
 
-// XXX This should move to some common lib.  This will be used when
-// the upstairs needs to translate a read/write offset in to the extent
-// eid and the block offset in the extent.
-// block offset.
-fn _extent_from_offset(u: &Arc<Upstairs>, offset: u64) -> Result<(usize, u64)> {
-    let ddef = u.ddef.lock().unwrap();
+/*
+ * Convert a virtual block offset and length into a Vec of:
+ *     Extent number (EID), Block offset, Length in bytes
+ *
+ * If the offset + length would fit into a single extent, then we only have
+ * one tuple in the Vec.  If the offset + length does not fit into the
+ * extent, then add a second tuple with EID + 1, 0, and whatever length
+ * is remaining.
+ *
+ * We don't support a length greater than a single extent,
+ * which means we only have to support spanning two extents at most.
+ *
+ */
+fn extent_from_offset(
+    up: &Arc<Upstairs>,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<(u64, u64, usize)>> {
+    let ddef = up.ddef.lock().unwrap();
+
+    // TODO Make asserts return error
+    assert!(len as u64 >= ddef.block_size);
+    assert!(len as u64 % ddef.block_size == 0);
+    assert!(offset % ddef.block_size == 0);
+
     let space_per_extent = ddef.block_size * ddef.extent_size;
+    /*
+     * XXX We only support a single region (downstairs).  When we grow to
+     * support a LBA size that is larger than a single region, then we will
+     * need to write more code.
+     */
     let eid: u64 = offset / space_per_extent;
+    assert!((len as u64) <= space_per_extent);
+    assert!((eid as u32) < ddef.extent_count);
+
     let block_in_extent: u64 =
         (offset - (eid * space_per_extent)) / ddef.block_size;
-    Ok((eid as usize, block_in_extent))
+
+    let mut res = Vec::new();
+
+    /*
+     * Check to see if our length extends past the end of this region.
+     * If it fits, then we can just add the tuple to our Vec.  If it
+     * does not fit, then we need to push two things into our Vec and
+     * determine the length that each extent needs.
+     */
+    let data_blocks = (len as u64) / ddef.block_size;
+    if data_blocks + block_in_extent <= ddef.extent_size {
+        res.push((eid, block_in_extent, len));
+    } else {
+        assert!((eid as u32) + 1 < ddef.extent_count);
+        let new_len = (ddef.extent_size - block_in_extent) * ddef.block_size;
+        res.push((eid, block_in_extent, new_len as usize));
+        res.push((eid + 1, 0, len - (new_len as usize)));
+    }
+
+    Ok(res)
 }
 
 /*
@@ -224,45 +264,205 @@ fn process_downstairs(
     Ok(())
 }
 
+/**
+ * When a read finishes, we need to keep track of the buffer we got back from
+ * downstairs.  This will allow us to decrypt and copy the read data into the
+ * buffer provided for us when the read was requested.
+ */
+fn save_read_buffer(
+    target: &SocketAddrV4,
+    up: &Arc<Upstairs>,
+    rn: u64,
+    buff: bytes::Bytes,
+) -> Result<()> {
+    let gw_id: u64;
+    {
+        let mut work = up.work.lock().unwrap();
+        let job = work
+            .active
+            .get_mut(&rn)
+            .ok_or_else(|| anyhow!("reqid {} is not active", rn))?;
+
+        gw_id = job.guest_id;
+    }
+
+    let mut gw = up.guest.guest_work.lock().unwrap();
+    /*
+     * This gw_id should exist, But.. If a previous read has already finished
+     * and we already sent that back to the guest, we could no longer have a
+     * valid gw_id on the active list.  A rare but possible situation.
+     */
+    if let Some(gtos_job) = gw.active.get_mut(&gw_id) {
+        /*
+         * If the rn is on the submitted list, then we will take it off
+         * and add the read result buffer to the gtos job structure for
+         * later copying.
+         *
+         * If it's not, then verify our rn is already on the completed
+         * list, just to catch any problems.
+         */
+        if gtos_job.submitted.remove(&rn).is_some() {
+            /*
+             * Take this job off of the submitted list.  The first read
+             * buffer will become the source for the final response
+             * back to the guest.  This buffer will be combined with other
+             * buffers if the upstairs request required multiple jobs.
+             */
+            if gtos_job.downstairs_buffer.contains_key(&rn) {
+                println!("Read buffer for {} already present at {}", gw_id, rn);
+                // panic? XXX
+            } else {
+                println!("{} Read save_read_buffer for {}", target, rn);
+                gtos_job.downstairs_buffer.insert(rn, buff);
+            }
+            gtos_job.completed.push(rn);
+        } else {
+            assert!(gtos_job.completed.contains(&rn));
+        }
+    }
+    Ok(())
+}
+
 /*
  * This function is called when the upstairs task is notified that
- * a downstairs has completed an IO request.
- *
- * We do the work here to decide if the IO is completed, or if we
- * are still waiting for other downstairs to respond.  If the IO is
- * completed, then we can add it to the completed ringbuf and take it
- * off of the active hashmap where new and in progress IOs are.
+ * a downstairs read has completed.  We add the read buffer to the
+ * guest struct for later processing and determine if we have all
+ * the results we need to finish up this read and transfer data
+ * to the guest memory, or if there is more to do.
  */
-fn io_completed(
-    u: &Arc<Upstairs>,
+fn io_read_completed(
+    target: &SocketAddrV4,
+    up: &Arc<Upstairs>,
     request_number: u64,
     client_id: u8,
 ) -> Result<()> {
-    let mut work = u.work.lock().unwrap();
+    let mut work = up.work.lock().unwrap();
+    let counts = work.complete(request_number, client_id)?;
 
     /*
-     * for a read, we can send the results to the caller once we get
-     * one answer.
-     * For a write or flush, we need at least two "finsihed" states
-     * before we can send results to the caller.
-     *
+     * We can send the results to the caller once we get one answer,
+     * so this waiting for counts.active == 0 should not prevent the
+     * guest_work from finishing.  TODO
+     */
+    if counts.active == 0 {
+        let done = work.retire(request_number);
+        let gw_id = done.guest_id;
+        println!(
+            "{} Read Request number {} is retired gw_id:{:?}",
+            target, request_number, gw_id
+        );
+
+        drop(work);
+
+        /*
+         * If this read IO is done, it's time to check and see if the
+         * guest IO is also done.  Some IOs from upstairs are broken into
+         * several downstairs IOs and we need to see if our gw_id is
+         * waiting for anything else.
+         *
+         * If it's not, then we can go ahead and do any read transfers
+         * and move this gtos_job to completed state.
+         */
+        let mut gw = up.guest.guest_work.lock().unwrap();
+        if let Some(gtos_job) = gw.active.get_mut(&gw_id) {
+            /*
+             * Reads will be removed from the submitted list when they
+             * attach their buffer to the GtoS struct.
+             * However, other request numbers may be outstanding, so
+             * we can't finish the guest work until those requests are
+             * done as well.
+             */
+            if gtos_job.submitted.is_empty() {
+                // Set in motion the final transfer of read buffers
+                println!("{} Time to retire gw_id:{}", target, gw_id);
+                gtos_job.transfer();
+                gw.complete(gw_id);
+                //up.guest.complete_send(gw_id);
+            } else {
+                assert!(gtos_job.completed.contains(&request_number));
+            }
+        } else {
+            /*
+             * This is okay, it just means previous jobs finished up
+             * all the work and sent results back to the guest.
+             */
+            println!("{} gw_id of {} is not active", target, gw_id);
+            // XXX assert it is on the completed list?  How long will
+            // things on the completed list live?
+        }
+    }
+    Ok(())
+}
+
+/*
+ * This function is called when the upstairs task is notified that
+ * a downstairs write or flush has completed.
+ */
+fn io_write_completed(
+    target: &SocketAddrV4,
+    up: &Arc<Upstairs>,
+    request_number: u64,
+    client_id: u8,
+) -> Result<()> {
+    let mut work = up.work.lock().unwrap();
+    /*
      * XXX How do we deal with a write error, or a write that never
      * comes back?  We will need to update states to include an error
      * as a result.
      */
     let counts = work.complete(request_number, client_id)?;
 
+    /*
+     * XXX We currently only look at marking a gw complete when
+     * all the downstairs jobs have responded to us.
+     * Eventually 2 out of 3 writes or flushes should trigger the
+     * response to the guest.
+     */
     if counts.active == 0 {
-        println!("Remove job {}", request_number);
-        work.retire(request_number);
+        let done = work.retire(request_number);
+        let gw_id = done.guest_id;
+        println!(
+            "{} Write/Flush Request number {} is retired gw_id:{:?}",
+            target, request_number, gw_id
+        );
+
+        drop(work);
+
+        /*
+         * If this IO is done, it's time to check and see if the
+         * guest IO is also done.  Some IOs from upstairs are broken into
+         * several downstairs IOs and we need to see if our gw_id is
+         * waiting for anything else.
+         */
+        let mut gw = up.guest.guest_work.lock().unwrap();
+        if let Some(gtos_job) = gw.active.get_mut(&gw_id) {
+            let _ = gtos_job.submitted.remove(&request_number).unwrap();
+            gtos_job.completed.push(request_number);
+            /*
+             * For multi-op writes, we may not be done yet/
+             */
+            if gtos_job.submitted.is_empty() {
+                println!("{} gt_id:{} Time to retire", target, gw_id);
+                gw.complete(gw_id);
+                //up.guest.complete_send(gw_id);
+            } else {
+                println!("{} gw_id:{} has more to do", target, gw_id);
+            }
+        } else {
+            println!("{} No gw_id of {} is active", target, gw_id);
+            // XXX assert it is on the completed list?  How long will
+            // things on the completed list live?
+        }
     }
     Ok(())
 }
 
 /*
- * This fn is for when the main task has added work to the hashmap
- * and the task for a downstairs has received the notification that there
- * is new work to do.
+ * This function is called by a worker task after the main task has added
+ * work to the hashmap and notified the worker tasks that new work is ready
+ * to be serviced.  The worker task will walk the hashmap and build a list
+ * of new work that it needs to do.  It will then iterate through those
+ * work items and send them over the wire to this tasks waiting downstaris.
  */
 async fn io_send(
     u: &Arc<Upstairs>,
@@ -273,7 +473,6 @@ async fn io_send(
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
      */
-    println!("[{}] io_send", client_id);
     let mut new_work = u.work.lock().unwrap().new_work(client_id);
 
     /*
@@ -287,12 +486,7 @@ async fn io_send(
      * This also allows us to sort the job ids and do them in order they
      * were put into the hashmap, though I don't think that is required.
      */
-    new_work.sort();
-    if !new_work.is_empty() {
-        println!("[{}] new_work_vector: {:?}", client_id, new_work);
-    } else {
-        println!("[{}] new_work_vector is empty", client_id);
-    }
+    new_work.sort_unstable();
 
     for new_id in new_work.iter() {
         /*
@@ -424,8 +618,10 @@ async fn proc(
                 needping = false;
             }
             _ = input.changed() => {
+                /*
                 let iv = *input.borrow();
-                println!("{}[{}] wakeup {} from main", target, client_id, iv);
+                println!("[{}] call io_send with {}", client_id, iv);
+                */
                 io_send(up, &mut fw, client_id).await?;
             }
             f = fr.next() => {
@@ -678,11 +874,11 @@ impl Work {
      * This request is now complete on all peers.  Remove it from the active set
      * and mark it in the completed ring buffer.
      */
-    fn retire(&mut self, reqid: u64) {
+    fn retire(&mut self, reqid: u64) -> IOWork {
         assert!(!self.completed.contains(&reqid));
-        let old = self.active.remove(&reqid);
-        assert!(old.is_some());
+        let old = self.active.remove(&reqid).unwrap();
         self.completed.push(reqid);
+        old
     }
 }
 
@@ -696,9 +892,9 @@ impl Work {
 #[derive(Debug)]
 struct Upstairs {
     /*
-     * A IOWork struct is added to this hashmap when the upstairs receives
-     * a new work request from a client.  See details about the IOWork
-     * structure where it is defined.
+     * A IOWork struct is added to this hashmap when the upstairs storage
+     * task receives a new work request from a the upstairs guest side task
+     * See details about the IOWork structure where it is defined.
      */
     work: Mutex<Work>,
     // The versions vec is not enough to solve a mismatch.  We really need
@@ -717,63 +913,7 @@ struct Upstairs {
      * Ready here indicates it can receive IO.
      */
     downstairs: Mutex<Vec<DownstairsState>>,
-}
-
-/*
- * Inspired from Propolis block.rs
- *
- * The following are the operations that Crucible supports from outside callers.
- * We have extended this to cover a bunch of test operations as well.
- * The first three are the supported operations, the other operations
- * tell the upstaris to behave in specific ways.
- */
-#[derive(Copy, Clone, Debug)]
-pub enum BlockOp {
-    Read,
-    Write,
-    Flush,
-    // Begin testing options.
-    ReadStep, // Put a read operaion on the upstairs internal work hashmap.
-    WriteStep, // Put a write operaion on the upstairs internal work hashmap.
-    FlushStep, // Put a flush operaion on the upstairs internal work hashmap.
-    Commit,   // Send update to all tasks that there is work on the queue.
-    ShowWork, // Show the status of the internal work hashmap and done Vec.
-}
-
-/*
- * This is the structure we use to pass work from outside Crucible into the
- * upstairs main task.
- */
-#[derive(Debug)]
-struct PropWork {
-    reqs: Mutex<VecDeque<BlockOp>>,
-    notify: Notify,
-}
-
-/*
- * These methods are how to add or checking for new work on the PropWork struct
- */
-impl PropWork {
-    pub fn new() -> PropWork {
-        PropWork {
-            reqs: Mutex::new(VecDeque::new()),
-            notify: Notify::new(),
-        }
-    }
-    pub fn send(&self, req: BlockOp) {
-        self.reqs.lock().unwrap().push_back(req);
-
-        self.notify.notify_one();
-    }
-
-    pub async fn recv(&self) -> BlockOp {
-        loop {
-            if let Some(req) = self.reqs.lock().unwrap().pop_front() {
-                return req;
-            }
-            self.notify.notified().await;
-        }
-    }
+    guest: Arc<Guest>,
 }
 
 /*
@@ -787,11 +927,12 @@ pub enum DownstairsState {
 }
 
 /*
- * A unit of work that is put into the hashmap.
+ * A unit of work for downstairs that is put into the hashmap.
  */
 #[derive(Debug)]
 struct IOWork {
     request_id: u64, // This MUST match our hashmap index
+    guest_id: u64,   // The hahsmap ID from the parent guest work.
     work: IOop,
     /*
      * Hash of work status where key is the downstairs "client id" and the
@@ -805,10 +946,13 @@ struct IOWork {
     state: HashMap<u8, IOState>,
 }
 
+/*
+ * Crucible to storage IO operations.
+ */
 #[derive(Debug, Clone)]
 pub enum IOop {
     Write {
-        dependencies: Vec<u64>, // Other writes that need to come before this
+        dependencies: Vec<u64>, // Writes that must finish before this
         eid: u64,
         block_offset: u64,
         data: bytes::Bytes,
@@ -819,7 +963,7 @@ pub enum IOop {
         blocks: u32,
     },
     Flush {
-        dependencies: Vec<u64>, // List of write requests that must finish first
+        dependencies: Vec<u64>, // Writes that must finish before this
         flush_numbers: Vec<u64>,
     },
 }
@@ -868,6 +1012,250 @@ impl fmt::Display for IOState {
         }
     }
 }
+
+/*
+ * Inspired from Propolis block.rs
+ *
+ * The following are the operations that Crucible supports from outside callers.
+ * We have extended this to cover a bunch of test operations as well.
+ * The first three are the supported operations, the other operations
+ * tell the upstaris to behave in specific ways.
+ */
+#[derive(Debug)]
+pub enum BlockOp {
+    Read { offset: u64, data: bytes::BytesMut },
+    Write { offset: u64, data: bytes::Bytes },
+    Flush,
+    // Begin testing options.
+    Commit,   // Send update to all tasks that there is work on the queue.
+    ShowWork, // Show the status of the internal work hashmap and done Vec.
+}
+
+/*
+ * This structure is for tracking the underlying storage side operations
+ * that map to a single Guest IO request. G to S stands for Guest
+ * to Storage.
+ *
+ * The submitted hashmap is indexd by the request number for the downstairs
+ * requests issued on behaf of this reuqest.
+ */
+#[derive(Debug)]
+struct GtoS {
+    /*
+     * Jobs we have submitted (or will soon submit) to the storage side
+     * of the upstairs process to send on to the downstairs.
+     * The key for the hashmap is the request number in the hashmap for
+     * downstairs work.  The value is the buffer size of the operation.
+     */
+    submitted: HashMap<u64, usize>,
+    completed: Vec<u64>,
+    /*
+     * This buffer is provided by the guest request.  It is either where
+     * data will come from on a write, or the location where data will
+     * be put for a read.
+     */
+    guest_buffer: Option<bytes::BytesMut>,
+    /*
+     * When we have an IO between the guest and crucible, it's possible
+     * it will be broken into two smaller requests if the range happens
+     * to cross an extent boundary.  This hashmap is a list of those
+     * buffers with the key being the downstairs request ID.
+     *
+     * Data moving in/out of this buffer will be encrypted or decrypted
+     * depending on the operation.
+     */
+    downstairs_buffer: HashMap<u64, bytes::Bytes>,
+}
+
+impl GtoS {
+    pub fn new(
+        submitted: HashMap<u64, usize>,
+        completed: Vec<u64>,
+        guest_buffer: Option<bytes::BytesMut>,
+        downstairs_buffer: HashMap<u64, bytes::Bytes>,
+    ) -> GtoS {
+        GtoS {
+            submitted,
+            completed,
+            guest_buffer,
+            downstairs_buffer,
+        }
+    }
+    /*
+     * When all downstairs jobs have completed, and all buffers have been
+     * attached to the GtoS struct, we can do the final copy of the data
+     * from upstairs memory back to the guest's memory.
+     *
+     * XXX When encryption/decryption is supported, here is where you will be
+     * writing the code to decrypt.
+     */
+    pub fn transfer(&mut self) {
+        if let Some(guest_buffer) = &mut self.guest_buffer {
+            self.completed.sort_unstable();
+            guest_buffer.clear();
+            for rn in self.completed.iter() {
+                // println!("Copy buff from {:?}", rn);
+                let ds_buf = self.downstairs_buffer.remove(rn).unwrap();
+                guest_buffer.put(ds_buf);
+            }
+            println!(
+                "Final data copy {:?} to {:p}",
+                self.completed,
+                guest_buffer.as_ptr(),
+            );
+        } else {
+            /*
+             * Should this panic?  If the caller is requesting a transfer,
+             * the guest_buffer should exist.  If it does not exist, then
+             * either there is a real problem, or the operation was a write
+             * or flush and why are we requesting a transfer for those.
+             */
+            panic!("No guest buffer, no copy");
+        }
+    }
+}
+
+/*
+ * This structure keeps track of work that Crucible has accepted from the
+ * "Guest", aka, Propolis.
+ *
+ * The active is a hashmap of GtoS structures for all I/Os that are
+ * outstanding.  Either just created or in progress operations.  The key
+ * for a new job comes from next_gw_id and should always increment.
+ *
+ * Once we have decided enough downstairs requests are finished, we remove
+ * the entry from the active and add the gw_id to the completed vec.
+ *
+ * TODO: The completed needs to implement some notify back to the Guest, and
+ * it should probably be a ring buffer.
+ */
+#[derive(Debug)]
+struct GuestWork {
+    active: HashMap<u64, GtoS>,
+    next_gw_id: u64,
+    completed: Vec<u64>,
+}
+
+impl GuestWork {
+    fn next_gw_id(&mut self) -> u64 {
+        let id = self.next_gw_id;
+        self.next_gw_id += 1;
+        id
+    }
+
+    /*
+     * Move a GtoS job from the active to completed.
+     * TODO, Should the logic for when to complete live in this
+     * method as well?
+     */
+    fn complete(&mut self, gw_id: u64) {
+        let _gtos_job = self.active.remove(&gw_id).unwrap();
+        self.completed.push(gw_id);
+    }
+}
+
+/*
+ * This is the structure we use to keep track of work passed into crucible
+ * from the the "Guest".
+ *
+ * Requests from the guest are put into the reqs VecDeque initally.
+ *
+ * A task on the Crucible side will receive a notification that a new
+ * operation has landed on the reqs queue and will take action:
+ *   Pop the request off the reqs queue.
+ *   Copy and encrypt any data buffers provided to us by the Guest.
+ *   Create one or more downstairs IOWork structures.
+ *   Create a GtoS tracking structure with the id's for each
+ *   downstairs task and the read result buffer if required.
+ *   Add the GtoS struct to the in GuestWork active work hashmap.
+ *   Put all the IOWork strucutres on the downstairs work queue.
+ *   Send notification to the upstairs tasks that there is new work.
+ *
+ * Work here will be added to storage side queues and the responses will
+ * be waited on and processed when they arrive.
+ *
+ * This structure and operations on in handle the translation between
+ * outside requests and internal upstairs structures and work queues.
+ */
+#[derive(Debug)]
+struct Guest {
+    /*
+     * New requests from outside go onto this VecDeque.  The notify is how
+     * the submittion task tells the listening task that new work has been
+     * added.
+     */
+    reqs: Mutex<VecDeque<BlockOp>>,
+    notify: Notify,
+    /*
+     * When the crucible listening task has noticed a new IO request, it will
+     * pull it from the reqs queue and create an GuestWork struct as well as
+     * convert the new IO request into the matching downstairs request(s).
+     * Each new GuestWork request will get a unique gw_id, which is also
+     * the index for that operation into the hashmap.
+     *
+     * It is during this process that data will encrypted.  For a read, the
+     * data is decrypted back to the guest provided buffer after all the
+     * required downstairs operations are completed.
+     */
+    guest_work: Mutex<GuestWork>,
+}
+
+/*
+ * These methods are how to add or checking for new work on the Guest struct
+ */
+impl Guest {
+    pub fn new() -> Guest {
+        Guest {
+            /*
+             * Incoming I/O requests are added to this queue.
+             */
+            reqs: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+            /*
+             * The in_progress hashmap is for in-flight I/O operations
+             * that we have taken off the incoming queue, but we have not
+             * received the response from downstairs.
+             * Note that a single IO from outside may have multiple I/O
+             * requests that need to finish before we can complete that IO.
+             */
+            guest_work: Mutex::new(GuestWork {
+                active: HashMap::new(), // GtoS
+                next_gw_id: 1,
+                completed: Vec::new(),
+            }),
+        }
+    }
+
+    /*
+     * Get the next available ID for a new job in the active hashmap.
+     */
+    pub fn next_gw_id(&self) -> u64 {
+        let mut gw = self.guest_work.lock().unwrap();
+        gw.next_gw_id()
+    }
+
+    /*
+     * This is used to submit a new IO request to Crucible.
+     */
+    pub fn send(&self, req: BlockOp) {
+        self.reqs.lock().unwrap().push_back(req);
+
+        self.notify.notify_one();
+    }
+
+    /*
+     * A crucible task will listen for new work using this.
+     */
+    pub async fn recv(&self) -> BlockOp {
+        loop {
+            if let Some(req) = self.reqs.lock().unwrap().pop_front() {
+                return req;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
 struct Target {
     #[allow(dead_code)]
     target: SocketAddrV4,
@@ -893,24 +1281,34 @@ fn main() -> Result<()> {
     /*
      * The structure we use to send work from outside crucible into the
      * Upstairs main task.
+     * We create this here instead of inside up_main() so we can use
+     * the run_scope() function to submit test work.
      */
-    let prop_work = Arc::new(PropWork::new());
+    let guest = Arc::new(Guest::new());
 
-    runtime.spawn(up_main(opt, prop_work.clone()));
+    runtime.spawn(up_main(opt, guest.clone()));
     println!("runtime is spawned");
 
     /*
      * Create the interactive input scope that will generate and send
      * work to the Crucible thread that listens to work from outside (Propolis).
+     * This is essentially how we create test commands and send them
+     * to the up_listen task.
      */
+    /*
+     * Using something else right now.
     runtime.spawn(run_scope(prop_work));
+     */
 
-    loop {
-        /*
-         * Sleep forever to avoid spinning in this thread.
-         */
-        std::thread::sleep(std::time::Duration::from_secs(86400));
-    }
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    run_big_workload(&guest)?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    println!("Tests done, show 1 and wait");
+    show_guest_work(&guest);
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    println!("Tests done, main now done, final show");
+    show_guest_work(&guest);
+    Ok(())
 }
 
 /*
@@ -939,121 +1337,389 @@ fn _send_work(t: &[Target], val: u64) {
 }
 
 /*
+ * This is a test workload that generates a write spanning an extent
+ * then trys to read the same.
+ */
+fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
+    let my_offset = 512 * 99;
+    let mut data = BytesMut::with_capacity(512 * 2);
+    for seed in 4..6 {
+        data.put(&[seed; 512][..]);
+    }
+    let data = data.freeze();
+    let wio = BlockOp::Write {
+        offset: my_offset,
+        data,
+    };
+    println!("send write 1");
+    guest.send(wio);
+    guest.send(BlockOp::ShowWork);
+
+    let read_offset = my_offset;
+    const READ_SIZE: usize = 1024;
+    println!("generate a read 1");
+    let mut data = BytesMut::with_capacity(READ_SIZE);
+    data.put(&[0x99; READ_SIZE][..]);
+    println!("send read, data at {:p}", data.as_ptr());
+    let rio = BlockOp::Read {
+        offset: read_offset,
+        data,
+    };
+    guest.send(rio);
+    guest.send(BlockOp::ShowWork);
+
+    println!("Final offset: {}", my_offset);
+    Ok(())
+}
+/*
  * This is basically just a test loop that generates a workload then sends the
  * workload to Crucible.
  */
-async fn run_scope(pw: Arc<PropWork>) -> Result<()> {
+fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
+    let mut my_offset: u64 = 0;
+    for olc in 0..10 {
+        for lc in 0..100 {
+            let seed = (my_offset % 255) as u8;
+            let mut data = BytesMut::with_capacity(512);
+            data.put(&[seed; 512][..]);
+            let data = data.freeze();
+            let wio = BlockOp::Write {
+                offset: my_offset,
+                data,
+            };
+            println!("[{}][{}] send write  offset:{}", olc, lc, my_offset);
+            guest.send(wio);
+
+            let read_offset = my_offset;
+            const READ_SIZE: usize = 512;
+            let mut data = BytesMut::with_capacity(READ_SIZE);
+            data.put(&[0x99; READ_SIZE][..]);
+            println!(
+                "[{}][{}] send read   offset:{}, data at {:p}",
+                olc,
+                lc,
+                read_offset,
+                data.as_ptr()
+            );
+            let rio = BlockOp::Read {
+                offset: read_offset,
+                data,
+            };
+            guest.send(rio);
+
+            println!("[{}][{}] send flush", olc, lc);
+            guest.send(BlockOp::Flush);
+            // guest.send(BlockOp::ShowWork);
+            my_offset += 512;
+        }
+    }
+    println!("Final offset: {}", my_offset);
+    Ok(())
+}
+
+async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
     let scope =
         crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
+    let mut my_offset = 512 * 99;
+    scope.wait_for("Send all the IOs").await;
     loop {
-        scope.wait_for("write").await;
-        pw.send(BlockOp::Write);
-        scope.wait_for("Flush step").await;
-        pw.send(BlockOp::Flush);
-        scope.wait_for("show step").await;
-        pw.send(BlockOp::ShowWork);
-        loop {
-            scope.wait_for("send Read ").await;
-            pw.send(BlockOp::Read);
+        let mut data = BytesMut::with_capacity(512 * 2);
+        for seed in 44..46 {
+            data.put(&[seed; 512][..]);
         }
+        let data = data.freeze();
+        let wio = BlockOp::Write {
+            offset: my_offset,
+            data,
+        };
+        my_offset += 512 * 2;
+        scope.wait_for("write 1").await;
+        println!("send write 1");
+        guest.send(wio);
+        scope.wait_for("show work").await;
+        guest.send(BlockOp::ShowWork);
+
+        let mut read_offset = 512 * 99;
+        const READ_SIZE: usize = 4096;
+        for _ in 0..4 {
+            let mut data = BytesMut::with_capacity(READ_SIZE);
+            data.put(&[0x99; READ_SIZE][..]);
+            println!("send read, data at {:p}", data.as_ptr());
+            let rio = BlockOp::Read {
+                offset: read_offset,
+                data,
+            };
+            // scope.wait_for("send Read").await;
+            guest.send(rio);
+            read_offset += READ_SIZE as u64;
+            // scope.wait_for("show work").await;
+            guest.send(BlockOp::ShowWork);
+        }
+
+        // scope.wait_for("Flush step").await;
+        println!("send flush");
+        guest.send(BlockOp::Flush);
+
+        let mut data = BytesMut::with_capacity(512);
+        data.put(&[0xbb; 512][..]);
+        let data = data.freeze();
+        let wio = BlockOp::Write {
+            offset: my_offset,
+            data,
+        };
+        // scope.wait_for("write 2").await;
+        println!("send write 2");
+        guest.send(wio);
+        my_offset += 512;
+        // scope.wait_for("show work").await;
+        guest.send(BlockOp::ShowWork);
+        //scope.wait_for("at the bottom").await;
     }
 }
 
 /*
- * This task will loop forever and watch the PropWork structure for new IO
+ * When we have a guest read request with offset and buffer, take them and
+ * build both the upstairs work guest tracking struct as well as the downstairs
+ * work struct. Once both are ready, submit them to the required places.
+ */
+fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
+    /*
+     * We need to know the block size to allow us to convert between
+     * bytes and blocks.  Bytes for when we have to slice buffers,
+     * blocks for what we send to the downstairs IO.
+     */
+    let block_size: u32;
+    {
+        let ddef = up.ddef.lock().unwrap();
+        block_size = ddef.block_size as u32;
+    }
+
+    /*
+     * Get the next ID for the guest work struct we will make at the
+     * end.  This ID is also put into the IO struct we create that
+     * handles the operation(s) on the storage side.
+     */
+    let gw_id: u64 = up.guest.next_gw_id();
+
+    /*
+     * Given the offset and buffer size, figure out what extent and
+     * block offset that translates into.  Keep in mind that an offset
+     * and length may span two extents, and eventually, TODO, two regions.
+     */
+    let nwo = extent_from_offset(up, offset, data.len()).unwrap();
+    println!(
+        "nwo: {:?} from offset:{} data: {:p} len:{}",
+        nwo,
+        offset,
+        data.as_ptr(),
+        data.len()
+    );
+
+    /*
+     * Create the list of downstairs request numbers we created on behalf
+     * of this guest job.
+     */
+    let mut sub = HashMap::new();
+    let mut ds_work = Vec::new();
+    let mut next_id: u64;
+
+    /*
+     * Now create a downstairs work job for each (eid, bi, len) returned
+     * from extent_from_offset
+     */
+    for (eid, bo, len) in nwo {
+        let blocks: u32 = len as u32 / block_size;
+        {
+            let mut work = up.work.lock().unwrap();
+            next_id = work.next_id();
+        }
+        sub.insert(next_id, len);
+        let wr = create_read_eob(next_id, gw_id, eid, bo, blocks);
+        ds_work.push(wr);
+    }
+
+    /*
+     * New work created, add to the guest_work HM
+     */
+    assert!(!sub.is_empty());
+    let mut gw = up.guest.guest_work.lock().unwrap();
+    let new_gtos = GtoS::new(sub, Vec::new(), Some(data), HashMap::new());
+    gw.active.insert(gw_id, new_gtos);
+
+    let mut work = up.work.lock().unwrap();
+    for wr in ds_work {
+        work.enqueue(wr);
+    }
+}
+
+/*
+ * When we have a guest write request with offset and buffer, take them and
+ * build both the upstairs work guest tracking struct as well as the downstairs
+ * work struct. Once both are ready, submit them to the required places.
+ */
+fn guest_submit_write(
+    up: &Arc<Upstairs>,
+    offset: u64,
+    data: bytes::Bytes, // Where the data comes from
+) {
+    /*
+     * Get the next ID for the guest work struct we will make at the
+     * end.  This ID is also put into the IO struct we create that
+     * handles the operation(s) on the storage side.
+     */
+    let gw_id: u64 = up.guest.next_gw_id();
+
+    /*
+     * Given the offset and buffer size, figure out what extent and
+     * block offset that translates into.  Keep in mind that an offset
+     * and length may span two extents, and eventually XXX, two regions.
+     */
+    let nwo = extent_from_offset(up, offset, data.len()).unwrap();
+    println!(
+        "nwo: {:?} from offset:{} data: {:p} len:{}",
+        nwo,
+        offset,
+        data.as_ptr(),
+        data.len()
+    );
+
+    /*
+     * Now create a downstairs work job for each (eid, bi, len) returned
+     * from extent_from_offset
+     */
+
+    /*
+     * Create the list of downstairs request numbers we created on behalf
+     * of this guest job.
+     */
+    let mut sub = HashMap::new();
+    let mut ds_work = Vec::new();
+    let mut next_id: u64;
+    let mut cur_offset = 0;
+    for (eid, bo, len) in nwo {
+        {
+            let mut work = up.work.lock().unwrap();
+            next_id = work.next_id();
+        }
+        /*
+         * XXX This is where encryption will happen, which will probably
+         * mean a refactor of how this job is built.
+         */
+        let sub_data = data.slice(cur_offset..(cur_offset + len));
+        sub.insert(next_id, len);
+
+        let wr = create_write_eob(next_id, gw_id, eid, bo, sub_data);
+        ds_work.push(wr);
+        cur_offset = len;
+    }
+    /*
+     * New work created, add to the guest_work HM
+     */
+    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new());
+    {
+        let mut gw = up.guest.guest_work.lock().unwrap();
+        gw.active.insert(gw_id, new_gtos);
+    }
+
+    let mut work = up.work.lock().unwrap();
+    for wr in ds_work {
+        work.enqueue(wr);
+    }
+}
+
+/*
+ * Turn a guest flush request into both a guest_work active operaion
+ * and put an entry on the work hashmap for downstairs.
+ */
+fn guest_submit_flush(up: &Arc<Upstairs>) {
+    /*
+     * Get the next ID for our new guest work job
+     */
+    let gw_id: u64 = up.guest.next_gw_id();
+
+    /*
+     * Build the flush request, and take note of the request ID that
+     * will be assigned to this new piece of work.
+     */
+    let next_id: u64;
+    let fl: IOWork;
+    {
+        // XXX double locking... think about this one
+        let mut work = up.work.lock().unwrap();
+        next_id = work.next_id();
+        let ver = up.versions.lock().unwrap();
+        fl = create_flush(next_id, ver.clone(), gw_id);
+    }
+
+    let mut sub = HashMap::new();
+    sub.insert(next_id, 0);
+    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new());
+    {
+        let mut gw = up.guest.guest_work.lock().unwrap();
+        gw.active.insert(gw_id, new_gtos);
+    }
+
+    let mut work = up.work.lock().unwrap();
+    work.enqueue(fl);
+}
+
+/*
+ * This task will loop forever and watch the Guest structure for new IO
  * operations showing up.  When one is detected, the type is checked and the
  * operation is translated into the corresponding upstairs IO type and put on
  * the internal upstairs queue.
  */
-async fn up_listen(up: &Arc<Upstairs>, pw: Arc<PropWork>, dst: Vec<Target>) {
+async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
     /*
      * XXX Once we move this function to being called after all downstairs are
      * online, we can remove this sleep
      */
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    /*
-     * XXX At the moment we are making up the actual work that upstairs does.
-     * We use the command coming in as a starting point, but then provide our
-     * own values to create a real IOop.  Eventually (soon dammit) this should
-     * change to actually sending the values that we will (eventually) be
-     * receiving from outside instead of making our own.
-     */
     let mut lastcast = 1;
-    let eid = 4;
-    let mut block_offset = 0;
-    let mut blocks: usize = 100;
     loop {
-        let req = pw.recv().await;
-        println!("UMT received {:#?}", req);
+        let req = up.guest.recv().await;
         match req {
-            BlockOp::Read => {
-                let mut work = up.work.lock().unwrap();
-                let re = create_read(work.next_id(), eid, block_offset, blocks);
-                work.enqueue(re);
+            BlockOp::Read { offset, data } => {
+                println!("recv read data at  {:p}", data.as_ptr());
+                guest_submit_read(up, offset, data);
+                // Send the message that there is new work to do
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
-                block_offset = (block_offset + 1) % 100;
             }
-            BlockOp::Write => {
-                let mut work = up.work.lock().unwrap();
-                let wr = create_write(
-                    work.next_id(),
-                    eid,
-                    block_offset,
-                    blocks,
-                    0x3a,
-                );
-                work.enqueue(wr);
+            BlockOp::Write { offset, data } => {
+                println!("PROCESS write offset:{} len:{}", offset, data.len());
+                guest_submit_write(up, offset, data);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
-                blocks = 1;
             }
             BlockOp::Flush => {
-                let mut work = up.work.lock().unwrap();
-                let ver = up.versions.lock().unwrap();
-                let fl = create_flush(work.next_id(), ver.clone());
-                work.enqueue(fl);
+                guest_submit_flush(up);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
-            BlockOp::WriteStep => {
-                let mut work = up.work.lock().unwrap();
-                let wr =
-                    create_write(work.next_id(), eid, block_offset, 1, 0x55);
-                work.enqueue(wr);
-            }
-            BlockOp::ReadStep => {
-                let mut work = up.work.lock().unwrap();
-                let re = create_read(work.next_id(), eid, block_offset, blocks);
-                work.enqueue(re);
-            }
-            BlockOp::FlushStep => {
-                let mut work = up.work.lock().unwrap();
-                let ver = up.versions.lock().unwrap();
-                let fl = create_flush(work.next_id(), ver.clone());
-                work.enqueue(fl);
-            }
             BlockOp::ShowWork => {
-                show_work(&up);
+                show_guest_work(&up.guest);
             }
             BlockOp::Commit => {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
         }
-        //eid = (eid + 1) % 10;
-        //block_offset = (block_offset + 1) % 100;
     }
 }
 
 /*
- * This is the main upstairs task that is responsible for accepting
- * work from propolis (or whomever) and taking that work and converting
- * it into a crucible IO, then sending it on to be processed to the mux
- * portion of crucible.
+ * This is the main upstairs task that starts all the other async
+ * tasks.
+ * XXX At the moment, this function is only half complete, and will
+ * probably need a re-write.
  */
-async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
+async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
+    /*
+     * Build the Upstairs struct that we use to share data between
+     * the different async tasks
+     */
     let up = Arc::new(Upstairs {
         work: Mutex::new(Work {
             active: HashMap::new(),
@@ -1064,6 +1730,7 @@ async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
         dirty: Mutex::new(Vec::new()),
         ddef: Mutex::new(RegionDefinition::default()),
         downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
+        guest,
     });
 
     /*
@@ -1105,7 +1772,7 @@ async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
     /*
      * Create a task to listen for work from outside.
      *
-     * The role of this task will be to move work between the outside
+     * The role of this task is to move work between the outside
      * work queue and the internal Upstairs work queue, as well as send
      * completion messages and/or copy data back to the outside.
      *
@@ -1114,12 +1781,12 @@ async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
      * take IO operations.
      */
     tokio::spawn(async move {
-        up_listen(&up, pw, dst).await;
+        up_listen(&up, dst).await;
     });
 
     // async tasks need to tell us they are alive, but they also need to
     // tell us the extent list from any attached downstairs.
-    // That part is not connected yet.
+    // That part is not connected yet. XXX
     let mut ds_count = 0u32;
     loop {
         let c = crx.recv().await.unwrap();
@@ -1141,29 +1808,18 @@ async fn up_main(opt: Opt, pw: Arc<PropWork>) -> Result<()> {
          * we need to also know that they all have the same data.
          */
     }
-
-    /*
-     * XXX Need to cleanup async tasks and close connections.
-     */
 }
 
 /*
- * A test function to create a write IOWork structure.
+ * Create a write IOWork structure from an EID, and offset, and the data buffer
  */
-fn create_write(
+fn create_write_eob(
     ri: u64,
+    gw_id: u64,
     eid: u64,
     block_offset: u64,
-    blocks: usize, // Number of blocks total
-    data_seed: u8,
+    data: bytes::Bytes,
 ) -> IOWork {
-    assert!(blocks > 0);
-    let mut data = BytesMut::with_capacity(blocks * 512);
-    for _ in 0..blocks {
-        data.put(&[data_seed; 512][..]);
-    }
-    let data = data.freeze();
-
     let awrite = IOop::Write {
         dependencies: Vec::new(), // XXX Coming soon
         eid,
@@ -1177,36 +1833,24 @@ fn create_write(
     }
     IOWork {
         request_id: ri,
+        guest_id: gw_id,
         work: awrite,
         state,
     }
 }
 
 /*
- * A test function to create a flush IOWork structure.
+ * Create a write IOWork structure from an EID, and offset, and the data
+ * buffer.  Used for converting a guest IO reead request into an IOWork that
+ * the downstairs can understand.
  */
-fn create_flush(ri: u64, fln: Vec<u64>) -> IOWork {
-    let flush = IOop::Flush {
-        dependencies: Vec::new(), // XXX coming soon
-        flush_numbers: fln,
-    };
-
-    let mut state = HashMap::new();
-    for cl in 0..3 {
-        state.insert(cl, IOState::New);
-    }
-    IOWork {
-        request_id: ri,
-        work: flush,
-        state,
-    }
-}
-
-/*
- * A test function to create a read IOWork structure.
- */
-fn create_read(ri: u64, eid: u64, block_offset: u64, blocks: usize) -> IOWork {
-    let blocks: u32 = blocks.try_into().unwrap();
+fn create_read_eob(
+    ri: u64,
+    gw_id: u64,
+    eid: u64,
+    block_offset: u64,
+    blocks: u32,
+) -> IOWork {
     let aread = IOop::Read {
         eid,
         block_offset,
@@ -1219,16 +1863,39 @@ fn create_read(ri: u64, eid: u64, block_offset: u64, blocks: usize) -> IOWork {
     }
     IOWork {
         request_id: ri,
+        guest_id: gw_id,
         work: aread,
         state,
     }
 }
+
+/*
+ * Create a flush IOWork structure.
+ */
+fn create_flush(ri: u64, fln: Vec<u64>, guest_id: u64) -> IOWork {
+    let flush = IOop::Flush {
+        dependencies: Vec::new(), // XXX coming soon
+        flush_numbers: fln,
+    };
+
+    let mut state = HashMap::new();
+    for cl in 0..3 {
+        state.insert(cl, IOState::New);
+    }
+    IOWork {
+        request_id: ri,
+        guest_id,
+        work: flush,
+        state,
+    }
+}
+
 /*
  * Debug function to display the work hashmap with status for all three of
  * the clients.
  */
 #[allow(unused_variables)]
-fn show_work(up: &Arc<Upstairs>) {
+fn _show_work(up: &Arc<Upstairs>) {
     let mut work = up.work.lock().unwrap();
     for (id, job) in work.active.iter_mut() {
         let job_type = match &job.work {
@@ -1264,72 +1931,39 @@ fn show_work(up: &Arc<Upstairs>) {
     }
     let done = work.completed.to_vec();
     println!("Done: {:?}", done);
+    let mut gw = up.guest.guest_work.lock().unwrap();
+    for (id, job) in gw.active.iter_mut() {
+        print!("GW_JOB:[{:04}] {:?} ", id, job);
+    }
 }
 
-fn _create_more_work(up: &Arc<Upstairs>) -> Result<()> {
-    let mut seed = 1;
-
-    for eid in 0..10 {
-        seed += 1;
-        for bo in 0..100 {
-            let mut work = up.work.lock().unwrap();
-            let wr = create_write(work.next_id(), eid, bo, 1, seed);
-            work.enqueue(wr);
-        }
+fn show_guest_work(guest: &Arc<Guest>) {
+    println!("Guest work:  Active and Completed Jobs:");
+    let mut gw = guest.guest_work.lock().unwrap();
+    for (id, job) in gw.active.iter_mut() {
+        println!(
+            "GW_JOB active:[{:04}] S:{:?} C:{:?} ",
+            id, job.submitted, job.completed
+        );
     }
-
-    {
-        let mut work = up.work.lock().unwrap();
-        let ver = up.versions.lock().unwrap();
-        let fl = create_flush(work.next_id(), ver.clone());
-        work.enqueue(fl);
-    }
-
-    for eid in 0..10 {
-        for bo in 0..100 {
-            let mut work = up.work.lock().unwrap();
-            let re = create_read(work.next_id(), eid, bo, 1);
-            work.enqueue(re);
-        }
-    }
-
-    Ok(())
-}
-
-fn _create_work(
-    up: &Arc<Upstairs>,
-    seed: u8,
-    eid: u64,
-    block_offset: u64,
-) -> Result<()> {
-    let mut work = up.work.lock().unwrap();
-
-    let wr = create_write(work.next_id(), eid, block_offset, 1, seed);
-    work.enqueue(wr);
-
-    let ver = up.versions.lock().unwrap().clone();
-    let fl = create_flush(work.next_id(), ver);
-    work.enqueue(fl);
-
-    let re = create_read(work.next_id(), eid, block_offset, 1);
-    work.enqueue(re);
-
-    Ok(())
+    println!("GW_JOB completed:{:?} ", gw.completed);
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn offset_to_extent() {
+    /*
+     * Beware, if you change these defaults, then you will have to change
+     * all the hard coded tests below that use make_upstairs().
+     */
+    fn make_upstairs() -> Arc<Upstairs> {
         let def = RegionDefinition {
             block_size: 512,
             extent_size: 100,
             extent_count: 10,
         };
 
-        let up = Arc::new(Upstairs {
+        Arc::new(Upstairs {
             work: Mutex::new(Work {
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2),
@@ -1339,16 +1973,171 @@ mod test {
             dirty: Mutex::new(Vec::new()),
             ddef: Mutex::new(def),
             downstairs: Mutex::new(Vec::with_capacity(1)),
-        });
+            guest: Arc::new(Guest::new()),
+        })
+    }
 
-        assert_eq!(_extent_from_offset(&up, 0).unwrap(), (0, 0));
-        assert_eq!(_extent_from_offset(&up, 512).unwrap(), (0, 1));
-        assert_eq!(_extent_from_offset(&up, 1024).unwrap(), (0, 2));
-        assert_eq!(_extent_from_offset(&up, 1024 + 512).unwrap(), (0, 3));
-        assert_eq!(_extent_from_offset(&up, 51200).unwrap(), (1, 0));
-        assert_eq!(_extent_from_offset(&up, 51200 + 512).unwrap(), (1, 1));
-        assert_eq!(_extent_from_offset(&up, 51200 + 1024).unwrap(), (1, 2));
-        assert_eq!(_extent_from_offset(&up, 102400 - 512).unwrap(), (1, 99));
-        assert_eq!(_extent_from_offset(&up, 102400).unwrap(), (2, 0));
+    #[test]
+    fn off_to_extent_basic() {
+        /*
+         * Verify the offsets match the expected block_offset for the
+         * default size region.
+         */
+        let up = make_upstairs();
+
+        let exv = vec![(0, 0, 512)];
+        assert_eq!(extent_from_offset(&up, 0, 512).unwrap(), exv);
+        let exv = vec![(0, 1, 512)];
+        assert_eq!(extent_from_offset(&up, 512, 512).unwrap(), exv);
+        let exv = vec![(0, 2, 512)];
+        assert_eq!(extent_from_offset(&up, 1024, 512).unwrap(), exv);
+        let exv = vec![(0, 3, 512)];
+        assert_eq!(extent_from_offset(&up, 1024 + 512, 512).unwrap(), exv);
+        let exv = vec![(0, 99, 512)];
+        assert_eq!(extent_from_offset(&up, 51200 - 512, 512).unwrap(), exv);
+
+        let exv = vec![(1, 0, 512)];
+        assert_eq!(extent_from_offset(&up, 51200, 512).unwrap(), exv);
+        let exv = vec![(1, 1, 512)];
+        assert_eq!(extent_from_offset(&up, 51200 + 512, 512).unwrap(), exv);
+        let exv = vec![(1, 2, 512)];
+        assert_eq!(extent_from_offset(&up, 51200 + 1024, 512).unwrap(), exv);
+        let exv = vec![(1, 99, 512)];
+        assert_eq!(extent_from_offset(&up, 102400 - 512, 512).unwrap(), exv);
+
+        let exv = vec![(2, 0, 512)];
+        assert_eq!(extent_from_offset(&up, 102400, 512).unwrap(), exv);
+
+        let exv = vec![(9, 99, 512)];
+        assert_eq!(
+            extent_from_offset(&up, (512 * 100 * 10) - 512, 512).unwrap(),
+            exv
+        );
+    }
+
+    #[test]
+    fn off_to_extent_buffer() {
+        /*
+         * Testing a buffer size larger than the default 512
+         */
+        let up = make_upstairs();
+
+        let exv = vec![(0, 0, 1024)];
+        assert_eq!(extent_from_offset(&up, 0, 1024).unwrap(), exv);
+        let exv = vec![(0, 1, 1024)];
+        assert_eq!(extent_from_offset(&up, 512, 1024).unwrap(), exv);
+        let exv = vec![(0, 2, 1024)];
+        assert_eq!(extent_from_offset(&up, 1024, 1024).unwrap(), exv);
+        let exv = vec![(0, 98, 1024)];
+        assert_eq!(extent_from_offset(&up, 51200 - 1024, 1024).unwrap(), exv);
+
+        let exv = vec![(1, 0, 1024)];
+        assert_eq!(extent_from_offset(&up, 51200, 1024).unwrap(), exv);
+        let exv = vec![(1, 1, 1024)];
+        assert_eq!(extent_from_offset(&up, 51200 + 512, 1024).unwrap(), exv);
+        let exv = vec![(1, 2, 1024)];
+        assert_eq!(extent_from_offset(&up, 51200 + 1024, 1024).unwrap(), exv);
+        let exv = vec![(1, 98, 1024)];
+        assert_eq!(extent_from_offset(&up, 102400 - 1024, 1024).unwrap(), exv);
+
+        let exv = vec![(2, 0, 1024)];
+        assert_eq!(extent_from_offset(&up, 102400, 1024).unwrap(), exv);
+
+        let exv = vec![(9, 98, 1024)];
+        assert_eq!(
+            extent_from_offset(&up, (512 * 100 * 10) - 1024, 1024).unwrap(),
+            exv
+        );
+    }
+
+    #[test]
+    fn off_to_extent_vbuff() {
+        let up = make_upstairs();
+
+        /*
+         * Walk the buffer sizes from 512 to the whole extent, make sure
+         * it all works as expected
+         */
+        for bsize in (512..=51200).step_by(512) {
+            let exv = vec![(0, 0, bsize)];
+            assert_eq!(extent_from_offset(&up, 0, bsize).unwrap(), exv);
+        }
+    }
+
+    #[test]
+    fn off_to_extent_bridge() {
+        /*
+         * Testing when our buffer crosses extents.
+         */
+        let up = make_upstairs();
+        /*
+         * 1024 buffer
+         */
+        let exv = vec![(0, 99, 512), (1, 0, 512)];
+        assert_eq!(extent_from_offset(&up, 51200 - 512, 1024).unwrap(), exv);
+        let exv = vec![(0, 98, 1024), (1, 0, 1024)];
+        assert_eq!(extent_from_offset(&up, 51200 - 1024, 2048).unwrap(), exv);
+
+        /*
+         * Largest buffer
+         */
+        let exv = vec![(0, 1, 51200 - 512), (1, 0, 512)];
+        assert_eq!(extent_from_offset(&up, 512, 51200).unwrap(), exv);
+        let exv = vec![(0, 2, 51200 - 1024), (1, 0, 1024)];
+        assert_eq!(extent_from_offset(&up, 1024, 51200).unwrap(), exv);
+        let exv = vec![(0, 4, 51200 - 2048), (1, 0, 2048)];
+        assert_eq!(extent_from_offset(&up, 2048, 51200).unwrap(), exv);
+
+        /*
+         * Largest buffer, last block offset possible
+         */
+        let exv = vec![(0, 99, 512), (1, 0, 51200 - 512)];
+        assert_eq!(extent_from_offset(&up, 51200 - 512, 51200).unwrap(), exv);
+    }
+
+    /*
+     * Testing various invalid inputs
+     */
+    #[test]
+    #[should_panic]
+    fn off_to_extent_length_zero() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 0, 0).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn off_to_extent_block_align() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 0, 511).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn off_to_extent_block_align2() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 0, 513).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn off_to_extent_length_big() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 0, 51200 + 512).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn off_to_extent_offset_align() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 511, 512).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn off_to_extent_offset_align2() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 513, 512).unwrap();
+    }
+    #[test]
+    #[should_panic]
+    fn off_to_extent_offset_big() {
+        let up = make_upstairs();
+        extent_from_offset(&up, 512000, 512).unwrap();
     }
 }

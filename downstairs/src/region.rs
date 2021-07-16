@@ -392,18 +392,6 @@ impl Extent {
     pub fn flush(&self, new_flush: u64) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        /*
-         * XXX Remove this when upstairs starts sending us the correct
-         * flush number for this extent.  For now we are still tracking
-         * and updating flush numbers all downstairs.
-         */
-        if inner.meta.flush_number != new_flush {
-            println!(
-                "E[{}] Ignore provided fn:{} use our own:{}",
-                self.number, new_flush, inner.meta.flush_number
-            );
-        }
-
         if !inner.meta.dirty {
             /*
              * If we have made no writes to this extent since the last flush
@@ -436,6 +424,11 @@ impl Extent {
         let new_meta = ExtentMeta {
             ext_version: inner.meta.ext_version,
             gen: inner.meta.gen,
+            /*
+             * XXX Remove this when upstairs starts sending us the correct
+             * flush number for this extent.  For now we are still tracking
+             * and updating flush numbers all downstairs.
+             */
             // XXX flush_number: new_flush,
             flush_number: inner.meta.flush_number + 1,
             dirty: false,
@@ -470,7 +463,10 @@ pub struct Region {
 }
 
 impl Region {
-    pub fn open<P: AsRef<Path>>(dir: P, options: RegionOptions) -> Result<Region> {
+    pub fn open<P: AsRef<Path>>(
+        dir: P,
+        options: RegionOptions,
+    ) -> Result<Region> {
         options.validate()?;
 
         let cp = config_path(dir.as_ref());
@@ -729,12 +725,18 @@ mod test {
 
     #[test]
     fn extent_path_mid_hi() {
-        assert_eq!(extent_path("/var/region", 65536), p("/var/region/00/010/000"));
+        assert_eq!(
+            extent_path("/var/region", 65536),
+            p("/var/region/00/010/000")
+        );
     }
 
     #[test]
     fn extent_path_mid_lo() {
-        assert_eq!(extent_path("/var/region", 65535), p("/var/region/00/00F/FFF"));
+        assert_eq!(
+            extent_path("/var/region", 65535),
+            p("/var/region/00/00F/FFF")
+        );
     }
 
     #[test]

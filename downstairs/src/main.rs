@@ -69,7 +69,8 @@ async fn proc_frame(
                 rn, dependencies, flush
             );
             //let dep = Vec::new();
-            d.region.region_flush(dependencies.to_vec(), flush.to_vec())?;
+            d.region
+                .region_flush(dependencies.to_vec(), flush.to_vec())?;
             fw.send(Message::FlushAck(*rn)).await
         }
         Message::ReadRequest(rn, eid, block_offset, blocks) => {
