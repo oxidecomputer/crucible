@@ -276,17 +276,6 @@ impl Extent {
          */
         inner.file.read_exact(data)?;
 
-        // XXX Debug
-        let mut snip: [u8; 4] = [0; 4];
-        snip[..4].copy_from_slice(&data[0..4]);
-        println!(
-            "read  eid:{:02} b_off:{:03} f_off:{:05} len:{:03} data:0x{:x?}",
-            self.number,
-            block_offset,
-            file_offset,
-            data.len(),
-            snip
-        );
         Ok(())
     }
 
@@ -331,15 +320,6 @@ impl Extent {
             );
         }
 
-        println!(
-            "start_block:{}, buf_len:{} blocks:{} es:{} final_block:{}",
-            block_offset,
-            data.len(),
-            data_blocks,
-            self.extent_size,
-            data_blocks + block_offset,
-        );
-
         Ok(())
     }
 
@@ -377,14 +357,6 @@ impl Extent {
         inner.file.seek(SeekFrom::Start(file_offset))?;
         inner.file.write_all(data)?;
         inner.file.flush()?;
-
-        // XXX Debug
-        let mut snip: [u8; 4] = [0; 4];
-        snip[..4].copy_from_slice(&data[0..4]);
-        println!(
-            "write eid:{} b_offset:{} f_offset:{} data:0x{:x?}",
-            self.number, block_offset, file_offset, snip
-        );
 
         Ok(())
     }
@@ -447,7 +419,7 @@ impl Extent {
             bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
         }
         inner.meta = new_meta;
-        println!("flush extent:{} with fn:{}", self.number, new_flush);
+
         Ok(())
     }
 }
@@ -597,7 +569,6 @@ impl Region {
             let extent = &self.extents[eid as usize];
             extent.flush(flush_numbers[eid as usize])?;
         }
-        println!("Flush on {} extents", self.def.extent_count);
         Ok(())
     }
 }
