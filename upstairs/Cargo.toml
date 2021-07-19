@@ -7,6 +7,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1"
 bytes = "1"
+crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 crucible-scope = { path = "../scope" }
 futures = "0.3"

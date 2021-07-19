@@ -140,6 +140,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "crucible-common",
  "crucible-protocol",
  "crucible-scope",
  "futures",
