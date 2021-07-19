@@ -60,6 +60,11 @@ async fn proc_frame(
                 .await
         }
         Message::Write(rn, eid, block_offset, data) => {
+            println!(
+                "Write       rn:{} eid:{:?} bo:{:?}",
+                rn, eid, block_offset
+            );
+
             d.region.region_write(*eid, *block_offset, data)?;
             fw.send(Message::WriteAck(*rn)).await
         }
@@ -74,6 +79,10 @@ async fn proc_frame(
             fw.send(Message::FlushAck(*rn)).await
         }
         Message::ReadRequest(rn, eid, block_offset, blocks) => {
+            println!(
+                "Read        rn:{} eid:{:?} bo:{:?}",
+                rn, eid, block_offset
+            );
             /*
              * XXX Some thought will need to be given to where the read
              * data buffer is created, both on this side and the remote.

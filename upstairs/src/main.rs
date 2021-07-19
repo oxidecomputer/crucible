@@ -90,20 +90,20 @@ async fn proc_frame(
             // XXX put this on the completed list for this downstairs
             // We might need to include more so we know which target
             // completed, and know when to ack back to the host
-            io_write_completed(target, u, *rn, client_id)
+            io_completed_wf(target, u, *rn, client_id)
         }
         Message::FlushAck(rn) => {
             // XXX put this on the completed list for this downstairs
             // We might need to include more so we know which target
             // completed, and know when to ack back to the host
             // XXX Clear dirty bit, but we need the job info for that.
-            io_write_completed(target, u, *rn, client_id)
+            io_completed_wf(target, u, *rn, client_id)
         }
         Message::ReadResponse(rn, data) => {
             // XXX put this on the completed list for this downstairs
             // We might need to include which target responded
             save_read_buffer(target, u, *rn, data.clone())?;
-            io_read_completed(target, u, *rn, client_id)
+            io_completed_read(target, u, *rn, client_id)
         }
         x => bail!("unexpected frame {:?}", x),
     }
@@ -330,14 +330,14 @@ fn save_read_buffer(
  * the results we need to finish up this read and transfer data
  * to the guest memory, or if there is more to do.
  */
-fn io_read_completed(
+fn io_completed_read(
     target: &SocketAddrV4,
     up: &Arc<Upstairs>,
-    request_number: u64,
+    ds_id: u64,
     client_id: u8,
 ) -> Result<()> {
     let mut work = up.work.lock().unwrap();
-    let counts = work.complete(request_number, client_id)?;
+    let counts = work.complete(ds_id, client_id)?;
 
     /*
      * We can send the results to the caller once we get one answer,
@@ -345,11 +345,11 @@ fn io_read_completed(
      * guest_work from finishing.  TODO
      */
     if counts.active == 0 {
-        let done = work.retire(request_number);
+        let done = work.retire(ds_id);
         let gw_id = done.guest_id;
         println!(
-            "{} Read Request number {} is retired gw_id:{:?}",
-            target, request_number, gw_id
+            "{} Read  ds_id {} retired  gw_id:{:?}",
+            target, ds_id, gw_id
         );
 
         drop(work);
@@ -368,28 +368,23 @@ fn io_read_completed(
             /*
              * Reads will be removed from the submitted list when they
              * attach their buffer to the GtoS struct.
-             * However, other request numbers may be outstanding, so
+             * However, their may be other downstairs ids outstanding, so
              * we can't finish the guest work until those requests are
              * done as well.
              */
             if gtos_job.submitted.is_empty() {
                 // Set in motion the final transfer of read buffers
-                println!("{} Time to retire gw_id:{}", target, gw_id);
                 gtos_job.transfer();
                 gw.complete(gw_id);
                 //up.guest.complete_send(gw_id);
             } else {
-                assert!(gtos_job.completed.contains(&request_number));
+                assert!(gtos_job.completed.contains(&ds_id));
             }
-        } else {
-            /*
-             * This is okay, it just means previous jobs finished up
-             * all the work and sent results back to the guest.
-             */
-            println!("{} gw_id of {} is not active", target, gw_id);
-            // XXX assert it is on the completed list?  How long will
-            // things on the completed list live?
         }
+        /*
+         * TODO might want to consider a check for the else case when a
+         * gw_id is not active.  Can we verify it is on the completed list?
+         */
     }
     Ok(())
 }
@@ -398,10 +393,10 @@ fn io_read_completed(
  * This function is called when the upstairs task is notified that
  * a downstairs write or flush has completed.
  */
-fn io_write_completed(
+fn io_completed_wf(
     target: &SocketAddrV4,
     up: &Arc<Upstairs>,
-    request_number: u64,
+    ds_id: u64,
     client_id: u8,
 ) -> Result<()> {
     let mut work = up.work.lock().unwrap();
@@ -410,7 +405,7 @@ fn io_write_completed(
      * comes back?  We will need to update states to include an error
      * as a result.
      */
-    let counts = work.complete(request_number, client_id)?;
+    let counts = work.complete(ds_id, client_id)?;
 
     /*
      * XXX We currently only look at marking a gw complete when
@@ -419,11 +414,11 @@ fn io_write_completed(
      * response to the guest.
      */
     if counts.active == 0 {
-        let done = work.retire(request_number);
+        let done = work.retire(ds_id);
         let gw_id = done.guest_id;
         println!(
-            "{} Write/Flush Request number {} is retired gw_id:{:?}",
-            target, request_number, gw_id
+            "{} Wr/Fl ds_id {} retired  gw_id:{:?}",
+            target, ds_id, gw_id
         );
 
         drop(work);
@@ -436,13 +431,12 @@ fn io_write_completed(
          */
         let mut gw = up.guest.guest_work.lock().unwrap();
         if let Some(gtos_job) = gw.active.get_mut(&gw_id) {
-            let _ = gtos_job.submitted.remove(&request_number).unwrap();
-            gtos_job.completed.push(request_number);
+            let _ = gtos_job.submitted.remove(&ds_id).unwrap();
+            gtos_job.completed.push(ds_id);
             /*
              * For multi-op writes, we may not be done yet/
              */
             if gtos_job.submitted.is_empty() {
-                println!("{} gt_id:{} Time to retire", target, gw_id);
                 gw.complete(gw_id);
                 //up.guest.complete_send(gw_id);
             } else {
@@ -512,8 +506,8 @@ async fn io_send(
                  *}
                  */
                 println!(
-                    "Write rn:{} eid:{:?} bo:{:?}",
-                    *new_id, eid, block_offset
+                    "[{}] Write ds_id:{} eid:{:?} bo:{:?}",
+                    client_id, *new_id, eid, block_offset
                 );
                 fw.send(Message::Write(
                     *new_id,
@@ -528,7 +522,7 @@ async fn io_send(
                 flush_numbers,
             } => {
                 println!(
-                    "Flush rn:{} dep:{:?} fl:{:?}",
+                    "Flush ds_id:{} dep:{:?} fl:{:?}",
                     *new_id, dependencies, flush_numbers
                 );
                 fw.send(Message::Flush(
@@ -544,7 +538,7 @@ async fn io_send(
                 blocks,
             } => {
                 println!(
-                    "Read  rn:{} eid:{:?} bo:{:?} blocks:{}",
+                    "Read  ds_id:{} eid:{:?} bo:{:?} blocks:{}",
                     *new_id, eid, block_offset, blocks,
                 );
                 fw.send(Message::ReadRequest(
@@ -605,6 +599,7 @@ async fn proc(
          * select would always have input.changed() and starve out the
          * fr.next() select?  Does this select ever work that way?
          */
+        // println!("[{}] at the top of the loop", client_id);
         tokio::select! {
             _ = sleep_until(deadline) => {
                 if !negotiated {
@@ -620,8 +615,8 @@ async fn proc(
             _ = input.changed() => {
                 /*
                 let iv = *input.borrow();
-                println!("[{}] call io_send with {}", client_id, iv);
-                */
+                println!("[{}] Input changed with {}", client_id, iv);
+                 */
                 io_send(up, &mut fw, client_id).await?;
             }
             f = fr.next() => {
@@ -799,7 +794,7 @@ struct WorkCounts {
 
 impl Work {
     /**
-     * Assign a new request ID.
+     * Assign a new downstairs ID.
      */
     fn next_id(&mut self) -> u64 {
         let id = self.next_id;
@@ -811,23 +806,23 @@ impl Work {
      * Mark this request as in progress for this client, and return a copy
      * of the details of the request.
      */
-    fn in_progress(&mut self, reqid: u64, client_id: u8) -> IOop {
-        let job = self.active.get_mut(&reqid).unwrap();
+    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> IOop {
+        let job = self.active.get_mut(&ds_id).unwrap();
         let oldstate = job.state.insert(client_id, IOState::InProgress);
         assert_eq!(oldstate, Some(IOState::New));
         job.work.clone()
     }
 
     /**
-     * Return a list of request IDs that represent unissued requests for this
-     * client.
+     * Return a list of downstairs request IDs that represent unissued
+     * requests for this client.
      */
     fn new_work(&self, client_id: u8) -> Vec<u64> {
         self.active
             .values()
             .filter_map(|job| {
                 if let Some(IOState::New) = job.state.get(&client_id) {
-                    Some(job.request_id)
+                    Some(job.ds_id)
                 } else {
                     None
                 }
@@ -836,21 +831,22 @@ impl Work {
     }
 
     /**
-     * Enqueue a new request.
+     * Enqueue a new downstairs request.
      */
     fn enqueue(&mut self, io: IOWork) {
-        self.active.insert(io.request_id, io);
+        self.active.insert(io.ds_id, io);
     }
 
     /**
-     * Mark this request as complete for this client.  Returns counts clients
-     * for which this request is still active or has been completed already.
+     * Mark this downstairs request as complete for this client.  Returns
+     * counts clients for which this request is still active or has been
+     * completed already.
      */
-    fn complete(&mut self, reqid: u64, client_id: u8) -> Result<WorkCounts> {
+    fn complete(&mut self, ds_id: u64, client_id: u8) -> Result<WorkCounts> {
         let job = self
             .active
-            .get_mut(&reqid)
-            .ok_or_else(|| anyhow!("reqid {} is not active", reqid))?;
+            .get_mut(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         let oldstate = job.state.insert(client_id, IOState::Done);
         assert_ne!(oldstate, Some(IOState::Done));
 
@@ -874,10 +870,10 @@ impl Work {
      * This request is now complete on all peers.  Remove it from the active set
      * and mark it in the completed ring buffer.
      */
-    fn retire(&mut self, reqid: u64) -> IOWork {
-        assert!(!self.completed.contains(&reqid));
-        let old = self.active.remove(&reqid).unwrap();
-        self.completed.push(reqid);
+    fn retire(&mut self, ds_id: u64) -> IOWork {
+        assert!(!self.completed.contains(&ds_id));
+        let old = self.active.remove(&ds_id).unwrap();
+        self.completed.push(ds_id);
         old
     }
 }
@@ -931,8 +927,8 @@ pub enum DownstairsState {
  */
 #[derive(Debug)]
 struct IOWork {
-    request_id: u64, // This MUST match our hashmap index
-    guest_id: u64,   // The hahsmap ID from the parent guest work.
+    ds_id: u64,    // This MUST match our hashmap index
+    guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
     /*
      * Hash of work status where key is the downstairs "client id" and the
@@ -1036,15 +1032,15 @@ pub enum BlockOp {
  * that map to a single Guest IO request. G to S stands for Guest
  * to Storage.
  *
- * The submitted hashmap is indexd by the request number for the downstairs
- * requests issued on behaf of this reuqest.
+ * The submitted hashmap is indexd by the request number (ds_id) for the
+ * downstairs requests issued on behaf of this reuqest.
  */
 #[derive(Debug)]
 struct GtoS {
     /*
      * Jobs we have submitted (or will soon submit) to the storage side
      * of the upstairs process to send on to the downstairs.
-     * The key for the hashmap is the request number in the hashmap for
+     * The key for the hashmap is the ds_id number in the hashmap for
      * downstairs work.  The value is the buffer size of the operation.
      */
     submitted: HashMap<u64, usize>,
@@ -1295,19 +1291,31 @@ fn main() -> Result<()> {
      * This is essentially how we create test commands and send them
      * to the up_listen task.
      */
-    /*
-     * Using something else right now.
-    runtime.spawn(run_scope(prop_work));
-     */
+    //runtime.spawn(run_scope(prop_work));
 
-    std::thread::sleep(std::time::Duration::from_secs(4));
-    run_big_workload(&guest)?;
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    println!("Tests done, show 1 and wait");
-    show_guest_work(&guest);
+    /*
+     * XXX The rest of this is just test code, and will be removed shortly
+     * as we transition to a library/crate for crucible.
+     */
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    //_run_big_workload(&guest, 2)?;
+    for _ in 0..1000 {
+        run_single_workload(&guest)?;
+        /*
+         * This helps us get around async/non-async issues.
+         * Keeing this process busy means some async tasks will never get
+         * time to run.  Give a little pause here and let some other
+         * tasks go.  Yes, this is a hack.  XXX
+         */
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    // show_guest_work(&guest);
+    println!("Tests done, wait");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    // show_guest_work(&guest);
+    println!("Tests done");
     std::thread::sleep(std::time::Duration::from_secs(10));
-    println!("Tests done, main now done, final show");
-    show_guest_work(&guest);
+    println!("all Tests done");
     Ok(())
 }
 
@@ -1318,13 +1326,10 @@ fn main() -> Result<()> {
  */
 fn _send_work(t: &[Target], val: u64) {
     for d_client in t.iter() {
-        println!("#### send to client {:?}", d_client.target);
+        // println!("#### send to client {:?}", d_client.target);
         let res = d_client.input.send(val);
         if let Err(e) = res {
-            println!(
-                "#### error {:#?} sending work to {:?}",
-                e, d_client.target
-            );
+            panic!("#### error {:#?} sending work to {:?}", e, d_client.target);
             /*
              * XXX
              * Write more code for this error,  If one downstairs
@@ -1340,7 +1345,7 @@ fn _send_work(t: &[Target], val: u64) {
  * This is a test workload that generates a write spanning an extent
  * then trys to read the same.
  */
-fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
+fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     let my_offset = 512 * 99;
     let mut data = BytesMut::with_capacity(512 * 2);
     for seed in 4..6 {
@@ -1351,9 +1356,10 @@ fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
         offset: my_offset,
         data,
     };
-    println!("send write 1");
     guest.send(wio);
-    guest.send(BlockOp::ShowWork);
+
+    guest.send(BlockOp::Flush);
+    //guest.send(BlockOp::ShowWork);
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;
@@ -1366,54 +1372,57 @@ fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
         data,
     };
     guest.send(rio);
-    guest.send(BlockOp::ShowWork);
+    // guest.send(BlockOp::ShowWork);
 
     println!("Final offset: {}", my_offset);
+
     Ok(())
 }
 /*
  * This is basically just a test loop that generates a workload then sends the
  * workload to Crucible.
  */
-fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
-    let mut my_offset: u64 = 0;
-    for olc in 0..10 {
-        for lc in 0..100 {
-            let seed = (my_offset % 255) as u8;
-            let mut data = BytesMut::with_capacity(512);
-            data.put(&[seed; 512][..]);
-            let data = data.freeze();
-            let wio = BlockOp::Write {
-                offset: my_offset,
-                data,
-            };
-            println!("[{}][{}] send write  offset:{}", olc, lc, my_offset);
-            guest.send(wio);
+fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
+    for _ll in 0..loops {
+        let mut my_offset: u64 = 0;
+        for olc in 0..10 {
+            for lc in 0..100 {
+                let seed = (my_offset % 255) as u8;
+                let mut data = BytesMut::with_capacity(512);
+                data.put(&[seed; 512][..]);
+                let data = data.freeze();
+                let wio = BlockOp::Write {
+                    offset: my_offset,
+                    data,
+                };
+                println!("[{}][{}] send write  offset:{}", olc, lc, my_offset);
+                guest.send(wio);
 
-            let read_offset = my_offset;
-            const READ_SIZE: usize = 512;
-            let mut data = BytesMut::with_capacity(READ_SIZE);
-            data.put(&[0x99; READ_SIZE][..]);
-            println!(
-                "[{}][{}] send read   offset:{}, data at {:p}",
-                olc,
-                lc,
-                read_offset,
-                data.as_ptr()
-            );
-            let rio = BlockOp::Read {
-                offset: read_offset,
-                data,
-            };
-            guest.send(rio);
+                let read_offset = my_offset;
+                const READ_SIZE: usize = 512;
+                let mut data = BytesMut::with_capacity(READ_SIZE);
+                data.put(&[0x99; READ_SIZE][..]);
+                println!(
+                    "[{}][{}] send read   offset:{}, data at {:p}",
+                    olc,
+                    lc,
+                    read_offset,
+                    data.as_ptr()
+                );
+                let rio = BlockOp::Read {
+                    offset: read_offset,
+                    data,
+                };
+                guest.send(rio);
 
-            println!("[{}][{}] send flush", olc, lc);
-            guest.send(BlockOp::Flush);
-            // guest.send(BlockOp::ShowWork);
-            my_offset += 512;
+                println!("[{}][{}] send flush", olc, lc);
+                guest.send(BlockOp::Flush);
+                // guest.send(BlockOp::ShowWork);
+                my_offset += 512;
+            }
         }
+        println!("Final offset: {}", my_offset);
     }
-    println!("Final offset: {}", my_offset);
     Ok(())
 }
 
@@ -1514,10 +1523,9 @@ fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
         data.as_ptr(),
         data.len()
     );
-
     /*
-     * Create the list of downstairs request numbers we created on behalf
-     * of this guest job.
+     * Create the list of downstairs request numbers (ds_id) we created
+     * on behalf of this guest job.
      */
     let mut sub = HashMap::new();
     let mut ds_work = Vec::new();
@@ -1538,13 +1546,16 @@ fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
         ds_work.push(wr);
     }
 
+    println!("READ:  gw_id:{} rns:{:?}", gw_id, sub,);
     /*
      * New work created, add to the guest_work HM
      */
     assert!(!sub.is_empty());
-    let mut gw = up.guest.guest_work.lock().unwrap();
     let new_gtos = GtoS::new(sub, Vec::new(), Some(data), HashMap::new());
-    gw.active.insert(gw_id, new_gtos);
+    {
+        let mut gw = up.guest.guest_work.lock().unwrap();
+        gw.active.insert(gw_id, new_gtos);
+    }
 
     let mut work = up.work.lock().unwrap();
     for wr in ds_work {
@@ -1589,8 +1600,8 @@ fn guest_submit_write(
      */
 
     /*
-     * Create the list of downstairs request numbers we created on behalf
-     * of this guest job.
+     * Create the list of downstairs request numbers (ds_id) we created
+     * on behalf of this guest job.
      */
     let mut sub = HashMap::new();
     let mut ds_work = Vec::new();
@@ -1612,6 +1623,7 @@ fn guest_submit_write(
         ds_work.push(wr);
         cur_offset = len;
     }
+    println!("WRITE: gw_id:{} rns:{:?}", gw_id, sub,);
     /*
      * New work created, add to the guest_work HM
      */
@@ -1653,6 +1665,8 @@ fn guest_submit_flush(up: &Arc<Upstairs>) {
 
     let mut sub = HashMap::new();
     sub.insert(next_id, 0);
+
+    println!("FLUSH: gw_id:{} rns:{:?}", gw_id, sub,);
     let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new());
     {
         let mut gw = up.guest.guest_work.lock().unwrap();
@@ -1688,7 +1702,6 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
                 lastcast += 1;
             }
             BlockOp::Write { offset, data } => {
-                println!("PROCESS write offset:{} len:{}", offset, data.len());
                 guest_submit_write(up, offset, data);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
@@ -1814,7 +1827,7 @@ async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
  * Create a write IOWork structure from an EID, and offset, and the data buffer
  */
 fn create_write_eob(
-    ri: u64,
+    ds_id: u64,
     gw_id: u64,
     eid: u64,
     block_offset: u64,
@@ -1832,7 +1845,7 @@ fn create_write_eob(
         state.insert(cl, IOState::New);
     }
     IOWork {
-        request_id: ri,
+        ds_id,
         guest_id: gw_id,
         work: awrite,
         state,
@@ -1845,7 +1858,7 @@ fn create_write_eob(
  * the downstairs can understand.
  */
 fn create_read_eob(
-    ri: u64,
+    ds_id: u64,
     gw_id: u64,
     eid: u64,
     block_offset: u64,
@@ -1862,7 +1875,7 @@ fn create_read_eob(
         state.insert(cl, IOState::New);
     }
     IOWork {
-        request_id: ri,
+        ds_id,
         guest_id: gw_id,
         work: aread,
         state,
@@ -1872,7 +1885,7 @@ fn create_read_eob(
 /*
  * Create a flush IOWork structure.
  */
-fn create_flush(ri: u64, fln: Vec<u64>, guest_id: u64) -> IOWork {
+fn create_flush(ds_id: u64, fln: Vec<u64>, guest_id: u64) -> IOWork {
     let flush = IOop::Flush {
         dependencies: Vec::new(), // XXX coming soon
         flush_numbers: fln,
@@ -1883,7 +1896,7 @@ fn create_flush(ri: u64, fln: Vec<u64>, guest_id: u64) -> IOWork {
         state.insert(cl, IOState::New);
     }
     IOWork {
-        request_id: ri,
+        ds_id,
         guest_id,
         work: flush,
         state,
@@ -1937,10 +1950,18 @@ fn _show_work(up: &Arc<Upstairs>) {
     }
 }
 
+/*
+ * Debug function to dump the guest work structure.
+ * This does a bit while holding the mutex, so don't expect performance
+ * to get better when calling it.
+ */
 fn show_guest_work(guest: &Arc<Guest>) {
     println!("Guest work:  Active and Completed Jobs:");
-    let mut gw = guest.guest_work.lock().unwrap();
-    for (id, job) in gw.active.iter_mut() {
+    let gw = guest.guest_work.lock().unwrap();
+    let mut kvec: Vec<u64> = gw.active.keys().cloned().collect::<Vec<u64>>();
+    kvec.sort();
+    for id in kvec.iter() {
+        let job = gw.active.get(id).unwrap();
         println!(
             "GW_JOB active:[{:04}] S:{:?} C:{:?} ",
             id, job.submitted, job.completed
