@@ -104,9 +104,9 @@ async fn proc_frame(
 }
 
 async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
-    let (r, w) = sock.split();
-    let mut fr = FramedRead::new(r, CrucibleDecoder::new());
-    let mut fw = FramedWrite::new(w, CrucibleEncoder::new());
+    let (read, write) = sock.split();
+    let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+    let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
     /*
      * Don't wait more than 5 seconds to hear from the other side.
@@ -124,11 +124,11 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                     bail!("inactivity timeout");
                 }
             }
-            f = fr.next() => {
+            new_read = fr.next() => {
                 /*
                  * Negotiate protocol before we get into specifics.
                  */
-                match f.transpose()? {
+                match new_read.transpose()? {
                     None => return Ok(()),
                     Some(Message::HereIAm(version)) => {
                         if negotiated {
@@ -140,12 +140,12 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                         negotiated = true;
                         fw.send(Message::YesItsMe(1)).await?;
                     }
-                    Some(m) => {
+                    Some(msg) => {
                         if !negotiated {
                             bail!("expected HereIAm first");
                         }
 
-                        proc_frame(d, &m, &mut fw).await?;
+                        proc_frame(d, &msg, &mut fw).await?;
                         deadline = deadline_secs(50);
                     }
                 }

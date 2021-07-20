@@ -29,6 +29,12 @@ impl CrucibleEncoder {
     }
 }
 
+impl Default for CrucibleEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Encoder<Message> for CrucibleEncoder {
     type Error = anyhow::Error;
 
@@ -211,6 +217,12 @@ pub struct CrucibleDecoder {}
 impl CrucibleDecoder {
     pub fn new() -> Self {
         CrucibleDecoder {}
+    }
+}
+
+impl Default for CrucibleDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

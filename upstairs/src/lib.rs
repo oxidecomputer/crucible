@@ -1218,6 +1218,12 @@ impl Guest {
     }
 }
 
+impl Default for Guest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Target {
     #[allow(dead_code)]
     target: SocketAddrV4,
@@ -1725,7 +1731,7 @@ fn show_guest_work(guest: &Arc<Guest>) {
     println!("Guest work:  Active and Completed Jobs:");
     let gw = guest.guest_work.lock().unwrap();
     let mut kvec: Vec<u64> = gw.active.keys().cloned().collect::<Vec<u64>>();
-    kvec.sort();
+    kvec.sort_unstable();
     for id in kvec.iter() {
         let job = gw.active.get(id).unwrap();
         println!(
