@@ -1,20 +1,13 @@
 [package]
-name = "crucible"
-version = "0.0.0"
+name = "crucible-client"
+version = "0.1.0"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 edition = "2018"
-
-[lib]
-name = "crucible"
-path = "src/lib.rs"
-
-[[bin]]
-name = "crucible-upstairs"
-path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
+crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 crucible-scope = { path = "../scope" }

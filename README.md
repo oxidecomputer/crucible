@@ -38,10 +38,11 @@ listening on 0.0.0.0:3803
 ...
 ```
 
-Then, connect to them with a single Upstairs process:
+Then, connect to them by using the crucible client program that will
+start the upstairs side of crucible for you.
 
 ```
-$ cargo run -q -p crucible-upstairs -- \
+$ cargo run -q -p crucible-client -- \
     -t 127.0.0.1:3801 -t 127.0.0.1:3802 -t 127.0.0.1:3803
 raw options: Opt { target: [127.0.0.1:3801, 127.0.0.1:3802, 127.0.0.1:3803] }
 target list: [
