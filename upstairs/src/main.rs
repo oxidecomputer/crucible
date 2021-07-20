@@ -4,6 +4,7 @@ use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crucible_common::*;
 use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
@@ -17,41 +18,6 @@ use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
-
-/*
- * XXX This is temp, this RegionDefinition needs to live in some common
- * area where both upstairs and downstaris can use it.  To get things
- * to work, the struct here is a copy of what lives in downstairs region.rs
- * file, which should also be renamed, but that is the subject of another
- * XXX in that file.
- */
-#[derive(Debug)]
-pub struct RegionDefinition {
-    /**
-     * The size of each block in bytes.  Must be a power of 2, minimum 512.
-     */
-    block_size: u64,
-
-    /**
-     * How many blocks should appear in each extent?
-     */
-    extent_size: u64,
-
-    /**
-     * How many whole extents comprise this region?
-     */
-    extent_count: u32,
-}
-
-impl Default for RegionDefinition {
-    fn default() -> RegionDefinition {
-        RegionDefinition {
-            block_size: 0,
-            extent_size: 0,
-            extent_count: 0,
-        }
-    }
-}
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "volume-side storage component")]
@@ -130,11 +96,11 @@ fn extent_from_offset(
     let ddef = up.ddef.lock().unwrap();
 
     // TODO Make asserts return error
-    assert!(len as u64 >= ddef.block_size);
-    assert!(len as u64 % ddef.block_size == 0);
-    assert!(offset % ddef.block_size == 0);
+    assert!(len as u64 >= ddef.block_size());
+    assert!(len as u64 % ddef.block_size() == 0);
+    assert!(offset % ddef.block_size() == 0);
 
-    let space_per_extent = ddef.block_size * ddef.extent_size;
+    let space_per_extent = ddef.block_size() * ddef.extent_size();
     /*
      * XXX We only support a single region (downstairs).  When we grow to
      * support a LBA size that is larger than a single region, then we will
@@ -142,10 +108,10 @@ fn extent_from_offset(
      */
     let eid: u64 = offset / space_per_extent;
     assert!((len as u64) <= space_per_extent);
-    assert!((eid as u32) < ddef.extent_count);
+    assert!((eid as u32) < ddef.extent_count());
 
     let block_in_extent: u64 =
-        (offset - (eid * space_per_extent)) / ddef.block_size;
+        (offset - (eid * space_per_extent)) / ddef.block_size();
 
     let mut res = Vec::new();
 
@@ -155,12 +121,13 @@ fn extent_from_offset(
      * does not fit, then we need to push two things into our Vec and
      * determine the length that each extent needs.
      */
-    let data_blocks = (len as u64) / ddef.block_size;
-    if data_blocks + block_in_extent <= ddef.extent_size {
+    let data_blocks = (len as u64) / ddef.block_size();
+    if data_blocks + block_in_extent <= ddef.extent_size() {
         res.push((eid, block_in_extent, len));
     } else {
-        assert!((eid as u32) + 1 < ddef.extent_count);
-        let new_len = (ddef.extent_size - block_in_extent) * ddef.block_size;
+        assert!((eid as u32) + 1 < ddef.extent_count());
+        let new_len =
+            (ddef.extent_size() - block_in_extent) * ddef.block_size();
         res.push((eid, block_in_extent, new_len as usize));
         res.push((eid + 1, 0, len - (new_len as usize)));
     }
@@ -247,16 +214,16 @@ fn process_downstairs(
      * 0 should never be a valid block size
      */
     let mut ddef = u.ddef.lock().unwrap();
-    if ddef.block_size == 0 {
-        ddef.block_size = bs;
-        ddef.extent_size = es;
-        ddef.extent_count = ec;
+    if ddef.block_size() == 0 {
+        ddef.set_block_size(bs);
+        ddef.set_extent_size(es);
+        ddef.set_extent_count(ec);
         println!("Global using: bs:{} es:{} ec:{}", bs, es, ec);
     }
 
-    if ddef.block_size != bs
-        || ddef.extent_size != es
-        || ddef.extent_count != ec
+    if ddef.block_size() != bs
+        || ddef.extent_size() != es
+        || ddef.extent_count() != ec
     {
         // XXX Figure out if we can hande this error.  Possibly not.
         panic!("New downstaris region info mismatch");
@@ -1500,7 +1467,7 @@ fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
     let block_size: u32;
     {
         let ddef = up.ddef.lock().unwrap();
-        block_size = ddef.block_size as u32;
+        block_size = ddef.block_size() as u32;
     }
 
     /*

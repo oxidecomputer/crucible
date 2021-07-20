@@ -11,89 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crucible_common::*;
 
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct RegionDefinition {
-    /**
-     * The size of each block in bytes.  Must be a power of 2, minimum 512.
-     */
-    block_size: u64,
-
-    /**
-     * How many blocks should appear in each extent?
-     */
-    extent_size: u64,
-
-    /**
-     * How many whole extents comprise this region?
-     */
-    extent_count: u32,
-}
-
-impl RegionDefinition {
-    fn from_options(opts: &RegionOptions) -> Result<Self> {
-        opts.validate()?;
-        Ok(RegionDefinition {
-            block_size: opts.block_size,
-            extent_size: opts.extent_size,
-            extent_count: 0,
-        })
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct RegionOptions {
-    /**
-     * The size of each block in bytes.  Must be a power of 2, minimum 512.
-     */
-    block_size: u64,
-
-    /**
-     * How many blocks should appear in each extent?
-     */
-    extent_size: u64,
-}
-
-impl RegionOptions {
-    fn validate(&self) -> Result<()> {
-        if !self.block_size.is_power_of_two() {
-            bail!("block size must be a power of two, not {}", self.block_size);
-        }
-
-        if self.block_size < 512 {
-            bail!("minimum block size is 512 bytes, not {}", self.block_size);
-        }
-
-        if self.extent_size < 1 {
-            bail!("extent size must be at least 1 block");
-        }
-
-        let bs = self.extent_size.saturating_mul(self.block_size);
-        if bs > 10 * 1024 * 1024 {
-            /*
-             * For now, make sure we don't accidentally try to use a gigantic
-             * extent.
-             */
-            bail!(
-                "extent size {} x {} bytes = {}MB, bigger than 10MB",
-                self.extent_size,
-                self.block_size,
-                bs / 1024 / 1024
-            );
-        }
-
-        Ok(())
-    }
-}
-
-impl Default for RegionOptions {
-    fn default() -> Self {
-        RegionOptions {
-            block_size: 512,  /* XXX bigger? */
-            extent_size: 100, /* XXX bigger? */
-        }
-    }
-}
-
 pub struct Extent {
     number: u32,
     block_size: u64,
@@ -178,8 +95,8 @@ impl Extent {
          * XXX Assert somewhere (compile time?)  that struct ExtentMeta
          * size is always < one block?
          */
-        let bcount = def.extent_size.checked_add(1).unwrap();
-        let size = def.block_size.checked_mul(bcount).unwrap();
+        let bcount = def.extent_size().checked_add(1).unwrap();
+        let size = def.block_size().checked_mul(bcount).unwrap();
 
         mkdir_for_file(&path)?;
         /*
@@ -231,8 +148,8 @@ impl Extent {
 
         Ok(Extent {
             number,
-            block_size: def.block_size,
-            extent_size: def.extent_size,
+            block_size: def.block_size(),
+            extent_size: def.extent_size(),
             inner: Mutex::new(Inner {
                 file,
                 meta: ExtentMeta {
@@ -468,25 +385,25 @@ impl Region {
 
     fn open_extents(&mut self) -> Result<()> {
         let next_eid = self.extents.len() as u32;
-        for eid in next_eid..self.def.extent_count {
+        for eid in next_eid..self.def.extent_count() {
             self.extents.push(Extent::open(&self.dir, &self.def, eid)?);
             assert_eq!(self.extents[eid as usize].number, eid);
         }
-        assert_eq!(self.def.extent_count as usize, self.extents.len());
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
         Ok(())
     }
 
     pub fn extend(&mut self, newsize: u32) -> Result<()> {
-        if newsize < self.def.extent_count {
+        if newsize < self.def.extent_count() {
             bail!(
                 "will not truncate {} -> {} for now",
-                self.def.extent_count,
+                self.def.extent_count(),
                 newsize
             );
         }
 
-        if newsize > self.def.extent_count {
-            self.def.extent_count = newsize;
+        if newsize > self.def.extent_count() {
+            self.def.set_extent_count(newsize);
             write_json(config_path(&self.dir), &self.def, true)?;
             self.open_extents()?;
         }
@@ -495,9 +412,9 @@ impl Region {
 
     pub fn region_def(&self) -> (u64, u64, u32) {
         (
-            self.def.block_size,
-            self.def.extent_size,
-            self.def.extent_count,
+            self.def.block_size(),
+            self.def.extent_size(),
+            self.def.extent_count(),
         )
     }
 
@@ -553,17 +470,17 @@ impl Region {
         flush_numbers: Vec<u64>,
     ) -> Result<()> {
         if flush_numbers.len()
-            != usize::try_from(self.def.extent_count).unwrap()
+            != usize::try_from(self.def.extent_count()).unwrap()
         {
             bail!(
                 "extent count {} does not match flush vector count {}",
-                self.def.extent_count,
+                self.def.extent_count(),
                 dep.len()
             );
         }
 
         // XXX How to we convert between usize and u32 correctly?
-        for eid in 0..self.def.extent_count {
+        for eid in 0..self.def.extent_count() {
             // We will need to pull out the value from dep that
             // each extent needs to use for flush number
             let extent = &self.extents[eid as usize];
