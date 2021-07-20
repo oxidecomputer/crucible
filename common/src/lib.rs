@@ -25,8 +25,8 @@ where
     let mut buf = Vec::<u8>::new();
     f.read_to_end(&mut buf)
         .with_context(|| anyhow!("read {:?}", file))?;
-    Ok(serde_json::from_slice(buf.as_slice())
-        .with_context(|| anyhow!("parse {:?}", file))?)
+    serde_json::from_slice(buf.as_slice())
+        .with_context(|| anyhow!("parse {:?}", file))
 }
 
 pub fn read_json<P, T>(file: P) -> Result<T>
@@ -35,8 +35,8 @@ where
     for<'de> T: Deserialize<'de>,
 {
     let file = file.as_ref();
-    Ok(read_json_maybe(file)?
-        .ok_or_else(|| anyhow!("open {:?}: file not found", file))?)
+    read_json_maybe(file)?
+        .ok_or_else(|| anyhow!("open {:?}: file not found", file))
 }
 
 pub fn write_json<P, T>(file: P, data: &T, clobber: bool) -> Result<()>
