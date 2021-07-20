@@ -83,6 +83,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crucible-common",
+ "crucible-protocol",
+ "crucible-scope",
+ "futures",
+ "futures-core",
+ "ringbuffer",
+ "serde",
+ "serde_json",
+ "structopt",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
+name = "crucible-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crucible",
+ "crucible-common",
+ "crucible-protocol",
+ "crucible-scope",
+ "futures",
+ "futures-core",
+ "ringbuffer",
+ "serde",
+ "serde_json",
+ "structopt",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
 name = "crucible-common"
 version = "0.0.0"
 dependencies = [
@@ -129,26 +170,6 @@ dependencies = [
  "futures-core",
  "serde",
  "serde_json",
- "tokio",
- "tokio-util",
- "toml",
-]
-
-[[package]]
-name = "crucible-upstairs"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "bytes",
- "crucible-common",
- "crucible-protocol",
- "crucible-scope",
- "futures",
- "futures-core",
- "ringbuffer",
- "serde",
- "serde_json",
- "structopt",
  "tokio",
  "tokio-util",
  "toml",
