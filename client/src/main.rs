@@ -92,9 +92,9 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;
     println!("generate a read 1");
-    let mut data = BytesMut::with_capacity(READ_SIZE);
-    data.put(&[0x99; READ_SIZE][..]);
-    println!("send read, data at {:p}", data.as_ptr());
+    let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
+
+    println!("send read");
     let rio = BlockOp::Read {
         offset: read_offset,
         data,
@@ -128,14 +128,12 @@ fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
 
                 let read_offset = my_offset;
                 const READ_SIZE: usize = 512;
-                let mut data = BytesMut::with_capacity(READ_SIZE);
-                data.put(&[0x99; READ_SIZE][..]);
+                let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
                 println!(
-                    "[{}][{}] send read   offset:{}, data at {:p}",
+                    "[{}][{}] send read   offset:{}",
                     olc,
                     lc,
                     read_offset,
-                    data.as_ptr()
                 );
                 let rio = BlockOp::Read {
                     offset: read_offset,
@@ -179,9 +177,9 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         let mut read_offset = 512 * 99;
         const READ_SIZE: usize = 4096;
         for _ in 0..4 {
-            let mut data = BytesMut::with_capacity(READ_SIZE);
-            data.put(&[0x99; READ_SIZE][..]);
-            println!("send read, data at {:p}", data.as_ptr());
+            let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
+
+            println!("send a read");
             let rio = BlockOp::Read {
                 offset: read_offset,
                 data,

@@ -1,14 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddrV4;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use std::sync::{mpsc as std_mpsc};
 
 use crucible_common::*;
 use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
-use bytes::BufMut;
 use futures::{SinkExt, StreamExt};
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use structopt::StructOpt;
@@ -937,16 +937,56 @@ impl fmt::Display for IOState {
 }
 
 /*
+ * Provides a shared Buffer that Read operations will write into.
+ *
+ * Originally BytesMut was used here, but it didn't guarantee that memory
+ * was shared between cloned BytesMut objects.
+ */
+#[derive(Clone, Debug)]
+pub struct Buffer {
+    data: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Buffer {
+    pub fn new(len: usize)-> Buffer {
+        Buffer {
+            data: Arc::new(Mutex::new(Vec::<u8>::with_capacity(len))),
+        }
+    }
+
+    pub fn from_slice(buf: &[u8]) -> Buffer {
+        let data = Buffer::new(buf.len());
+
+        {
+            let mut vec = data.as_vec();
+            for i in 0..buf.len() {
+                vec.push(buf[i]);
+            }
+        }
+
+        data
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.try_lock().unwrap().len()
+    }
+
+    pub fn as_vec(&self) -> MutexGuard<Vec<u8>> {
+        self.data.try_lock().unwrap()
+    }
+}
+
+/*
  * Inspired from Propolis block.rs
  *
  * The following are the operations that Crucible supports from outside callers.
  * We have extended this to cover a bunch of test operations as well.
  * The first three are the supported operations, the other operations
- * tell the upstaris to behave in specific ways.
+ * tell the upstairs to behave in specific ways.
  */
 #[derive(Debug)]
 pub enum BlockOp {
-    Read { offset: u64, data: bytes::BytesMut },
+    Read { offset: u64, data: Buffer },
     Write { offset: u64, data: bytes::Bytes },
     Flush,
     // Begin testing options.
@@ -960,7 +1000,7 @@ pub enum BlockOp {
  * to Storage.
  *
  * The submitted hashmap is indexd by the request number (ds_id) for the
- * downstairs requests issued on behaf of this reuqest.
+ * downstairs requests issued on behalf of this request.
  */
 #[derive(Debug)]
 struct GtoS {
@@ -972,12 +1012,13 @@ struct GtoS {
      */
     submitted: HashMap<u64, usize>,
     completed: Vec<u64>,
+
     /*
-     * This buffer is provided by the guest request.  It is either where
-     * data will come from on a write, or the location where data will
-     * be put for a read.
+     * This buffer is provided by the guest request. If this is a read,
+     * data will be written here.
      */
-    guest_buffer: Option<bytes::BytesMut>,
+    guest_buffer: Option<Buffer>,
+
     /*
      * When we have an IO between the guest and crucible, it's possible
      * it will be broken into two smaller requests if the range happens
@@ -988,22 +1029,30 @@ struct GtoS {
      * depending on the operation.
      */
     downstairs_buffer: HashMap<u64, bytes::Bytes>,
+
+    /*
+     * Notify the caller waiting on the job to finish.
+     */
+    sender: std_mpsc::Sender<i32>,
 }
 
 impl GtoS {
     pub fn new(
         submitted: HashMap<u64, usize>,
         completed: Vec<u64>,
-        guest_buffer: Option<bytes::BytesMut>,
+        guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, bytes::Bytes>,
+        sender: std_mpsc::Sender<i32>,
     ) -> GtoS {
         GtoS {
             submitted,
             completed,
             guest_buffer,
             downstairs_buffer,
+            sender,
         }
     }
+
     /*
      * When all downstairs jobs have completed, and all buffers have been
      * attached to the GtoS struct, we can do the final copy of the data
@@ -1017,22 +1066,17 @@ impl GtoS {
             self.completed.sort_unstable();
             assert!(!self.completed.is_empty());
 
-            /*
-             * XXX The clearing of the Guest provided buffer is probably not
-             * the correct way to do this, but we will know more when the
-             * plumbing between Propolis and Crucible is implemented.
-             */
-            guest_buffer.clear();
             for ds_id in self.completed.iter() {
                 // println!("Copy buff from {:?}", ds_id);
                 let ds_buf = self.downstairs_buffer.remove(ds_id).unwrap();
-                guest_buffer.put(ds_buf);
+                {
+                    let mut vec = guest_buffer.as_vec();
+                    for i in 0..ds_buf.len() {
+                        vec[i] = ds_buf[i];
+                    }
+                }
             }
-            println!(
-                "Final data copy {:?} to {:p}",
-                self.completed,
-                guest_buffer.as_ptr(),
-            );
+            println!("Final data copy {:?}", self.completed);
         } else {
             /*
              * Should this panic?  If the caller is requesting a transfer,
@@ -1042,6 +1086,13 @@ impl GtoS {
              */
             panic!("No guest buffer, no copy");
         }
+    }
+
+    /*
+     * Notify corresponding BlockReqWaiter
+     */
+    pub fn notify(&mut self) {
+        self.sender.send(0);
     }
 }
 
@@ -1087,7 +1138,7 @@ impl GuestWork {
     /**
      * When the required number of downstairs completions for a downstairs
      * ds_id have arrived, we call this method on the parent GuestWork
-     * that requested them and includ the DownstairsIO struct.
+     * that requested them and include the DownstairsIO struct.
      *
      * If this operation was a read, then we attach the read buffer to the
      * GtoS struct for later transfer, if it is not already present.
@@ -1144,12 +1195,13 @@ impl GuestWork {
             /*
              * If all the downstairs jobs created for this have completed,
              * we can copy (if present) read data back to the guest buffer
-             * they provided to us.
+             * they provided to us, and notify any waiters.
              */
             if gtos_job.submitted.is_empty() {
                 if gtos_job.guest_buffer.is_some() {
                     gtos_job.transfer();
                 }
+                gtos_job.notify();
                 self.complete(gw_id);
             }
         } else {
@@ -1165,6 +1217,48 @@ impl GuestWork {
         }
     }
 }
+
+/**
+ * Couple a BlockOp with a notifier for calling code.
+ */
+#[derive(Debug)]
+pub struct BlockReq {
+    op: BlockOp,
+    send: std_mpsc::Sender<i32>,
+}
+
+impl BlockReq {
+    // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code
+    // return the std::sync::mpsc Sender to non-tokio task callers
+    fn new(op: BlockOp, send: std_mpsc::Sender<i32>) -> BlockReq {
+        Self {
+            op: op,
+            send: send,
+        }
+    }
+}
+
+/**
+ * When BlockOps are sent to a guest, the calling function receives a
+ * waiter that it can block on.
+ */
+pub struct BlockReqWaiter {
+    recv: std_mpsc::Receiver<i32>,
+}
+
+impl BlockReqWaiter {
+    fn new(recv: std_mpsc::Receiver<i32>) -> BlockReqWaiter {
+        Self {
+            recv: recv,
+        }
+    }
+
+    pub fn block_wait(&mut self) {
+        // TODO: Instead of i32, errors should be bubbled up.
+        let _ = self.recv.recv();
+    }
+}
+
 
 /**
  * This is the structure we use to keep track of work passed into crucible
@@ -1196,8 +1290,9 @@ pub struct Guest {
      * the submittion task tells the listening task that new work has been
      * added.
      */
-    reqs: Mutex<VecDeque<BlockOp>>,
+    reqs: Mutex<VecDeque<BlockReq>>,
     notify: Notify,
+
     /*
      * When the crucible listening task has noticed a new IO request, it will
      * pull it from the reqs queue and create an GuestWork struct as well as
@@ -1249,16 +1344,19 @@ impl Guest {
     /*
      * This is used to submit a new BlockOp IO request to Crucible.
      */
-    pub fn send(&self, req: BlockOp) {
-        self.reqs.lock().unwrap().push_back(req);
+    pub fn send(&self, op: BlockOp) -> BlockReqWaiter {
+        let (send, recv) = std_mpsc::channel();
 
+        self.reqs.lock().unwrap().push_back(BlockReq::new(op, send));
         self.notify.notify_one();
+
+        return BlockReqWaiter::new(recv);
     }
 
     /*
      * A crucible task will listen for new work using this.
      */
-    pub async fn recv(&self) -> BlockOp {
+    pub async fn recv(&self) -> BlockReq {
         loop {
             if let Some(req) = self.reqs.lock().unwrap().pop_front() {
                 return req;
@@ -1312,7 +1410,7 @@ fn _send_work(t: &[Target], val: u64) {
  * build both the upstairs work guest tracking struct as well as the downstairs
  * work struct. Once both are ready, submit them to the required places.
  */
-fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
+fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: Buffer, sender: std_mpsc::Sender<i32>) {
     /*
      * We need to know the block size to allow us to convert between
      * bytes and blocks.  Bytes for when we have to slice buffers,
@@ -1338,10 +1436,9 @@ fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
      */
     let nwo = extent_from_offset(up, offset, data.len()).unwrap();
     println!(
-        "nwo: {:?} from offset:{} data: {:p} len:{}",
+        "nwo: {:?} from offset:{} data len:{}",
         nwo,
         offset,
-        data.as_ptr(),
         data.len()
     );
     /*
@@ -1381,7 +1478,7 @@ fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: bytes::BytesMut) {
      * lists.  We don't want to miss a completion from downstairs.
      */
     assert!(!sub.is_empty());
-    let new_gtos = GtoS::new(sub, Vec::new(), Some(data), HashMap::new());
+    let new_gtos = GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
     {
         let mut gw = up.guest.guest_work.lock().unwrap();
         gw.active.insert(gw_id, new_gtos);
@@ -1402,6 +1499,7 @@ fn guest_submit_write(
     up: &Arc<Upstairs>,
     offset: u64,
     data: bytes::Bytes, // Where the data comes from
+    sender: std_mpsc::Sender<i32>,
 ) {
     /*
      * Get the next ID for the guest work struct we will make at the
@@ -1457,7 +1555,7 @@ fn guest_submit_write(
     /*
      * New work created, add to the guest_work HM
      */
-    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new());
+    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
     {
         let mut gw = up.guest.guest_work.lock().unwrap();
         gw.active.insert(gw_id, new_gtos);
@@ -1473,7 +1571,7 @@ fn guest_submit_write(
  * Turn a guest flush request into both a guest_work active operaion
  * and put an entry on the work hashmap for downstairs.
  */
-fn guest_submit_flush(up: &Arc<Upstairs>) {
+fn guest_submit_flush(up: &Arc<Upstairs>, sender: std_mpsc::Sender<i32>) {
     /*
      * Get the next ID for our new guest work job
      */
@@ -1497,7 +1595,7 @@ fn guest_submit_flush(up: &Arc<Upstairs>) {
     sub.insert(next_id, 0);
 
     println!("FLUSH: gw_id:{} ds_ids:{:?}", gw_id, sub,);
-    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new());
+    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
     {
         let mut gw = up.guest.guest_work.lock().unwrap();
         gw.active.insert(gw_id, new_gtos);
@@ -1562,21 +1660,20 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
     let mut lastcast = 1;
     loop {
         let req = up.guest.recv().await;
-        match req {
+        match req.op {
             BlockOp::Read { offset, data } => {
-                println!("recv read data at  {:p}", data.as_ptr());
-                guest_submit_read(up, offset, data);
+                guest_submit_read(up, offset, data, req.send);
                 // Send the message that there is new work to do
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
             BlockOp::Write { offset, data } => {
-                guest_submit_write(up, offset, data);
+                guest_submit_write(up, offset, data, req.send);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
             BlockOp::Flush => {
-                guest_submit_flush(up);
+                guest_submit_flush(up, req.send);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }

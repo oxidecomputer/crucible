@@ -56,6 +56,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
 
 [[package]]
+name = "byteorder"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14c189c53d098945499cdfa7ecc63567cf3886b3332b312a5b4585d8d3a6a610"
+
+[[package]]
 name = "bytes"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -146,6 +152,28 @@ dependencies = [
  "futures",
  "futures-core",
  "serde",
+ "structopt",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
+name = "crucible-nbd-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crucible",
+ "crucible-common",
+ "crucible-protocol",
+ "crucible-scope",
+ "futures",
+ "futures-core",
+ "nbd",
+ "ringbuffer",
+ "serde",
+ "serde_json",
  "structopt",
  "tokio",
  "tokio-util",
@@ -371,6 +399,15 @@ checksum = "5a33c1b55807fbed163481b5ba66db4b2fa6cde694a5027be10fb724206c5897"
 dependencies = [
  "socket2",
  "winapi",
+]
+
+[[package]]
+name = "nbd"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae36b0aee27117ae0bc775511be136ac58692704b8650da1e6afee816394a11a"
+dependencies = [
+ "byteorder",
 ]
 
 [[package]]
