@@ -61,12 +61,12 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;
-    let mut data = BytesMut::with_capacity(READ_SIZE);
-    data.put(&[0x99; READ_SIZE][..]);
-    println!("send read, data at {:p}", data.as_ptr());
+    let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
+
+    println!("send a read");
     let rio = BlockOp::Read {
         offset: read_offset,
-        data,
+        data: data.clone(),
     };
     guest.send(rio);
 
