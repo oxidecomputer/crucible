@@ -1,6 +1,6 @@
 [package]
 name = "crucible"
-version = "0.0.0"
+version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 edition = "2018"
 
@@ -11,6 +11,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "crucible-upstairs"
 path = "src/main.rs"
+
+[build-dependencies]
+usdt = "0.1.13"
+
+[features]
+asm = ["usdt/asm"]
 
 [dependencies]
 anyhow = "1"
@@ -27,3 +33,4 @@ structopt = "0.3"
 tokio = { version = "1.7.1", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"]}
 toml = "0.5"
+usdt = "0.1.13"
