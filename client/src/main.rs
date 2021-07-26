@@ -131,9 +131,7 @@ fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
                 let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
                 println!(
                     "[{}][{}] send read   offset:{}",
-                    olc,
-                    lc,
-                    read_offset,
+                    olc, lc, read_offset,
                 );
                 let rio = BlockOp::Read {
                     offset: read_offset,
@@ -211,4 +209,3 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         //scope.wait_for("at the bottom").await;
     }
 }
-

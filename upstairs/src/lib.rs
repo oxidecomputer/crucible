@@ -2,9 +2,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddrV4;
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use std::sync::{mpsc as std_mpsc};
 
 use crucible_common::*;
 use crucible_protocol::*;
@@ -955,7 +955,7 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn new(len: usize)-> Buffer {
+    pub fn new(len: usize) -> Buffer {
         Buffer {
             data: Arc::new(Mutex::new(Vec::<u8>::with_capacity(len))),
         }
@@ -1239,10 +1239,7 @@ impl BlockReq {
     // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code
     // return the std::sync::mpsc Sender to non-tokio task callers
     fn new(op: BlockOp, send: std_mpsc::Sender<i32>) -> BlockReq {
-        Self {
-            op: op,
-            send: send,
-        }
+        Self { op: op, send: send }
     }
 }
 
@@ -1256,9 +1253,7 @@ pub struct BlockReqWaiter {
 
 impl BlockReqWaiter {
     fn new(recv: std_mpsc::Receiver<i32>) -> BlockReqWaiter {
-        Self {
-            recv: recv,
-        }
+        Self { recv: recv }
     }
 
     pub fn block_wait(&mut self) {
@@ -1266,7 +1261,6 @@ impl BlockReqWaiter {
         let _ = self.recv.recv();
     }
 }
-
 
 /**
  * This is the structure we use to keep track of work passed into crucible
@@ -1418,7 +1412,12 @@ fn _send_work(t: &[Target], val: u64) {
  * build both the upstairs work guest tracking struct as well as the downstairs
  * work struct. Once both are ready, submit them to the required places.
  */
-fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: Buffer, sender: std_mpsc::Sender<i32>) {
+fn guest_submit_read(
+    up: &Arc<Upstairs>,
+    offset: u64,
+    data: Buffer,
+    sender: std_mpsc::Sender<i32>,
+) {
     /*
      * We need to know the block size to allow us to convert between
      * bytes and blocks.  Bytes for when we have to slice buffers,
@@ -1486,7 +1485,8 @@ fn guest_submit_read(up: &Arc<Upstairs>, offset: u64, data: Buffer, sender: std_
      * lists.  We don't want to miss a completion from downstairs.
      */
     assert!(!sub.is_empty());
-    let new_gtos = GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
+    let new_gtos =
+        GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
     {
         let mut gw = up.guest.guest_work.lock().unwrap();
         gw.active.insert(gw_id, new_gtos);
@@ -1706,7 +1706,6 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
  * probably need a re-write.
  */
 pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
-
     register_probes().unwrap();
     /*
      * Build the Upstairs struct that we use to share data between
@@ -1798,7 +1797,6 @@ pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
     // That part is not connected yet. XXX
     let mut ds_count = 0u32;
     loop {
-
         register_probes().unwrap();
         let c = crx.recv().await.unwrap();
         if c.connected {
@@ -1979,7 +1977,6 @@ fn show_guest_work(guest: &Arc<Guest>) {
     let done = gw.completed.to_vec();
     println!("GW_JOB completed:{:?} ", done);
 }
-
 
 #[cfg(test)]
 mod test {

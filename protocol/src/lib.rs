@@ -125,7 +125,7 @@ impl Encoder<Message> for CrucibleEncoder {
                     + dependencies.len() * 8  // dep Vec
                     + 8     // block offset
                     + 4     // data len.
-                    + data.len();  // data
+                    + data.len(); // data
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(7);
@@ -157,7 +157,7 @@ impl Encoder<Message> for CrucibleEncoder {
                     + 4      // dep Vec len
                     + dependencies.len() * 8  // dep Vec
                     + 4      // flush Vec len
-                    + flush.len() * 8;  // flush Vec
+                    + flush.len() * 8; // flush Vec
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(9);
