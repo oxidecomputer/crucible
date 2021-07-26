@@ -197,10 +197,10 @@ fn main() -> Result<()> {
     // NBD server
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
     let mut cpf = CruciblePseudoFile {
-        guest: guest,
+        guest,
         block_size: region.block_size() as usize,
         offset: 0,
-        sz: sz, // sent to NBD client during handshake through Export struct
+        sz, // sent to NBD client during handshake through Export struct
     };
 
     for stream in listener.incoming() {

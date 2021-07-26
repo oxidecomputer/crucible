@@ -231,68 +231,6 @@ fn process_downstairs(
     Ok(())
 }
 
-/**
- * When a read finishes, we need to keep track of the buffer we got back from
- * downstairs.  This will allow us to decrypt and copy the read data into the
- * buffer provided for us when the read was requested.
- */
-fn _save_read_buffer(
-    target: &SocketAddrV4,
-    up: &Arc<Upstairs>,
-    ds_id: u64,
-    buff: bytes::Bytes,
-) -> Result<()> {
-    let gw_id: u64;
-    {
-        let mut work = up.work.lock().unwrap();
-        let job = work
-            .active
-            .get_mut(&ds_id)
-            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
-
-        gw_id = job.guest_id;
-    }
-
-    let mut gw = up.guest.guest_work.lock().unwrap();
-    /*
-     * This gw_id should exist, But.. If a previous read has already finished
-     * and we already sent that back to the guest, we could no longer have a
-     * valid gw_id on the active list.  A rare but possible situation.
-     */
-    if let Some(gtos_job) = gw.active.get_mut(&gw_id) {
-        /*
-         * If the ds_id is on the submitted list, then we will take it off
-         * and add the read result buffer to the gtos job structure for
-         * later copying.
-         *
-         * If it's not, then verify our ds_id is already on the completed
-         * list, just to catch any problems.
-         */
-        if gtos_job.submitted.remove(&ds_id).is_some() {
-            /*
-             * Take this job off of the submitted list.  The first read
-             * buffer will become the source for the final response
-             * back to the guest.  This buffer will be combined with other
-             * buffers if the upstairs request required multiple jobs.
-             */
-            if gtos_job.downstairs_buffer.contains_key(&ds_id) {
-                println!(
-                    "Read buffer for {} already present at {}",
-                    gw_id, ds_id
-                );
-                // panic? XXX
-            } else {
-                println!("{} Read save_read_buffer for {}", target, ds_id);
-                gtos_job.downstairs_buffer.insert(ds_id, buff);
-            }
-            gtos_job.completed.push(ds_id);
-        } else {
-            assert!(gtos_job.completed.contains(&ds_id));
-        }
-    }
-    Ok(())
-}
-
 /*
  * This function is called when the upstairs task is notified that
  * a downstairs operation has completed.  We add the read buffer to the
@@ -848,8 +786,8 @@ pub struct Upstairs {
  */
 #[derive(Debug, Clone)]
 enum DownstairsState {
-    NotReady,
-    Ready,
+    _NotReady,
+    _Ready,
 }
 
 /*
@@ -966,8 +904,9 @@ impl Buffer {
 
         {
             let mut vec = data.as_vec();
-            for i in 0..buf.len() {
-                vec.push(buf[i]);
+            for item in buf {
+                //vec.push(buf[i]);
+                vec.push(*item);
             }
         }
 
@@ -976,6 +915,10 @@ impl Buffer {
 
     pub fn len(&self) -> usize {
         self.data.try_lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() > 0
     }
 
     pub fn as_vec(&self) -> MutexGuard<Vec<u8>> {
@@ -1099,7 +1042,12 @@ impl GtoS {
      * Notify corresponding BlockReqWaiter
      */
     pub fn notify(&mut self) {
-        self.sender.send(0);
+        /*
+         * If the guest is no longer listening and this returns an error,
+         * do we care?  This could happen if the guest has given up
+         * becuase an IO took too long, or other possible guest side reasons.
+         */
+        if self.sender.send(0).is_ok() {}
     }
 }
 
@@ -1155,6 +1103,10 @@ impl GuestWork {
      * we may not be done yet.  When all the downstairs jobs finish, we
      * can move forward with finishing up the guest work operation.
      * This may include moving/decrypting data buffers from completed reads.
+     *
+     * TODO: Error handling case needs to come through here in a way that
+     * won't break if enough of the IO completed to satisfy the upstairs, but
+     * will be handled if all the downstairs have returned error.
      */
     fn ds_complete(&mut self, done: DownstairsIO) {
         let gw_id = done.guest_id;
@@ -1174,25 +1126,33 @@ impl GuestWork {
              * list, just to catch any problems.
              */
             if gtos_job.submitted.remove(&ds_id).is_some() {
-                /*
-                 * Take this job off of the submitted list.  The first read
-                 * buffer will become the source for the final response
-                 * back to the guest.  This buffer will be combined with other
-                 * buffers if the upstairs request required multiple jobs.
-                 */
-                if gtos_job.downstairs_buffer.contains_key(&ds_id) {
-                    println!(
-                        "gw_id:{} Read buffer for {} already present",
-                        gw_id, ds_id
-                    );
-                    // panic? XXX
-                } else {
-                    if let Some(data) = done.data {
-                        println!("gw_id:{} save buffer for {}", gw_id, ds_id);
-                        gtos_job.downstairs_buffer.insert(ds_id, data);
+                if let Some(data) = done.data {
+                    /*
+                     * The first read buffer will become the source for the
+                     * final response back to the guest.  This buffer will be
+                     * combined with other buffers if the upstairs request
+                     * required multiple jobs.
+                     */
+                    if gtos_job.downstairs_buffer.insert(ds_id, data).is_some()
+                    {
+                        println!(
+                            "gw_id:{} read buffer already present for {}",
+                            gw_id, ds_id
+                        );
+                        /*
+                         * This may panic at some future point when only one
+                         * read should be enough to satisfy the guest
+                         * reuquest, though it may depend on how we make the
+                         * different downstairs consistent.  XXX
+                         */
+                    } else {
+                        println!(
+                            "gw_id:{} Save read buffer for {}",
+                            gw_id, ds_id
+                        );
                     }
-                    // else: Assert flush or write XXX
-                }
+                } // XXX else can we assert we don't expect data?
+
                 gtos_job.completed.push(ds_id);
             } else {
                 // XXX Should this just panic?
@@ -1239,7 +1199,7 @@ impl BlockReq {
     // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code
     // return the std::sync::mpsc Sender to non-tokio task callers
     fn new(op: BlockOp, send: std_mpsc::Sender<i32>) -> BlockReq {
-        Self { op: op, send: send }
+        Self { op, send }
     }
 }
 
@@ -1253,7 +1213,7 @@ pub struct BlockReqWaiter {
 
 impl BlockReqWaiter {
     fn new(recv: std_mpsc::Receiver<i32>) -> BlockReqWaiter {
-        Self { recv: recv }
+        Self { recv }
     }
 
     pub fn block_wait(&mut self) {
@@ -1352,7 +1312,7 @@ impl Guest {
         self.reqs.lock().unwrap().push_back(BlockReq::new(op, send));
         self.notify.notify_one();
 
-        return BlockReqWaiter::new(recv);
+        BlockReqWaiter::new(recv)
     }
 
     /*
@@ -1689,7 +1649,7 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
                 lastcast += 1;
             }
             BlockOp::ShowWork => {
-                _show_work(&up);
+                _show_work(up);
             }
             BlockOp::Commit => {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());

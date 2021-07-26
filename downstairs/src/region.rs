@@ -278,7 +278,7 @@ impl Extent {
         Ok(())
     }
 
-    pub fn flush(&self, new_flush: u64) -> Result<()> {
+    pub fn flush(&self, _new_flush: u64) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
         if !inner.meta.dirty {

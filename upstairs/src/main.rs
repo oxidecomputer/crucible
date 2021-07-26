@@ -66,7 +66,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     println!("send a read");
     let rio = BlockOp::Read {
         offset: read_offset,
-        data: data.clone(),
+        data,
     };
     guest.send(rio);
 
