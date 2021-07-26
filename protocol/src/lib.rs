@@ -12,7 +12,7 @@ pub enum Message {
     Imok,
     ExtentVersionsPlease,
     ExtentVersions(u64, u64, u32, Vec<u64>),
-    Write(u64, u64, u64, bytes::Bytes), // XXX Still needs a depend
+    Write(u64, u64, Vec<u64>, u64, bytes::Bytes),
     WriteAck(u64),
     Flush(u64, Vec<u64>, Vec<u64>),
     FlushAck(u64),
@@ -116,18 +116,25 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::Write(rn, eid, block_offset, data) => {
-                /*
-                 * Total size is:
-                 * length field + message ID + rn + eid + block offset
-                 * + buf len + buf
-                 */
-                let len = 4 + 8 + 4 + 8 + 8 + 4 + data.len();
+            Message::Write(rn, eid, dependencies, block_offset, data) => {
+                let len = 4 // length field
+                    + 4     // message ID
+                    + 8     // rn
+                    + 8     // eid
+                    + 4     // dep Vec len
+                    + dependencies.len() * 8  // dep Vec
+                    + 8     // block offset
+                    + 4     // data len.
+                    + data.len(); // data
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(7);
                 dst.put_u64_le(rn);
                 dst.put_u64_le(eid);
+                dst.put_u32_le(dependencies.len() as u32);
+                for v in dependencies.iter() {
+                    dst.put_u64_le(*v);
+                }
                 dst.put_u64_le(block_offset);
                 dst.put_u32_le(data.len() as u32);
                 dst.extend_from_slice(&data);
@@ -144,19 +151,13 @@ impl Encoder<Message> for CrucibleEncoder {
                 Ok(())
             }
             Message::Flush(rn, dependencies, flush) => {
-                /*
-                 * Total size is all of these:
-                 * length field, message ID, rn,
-                 * dep vector length, dep vector
-                 * flush vector length, flush vector
-                 */
-                let len = 4
-                    + 4
-                    + 8
-                    + 4
-                    + dependencies.len() * 8
-                    + 4
-                    + flush.len() * 8;
+                let len = 4  // length
+                    + 4      // Message ID
+                    + 8      // rn
+                    + 4      // dep Vec len
+                    + dependencies.len() * 8  // dep Vec
+                    + 4      // flush Vec len
+                    + flush.len() * 8; // flush Vec
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(9);
@@ -312,11 +313,18 @@ impl Decoder for CrucibleDecoder {
                 chklen(&src, 8 + 8 + 4)?;
                 let rn = src.get_u64_le();
                 let eid = src.get_u64_le();
+                let depend_count = src.get_u32_le() as usize;
+                chklen(&src, depend_count.checked_mul(8).unwrap())?;
+                let mut dependencies = Vec::new();
+                for _ in 0..depend_count {
+                    dependencies.push(src.get_u64_le());
+                }
+                chklen(&src, 8 + 4)?;
                 let block_offset = src.get_u64_le();
                 let data_len = src.get_u32_le() as usize;
                 chklen(&src, data_len)?;
                 let data = src.split_to(data_len).freeze();
-                Some(Message::Write(rn, eid, block_offset, data))
+                Some(Message::Write(rn, eid, dependencies, block_offset, data))
             }
             8 => {
                 chklen(&src, 8)?;
