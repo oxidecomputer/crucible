@@ -1,16 +1,16 @@
-use std::sync::{Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::{BufMut, BytesMut};
 use tokio::runtime::Builder;
 
 use crucible::*;
-use crucible_common::{RegionOptions, RegionDefinition};
+use crucible_common::{RegionDefinition, RegionOptions};
 
-use std::io::{Result as IOResult};
-use std::net::{TcpListener, TcpStream as NetTcpStream};
 use nbd::server::{handshake, transmission, Export};
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::Result as IOResult;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::{TcpListener, TcpStream as NetTcpStream};
 
 /*
  * NBD server commands translate through the CruciblePseudoFile and turn
@@ -92,7 +92,6 @@ impl Read for CruciblePseudoFile {
 
         Ok(result)
     }
-
 }
 
 impl Write for CruciblePseudoFile {
@@ -127,11 +126,11 @@ impl Seek for CruciblePseudoFile {
         match pos {
             SeekFrom::Start(v) => {
                 self.offset = v as u64;
-            },
+            }
             SeekFrom::Current(v) => {
                 // TODO: as checked add?
                 self.offset += v as u64;
-            },
+            }
             SeekFrom::End(v) => {
                 // TODO: as checked subtract?
                 self.offset = self.sz - v as u64;
@@ -145,7 +144,10 @@ impl Seek for CruciblePseudoFile {
     }
 }
 
-fn handle_nbd_client(cpf: &mut CruciblePseudoFile, mut stream: NetTcpStream) -> Result<()> {
+fn handle_nbd_client(
+    cpf: &mut CruciblePseudoFile,
+    mut stream: NetTcpStream,
+) -> Result<()> {
     let e = Export {
         size: cpf.sz,
         readonly: false,
@@ -183,15 +185,18 @@ fn main() -> Result<()> {
     println!("Crucible runtime is spawned");
 
     // TODO: read this from somewhere, instead of defaults
-    let mut region = RegionDefinition::from_options(&RegionOptions::default()).unwrap();
+    let mut region =
+        RegionDefinition::from_options(&RegionOptions::default()).unwrap();
     region.set_extent_count(10);
 
-    let sz = region.block_size() * region.extent_size() * (region.extent_count() as u64);
+    let sz = region.block_size()
+        * region.extent_size()
+        * (region.extent_count() as u64);
     println!("NBD advertised size as {} bytes", sz);
 
     // NBD server
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
-    let mut cpf = CruciblePseudoFile{
+    let mut cpf = CruciblePseudoFile {
         guest: guest,
         block_size: region.block_size() as usize,
         offset: 0,
