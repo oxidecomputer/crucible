@@ -848,8 +848,8 @@ pub struct Upstairs {
  */
 #[derive(Debug, Clone)]
 enum DownstairsState {
-    NotReady,
-    Ready,
+    _NotReady,
+    _Ready,
 }
 
 /*
@@ -1098,8 +1098,9 @@ impl GtoS {
     /*
      * Notify corresponding BlockReqWaiter
      */
-    pub fn notify(&mut self) {
-        self.sender.send(0);
+    pub fn notify(&mut self) -> Result<()> {
+        self.sender.send(0)?;
+        Ok(())
     }
 }
 
@@ -1209,7 +1210,7 @@ impl GuestWork {
                 if gtos_job.guest_buffer.is_some() {
                     gtos_job.transfer();
                 }
-                gtos_job.notify();
+                gtos_job.notify().unwrap(); // TODO: Handle this error
                 self.complete(gw_id);
             }
         } else {
