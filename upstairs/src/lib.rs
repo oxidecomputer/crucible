@@ -388,6 +388,7 @@ async fn io_send(
                 fw.send(Message::Write(
                     *new_id,
                     eid,
+                    dependencies.clone(),
                     block_offset,
                     data.clone(),
                 ))

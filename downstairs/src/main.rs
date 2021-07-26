@@ -59,10 +59,10 @@ async fn proc_frame(
             fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
                 .await
         }
-        Message::Write(rn, eid, block_offset, data) => {
+        Message::Write(rn, eid, dependencies, block_offset, data) => {
             println!(
-                "Write       rn:{} eid:{:?} bo:{:?}",
-                rn, eid, block_offset
+                "Write       rn:{} eid:{:?} dep:{:?} bo:{:?}",
+                rn, eid, dependencies, block_offset
             );
 
             d.region.region_write(*eid, *block_offset, data)?;
