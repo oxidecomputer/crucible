@@ -272,36 +272,36 @@ impl Decoder for CrucibleDecoder {
         Ok(match src.get_u32_le() {
             0 => bail!("message code must be non-zero"),
             1 => {
-                chklen(&src, 4)?;
+                chklen(src, 4)?;
 
                 let version = src.get_u32_le();
                 Some(Message::HereIAm(version))
             }
             2 => {
-                chklen(&src, 4)?;
+                chklen(src, 4)?;
 
                 let version = src.get_u32_le();
                 Some(Message::YesItsMe(version))
             }
             3 => {
-                chklen(&src, 0)?;
+                chklen(src, 0)?;
                 Some(Message::Ruok)
             }
             4 => {
-                chklen(&src, 0)?;
+                chklen(src, 0)?;
                 Some(Message::Imok)
             }
             5 => {
-                chklen(&src, 0)?;
+                chklen(src, 0)?;
                 Some(Message::ExtentVersionsPlease)
             }
             6 => {
-                chklen(&src, 8 + 8 + 4 + 4)?;
+                chklen(src, 8 + 8 + 4 + 4)?;
                 let bs = src.get_u64_le();
                 let es = src.get_u64_le();
                 let ec = src.get_u32_le();
                 let extent_count = src.get_u32_le() as usize;
-                chklen(&src, extent_count.checked_mul(8).unwrap())?;
+                chklen(src, extent_count.checked_mul(8).unwrap())?;
                 let mut versions = Vec::new();
                 for _ in 0..extent_count {
                     versions.push(src.get_u64_le());
@@ -310,38 +310,38 @@ impl Decoder for CrucibleDecoder {
             }
             7 => {
                 // Write
-                chklen(&src, 8 + 8 + 4)?;
+                chklen(src, 8 + 8 + 4)?;
                 let rn = src.get_u64_le();
                 let eid = src.get_u64_le();
                 let depend_count = src.get_u32_le() as usize;
-                chklen(&src, depend_count.checked_mul(8).unwrap())?;
+                chklen(src, depend_count.checked_mul(8).unwrap())?;
                 let mut dependencies = Vec::new();
                 for _ in 0..depend_count {
                     dependencies.push(src.get_u64_le());
                 }
-                chklen(&src, 8 + 4)?;
+                chklen(src, 8 + 4)?;
                 let block_offset = src.get_u64_le();
                 let data_len = src.get_u32_le() as usize;
-                chklen(&src, data_len)?;
+                chklen(src, data_len)?;
                 let data = src.split_to(data_len).freeze();
                 Some(Message::Write(rn, eid, dependencies, block_offset, data))
             }
             8 => {
-                chklen(&src, 8)?;
+                chklen(src, 8)?;
                 let rn = src.get_u64_le();
                 Some(Message::WriteAck(rn))
             }
             9 => {
-                chklen(&src, 8 + 4)?;
+                chklen(src, 8 + 4)?;
                 let rn = src.get_u64_le();
                 let depend_count = src.get_u32_le() as usize;
-                chklen(&src, depend_count.checked_mul(8).unwrap())?;
+                chklen(src, depend_count.checked_mul(8).unwrap())?;
                 let mut dependencies = Vec::new();
                 for _ in 0..depend_count {
                     dependencies.push(src.get_u64_le());
                 }
                 let flush_count = src.get_u32_le() as usize;
-                chklen(&src, flush_count.checked_mul(8).unwrap())?;
+                chklen(src, flush_count.checked_mul(8).unwrap())?;
                 let mut flush = Vec::new();
                 for _ in 0..flush_count {
                     flush.push(src.get_u64_le());
@@ -349,12 +349,12 @@ impl Decoder for CrucibleDecoder {
                 Some(Message::Flush(rn, dependencies, flush))
             }
             10 => {
-                chklen(&src, 8)?;
+                chklen(src, 8)?;
                 let rn = src.get_u64_le();
                 Some(Message::FlushAck(rn))
             }
             11 => {
-                chklen(&src, 28)?;
+                chklen(src, 28)?;
                 let rn = src.get_u64_le();
                 let eid = src.get_u64_le();
                 let block_offset = src.get_u64_le();
@@ -362,10 +362,10 @@ impl Decoder for CrucibleDecoder {
                 Some(Message::ReadRequest(rn, eid, block_offset, blocks))
             }
             12 => {
-                chklen(&src, 8 + 4)?;
+                chklen(src, 8 + 4)?;
                 let rn = src.get_u64_le();
                 let data_len = src.get_u32_le() as usize;
-                chklen(&src, data_len)?;
+                chklen(src, data_len)?;
                 let data = src.split_to(data_len).freeze();
                 Some(Message::ReadResponse(rn, data))
             }
