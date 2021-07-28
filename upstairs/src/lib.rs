@@ -50,7 +50,7 @@ impl Opt {
      *
      */
     pub fn from_string(args: String) -> Result<Opt> {
-        let opt: Opt = Opt::from_iter(args.split(" "));
+        let opt: Opt = Opt::from_iter(args.split(' '));
 
         if opt.target.is_empty() {
             bail!("must specify at least one --target");
@@ -103,7 +103,6 @@ async fn proc_frame(
             Ok(io_completed(u, *ds_id, client_id, None, ds_done_tx).await?)
         }
         Message::FlushAck(ds_id) => {
-            // XXX Clear dirty bit, but we need the job info for that.
             Ok(io_completed(u, *ds_id, client_id, None, ds_done_tx).await?)
         }
         Message::ReadResponse(ds_id, data) => Ok(io_completed(
@@ -198,23 +197,20 @@ fn process_downstairs(
         target, bs, es, ec, versions
     );
 
-    let mut v = u.versions.lock().unwrap();
-    if v.len() == 0 {
+    let mut fi = u.flush_info.lock().unwrap();
+    if fi.flush_numbers.is_empty() {
         /*
          * This is the first version list we have, so
          * we will make it the original and compare
          * whatever comes next.
          */
-        *v = versions;
-        println!("Setting inital Extent versions to {:?}", v);
-
-        /*
-         * Create the dirty vector with the same length as our version list.
-         * XXX Not used yet.
-         */
-        let mut d = u.dirty.lock().unwrap();
-        *d = vec![false; v.len()];
-    } else if v.len() != versions.len() {
+        fi.flush_numbers = versions;
+        fi.next_flush = *fi.flush_numbers.iter().max().unwrap() + 1;
+        println!(
+            "Set inital Extent versions to {:?}\nNext flush: {}",
+            fi.flush_numbers, fi.next_flush
+        );
+    } else if fi.flush_numbers.len() != versions.len() {
         /*
          * I don't think there is much we can do here, the expected number
          * of flush numbers does not match.  Possibly we have grown one but
@@ -224,7 +220,7 @@ fn process_downstairs(
             "Expected downstairs version \
               len:{:?} does not match new \
               downstairs:{:?}",
-            v.len(),
+            fi.flush_numbers.len(),
             versions.len()
         );
     } else {
@@ -232,13 +228,14 @@ fn process_downstairs(
          * We already have a list of versions to compare with.  Make that
          * comparision now against this new list
          */
-        let ver_cmp = v.iter().eq(versions.iter());
+        let ver_cmp = fi.flush_numbers.iter().eq(versions.iter());
         if !ver_cmp {
-            // XXX Recovery process should start here
             println!(
                 "{} MISMATCH expected: {:?} != new: {:?}",
-                target, v, versions
+                target, fi.flush_numbers, versions
             );
+            // XXX Recovery process should start here
+            println!("{} Ignoring this downstairs version info", target);
         }
     }
 
@@ -355,13 +352,6 @@ async fn io_send(
                 block_offset,
                 data,
             } => {
-                /*
-                 * XXX Before we write, we should set the dirty bit
-                 * {
-                 *    let eid = eid_from_offset(u, offset);
-                 *    let dirt = u.dirty.lock().unwrap();
-                 *}
-                 */
                 println!(
                     "[{}] Write ds_id:{} eid:{:?} bo:{:?}",
                     client_id, *new_id, eid, block_offset
@@ -377,16 +367,16 @@ async fn io_send(
             }
             IOop::Flush {
                 dependencies,
-                flush_numbers,
+                flush_number,
             } => {
                 println!(
-                    "Flush ds_id:{} dep:{:?} fl:{:?}",
-                    *new_id, dependencies, flush_numbers
+                    "Flush ds_id:{} dep:{:?} flush_number:{:?}",
+                    *new_id, dependencies, flush_number
                 );
                 fw.send(Message::Flush(
                     *new_id,
                     dependencies.clone(),
-                    flush_numbers.clone(),
+                    flush_number,
                 ))
                 .await?
             }
@@ -804,11 +794,23 @@ pub struct Upstairs {
      * upstairs on behalf of IO requests coming from the guest.
      */
     work: Mutex<Work>,
-    // The versions vec is not enough to solve a mismatch.  We really need
-    // Generation number, flush number, and dirty bit for every extent
-    // when resolving conflicts.
-    versions: Mutex<Vec<u64>>,
-    dirty: Mutex<Vec<bool>>,
+    /*
+     * The flush info Vec is only used when first connecting or re-connecting
+     * to a downstairs.  It is populated with the versions the upstairs
+     * considers the "correct".  If a downstairs disconnects and then
+     * comes back, it has to match or be made to match what was decided
+     * as the correct list.  This may involve having to refresh the versions
+     * vec.
+     *
+     * The versions vec is not enough to solve a mismatch.  We really need
+     * Generation number, flush number, and dirty bit for every extent
+     * when resolving conflicts.
+     *
+     * On Startup we determine the highest flush number from all three
+     * downstairs.  We add one to that and it becomes the next flush
+     * number.  Flush numbers increment by one each time.
+     */
+    flush_info: Mutex<FlushInfo>,
     /*
      * The global description of the downstairs region we are using.
      * This allows us to verify each downstairs is the same, as well as
@@ -823,6 +825,59 @@ pub struct Upstairs {
     guest: Arc<Guest>,
 }
 
+impl Upstairs {
+    pub fn new(opt: &Opt, guest: Arc<Guest>) -> Arc<Upstairs> {
+        Arc::new(Upstairs {
+            work: Mutex::new(Work {
+                active: HashMap::new(),
+                completed: AllocRingBuffer::with_capacity(2048),
+                next_id: 1000,
+            }),
+            flush_info: Mutex::new(FlushInfo::new()),
+            ddef: Mutex::new(RegionDefinition::default()),
+            downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
+            guest,
+        })
+    }
+    /*
+     * If we are doing a flush, the flush number and the rn number
+     * must both go up together.  We don't want a lower next_id
+     * with a higher flush_number to be possible, as that can introduce
+     * dependency deadlock.
+     */
+    pub fn next_flush_ids(&self) -> (u64, u64) {
+        let mut work = self.work.lock().unwrap();
+        let next_id = work.next_id();
+        let mut fi = self.flush_info.lock().unwrap();
+        let nf = fi.next_flush();
+        (next_id, nf)
+    }
+}
+
+#[derive(Debug)]
+struct FlushInfo {
+    flush_numbers: Vec<u64>,
+    /*
+     * Next flush number (other than initial setting) must come through
+     * the upstairs next_flush_id method.  This is required to avoid dependency
+     * deadlock where a lower job ID to downstairs has a higher flush number.
+     */
+    next_flush: u64,
+}
+
+impl FlushInfo {
+    pub fn new() -> FlushInfo {
+        FlushInfo {
+            flush_numbers: Vec::new(),
+            next_flush: 0,
+        }
+    }
+    fn next_flush(&mut self) -> u64 {
+        let id = self.next_flush;
+        self.next_flush += 1;
+        id
+    }
+}
 /*
  * I think we will have more states.  If not, then this should just become
  * a bool.
@@ -875,7 +930,7 @@ pub enum IOop {
     },
     Flush {
         dependencies: Vec<u64>, // Writes that must finish before this
-        flush_numbers: Vec<u64>,
+        flush_number: u64,
     },
 }
 
@@ -1603,15 +1658,9 @@ fn guest_submit_flush(up: &Arc<Upstairs>, sender: std_mpsc::Sender<i32>) {
      * Build the flush request, and take note of the request ID that
      * will be assigned to this new piece of work.
      */
-    let next_id: u64;
-    let fl: DownstairsIO;
-    {
-        // XXX double locking... think about this one
-        let mut work = up.work.lock().unwrap();
-        next_id = work.next_id();
-        let ver = up.versions.lock().unwrap();
-        fl = create_flush(next_id, ver.clone(), gw_id);
-    }
+    let (next_id, next_flush) = up.next_flush_ids();
+    let dep = Vec::new();
+    let fl = create_flush(next_id, dep, next_flush, gw_id);
 
     let mut sub = HashMap::new();
     sub.insert(next_id, 0);
@@ -1731,18 +1780,7 @@ pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Arc::new(Upstairs {
-        work: Mutex::new(Work {
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2048),
-            next_id: 1000,
-        }),
-        versions: Mutex::new(Vec::new()),
-        dirty: Mutex::new(Vec::new()),
-        ddef: Mutex::new(RegionDefinition::default()),
-        downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
-        guest,
-    });
+    let up = Upstairs::new(&opt, guest);
 
     /*
      * Use this channel to receive updates on target status from each task
@@ -1903,10 +1941,15 @@ fn create_read_eob(
 /*
  * Create a flush DownstairsIO structure.
  */
-fn create_flush(ds_id: u64, fln: Vec<u64>, guest_id: u64) -> DownstairsIO {
+fn create_flush(
+    ds_id: u64,
+    dependencies: Vec<u64>,
+    flush_number: u64,
+    guest_id: u64,
+) -> DownstairsIO {
     let flush = IOop::Flush {
-        dependencies: Vec::new(), // XXX coming soon
-        flush_numbers: fln,
+        dependencies,
+        flush_number,
     };
 
     let mut state = HashMap::new();
@@ -1949,7 +1992,7 @@ fn _show_work(up: &Arc<Upstairs>) {
             } => "Write".to_string(),
             IOop::Flush {
                 dependencies,
-                flush_numbers,
+                flush_number,
             } => "Flush".to_string(),
         };
         print!("JOB:[{:04}] {} ", id, job_type);
@@ -2016,8 +2059,7 @@ mod test {
                 completed: AllocRingBuffer::with_capacity(2),
                 next_id: 1000,
             }),
-            versions: Mutex::new(Vec::new()),
-            dirty: Mutex::new(Vec::new()),
+            flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             downstairs: Mutex::new(Vec::with_capacity(1)),
             guest: Arc::new(Guest::new()),
