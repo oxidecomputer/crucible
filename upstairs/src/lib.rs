@@ -42,6 +42,49 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
+impl Opt {
+    /*
+     * Use:
+     *
+     *     let opt = Opt::from_string("-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string()).unwrap();
+     *
+     */
+    pub fn from_string(args: String) -> Result<Opt> {
+        let opt: Opt = Opt::from_iter(args.split(" "));
+
+        if opt.target.is_empty() {
+            bail!("must specify at least one --target");
+        }
+
+        Ok(opt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Opt;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    #[test]
+    fn test_opt_from_string() {
+        let opt = Opt::from_string(
+            "-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string(),
+        )
+        .unwrap();
+        assert_eq!(opt.target.is_empty(), false);
+        assert_eq!(opt.target.len(), 2);
+
+        assert_eq!(
+            opt.target[0],
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 3801)
+        );
+        assert_eq!(
+            opt.target[1],
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801)
+        );
+    }
+}
+
 pub fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
         .checked_add(Duration::from_secs(secs))
@@ -893,9 +936,18 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn new(len: usize) -> Buffer {
+    pub fn from_vec(vec: Vec<u8>) -> Buffer {
         Buffer {
-            data: Arc::new(Mutex::new(Vec::<u8>::with_capacity(len))),
+            data: Arc::new(Mutex::new(vec)),
+        }
+    }
+
+    pub fn new(len: usize) -> Buffer {
+        let mut vec = Vec::<u8>::with_capacity(len);
+        vec.resize(len, 0);
+
+        Buffer {
+            data: Arc::new(Mutex::new(vec)),
         }
     }
 
@@ -1666,7 +1718,15 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
  * probably need a re-write.
  */
 pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
-    register_probes().unwrap();
+    match register_probes() {
+        Ok(()) => {
+            println!("DTrace probes registered ok");
+        }
+        Err(e) => {
+            println!("Error registering DTrace probes: {:?}", e);
+        }
+    }
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
@@ -1757,7 +1817,6 @@ pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
     // That part is not connected yet. XXX
     let mut ds_count = 0u32;
     loop {
-        register_probes().unwrap();
         let c = crx.recv().await.unwrap();
         if c.connected {
             ds_count += 1;
