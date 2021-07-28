@@ -1,6 +1,7 @@
 #![feature(asm)]
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::net::SocketAddrV4;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -40,6 +41,20 @@ pub struct Opt {
 
     #[structopt(short, long)]
     key: Option<String>,
+}
+
+impl Opt {
+    fn key_bytes(&self) -> Option<Vec<u8>> {
+        match &self.key {
+            Some(key) => {
+                match base64::decode(key) {
+                    Ok(bytes) => { Some(bytes) }
+                    Err(_) => { None }
+                }
+            }
+            None => { None }
+        }
+    }
 }
 
 pub fn opts() -> Result<Opt> {
@@ -809,6 +824,14 @@ pub struct UpstairsEncryptionContext {
     block_size: usize,
 }
 
+impl Debug for UpstairsEncryptionContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        f.debug_struct("UpstairsEncryptionContext")
+            .field("block_size", &self.block_size)
+            .finish()
+    }
+}
+
 impl UpstairsEncryptionContext {
     fn new(key: Vec<u8>, block_size: usize) -> UpstairsEncryptionContext {
         assert!(key.len() == 32);
@@ -921,10 +944,24 @@ pub struct Upstairs {
      * Ready here indicates it can receive IO.
      */
     downstairs: Mutex<Vec<DownstairsState>>,
+
+    /*
+     * Optional encryption context - supply a key in the Opt
+     */
+    encryption_context: Option<UpstairsEncryptionContext>,
 }
 
 impl Upstairs {
     pub fn new(opt: &Opt, guest: Arc<Guest>) -> Arc<Upstairs> {
+        /*
+         * Creation encryption context if a key is supplied.
+         * TODO: sector size is hard coded here.
+         */
+        let encryption_context = match opt.key_bytes() {
+            Some(key) => { Some(UpstairsEncryptionContext::new(key, 512)) }
+            None => { None }
+        };
+
         Arc::new(Upstairs {
             guest,
             ds_work: Mutex::new(Work {
@@ -935,6 +972,7 @@ impl Upstairs {
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(RegionDefinition::default()),
             downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
+            encryption_context,
         })
     }
 
@@ -2221,6 +2259,7 @@ mod test {
             ddef: Mutex::new(def),
             downstairs: Mutex::new(Vec::with_capacity(1)),
             guest: Arc::new(Guest::new()),
+            encryption_context: None,
         })
     }
 
