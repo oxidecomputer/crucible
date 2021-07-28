@@ -1703,7 +1703,11 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
  * probably need a re-write.
  */
 pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
-    register_probes().unwrap();
+    match register_probes() {
+        Ok(()) => { println!("DTrace probes registered ok"); }
+        Err(e) => { println!("Error registering DTrace probes: {:?}", e); }
+    }
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
@@ -1794,7 +1798,11 @@ pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
     // That part is not connected yet. XXX
     let mut ds_count = 0u32;
     loop {
-        register_probes().unwrap();
+        match register_probes() {
+            Ok(()) => { println!("In loop, DTrace probes registered ok"); }
+            Err(e) => { println!("In loop, error registering DTrace probes: {:?}", e); }
+        }
+
         let c = crx.recv().await.unwrap();
         if c.connected {
             ds_count += 1;
