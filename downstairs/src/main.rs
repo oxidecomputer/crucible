@@ -47,6 +47,11 @@ fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
+/*
+ * A new IO request has been received.
+ *
+ * For writes and flushes, we put them on the work queue.
+ */
 async fn proc_frame(
     d: &Arc<Downstairs>,
     m: &Message,
@@ -68,14 +73,13 @@ async fn proc_frame(
             d.region.region_write(*eid, *block_offset, data)?;
             fw.send(Message::WriteAck(*rn)).await
         }
-        Message::Flush(rn, dependencies, flush) => {
+        Message::Flush(rn, dependencies, flush_number) => {
             println!(
-                "flush       rn:{} dep:{:?} fl:{:?}",
-                rn, dependencies, flush
+                "flush       rn:{} dep:{:?} fln:{:?}",
+                rn, dependencies, flush_number
             );
-            //let dep = Vec::new();
             d.region
-                .region_flush(dependencies.to_vec(), flush.to_vec())?;
+                .region_flush(dependencies.to_vec(), *flush_number)?;
             fw.send(Message::FlushAck(*rn)).await
         }
         Message::ReadRequest(rn, eid, block_offset, blocks) => {
@@ -156,6 +160,8 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
 
 struct Downstairs {
     region: Region,
+    // completed ringbuf?
+    // in_progress ringbuff.
 }
 
 #[tokio::main]

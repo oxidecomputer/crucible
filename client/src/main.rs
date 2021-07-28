@@ -44,11 +44,14 @@ fn main() -> Result<()> {
 
     /*
      * XXX The rest of this is just test code
+     * It should all be replaced with a better test that does not
+     * get in its own way.
      */
     std::thread::sleep(std::time::Duration::from_secs(5));
-    //_run_big_workload(&guest, 2)?;
+    run_big_workload(&guest, 1)?;
+    /*
     for _ in 0..1000 {
-        run_single_workload(&guest)?;
+        _run_single_workload(&guest)?;
         /*
          * This helps us get around async/non-async issues.
          * Keeing this process busy means some async tasks will never get
@@ -57,6 +60,7 @@ fn main() -> Result<()> {
          */
         std::thread::sleep(std::time::Duration::from_micros(500));
     }
+    */
     // show_guest_work(&guest);
     println!("Tests done, wait");
     std::thread::sleep(std::time::Duration::from_secs(5));
@@ -65,7 +69,8 @@ fn main() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(10));
     println!("all Tests done");
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        guest.send(BlockOp::ShowWork);
+        std::thread::sleep(std::time::Duration::from_secs(30));
     }
 }
 
@@ -73,7 +78,7 @@ fn main() -> Result<()> {
  * This is a test workload that generates a write spanning an extent
  * then trys to read the same.
  */
-fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
+fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     let my_offset = 512 * 99;
     let mut data = BytesMut::with_capacity(512 * 2);
     for seed in 4..6 {
@@ -110,7 +115,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
  * This is basically just a test loop that generates a workload then sends the
  * workload to Crucible.
  */
-fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
+fn run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
     for _ll in 0..loops {
         let mut my_offset: u64 = 0;
         for olc in 0..10 {
@@ -144,8 +149,13 @@ fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
                 // guest.send(BlockOp::ShowWork);
                 my_offset += 512;
             }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            println!("\n[{}] end loop at offset:{}", olc, my_offset);
+
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
         println!("Final offset: {}", my_offset);
+        guest.send(BlockOp::ShowWork);
     }
     Ok(())
 }

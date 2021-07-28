@@ -1,4 +1,3 @@
-use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
@@ -101,7 +100,7 @@ impl Extent {
         mkdir_for_file(&path)?;
         /*
          * If the extent file exists, just open it and move forward.
-         * If it does not, then create it and set zero flush number.
+         * If it does not, then create it and set to zero the flush number.
          * If the extent should have existed, we rely on the upper layers to
          * check the flush number and restore missing contents.
          */
@@ -278,14 +277,13 @@ impl Extent {
         Ok(())
     }
 
-    pub fn flush(&self, _new_flush: u64) -> Result<()> {
+    pub fn flush_block(&self, new_flush: u64) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
         if !inner.meta.dirty {
             /*
-             * If we have made no writes to this extent since the last flush
-             * AND, our flush numbers match, we do not need to update the
-             * extent on disk
+             * If we have made no writes to this extent since the last flush,
+             * we do not need to update the extent on disk
              */
             return Ok(());
         }
@@ -313,13 +311,7 @@ impl Extent {
         let new_meta = ExtentMeta {
             ext_version: inner.meta.ext_version,
             gen: inner.meta.gen,
-            /*
-             * XXX Remove this when upstairs starts sending us the correct
-             * flush number for this extent.  For now we are still tracking
-             * and updating flush numbers all downstairs.
-             */
-            // XXX flush_number: new_flush,
-            flush_number: inner.meta.flush_number + 1,
+            flush_number: new_flush,
             dirty: false,
         };
         let encoded: Vec<u8> = bincode::serialize(&new_meta).unwrap();
@@ -450,41 +442,26 @@ impl Region {
         block_offset: u64,
         data: &mut BytesMut,
     ) -> Result<()> {
-        /*
-         * XXX Handle the case where the read length can span more than
-         * one extent.  Soon!  This means we will also need to handle the
-         * case where a read covers two extents.  So we will need to
-         * recombine buffers from two extent.read_block() calls.
-         */
         let extent = &self.extents[eid as usize];
         extent.read_block(block_offset, data)?;
         Ok(())
     }
+
     /*
-     * Perhaps this can be a list of extents that need flush instead of
-     * sending the whole Vec.  Something to think about XXX
+     * Send a flush to all extents.  The provided flush number is
+     * what an extent should use if a flush is required.
      */
     pub fn region_flush(
         &self,
-        dep: Vec<u64>,
-        flush_numbers: Vec<u64>,
+        _dep: Vec<u64>,
+        flush_number: u64,
     ) -> Result<()> {
-        if flush_numbers.len()
-            != usize::try_from(self.def.extent_count()).unwrap()
-        {
-            bail!(
-                "extent count {} does not match flush vector count {}",
-                self.def.extent_count(),
-                dep.len()
-            );
-        }
-
         // XXX How to we convert between usize and u32 correctly?
         for eid in 0..self.def.extent_count() {
             // We will need to pull out the value from dep that
             // each extent needs to use for flush number
             let extent = &self.extents[eid as usize];
-            extent.flush(flush_numbers[eid as usize])?;
+            extent.flush_block(flush_number)?;
         }
         Ok(())
     }

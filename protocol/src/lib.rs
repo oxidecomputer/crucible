@@ -14,7 +14,7 @@ pub enum Message {
     ExtentVersions(u64, u64, u32, Vec<u64>),
     Write(u64, u64, Vec<u64>, u64, bytes::Bytes),
     WriteAck(u64),
-    Flush(u64, Vec<u64>, Vec<u64>),
+    Flush(u64, Vec<u64>, u64),
     FlushAck(u64),
     ReadRequest(u64, u64, u64, u32),
     ReadResponse(u64, bytes::Bytes),
@@ -150,14 +150,13 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::Flush(rn, dependencies, flush) => {
+            Message::Flush(rn, dependencies, flush_number) => {
                 let len = 4  // length
                     + 4      // Message ID
                     + 8      // rn
                     + 4      // dep Vec len
                     + dependencies.len() * 8  // dep Vec
-                    + 4      // flush Vec len
-                    + flush.len() * 8; // flush Vec
+                    + 8; // flush number
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(9);
@@ -166,10 +165,7 @@ impl Encoder<Message> for CrucibleEncoder {
                 for v in dependencies.iter() {
                     dst.put_u64_le(*v);
                 }
-                dst.put_u32_le(flush.len() as u32);
-                for v in flush.iter() {
-                    dst.put_u64_le(*v);
-                }
+                dst.put_u64_le(flush_number);
 
                 Ok(())
             }
@@ -340,13 +336,9 @@ impl Decoder for CrucibleDecoder {
                 for _ in 0..depend_count {
                     dependencies.push(src.get_u64_le());
                 }
-                let flush_count = src.get_u32_le() as usize;
-                chklen(src, flush_count.checked_mul(8).unwrap())?;
-                let mut flush = Vec::new();
-                for _ in 0..flush_count {
-                    flush.push(src.get_u64_le());
-                }
-                Some(Message::Flush(rn, dependencies, flush))
+                chklen(src, 8)?;
+                let flush_number = src.get_u64_le();
+                Some(Message::Flush(rn, dependencies, flush_number))
             }
             10 => {
                 chklen(src, 8)?;
