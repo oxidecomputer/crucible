@@ -63,16 +63,25 @@ impl Opt {
 #[cfg(test)]
 mod tests {
     use crate::Opt;
-    use std::net::{SocketAddrV4, Ipv4Addr};
+    use std::net::{Ipv4Addr, SocketAddrV4};
 
     #[test]
     fn test_opt_from_string() {
-        let opt = Opt::from_string("-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string()).unwrap();
+        let opt = Opt::from_string(
+            "-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string(),
+        )
+        .unwrap();
         assert_eq!(opt.target.is_empty(), false);
         assert_eq!(opt.target.len(), 2);
 
-        assert_eq!(opt.target[0], SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 3801));
-        assert_eq!(opt.target[1], SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801));
+        assert_eq!(
+            opt.target[0],
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 3801)
+        );
+        assert_eq!(
+            opt.target[1],
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801)
+        );
     }
 }
 
@@ -1710,8 +1719,12 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
  */
 pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
     match register_probes() {
-        Ok(()) => { println!("DTrace probes registered ok"); }
-        Err(e) => { println!("Error registering DTrace probes: {:?}", e); }
+        Ok(()) => {
+            println!("DTrace probes registered ok");
+        }
+        Err(e) => {
+            println!("Error registering DTrace probes: {:?}", e);
+        }
     }
 
     /*
@@ -1805,8 +1818,12 @@ pub async fn up_main(opt: Opt, guest: Arc<Guest>) -> Result<()> {
     let mut ds_count = 0u32;
     loop {
         match register_probes() {
-            Ok(()) => { println!("In loop, DTrace probes registered ok"); }
-            Err(e) => { println!("In loop, error registering DTrace probes: {:?}", e); }
+            Ok(()) => {
+                println!("In loop, DTrace probes registered ok");
+            }
+            Err(e) => {
+                println!("In loop, error registering DTrace probes: {:?}", e);
+            }
         }
 
         let c = crx.recv().await.unwrap();
