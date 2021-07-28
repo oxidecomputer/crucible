@@ -1,11 +1,13 @@
 #![feature(asm)]
 use std::collections::{HashMap, VecDeque};
+use std::clone::Clone;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddrV4;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use bytes::Bytes;
 
 use crucible_common::*;
 use crucible_protocol::*;
@@ -821,6 +823,7 @@ impl Work {
 /// See: https://en.wikipedia.org/wiki/Disk_encryption_theory#XEX-based_tweaked-codebook_mode_with_ciphertext_stealing_(XTS)
 pub struct UpstairsEncryptionContext {
     xts: Xts128<Aes128>,
+    key: Vec<u8>,
     block_size: usize,
 }
 
@@ -829,6 +832,16 @@ impl Debug for UpstairsEncryptionContext {
         f.debug_struct("UpstairsEncryptionContext")
             .field("block_size", &self.block_size)
             .finish()
+    }
+}
+
+impl Clone for UpstairsEncryptionContext {
+    fn clone(&self) -> Self {
+        UpstairsEncryptionContext::new(self.key.clone(), self.block_size)
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        *self = UpstairsEncryptionContext::new(source.key.clone(), source.block_size);
     }
 }
 
@@ -843,8 +856,17 @@ impl UpstairsEncryptionContext {
 
         UpstairsEncryptionContext {
             xts,
+            key,
             block_size,
         }
+    }
+
+    fn key(&self) -> &Vec<u8> {
+        &self.key
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
     }
 
     // TODO: checksums?
@@ -1033,7 +1055,7 @@ impl Upstairs {
         sub.insert(next_id, 0);
 
         println!("FLUSH: gw_id:{} ds_ids:{:?}", gw_id, sub,);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender, None);
         gw.active.insert(gw_id, new_gtos);
         crutrace_gw_start!(|| (gw_id));
 
@@ -1105,10 +1127,16 @@ impl Upstairs {
             cur_offset = len;
         }
         println!("WRITE: gw_id:{} ds_ids:{:?}", gw_id, sub,);
+
         /*
          * New work created, add to the guest_work HM
          */
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
+        let context = match &up.encryption_context {
+            Some(context) => { Some(context.clone()) }
+            None => { None }
+        };
+
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender, context);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -1195,8 +1223,14 @@ impl Upstairs {
          * lists.  We don't want to miss a completion from downstairs.
          */
         assert!(!sub.is_empty());
+
+        let context = match &up.encryption_context {
+            Some(context) => { Some(context.clone()) }
+            None => { None }
+        };
+
         let new_gtos =
-            GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
+            GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender, context);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -1496,6 +1530,8 @@ struct GtoS {
      * Notify the caller waiting on the job to finish.
      */
     sender: std_mpsc::Sender<i32>,
+
+    encryption_context: Option<UpstairsEncryptionContext>,
 }
 
 impl GtoS {
@@ -1505,6 +1541,7 @@ impl GtoS {
         guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, bytes::Bytes>,
         sender: std_mpsc::Sender<i32>,
+        encryption_context: Option<UpstairsEncryptionContext>,
     ) -> GtoS {
         GtoS {
             submitted,
@@ -1512,6 +1549,7 @@ impl GtoS {
             guest_buffer,
             downstairs_buffer,
             sender,
+            encryption_context,
         }
     }
 
@@ -1519,9 +1557,6 @@ impl GtoS {
      * When all downstairs jobs have completed, and all buffers have been
      * attached to the GtoS struct, we can do the final copy of the data
      * from upstairs memory back to the guest's memory.
-     *
-     * XXX When encryption/decryption is supported, here is where you will be
-     * writing the code to decrypt.
      */
     fn transfer(&mut self) {
         if let Some(guest_buffer) = &mut self.guest_buffer {
@@ -1531,10 +1566,15 @@ impl GtoS {
             for ds_id in self.completed.iter() {
                 // println!("Copy buff from {:?}", ds_id);
                 let ds_buf = self.downstairs_buffer.remove(ds_id).unwrap();
+
                 {
                     let mut vec = guest_buffer.as_vec();
                     for i in 0..ds_buf.len() {
                         vec[i] = ds_buf[i];
+                    }
+
+                    if let Some(context) = &self.encryption_context {
+                        context.decrypt_in_place(&mut vec[..], 0); // XXX: sector index is bad
                     }
                 }
                 // println!("Final data copy {} {:#?}", ds_id, ds_buf);
@@ -1744,7 +1784,7 @@ impl BlockReqWaiter {
  * A task on the Crucible side will receive a notification that a new
  * operation has landed on the reqs queue and will take action:
  *   Pop the request off the reqs queue.
- *   Copy (TODO: and encrypt) any data buffers provided to us by the Guest.
+ *   Copy (and optionally encrypt) any data buffers provided to us by the Guest.
  *   Create one or more downstairs DownstairsIO structures.
  *   Create a GtoS tracking structure with the id's for each
  *   downstairs task and the read result buffer if required.
