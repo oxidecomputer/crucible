@@ -42,6 +42,40 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
+impl Opt {
+    /*
+     * Use:
+     *
+     *     let opt = Opt::from_string("-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string()).unwrap();
+     *
+     */
+    pub fn from_string(args: String) -> Result<Opt> {
+        let opt: Opt = Opt::from_iter(args.split(" "));
+
+        if opt.target.is_empty() {
+            bail!("must specify at least one --target");
+        }
+
+        Ok(opt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Opt;
+    use std::net::{SocketAddrV4, Ipv4Addr};
+
+    #[test]
+    fn test_opt_from_string() {
+        let opt = Opt::from_string("-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string()).unwrap();
+        assert_eq!(opt.target.is_empty(), false);
+        assert_eq!(opt.target.len(), 2);
+
+        assert_eq!(opt.target[0], SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 3801));
+        assert_eq!(opt.target[1], SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801));
+    }
+}
+
 pub fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
         .checked_add(Duration::from_secs(secs))
