@@ -3,3 +3,7 @@
 core
 *.swp
 /.*.sock
+/fio/*.png
+/fio/*.log
+/fio/*.log.hist
+/fio/*.report
