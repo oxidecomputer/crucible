@@ -1119,24 +1119,25 @@ impl Upstairs {
              * TODO: This is where encryption will happen, which will probably
              * mean a refactor of how this job is built.
              */
-            let sub_data = data.slice(cur_offset..(cur_offset + len));
+            let mut sub_data = data.slice(cur_offset..(cur_offset + len));
             sub.insert(next_id, len);
+
+            if let Some(context) = &up.encryption_context {
+                let mut mut_data: Vec<u8> = Vec::<u8>::from(&sub_data[..]);
+                context.encrypt_in_place(&mut mut_data[..], bo as u128);
+                sub_data = Bytes::from(mut_data);
+            }
 
             let wr = create_write_eob(next_id, gw_id, eid, bo, sub_data);
             new_ds_work.push(wr);
             cur_offset = len;
         }
-        println!("WRITE: gw_id:{} ds_ids:{:?}", gw_id, sub,);
+        println!("WRITE: gw_id:{} ds_ids:{:?}", gw_id, sub);
 
         /*
          * New work created, add to the guest_work HM
          */
-        let context = match &up.encryption_context {
-            Some(context) => { Some(context.clone()) }
-            None => { None }
-        };
-
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender, context);
+        let new_gtos = GtoS::new(sub, None, Vec::new(), None, HashMap::new(), sender, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -1192,6 +1193,7 @@ impl Upstairs {
          * will create on behalf of this guest job.
          */
         let mut sub = HashMap::new();
+        let mut offsets = HashMap::new();
         let mut new_ds_work = Vec::new();
         let mut next_id: u64;
 
@@ -1212,17 +1214,20 @@ impl Upstairs {
              * sequential.
              */
             sub.insert(next_id, len);
+            offsets.insert(next_id, bo);
             let wr = create_read_eob(next_id, gw_id, eid, bo, blocks);
             new_ds_work.push(wr);
         }
 
-        println!("READ:  gw_id:{} ds_ids:{:?}", gw_id, sub,);
+        println!("READ:  gw_id:{} ds_ids:{:?} offsets:{:?}", gw_id, sub, offsets);
+
         /*
          * New work created, add to the guest_work HM.  New work must be put
          * on the guest_work active HM first, before it lands on the downstairs
          * lists.  We don't want to miss a completion from downstairs.
          */
         assert!(!sub.is_empty());
+        assert!(!offsets.is_empty());
 
         let context = match &up.encryption_context {
             Some(context) => { Some(context.clone()) }
@@ -1230,7 +1235,7 @@ impl Upstairs {
         };
 
         let new_gtos =
-            GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender, context);
+            GtoS::new(sub, offsets, Vec::new(), Some(data), HashMap::new(), sender, context);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -1504,9 +1509,15 @@ struct GtoS {
      * Jobs we have submitted (or will soon submit) to the storage side
      * of the upstairs process to send on to the downstairs.
      * The key for the hashmap is the ds_id number in the hashmap for
-     * downstairs work.  The value is the buffer size of the operation.
+     * downstairs work. The value is the buffer size of the operation.
      */
     submitted: HashMap<u64, usize>,
+
+    /*
+     * Block offsets are recorded for encryption and decryption.
+     */
+    offsets: HashMap<u64, u64>,
+
     completed: Vec<u64>,
 
     /*
@@ -1537,6 +1548,7 @@ struct GtoS {
 impl GtoS {
     pub fn new(
         submitted: HashMap<u64, usize>,
+        offsets: HashMap<u64, u64>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, bytes::Bytes>,
@@ -1545,6 +1557,7 @@ impl GtoS {
     ) -> GtoS {
         GtoS {
             submitted,
+            offsets,
             completed,
             guest_buffer,
             downstairs_buffer,
@@ -1573,8 +1586,12 @@ impl GtoS {
                         vec[i] = ds_buf[i];
                     }
 
+                    /*
+                     * If there's an encryption context, decrypt the guest memory in place.
+                     */
                     if let Some(context) = &self.encryption_context {
-                        context.decrypt_in_place(&mut vec[..], 0); // XXX: sector index is bad
+                        let block_index = self.offsets.remove(ds_id).unwrap();
+                        context.decrypt_in_place(&mut vec[..], block_index as u128);
                     }
                 }
                 // println!("Final data copy {} {:#?}", ds_id, ds_buf);
