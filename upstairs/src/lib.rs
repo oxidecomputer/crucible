@@ -1007,17 +1007,12 @@ impl Buffer {
     }
 
     pub fn from_slice(buf: &[u8]) -> Buffer {
-        let data = Buffer::new(buf.len());
-
-        {
-            let mut vec = data.as_vec();
-            for item in buf {
-                //vec.push(buf[i]);
-                vec.push(*item);
-            }
+        let mut vec = Vec::<u8>::with_capacity(buf.len());
+        for item in buf {
+            vec.push(*item);
         }
 
-        data
+        Buffer::from_vec(vec)
     }
 
     pub fn len(&self) -> usize {
