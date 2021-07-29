@@ -113,24 +113,32 @@ impl Write for CruciblePseudoFile {
 impl Seek for CruciblePseudoFile {
     fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
         // TODO: does not check against block device size
+        let mut offset: i64 = self.offset as i64;
         match pos {
             SeekFrom::Start(v) => {
-                self.offset = v as u64;
+                offset = v as i64;
             }
             SeekFrom::Current(v) => {
                 // TODO: as checked add?
-                self.offset += v as u64;
+                offset += v;
             }
             SeekFrom::End(v) => {
-                // TODO: as checked subtract?
-                self.offset = self.sz - v as u64;
+                // TODO: as checked add?
+                offset += v;
             }
         }
-        Ok(self.offset)
+
+        if offset < 0 {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "offset is negative!"))
+        } else {
+            // offset >= 0
+            self.offset = offset as u64;
+            Ok(self.offset)
+        }
     }
 
     fn stream_position(&mut self) -> IOResult<u64> {
-        Ok(self.offset)
+        self.seek(SeekFrom::Current(0))
     }
 }
 
