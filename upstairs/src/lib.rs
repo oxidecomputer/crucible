@@ -28,7 +28,6 @@ use base64;
 use aes::{Aes128, NewBlockCipher};
 use aes::cipher::generic_array::GenericArray;
 use xts_mode::{Xts128, get_tweak_default};
-use rand::{thread_rng, Rng};
 
 
 
@@ -884,6 +883,8 @@ impl UpstairsEncryptionContext {
 
 #[test]
 pub fn test_upstairs_encryption_context_ok() {
+    use rand::{thread_rng, Rng};
+
     let key_bytes = base64::decode("ClENKTXD2bCyXSHnKXY7GGnk+NvQKbwpatjWP2fJzk0=").unwrap();
     let context = UpstairsEncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
 
@@ -901,6 +902,8 @@ pub fn test_upstairs_encryption_context_ok() {
 
 #[test]
 pub fn test_upstairs_encryption_context_bad_index() {
+    use rand::{thread_rng, Rng};
+
     let key_bytes = base64::decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=").unwrap();
     let context = UpstairsEncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
 
