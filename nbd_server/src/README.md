@@ -10,6 +10,10 @@ To spin up a NBD server to issue work to Crucible, do the following:
 
        $ cargo run -p crucible-nbd-server -- -t 127.0.0.1:3801 -t 127.0.0.1:3802 -t 127.0.0.1:3803
 
+   If you want to use encryption, specify a key option (32 bytes base64 encoded):
+
+       $ cargo run -p crucible-nbd-server -- -t 127.0.0.1:3801 -t 127.0.0.1:3802 -t 127.0.0.1:3803 --key 'JnAxKQbjPUGJ7XGj7LTDn2HgIDvx3NNyAYRWSR/6BFs='
+
 1. Connect nbd-client to the crucible-nbd-server:
 
        $ sudo nbd-client 127.0.0.1 10809 /dev/nbd0
