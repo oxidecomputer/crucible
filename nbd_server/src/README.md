@@ -2,9 +2,9 @@ To spin up a NBD server to issue work to Crucible, do the following:
 
 1. Start up three separate crucible-downstairs:
 
-    $ cargo run -p crucible-downstairs -- -p 3801 -d "$PWD/disks/d1"
-    $ cargo run -p crucible-downstairs -- -p 3802 -d "$PWD/disks/d2"
-    $ cargo run -p crucible-downstairs -- -p 3803 -d "$PWD/disks/d3"
+       $ cargo run -p crucible-downstairs -- -p 3801 -d "$PWD/disks/d1"
+       $ cargo run -p crucible-downstairs -- -p 3802 -d "$PWD/disks/d2"
+       $ cargo run -p crucible-downstairs -- -p 3803 -d "$PWD/disks/d3"
 
 1. Start up crucible-nbd-server:
 
