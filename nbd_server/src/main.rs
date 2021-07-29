@@ -77,18 +77,13 @@ impl CruciblePseudoFile {
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        let mut i = 0;
-        let mut sz = buf.len();
-        let orig_sz = buf.len();
+        assert!((buf.len() % 512) == 0);
+
         let mut result: usize = 0;
 
-        while sz > self.block_size {
+        for i in (0..buf.len()).step_by(512) {
             result += self._read(&mut buf[i..(i + self.block_size)])?;
-            sz -= self.block_size;
-            i += self.block_size;
         }
-
-        result += self._read(&mut buf[i..orig_sz])?;
 
         Ok(result)
     }
@@ -96,18 +91,13 @@ impl Read for CruciblePseudoFile {
 
 impl Write for CruciblePseudoFile {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        let mut i = 0;
-        let mut sz = buf.len();
-        let orig_sz = buf.len();
+        assert!((buf.len() % 512) == 0);
+
         let mut result: usize = 0;
 
-        while sz > self.block_size {
+        for i in (0..buf.len()).step_by(512) {
             result += self._write(&buf[i..(i + self.block_size)])?;
-            sz -= self.block_size;
-            i += self.block_size;
         }
-
-        result += self._write(&buf[i..orig_sz])?;
 
         Ok(result)
     }
