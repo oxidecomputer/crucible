@@ -1,7 +1,9 @@
+use std::net::SocketAddrV4;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::{BufMut, BytesMut};
+use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
@@ -159,8 +161,27 @@ fn handle_nbd_client(
     Ok(())
 }
 
+#[derive(Debug, StructOpt)]
+#[structopt(about = "volume-side storage component")]
+pub struct Opt {
+    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    target: Vec<SocketAddrV4>,
+}
+
+pub fn opts() -> Result<Opt> {
+    let opt: Opt = Opt::from_args();
+    println!("raw options: {:?}", opt);
+
+    if opt.target.is_empty() {
+        bail!("must specify at least one --target");
+    }
+
+    Ok(opt)
+}
+
 fn main() -> Result<()> {
     let opt = opts()?;
+    let crucible_opts = CrucibleOpts { target: opt.target };
 
     /*
      * Crucible needs a runtime as it will create several async tasks to
@@ -182,7 +203,7 @@ fn main() -> Result<()> {
      */
     let guest = Arc::new(Guest::new());
 
-    runtime.spawn(up_main(opt, guest.clone()));
+    runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
     // TODO: read this from somewhere, instead of defaults
