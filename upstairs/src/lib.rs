@@ -991,13 +991,21 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /*
+     * XXX: For now, assert Buffer size is at least hard coded block size 512.
+     */
+
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
+        assert!(vec.len() >= 512);
+
         Buffer {
             data: Arc::new(Mutex::new(vec)),
         }
     }
 
     pub fn new(len: usize) -> Buffer {
+        assert!(len >= 512);
+
         let mut vec = Vec::<u8>::with_capacity(len);
         vec.resize(len, 0);
 
@@ -1007,6 +1015,8 @@ impl Buffer {
     }
 
     pub fn from_slice(buf: &[u8]) -> Buffer {
+        assert!(buf.len() >= 512);
+
         let mut vec = Vec::<u8>::with_capacity(buf.len());
         for item in buf {
             vec.push(*item);
@@ -1058,6 +1068,13 @@ fn test_buffer_len_index_overflow() {
     for i in 0..(READ_SIZE +1) {
         vec[i] = 0x99;
     }
+}
+
+#[test]
+fn test_buffer_len_over_block_size() {
+    const READ_SIZE: usize = 600;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 /*
