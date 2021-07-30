@@ -1028,6 +1028,38 @@ impl Buffer {
     }
 }
 
+#[test]
+fn test_buffer_len() {
+    const READ_SIZE: usize = 512;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
+}
+
+#[test]
+fn test_buffer_len_after_clone() {
+    const READ_SIZE: usize = 512;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
+
+    let new_buffer = data.clone();
+    assert_eq!(new_buffer.len(), READ_SIZE);
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds: the len is 512 but the index is 512")]
+fn test_buffer_len_index_overflow() {
+    const READ_SIZE: usize = 512;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
+
+    let mut vec = data.as_vec();
+    assert_eq!(vec.len(), 512);
+
+    for i in 0..(READ_SIZE +1) {
+        vec[i] = 0x99;
+    }
+}
+
 /*
  * Inspired from Propolis block.rs
  *
