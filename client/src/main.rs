@@ -48,7 +48,8 @@ fn main() -> Result<()> {
      * get in its own way.
      */
     std::thread::sleep(std::time::Duration::from_secs(5));
-    run_big_workload(&guest, 1)?;
+    _run_single_workload(&guest)?;
+    //run_big_workload(&guest, 1)?;
     /*
     for _ in 0..1000 {
         _run_single_workload(&guest)?;
@@ -63,14 +64,14 @@ fn main() -> Result<()> {
     */
     // show_guest_work(&guest);
     println!("Tests done, wait");
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    std::thread::sleep(std::time::Duration::from_secs(50));
     // show_guest_work(&guest);
     println!("Tests done");
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    println!("all Tests done");
     loop {
         guest.send(BlockOp::ShowWork);
         std::thread::sleep(std::time::Duration::from_secs(30));
+        println!("\n\n   Loop send flush");
+        guest.send(BlockOp::Flush);
     }
 }
 
@@ -115,7 +116,7 @@ fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
  * This is basically just a test loop that generates a workload then sends the
  * workload to Crucible.
  */
-fn run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
+fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
     for _ll in 0..loops {
         let mut my_offset: u64 = 0;
         for olc in 0..10 {
@@ -124,19 +125,28 @@ fn run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
                 let mut data = BytesMut::with_capacity(512);
                 data.put(&[seed; 512][..]);
                 let data = data.freeze();
+                println!(
+                    "[{}][{}] send write  offset:{}  len:{}",
+                    olc,
+                    lc,
+                    my_offset,
+                    data.len()
+                );
                 let wio = BlockOp::Write {
                     offset: my_offset,
                     data,
                 };
-                println!("[{}][{}] send write  offset:{}", olc, lc, my_offset);
                 guest.send(wio);
 
                 let read_offset = my_offset;
                 const READ_SIZE: usize = 512;
                 let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
                 println!(
-                    "[{}][{}] send read   offset:{}",
-                    olc, lc, read_offset,
+                    "[{}][{}] send read   offset:{} len:{}",
+                    olc,
+                    lc,
+                    read_offset,
+                    data.len(),
                 );
                 let rio = BlockOp::Read {
                     offset: read_offset,
@@ -150,10 +160,8 @@ fn run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
                 my_offset += 512;
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
-            println!("\n[{}] end loop at offset:{}", olc, my_offset);
-
-            std::thread::sleep(std::time::Duration::from_secs(5));
         }
+        std::thread::sleep(std::time::Duration::from_secs(5));
         println!("Final offset: {}", my_offset);
         guest.send(BlockOp::ShowWork);
     }

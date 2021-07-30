@@ -131,12 +131,10 @@ async fn proc_frame(
  *
  */
 fn extent_from_offset(
-    up: &Arc<Upstairs>,
+    ddef: MutexGuard<RegionDefinition>,
     offset: u64,
     len: usize,
 ) -> Result<Vec<(u64, u64, usize)>> {
-    let ddef = up.ddef.lock().unwrap();
-
     // TODO Make asserts return error
     assert!(len as u64 >= ddef.block_size());
     assert!(len as u64 % ddef.block_size() == 0);
@@ -292,7 +290,7 @@ async fn io_completed(
      * is finished for a ds_id.
      */
     {
-        let mut work = up.work.lock().unwrap();
+        let mut work = up.ds_work.lock().unwrap();
         let counts = work.complete(ds_id, client_id, data)?;
         if counts.active == 0 {
             gw_work_done = true;
@@ -321,7 +319,7 @@ async fn io_send(
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
      */
-    let mut new_work = u.work.lock().unwrap().new_work(client_id);
+    let mut new_work = u.ds_work.lock().unwrap().new_work(client_id);
 
     /*
      * Now we have a list of all the job IDs that are new for our client id.
@@ -343,7 +341,7 @@ async fn io_send(
          * from the hashmap and release the lock when we leave
          * this scope.
          */
-        let job = u.work.lock().unwrap().in_progress(*new_id, client_id);
+        let job = u.ds_work.lock().unwrap().in_progress(*new_id, client_id);
 
         match job {
             IOop::Write {
@@ -371,7 +369,9 @@ async fn io_send(
             } => {
                 println!(
                     "Flush ds_id:{} dep:{:?} flush_number:{:?}",
-                    *new_id, dependencies, flush_number
+                    *new_id,
+                    dependencies.len(),
+                    flush_number
                 );
                 fw.send(Message::Flush(
                     *new_id,
@@ -630,6 +630,9 @@ async fn looper(
     }
 }
 
+/*
+ * The structure that tracks downstairs work in progress
+ */
 #[derive(Debug)]
 pub struct Work {
     active: HashMap<u64, DownstairsIO>,
@@ -789,11 +792,17 @@ impl Work {
 #[derive(Debug)]
 pub struct Upstairs {
     /*
+     * The guest struct keeps track of jobs accepted from the Guest as they
+     * progress through crucible.  A single job submitted can produce
+     * multiple downstairs requests.
+     */
+    guest: Arc<Guest>,
+    /*
      * This Work struct keeps track of IO operations going between upstairs
      * and downstairs.  New work for downstairs is generated inside the
      * upstairs on behalf of IO requests coming from the guest.
      */
-    work: Mutex<Work>,
+    ds_work: Mutex<Work>,
     /*
      * The flush info Vec is only used when first connecting or re-connecting
      * to a downstairs.  It is populated with the versions the upstairs
@@ -822,13 +831,13 @@ pub struct Upstairs {
      * Ready here indicates it can receive IO.
      */
     downstairs: Mutex<Vec<DownstairsState>>,
-    guest: Arc<Guest>,
 }
 
 impl Upstairs {
     pub fn new(opt: &Opt, guest: Arc<Guest>) -> Arc<Upstairs> {
         Arc::new(Upstairs {
-            work: Mutex::new(Work {
+            guest,
+            ds_work: Mutex::new(Work {
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2048),
                 next_id: 1000,
@@ -836,21 +845,238 @@ impl Upstairs {
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(RegionDefinition::default()),
             downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
-            guest,
         })
     }
+
     /*
      * If we are doing a flush, the flush number and the rn number
      * must both go up together.  We don't want a lower next_id
      * with a higher flush_number to be possible, as that can introduce
      * dependency deadlock.
+     * To also avoid any problems, this method should be called only
+     * during the submit_flush method so we know the ds_work and
+     * guest_work locks are both held.
      */
-    pub fn next_flush_ids(&self) -> (u64, u64) {
-        let mut work = self.work.lock().unwrap();
-        let next_id = work.next_id();
+    fn next_flush_id(&self) -> u64 {
         let mut fi = self.flush_info.lock().unwrap();
-        let nf = fi.next_flush();
-        (next_id, nf)
+        fi.next_flush()
+    }
+
+    pub fn submit_flush(&self, sender: std_mpsc::Sender<i32>) -> Result<()> {
+        /*
+         * Lock first the guest_work struct where this new job will go,
+         * then lock the ds_work struct.  Once we have both we can proceed
+         * to build our flush command.
+         */
+        let mut gw = self.guest.guest_work.lock().unwrap();
+        let mut ds_work = self.ds_work.lock().unwrap();
+
+        /*
+         * Get the next ID for our new guest work job.  Note that the flush
+         * ID and the next_id are connected here, in that all future writes
+         * should be flushed at the next flush ID.
+         */
+        let gw_id: u64 = gw.next_gw_id();
+        let next_id = ds_work.next_id();
+        let next_flush = self.next_flush_id();
+
+        /*
+         * Walk the downstairs work active list, and pull out all the active
+         * jobs.  Anything we have not submitted back to the guest.
+         *
+         * TODO, we can go faster if we:
+         * 1. Ignore everything that was before and including the last flush.
+         * 2. Ignore reads.
+         */
+        let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
+        dep.sort_unstable();
+        /*
+         * TODO: Walk the list of guest work structs and build the same list
+         * and make sure it matches.
+         */
+
+        /*
+         * Build the flush request, and take note of the request ID that
+         * will be assigned to this new piece of work.
+         */
+        let fl = create_flush(next_id, dep, next_flush, gw_id);
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+
+        println!("FLUSH: gw_id:{} ds_ids:{:?}", gw_id, sub,);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
+        gw.active.insert(gw_id, new_gtos);
+        crutrace_gw_start!(|| (gw_id));
+
+        ds_work.enqueue(fl);
+        Ok(())
+    }
+
+    /*
+     * When we have a guest write request with offset and buffer, take them and
+     * build both the upstairs work guest tracking struct as well as the downstairs
+     * work struct. Once both are ready, submit them to the required places.
+     */
+    fn submit_write(
+        &self,
+        offset: u64,
+        data: bytes::Bytes,
+        sender: std_mpsc::Sender<i32>,
+    ) {
+        /*
+         * Get the next ID for the guest work struct we will make at the
+         * end.  This ID is also put into the IO struct we create that
+         * handles the operation(s) on the storage side.
+         */
+        let mut gw = self.guest.guest_work.lock().unwrap();
+        let mut ds_work = self.ds_work.lock().unwrap();
+        let gw_id: u64 = gw.next_gw_id();
+
+        /*
+         * Given the offset and buffer size, figure out what extent and
+         * block offset that translates into.  Keep in mind that an offset
+         * and length may span two extents, and eventually XXX, two regions.
+         */
+        let ddef = self.ddef.lock().unwrap();
+        let nwo = extent_from_offset(ddef, offset, data.len()).unwrap();
+        println!(
+            "nwo: {:?} from offset:{} data: {:p} len:{}",
+            nwo,
+            offset,
+            data.as_ptr(),
+            data.len()
+        );
+
+        /*
+         * Now create a downstairs work job for each (eid, bi, len) returned
+         * from extent_from_offset
+         *
+         * Create the list of downstairs request numbers (ds_id) we created
+         * on behalf of this guest job.
+         */
+        let mut sub = HashMap::new();
+        let mut new_ds_work = Vec::new();
+        let mut next_id: u64;
+        let mut cur_offset = 0;
+
+        /* Lock here, through both jobs submitted */
+        for (eid, bo, len) in nwo {
+            {
+                next_id = ds_work.next_id();
+            }
+            /*
+             * TODO: This is where encryption will happen, which will probably
+             * mean a refactor of how this job is built.
+             */
+            let sub_data = data.slice(cur_offset..(cur_offset + len));
+            sub.insert(next_id, len);
+
+            let wr = create_write_eob(next_id, gw_id, eid, bo, sub_data);
+            new_ds_work.push(wr);
+            cur_offset = len;
+        }
+        println!("WRITE: gw_id:{} ds_ids:{:?}", gw_id, sub,);
+        /*
+         * New work created, add to the guest_work HM
+         */
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        crutrace_gw_start!(|| (gw_id));
+
+        for wr in new_ds_work {
+            ds_work.enqueue(wr);
+        }
+    }
+
+    /*
+     * When we have a guest read request with offset and buffer, take them
+     * and build both the upstairs work guest tracking struct as well as the
+     * downstairs work struct. Once both are ready, submit them to the
+     * required places.
+     */
+    pub fn submit_read(
+        &self,
+        offset: u64,
+        data: Buffer,
+        sender: std_mpsc::Sender<i32>,
+    ) {
+        /*
+         * Get the next ID for the guest work struct we will make at the
+         * end.  This ID is also put into the IO struct we create that
+         * handles the operation(s) on the storage side.
+         */
+        let mut gw = self.guest.guest_work.lock().unwrap();
+        let mut ds_work = self.ds_work.lock().unwrap();
+        let gw_id: u64 = gw.next_gw_id();
+
+        /*
+         * We need to know the block size to allow us to convert between
+         * bytes and blocks.  Bytes for when we have to slice buffers,
+         * blocks for what we send to the downstairs IO.
+         */
+        let ddef = self.ddef.lock().unwrap();
+        let block_size = ddef.block_size() as u32;
+        /*
+         * Given the offset and buffer size, figure out what extent and
+         * block offset that translates into.  Keep in mind that an offset
+         * and length may span two extents, and eventually, TODO, two regions.
+         */
+        let nwo = extent_from_offset(ddef, offset, data.len()).unwrap();
+        println!(
+            "nwo: {:?} from offset:{} data len:{}",
+            nwo,
+            offset,
+            data.len()
+        );
+        /*
+         * Create the tracking info for downstairs request numbers (ds_id) we
+         * will create on behalf of this guest job.
+         */
+        let mut sub = HashMap::new();
+        let mut new_ds_work = Vec::new();
+        let mut next_id: u64;
+
+        /*
+         * Now create a downstairs work job for each (eid, bi, len) returned
+         * from extent_from_offset
+         */
+        for (eid, bo, len) in nwo {
+            let blocks: u32 = len as u32 / block_size;
+            {
+                next_id = ds_work.next_id();
+            }
+            /*
+             * When multiple operations are needed to satisfy a read, The offset
+             * and length will be divided across two downstairs requests.  It is
+             * required (for re-assembly on the other side) that the lower offset
+             * corresponds to the lower next_id.  The ID's don't need to be
+             * sequential.
+             */
+            sub.insert(next_id, len);
+            let wr = create_read_eob(next_id, gw_id, eid, bo, blocks);
+            new_ds_work.push(wr);
+        }
+
+        println!("READ:  gw_id:{} ds_ids:{:?}", gw_id, sub,);
+        /*
+         * New work created, add to the guest_work HM.  New work must be put
+         * on the guest_work active HM first, before it lands on the downstairs
+         * lists.  We don't want to miss a completion from downstairs.
+         */
+        assert!(!sub.is_empty());
+        let new_gtos =
+            GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        crutrace_gw_start!(|| (gw_id));
+
+        for wr in new_ds_work {
+            ds_work.enqueue(wr);
+        }
     }
 }
 
@@ -858,9 +1084,7 @@ impl Upstairs {
 struct FlushInfo {
     flush_numbers: Vec<u64>,
     /*
-     * Next flush number (other than initial setting) must come through
-     * the upstairs next_flush_id method.  This is required to avoid dependency
-     * deadlock where a lower job ID to downstairs has a higher flush number.
+     * The next flush number to use when a Flush is issued.
      */
     next_flush: u64,
 }
@@ -872,6 +1096,13 @@ impl FlushInfo {
             next_flush: 0,
         }
     }
+    /*
+     * Upstairs flush_info mutex must be held when calling this.
+     * In addition, a downstairs request ID should be obtained at the
+     * same time the next flush number is obtained, such that any IO that
+     * is given a downstaris request number higer than the request number
+     * for the flush will happen after this flush, never before.
+     */
     fn next_flush(&mut self) -> u64 {
         let id = self.next_flush;
         self.next_flush += 1;
@@ -918,7 +1149,7 @@ struct DownstairsIO {
 #[derive(Debug, Clone)]
 pub enum IOop {
     Write {
-        dependencies: Vec<u64>, // Writes that must finish before this
+        dependencies: Vec<u64>, // Jobs that must finish before this
         eid: u64,
         block_offset: u64,
         data: bytes::Bytes,
@@ -929,7 +1160,7 @@ pub enum IOop {
         blocks: u32,
     },
     Flush {
-        dependencies: Vec<u64>, // Writes that must finish before this
+        dependencies: Vec<u64>, // Jobs that must finish before this
         flush_number: u64,
     },
 }
@@ -1178,6 +1409,7 @@ impl GtoS {
                         vec[i] = ds_buf[i];
                     }
                 }
+                // println!("Final data copy {} {:#?}", ds_id, ds_buf);
             }
             println!("Final data copy {:?}", self.completed);
         } else {
@@ -1449,14 +1681,6 @@ impl Guest {
     }
 
     /*
-     * Get the next available ID for a new job in the active hashmap.
-     */
-    pub fn next_gw_id(&self) -> u64 {
-        let mut gw = self.guest_work.lock().unwrap();
-        gw.next_gw_id()
-    }
-
-    /*
      * This is used to submit a new BlockOp IO request to Crucible.
      */
     pub fn send(&self, op: BlockOp) -> BlockReqWaiter {
@@ -1520,209 +1744,6 @@ fn _send_work(t: &[Target], val: u64) {
     }
 }
 
-/*
- * When we have a guest read request with offset and buffer, take them and
- * build both the upstairs work guest tracking struct as well as the downstairs
- * work struct. Once both are ready, submit them to the required places.
- */
-fn guest_submit_read(
-    up: &Arc<Upstairs>,
-    offset: u64,
-    data: Buffer,
-    sender: std_mpsc::Sender<i32>,
-) {
-    /*
-     * We need to know the block size to allow us to convert between
-     * bytes and blocks.  Bytes for when we have to slice buffers,
-     * blocks for what we send to the downstairs IO.
-     */
-    let block_size: u32;
-    {
-        let ddef = up.ddef.lock().unwrap();
-        block_size = ddef.block_size() as u32;
-    }
-
-    /*
-     * Get the next ID for the guest work struct we will make at the
-     * end.  This ID is also put into the IO struct we create that
-     * handles the operation(s) on the storage side.
-     */
-    let gw_id: u64 = up.guest.next_gw_id();
-
-    /*
-     * Given the offset and buffer size, figure out what extent and
-     * block offset that translates into.  Keep in mind that an offset
-     * and length may span two extents, and eventually, TODO, two regions.
-     */
-    let nwo = extent_from_offset(up, offset, data.len()).unwrap();
-    println!(
-        "nwo: {:?} from offset:{} data len:{}",
-        nwo,
-        offset,
-        data.len()
-    );
-    /*
-     * Create the tracking info for downstairs request numbers (ds_id) we
-     * will create on behalf of this guest job.
-     */
-    let mut sub = HashMap::new();
-    let mut ds_work = Vec::new();
-    let mut next_id: u64;
-
-    /*
-     * Now create a downstairs work job for each (eid, bi, len) returned
-     * from extent_from_offset
-     */
-    for (eid, bo, len) in nwo {
-        let blocks: u32 = len as u32 / block_size;
-        {
-            let mut work = up.work.lock().unwrap();
-            next_id = work.next_id();
-        }
-        /*
-         * When multiple operations are needed to satisfy a read, The offset
-         * and length will be divided across two downstairs requests.  It is
-         * required (for re-assembly on the other side) that the lower offset
-         * corresponds to the lower next_id.  The ID's don't need to be
-         * sequential.
-         */
-        sub.insert(next_id, len);
-        let wr = create_read_eob(next_id, gw_id, eid, bo, blocks);
-        ds_work.push(wr);
-    }
-
-    println!("READ:  gw_id:{} ds_ids:{:?}", gw_id, sub,);
-    /*
-     * New work created, add to the guest_work HM.  New work must be put
-     * on the guest_work active HM first, before it lands on the downstairs
-     * lists.  We don't want to miss a completion from downstairs.
-     */
-    assert!(!sub.is_empty());
-    let new_gtos =
-        GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
-    {
-        let mut gw = up.guest.guest_work.lock().unwrap();
-        gw.active.insert(gw_id, new_gtos);
-    }
-    crutrace_gw_start!(|| (gw_id));
-
-    let mut work = up.work.lock().unwrap();
-    for wr in ds_work {
-        work.enqueue(wr);
-    }
-}
-
-/*
- * When we have a guest write request with offset and buffer, take them and
- * build both the upstairs work guest tracking struct as well as the downstairs
- * work struct. Once both are ready, submit them to the required places.
- */
-fn guest_submit_write(
-    up: &Arc<Upstairs>,
-    offset: u64,
-    data: bytes::Bytes, // Where the data comes from
-    sender: std_mpsc::Sender<i32>,
-) {
-    /*
-     * Get the next ID for the guest work struct we will make at the
-     * end.  This ID is also put into the IO struct we create that
-     * handles the operation(s) on the storage side.
-     */
-    let gw_id: u64 = up.guest.next_gw_id();
-
-    /*
-     * Given the offset and buffer size, figure out what extent and
-     * block offset that translates into.  Keep in mind that an offset
-     * and length may span two extents, and eventually XXX, two regions.
-     */
-    let nwo = extent_from_offset(up, offset, data.len()).unwrap();
-    println!(
-        "nwo: {:?} from offset:{} data: {:p} len:{}",
-        nwo,
-        offset,
-        data.as_ptr(),
-        data.len()
-    );
-
-    /*
-     * Now create a downstairs work job for each (eid, bi, len) returned
-     * from extent_from_offset
-     */
-
-    /*
-     * Create the list of downstairs request numbers (ds_id) we created
-     * on behalf of this guest job.
-     */
-    let mut sub = HashMap::new();
-    let mut ds_work = Vec::new();
-    let mut next_id: u64;
-    let mut cur_offset = 0;
-    for (eid, bo, len) in nwo {
-        {
-            let mut work = up.work.lock().unwrap();
-            next_id = work.next_id();
-        }
-        /*
-         * TODO: This is where encryption will happen, which will probably
-         * mean a refactor of how this job is built.
-         */
-        let sub_data = data.slice(cur_offset..(cur_offset + len));
-        sub.insert(next_id, len);
-
-        let wr = create_write_eob(next_id, gw_id, eid, bo, sub_data);
-        ds_work.push(wr);
-        cur_offset = len;
-    }
-    println!("WRITE: gw_id:{} ds_ids:{:?}", gw_id, sub,);
-    /*
-     * New work created, add to the guest_work HM
-     */
-    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
-    {
-        let mut gw = up.guest.guest_work.lock().unwrap();
-        gw.active.insert(gw_id, new_gtos);
-    }
-    crutrace_gw_start!(|| (gw_id));
-
-    let mut work = up.work.lock().unwrap();
-    for wr in ds_work {
-        work.enqueue(wr);
-    }
-}
-
-/*
- * Turn a guest flush request into both a guest_work active operaion
- * and put an entry on the work hashmap for downstairs.
- */
-fn guest_submit_flush(up: &Arc<Upstairs>, sender: std_mpsc::Sender<i32>) {
-    /*
-     * Get the next ID for our new guest work job
-     */
-    let gw_id: u64 = up.guest.next_gw_id();
-
-    /*
-     * Build the flush request, and take note of the request ID that
-     * will be assigned to this new piece of work.
-     */
-    let (next_id, next_flush) = up.next_flush_ids();
-    let dep = Vec::new();
-    let fl = create_flush(next_id, dep, next_flush, gw_id);
-
-    let mut sub = HashMap::new();
-    sub.insert(next_id, 0);
-
-    println!("FLUSH: gw_id:{} ds_ids:{:?}", gw_id, sub,);
-    let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
-    {
-        let mut gw = up.guest.guest_work.lock().unwrap();
-        gw.active.insert(gw_id, new_gtos);
-    }
-    crutrace_gw_start!(|| (gw_id));
-
-    let mut work = up.work.lock().unwrap();
-    work.enqueue(fl);
-}
-
 /**
  * We listen on the ds_done channel to know when all the downstairs requests
  * for a downstairs work task have finished and it is time to complete
@@ -1738,11 +1759,11 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
          * process the set of things we know are done now, then the
          * ds_done_rx.recv() should trigger when we loop.
          */
-        let done_list = up.work.lock().unwrap().completed_work();
+        let done_list = up.ds_work.lock().unwrap().completed_work();
         // println!( "rcv:{} Done List: {:?}", ds_id, done_list);
 
         for ds_id_done in done_list.iter() {
-            let mut work = up.work.lock().unwrap();
+            let mut work = up.ds_work.lock().unwrap();
 
             /*
              * TODO: retire means the downstairs is "consistent" with
@@ -1780,23 +1801,24 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
         let req = up.guest.recv().await;
         match req.op {
             BlockOp::Read { offset, data } => {
-                guest_submit_read(up, offset, data, req.send);
+                up.submit_read(offset, data, req.send);
                 // Send the message that there is new work to do
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
             BlockOp::Write { offset, data } => {
-                guest_submit_write(up, offset, data, req.send);
+                //guest_submit_write(up, offset, data, req.send);
+                up.submit_write(offset, data, req.send);
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
             BlockOp::Flush => {
-                guest_submit_flush(up, req.send);
+                up.submit_flush(req.send).unwrap();
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
             BlockOp::ShowWork => {
-                _show_work(up);
+                show_all_work(up);
             }
             BlockOp::Commit => {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
@@ -2016,10 +2038,10 @@ fn create_flush(
  * the clients.
  */
 #[allow(unused_variables)]
-fn _show_work(up: &Arc<Upstairs>) {
+fn show_all_work(up: &Arc<Upstairs>) {
     println!("######### Crucible Downstairs work queue #####");
     println!("######### ############################## #####");
-    let work = up.work.lock().unwrap();
+    let work = up.ds_work.lock().unwrap();
     let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
     kvec.sort_unstable();
     for id in kvec.iter() {
@@ -2056,7 +2078,7 @@ fn _show_work(up: &Arc<Upstairs>) {
         println!();
     }
     let done = work.completed.to_vec();
-    println!("Done: {:?}", done);
+    println!("Done tasks: {:?}", done.len());
     drop(work);
     show_guest_work(&up.guest);
 }
@@ -2100,7 +2122,7 @@ mod test {
         def.set_extent_count(10);
 
         Arc::new(Upstairs {
-            work: Mutex::new(Work {
+            ds_work: Mutex::new(Work {
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2),
                 next_id: 1000,
@@ -2112,6 +2134,19 @@ mod test {
         })
     }
 
+    /*
+     * Terrible wrapper, but it allows us to call extent_from_offset()
+     * just like the program does.
+     */
+    fn up_efo(
+        up: &Arc<Upstairs>,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<(u64, u64, usize)>> {
+        let ddef = up.ddef.lock().unwrap();
+        extent_from_offset(ddef, offset, len)
+    }
+
     #[test]
     fn off_to_extent_basic() {
         /*
@@ -2121,33 +2156,30 @@ mod test {
         let up = make_upstairs();
 
         let exv = vec![(0, 0, 512)];
-        assert_eq!(extent_from_offset(&up, 0, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 0, 512).unwrap(), exv);
         let exv = vec![(0, 1, 512)];
-        assert_eq!(extent_from_offset(&up, 512, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 512, 512).unwrap(), exv);
         let exv = vec![(0, 2, 512)];
-        assert_eq!(extent_from_offset(&up, 1024, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 1024, 512).unwrap(), exv);
         let exv = vec![(0, 3, 512)];
-        assert_eq!(extent_from_offset(&up, 1024 + 512, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 1024 + 512, 512).unwrap(), exv);
         let exv = vec![(0, 99, 512)];
-        assert_eq!(extent_from_offset(&up, 51200 - 512, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 - 512, 512).unwrap(), exv);
 
         let exv = vec![(1, 0, 512)];
-        assert_eq!(extent_from_offset(&up, 51200, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200, 512).unwrap(), exv);
         let exv = vec![(1, 1, 512)];
-        assert_eq!(extent_from_offset(&up, 51200 + 512, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 + 512, 512).unwrap(), exv);
         let exv = vec![(1, 2, 512)];
-        assert_eq!(extent_from_offset(&up, 51200 + 1024, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 + 1024, 512).unwrap(), exv);
         let exv = vec![(1, 99, 512)];
-        assert_eq!(extent_from_offset(&up, 102400 - 512, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 102400 - 512, 512).unwrap(), exv);
 
         let exv = vec![(2, 0, 512)];
-        assert_eq!(extent_from_offset(&up, 102400, 512).unwrap(), exv);
+        assert_eq!(up_efo(&up, 102400, 512).unwrap(), exv);
 
         let exv = vec![(9, 99, 512)];
-        assert_eq!(
-            extent_from_offset(&up, (512 * 100 * 10) - 512, 512).unwrap(),
-            exv
-        );
+        assert_eq!(up_efo(&up, (512 * 100 * 10) - 512, 512).unwrap(), exv);
     }
 
     #[test]
@@ -2158,31 +2190,28 @@ mod test {
         let up = make_upstairs();
 
         let exv = vec![(0, 0, 1024)];
-        assert_eq!(extent_from_offset(&up, 0, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 0, 1024).unwrap(), exv);
         let exv = vec![(0, 1, 1024)];
-        assert_eq!(extent_from_offset(&up, 512, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 512, 1024).unwrap(), exv);
         let exv = vec![(0, 2, 1024)];
-        assert_eq!(extent_from_offset(&up, 1024, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 1024, 1024).unwrap(), exv);
         let exv = vec![(0, 98, 1024)];
-        assert_eq!(extent_from_offset(&up, 51200 - 1024, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 - 1024, 1024).unwrap(), exv);
 
         let exv = vec![(1, 0, 1024)];
-        assert_eq!(extent_from_offset(&up, 51200, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200, 1024).unwrap(), exv);
         let exv = vec![(1, 1, 1024)];
-        assert_eq!(extent_from_offset(&up, 51200 + 512, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 + 512, 1024).unwrap(), exv);
         let exv = vec![(1, 2, 1024)];
-        assert_eq!(extent_from_offset(&up, 51200 + 1024, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 + 1024, 1024).unwrap(), exv);
         let exv = vec![(1, 98, 1024)];
-        assert_eq!(extent_from_offset(&up, 102400 - 1024, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 102400 - 1024, 1024).unwrap(), exv);
 
         let exv = vec![(2, 0, 1024)];
-        assert_eq!(extent_from_offset(&up, 102400, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 102400, 1024).unwrap(), exv);
 
         let exv = vec![(9, 98, 1024)];
-        assert_eq!(
-            extent_from_offset(&up, (512 * 100 * 10) - 1024, 1024).unwrap(),
-            exv
-        );
+        assert_eq!(up_efo(&up, (512 * 100 * 10) - 1024, 1024).unwrap(), exv);
     }
 
     #[test]
@@ -2195,7 +2224,7 @@ mod test {
          */
         for bsize in (512..=51200).step_by(512) {
             let exv = vec![(0, 0, bsize)];
-            assert_eq!(extent_from_offset(&up, 0, bsize).unwrap(), exv);
+            assert_eq!(up_efo(&up, 0, bsize).unwrap(), exv);
         }
     }
 
@@ -2209,25 +2238,25 @@ mod test {
          * 1024 buffer
          */
         let exv = vec![(0, 99, 512), (1, 0, 512)];
-        assert_eq!(extent_from_offset(&up, 51200 - 512, 1024).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 - 512, 1024).unwrap(), exv);
         let exv = vec![(0, 98, 1024), (1, 0, 1024)];
-        assert_eq!(extent_from_offset(&up, 51200 - 1024, 2048).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 - 1024, 2048).unwrap(), exv);
 
         /*
          * Largest buffer
          */
         let exv = vec![(0, 1, 51200 - 512), (1, 0, 512)];
-        assert_eq!(extent_from_offset(&up, 512, 51200).unwrap(), exv);
+        assert_eq!(up_efo(&up, 512, 51200).unwrap(), exv);
         let exv = vec![(0, 2, 51200 - 1024), (1, 0, 1024)];
-        assert_eq!(extent_from_offset(&up, 1024, 51200).unwrap(), exv);
+        assert_eq!(up_efo(&up, 1024, 51200).unwrap(), exv);
         let exv = vec![(0, 4, 51200 - 2048), (1, 0, 2048)];
-        assert_eq!(extent_from_offset(&up, 2048, 51200).unwrap(), exv);
+        assert_eq!(up_efo(&up, 2048, 51200).unwrap(), exv);
 
         /*
          * Largest buffer, last block offset possible
          */
         let exv = vec![(0, 99, 512), (1, 0, 51200 - 512)];
-        assert_eq!(extent_from_offset(&up, 51200 - 512, 51200).unwrap(), exv);
+        assert_eq!(up_efo(&up, 51200 - 512, 51200).unwrap(), exv);
     }
 
     /*
@@ -2237,42 +2266,42 @@ mod test {
     #[should_panic]
     fn off_to_extent_length_zero() {
         let up = make_upstairs();
-        extent_from_offset(&up, 0, 0).unwrap();
+        up_efo(&up, 0, 0).unwrap();
     }
     #[test]
     #[should_panic]
     fn off_to_extent_block_align() {
         let up = make_upstairs();
-        extent_from_offset(&up, 0, 511).unwrap();
+        up_efo(&up, 0, 511).unwrap();
     }
     #[test]
     #[should_panic]
     fn off_to_extent_block_align2() {
         let up = make_upstairs();
-        extent_from_offset(&up, 0, 513).unwrap();
+        up_efo(&up, 0, 513).unwrap();
     }
     #[test]
     #[should_panic]
     fn off_to_extent_length_big() {
         let up = make_upstairs();
-        extent_from_offset(&up, 0, 51200 + 512).unwrap();
+        up_efo(&up, 0, 51200 + 512).unwrap();
     }
     #[test]
     #[should_panic]
     fn off_to_extent_offset_align() {
         let up = make_upstairs();
-        extent_from_offset(&up, 511, 512).unwrap();
+        up_efo(&up, 511, 512).unwrap();
     }
     #[test]
     #[should_panic]
     fn off_to_extent_offset_align2() {
         let up = make_upstairs();
-        extent_from_offset(&up, 513, 512).unwrap();
+        up_efo(&up, 513, 512).unwrap();
     }
     #[test]
     #[should_panic]
     fn off_to_extent_offset_big() {
         let up = make_upstairs();
-        extent_from_offset(&up, 512000, 512).unwrap();
+        up_efo(&up, 512000, 512).unwrap();
     }
 }
