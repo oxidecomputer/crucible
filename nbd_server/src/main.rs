@@ -81,7 +81,7 @@ impl Read for CruciblePseudoFile {
 
         let mut result: usize = 0;
 
-        for i in (0..buf.len()).step_by(512) {
+        for i in (0..buf.len()).step_by(self.block_size) {
             result += self._read(&mut buf[i..(i + self.block_size)])?;
         }
 
@@ -95,7 +95,7 @@ impl Write for CruciblePseudoFile {
 
         let mut result: usize = 0;
 
-        for i in (0..buf.len()).step_by(512) {
+        for i in (0..buf.len()).step_by(self.block_size) {
             result += self._write(&buf[i..(i + self.block_size)])?;
         }
 
