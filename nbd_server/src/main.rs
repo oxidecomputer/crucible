@@ -129,7 +129,10 @@ impl Seek for CruciblePseudoFile {
         }
 
         if offset < 0 {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "offset is negative!"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "offset is negative!",
+            ))
         } else {
             // offset >= 0
             self.offset = offset as u64;

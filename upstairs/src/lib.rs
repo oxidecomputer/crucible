@@ -1056,7 +1056,9 @@ fn test_buffer_len_after_clone() {
 }
 
 #[test]
-#[should_panic(expected = "index out of bounds: the len is 512 but the index is 512")]
+#[should_panic(
+    expected = "index out of bounds: the len is 512 but the index is 512"
+)]
 fn test_buffer_len_index_overflow() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
@@ -1065,7 +1067,7 @@ fn test_buffer_len_index_overflow() {
     let mut vec = data.as_vec();
     assert_eq!(vec.len(), 512);
 
-    for i in 0..(READ_SIZE +1) {
+    for i in 0..(READ_SIZE + 1) {
         vec[i] = 0x99;
     }
 }
