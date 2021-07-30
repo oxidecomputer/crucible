@@ -916,15 +916,23 @@ impl UpstairsEncryptionContext {
 // key material made with `openssl rand -base64 32`
 
 #[test]
-pub fn test_upstairs_encryption_cloning() {
+pub fn test_upstairs_encryption_clone_offsets_not_shared() {
     let key_bytes =
         base64::decode("qOUIYJ3pElgcFx1VOiPiATOtyZO0kRVBdK/GANmn13A=").unwrap();
-    let context =
+    let mut context =
         UpstairsEncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
 
     let clone = context.clone();
 
     assert_eq!(context.key(), clone.key());
+    assert_eq!(context.block_size(), clone.block_size());
+
+    assert_eq!(context.offsets, clone.offsets);
+
+    let mut block = [0u8; 512];
+    context.encrypt_in_place(&mut block[..], 0, 0);
+
+    assert_ne!(context.offsets, clone.offsets);
 }
 
 #[test]
