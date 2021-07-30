@@ -991,13 +991,21 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /*
+     * XXX: For now, assert Buffer size is at least hard coded block size 512.
+     */
+
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
+        assert!(vec.len() >= 512);
+
         Buffer {
             data: Arc::new(Mutex::new(vec)),
         }
     }
 
     pub fn new(len: usize) -> Buffer {
+        assert!(len >= 512);
+
         let mut vec = Vec::<u8>::with_capacity(len);
         vec.resize(len, 0);
 
@@ -1007,17 +1015,14 @@ impl Buffer {
     }
 
     pub fn from_slice(buf: &[u8]) -> Buffer {
-        let data = Buffer::new(buf.len());
+        assert!(buf.len() >= 512);
 
-        {
-            let mut vec = data.as_vec();
-            for item in buf {
-                //vec.push(buf[i]);
-                vec.push(*item);
-            }
+        let mut vec = Vec::<u8>::with_capacity(buf.len());
+        for item in buf {
+            vec.push(*item);
         }
 
-        data
+        Buffer::from_vec(vec)
     }
 
     pub fn len(&self) -> usize {
@@ -1025,12 +1030,53 @@ impl Buffer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() > 0
+        self.len() == 0
     }
 
     pub fn as_vec(&self) -> MutexGuard<Vec<u8>> {
         self.data.try_lock().unwrap()
     }
+}
+
+#[test]
+fn test_buffer_len() {
+    const READ_SIZE: usize = 512;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
+}
+
+#[test]
+fn test_buffer_len_after_clone() {
+    const READ_SIZE: usize = 512;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
+
+    let new_buffer = data.clone();
+    assert_eq!(new_buffer.len(), READ_SIZE);
+}
+
+#[test]
+#[should_panic(
+    expected = "index out of bounds: the len is 512 but the index is 512"
+)]
+fn test_buffer_len_index_overflow() {
+    const READ_SIZE: usize = 512;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
+
+    let mut vec = data.as_vec();
+    assert_eq!(vec.len(), 512);
+
+    for i in 0..(READ_SIZE + 1) {
+        vec[i] = 0x99;
+    }
+}
+
+#[test]
+fn test_buffer_len_over_block_size() {
+    const READ_SIZE: usize = 600;
+    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 /*

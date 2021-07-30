@@ -77,18 +77,13 @@ impl CruciblePseudoFile {
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        let mut i = 0;
-        let mut sz = buf.len();
-        let orig_sz = buf.len();
+        assert!((buf.len() % self.block_size) == 0);
+
         let mut result: usize = 0;
 
-        while sz > self.block_size {
+        for i in (0..buf.len()).step_by(self.block_size) {
             result += self._read(&mut buf[i..(i + self.block_size)])?;
-            sz -= self.block_size;
-            i += self.block_size;
         }
-
-        result += self._read(&mut buf[i..orig_sz])?;
 
         Ok(result)
     }
@@ -96,18 +91,13 @@ impl Read for CruciblePseudoFile {
 
 impl Write for CruciblePseudoFile {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        let mut i = 0;
-        let mut sz = buf.len();
-        let orig_sz = buf.len();
+        assert!((buf.len() % self.block_size) == 0);
+
         let mut result: usize = 0;
 
-        while sz > self.block_size {
+        for i in (0..buf.len()).step_by(self.block_size) {
             result += self._write(&buf[i..(i + self.block_size)])?;
-            sz -= self.block_size;
-            i += self.block_size;
         }
-
-        result += self._write(&buf[i..orig_sz])?;
 
         Ok(result)
     }
@@ -123,24 +113,35 @@ impl Write for CruciblePseudoFile {
 impl Seek for CruciblePseudoFile {
     fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
         // TODO: does not check against block device size
+        let mut offset: i64 = self.offset as i64;
         match pos {
             SeekFrom::Start(v) => {
-                self.offset = v as u64;
+                offset = v as i64;
             }
             SeekFrom::Current(v) => {
                 // TODO: as checked add?
-                self.offset += v as u64;
+                offset += v;
             }
             SeekFrom::End(v) => {
-                // TODO: as checked subtract?
-                self.offset = self.sz - v as u64;
+                // TODO: as checked add?
+                offset += v;
             }
         }
-        Ok(self.offset)
+
+        if offset < 0 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "offset is negative!",
+            ))
+        } else {
+            // offset >= 0
+            self.offset = offset as u64;
+            Ok(self.offset)
+        }
     }
 
     fn stream_position(&mut self) -> IOResult<u64> {
-        Ok(self.offset)
+        self.seek(SeekFrom::Current(0))
     }
 }
 
