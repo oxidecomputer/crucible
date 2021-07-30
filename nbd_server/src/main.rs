@@ -77,7 +77,7 @@ impl CruciblePseudoFile {
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        assert!((buf.len() % 512) == 0);
+        assert!((buf.len() % self.block_size) == 0);
 
         let mut result: usize = 0;
 
@@ -91,7 +91,7 @@ impl Read for CruciblePseudoFile {
 
 impl Write for CruciblePseudoFile {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        assert!((buf.len() % 512) == 0);
+        assert!((buf.len() % self.block_size) == 0);
 
         let mut result: usize = 0;
 
