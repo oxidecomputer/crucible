@@ -1,13 +1,79 @@
+use std::net::SocketAddrV4;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::{BufMut, BytesMut};
+use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
 
+/*
+ * A simple example of using the crucible lib
+ */
+#[derive(Debug, StructOpt)]
+#[structopt(about = "volume-side storage component")]
+pub struct Opt {
+    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    target: Vec<SocketAddrV4>,
+}
+
+pub fn opts() -> Result<Opt> {
+    let opt: Opt = Opt::from_args();
+    println!("raw options: {:?}", opt);
+
+    if opt.target.is_empty() {
+        bail!("must specify at least one --target");
+    }
+
+    Ok(opt)
+}
+impl Opt {
+    /*
+     * Use:
+     *
+     *     let opt = Opt::from_string("-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string()).unwrap();
+     *
+     */
+    pub fn from_string(args: String) -> Result<Opt> {
+        let opt: Opt = Opt::from_iter(args.split(' '));
+
+        if opt.target.is_empty() {
+            bail!("must specify at least one --target");
+        }
+
+        Ok(opt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Opt;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    #[test]
+    fn test_opt_from_string() {
+        let opt = Opt::from_string(
+            "-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string(),
+        )
+        .unwrap();
+        assert_eq!(opt.target.is_empty(), false);
+        assert_eq!(opt.target.len(), 2);
+
+        assert_eq!(
+            opt.target[0],
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 3801)
+        );
+        assert_eq!(
+            opt.target[1],
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801)
+        );
+    }
+}
+
 fn main() -> Result<()> {
     let opt = opts()?;
+    let crucible_opts = CrucibleOpts { target: opt.target };
 
     let runtime = Builder::new_multi_thread()
         .worker_threads(10)
@@ -23,8 +89,7 @@ fn main() -> Result<()> {
      * the run_scope() function to submit test work.
      */
     let guest = Arc::new(Guest::new());
-
-    runtime.spawn(up_main(opt, guest.clone()));
+    runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("runtime is spawned");
 
     /*
