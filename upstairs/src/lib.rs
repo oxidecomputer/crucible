@@ -879,7 +879,7 @@ impl UpstairsEncryptionContext {
 
     // TODO: checksums?
 
-    fn set_offset_for_ds_id(&mut self, ds_id: u64, block_offset: u128) {
+    pub fn set_offset_for_ds_id(&mut self, ds_id: u64, block_offset: u128) {
         if self.offsets.contains_key(&ds_id) {
             // TODO: if exists already, bad news!
             panic!("ds_id reused?!");
@@ -1272,7 +1272,7 @@ impl Upstairs {
          * Clone Upstair's encryption context if it exists, attach to
          * GtoS for decryption use before notifying transfer completion.
          */
-        let encryption_context = match &self.encryption_context {
+        let mut encryption_context = match &self.encryption_context {
             Some(context) => Some(context.clone()),
             None => None,
         };
@@ -1286,6 +1286,7 @@ impl Upstairs {
             {
                 next_id = ds_work.next_id();
             }
+
             /*
              * When multiple operations are needed to satisfy a read, The offset
              * and length will be divided across two downstairs requests.  It is
@@ -1295,12 +1296,12 @@ impl Upstairs {
              */
             sub.insert(next_id, len);
 
-            /*
-            if let Some(context) = encryption_context {
-                // Shit.
-                context.set_offset(next_id, bo);
+            match encryption_context {
+                Some(ref mut context) => {
+                    context.set_offset_for_ds_id(next_id, bo as u128);
+                }
+                None => {}
             }
-            */
 
             let wr = create_read_eob(next_id, gw_id, eid, bo, blocks);
             new_ds_work.push(wr);
@@ -1661,6 +1662,9 @@ impl GtoS {
                 let ds_buf = self.downstairs_buffer.remove(ds_id).unwrap();
 
                 {
+                    /*
+                     * Copy over into guest memory.
+                     */
                     let mut vec = guest_buffer.as_vec();
                     for i in 0..ds_buf.len() {
                         vec[i] = ds_buf[i];
