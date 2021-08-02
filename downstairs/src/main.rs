@@ -1,10 +1,10 @@
+use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use std::fs;
-use std::fs::File;
-use std::io::Read;
 
 use crucible_protocol::*;
 
@@ -218,7 +218,10 @@ async fn main() -> Result<()> {
 
             let (block_size, extent_size, extent_count) = region.region_def();
 
-            println!("Importing {:?} to region with {} extents", import_path, extent_count);
+            println!(
+                "Importing {:?} to region with {} extents",
+                import_path, extent_count
+            );
 
             let space_per_extent = block_size * extent_size;
             let mut buffer = [0 as u8; 512];
