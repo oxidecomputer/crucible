@@ -77,6 +77,10 @@ fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 impl Extent {
+    /**
+     * Open an existing extent file at the location requested.
+     * Read in the metadata from the first block of the file.
+     */
     fn open<P: AsRef<Path>>(
         dir: P,
         def: &RegionDefinition,
@@ -91,37 +95,17 @@ impl Extent {
         /*
          * Leave a block at the beginning of the file as a place to scribble
          * metadata.
-         * XXX Assert somewhere (compile time?)  that struct ExtentMeta
-         * size is always < one block?
          */
         let bcount = def.extent_size().checked_add(1).unwrap();
         let size = def.block_size().checked_mul(bcount).unwrap();
 
-        mkdir_for_file(&path)?;
         /*
-         * If the extent file exists, just open it and move forward.
-         * If it does not, then create it and set to zero the flush number.
-         * If the extent should have existed, we rely on the upper layers to
-         * check the flush number and restore missing contents.
+         * Open the extent file and verify the size is as we expect.
          */
         let mut file =
             match OpenOptions::new().read(true).write(true).open(&path) {
-                Err(_e) => {
-                    /*
-                     * XXX Should we check or log the error here?
-                     * We should know if it's expected to find a file and we
-                     * do not.  Also might want to identify other possible
-                     * errors like bad permissions, out of space, etc.
-                     */
-                    let mut new_file = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .open(&path)?;
-
-                    new_file.set_len(size)?;
-                    new_file.seek(SeekFrom::Start(0))?;
-                    new_file
+                Err(e) => {
+                    bail!("Error: e {} No extent file found for {:?}", e, path);
                 }
                 Ok(f) => {
                     let cur_size = f.metadata().unwrap().len();
@@ -136,14 +120,13 @@ impl Extent {
                 }
             };
 
+        /*
+         * Read in the metadata from the beginning of the extent file.
+         */
         let size = bincode::serialized_size(&ExtentMeta::default()).unwrap();
         let mut encoded: Vec<u8> = vec![0; size as usize];
         file.read_exact(&mut encoded)?;
         let buf: ExtentMeta = bincode::deserialize(&encoded[..]).unwrap();
-
-        /*
-         * Read the flush number from the first block:
-         */
 
         Ok(Extent {
             number,
@@ -158,6 +141,67 @@ impl Extent {
                     dirty: false,
                 },
             }),
+        })
+    }
+
+    /**
+     * Create an extent at the location requested.
+     * Start off with the default meta data.
+     */
+    fn create<P: AsRef<Path>>(
+        // Extent
+        dir: P,
+        def: &RegionDefinition,
+        number: u32,
+    ) -> Result<Extent> {
+        /*
+         * Store extent data in files within a directory hierarchy so that there
+         * are not too many files in any level of that hierarchy.
+         */
+        let path = extent_path(dir, number);
+
+        /*
+         * Verify there are not existing extent files.
+         */
+        if Path::new(&path).exists() {
+            bail!("Extent file already exists {:?}", path);
+        }
+
+        /*
+         * Leave a block at the beginning of the file as a place to scribble
+         * metadata.
+         */
+        let bcount = def.extent_size().checked_add(1).unwrap();
+        let size = def.block_size().checked_mul(bcount).unwrap();
+
+        mkdir_for_file(&path)?;
+        /*
+         */
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+
+        file.set_len(size)?;
+        file.seek(SeekFrom::Start(0))?;
+
+        /*
+         * Write out the new inner.meta structure for this new extent.
+         */
+        let meta = ExtentMeta::default();
+        let encoded: Vec<u8> = bincode::serialize(&meta).unwrap();
+        file.write_all(&encoded)?;
+        file.flush()?;
+
+        /*
+         * Complete the construction of our new extent
+         */
+        Ok(Extent {
+            number,
+            block_size: def.block_size(),
+            extent_size: def.extent_size(),
+            inner: Mutex::new(Inner { file, meta }),
         })
     }
 
@@ -195,7 +239,7 @@ impl Extent {
         Ok(())
     }
 
-    /*
+    /**
      * Verify that the requested block offset and size of the buffer
      * will fit within the extent.
      *
@@ -344,22 +388,33 @@ pub struct Region {
 }
 
 impl Region {
-    pub fn open<P: AsRef<Path>>(
+    pub fn create<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
     ) -> Result<Region> {
         options.validate()?;
 
         let cp = config_path(dir.as_ref());
-        let def = if let Some(def) = read_json_maybe(&cp)? {
-            println!("opened existing region file {:?}", cp);
-            def
-        } else {
-            let def = RegionDefinition::from_options(&options)?;
-            write_json(&cp, &def, false)?;
-            println!("created new region file {:?}", cp);
-            def
-        };
+        /*
+         * If the file exists, then exit now with error.  If the caller
+         * wants a new region, they have to delete the old one first.
+         */
+        if Path::new(&cp).exists() {
+            bail!("Config file already exists {:?}", cp);
+        }
+        mkdir_for_file(&cp)?;
+
+        let def = RegionDefinition::from_options(&options).unwrap();
+        if bincode::serialized_size(&ExtentMeta::default()).unwrap()
+            > def.block_size()
+        {
+            bail!(
+                "Extent metadata will not fit in block size {}",
+                def.block_size()
+            );
+        }
+        write_json(&cp, &def, false)?;
+        println!("created new region file {:?}", cp);
 
         /*
          * Open every extent that presently exists.
@@ -370,21 +425,73 @@ impl Region {
             extents: Vec::new(),
         };
 
-        region.open_extents()?;
+        region.open_extents(true)?;
 
         Ok(region)
     }
 
-    fn open_extents(&mut self) -> Result<()> {
+    pub fn open<P: AsRef<Path>>(
+        dir: P,
+        options: RegionOptions,
+    ) -> Result<Region> {
+        options.validate()?;
+
+        let cp = config_path(dir.as_ref());
+        /*
+         * We are expecting to find a region config file and extent files.
+         * If we do not, then report error and exit.
+         */
+        let def = match read_json(&cp) {
+            Ok(def) => def,
+            Err(e) => bail!("Error {:?} opening region config {:?}", e, cp),
+        };
+
+        println!("opened existing region file {:?}", cp);
+        /*
+         * Open every extent that presently exists.
+         */
+        let mut region = Region {
+            dir: dir.as_ref().to_path_buf(),
+            def,
+            extents: Vec::new(),
+        };
+
+        region.open_extents(false)?;
+
+        Ok(region)
+    }
+
+    /**
+     * If our extent_count is higher than the number of populated entries
+     * we have in our extents Vec, then open all the new extent files and
+     * load their content into the extent Vec.
+     *
+     * If create is false, we expect the extent files to exist at the
+     * expected location and will return error if they are not found.
+     *
+     * If create is true, we expect to create new extent files, and will
+     * return error if the file is already present.
+     */
+    fn open_extents(&mut self, create: bool) -> Result<()> {
         let next_eid = self.extents.len() as u32;
         for eid in next_eid..self.def.extent_count() {
-            self.extents.push(Extent::open(&self.dir, &self.def, eid)?);
+            let new_extent: Extent;
+            if create {
+                new_extent = Extent::create(&self.dir, &self.def, eid)?;
+            } else {
+                new_extent = Extent::open(&self.dir, &self.def, eid)?;
+            }
+            self.extents.push(new_extent);
             assert_eq!(self.extents[eid as usize].number, eid);
         }
         assert_eq!(self.def.extent_count() as usize, self.extents.len());
         Ok(())
     }
 
+    /**
+     * if there is a difference between what our actual extent_count is
+     * and what is requested, go out and create the new extent files.
+     */
     pub fn extend(&mut self, newsize: u32) -> Result<()> {
         if newsize < self.def.extent_count() {
             bail!(
@@ -397,7 +504,7 @@ impl Region {
         if newsize > self.def.extent_count() {
             self.def.set_extent_count(newsize);
             write_json(config_path(&self.dir), &self.def, true)?;
-            self.open_extents()?;
+            self.open_extents(true)?;
         }
         Ok(())
     }
@@ -471,8 +578,11 @@ impl Region {
 mod test {
     use super::extent_path;
     use super::*;
+    use crate::Opt;
     use bytes::BufMut;
+    use std::fs::remove_dir_all;
     use std::path::PathBuf;
+    use structopt::StructOpt;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -485,7 +595,7 @@ mod test {
         let inn = Inner { file: ff, meta: em };
 
         /*
-         * Note:  All the tests expext 512 and 100, so if you change
+         * Note:  All the tests expect 512 and 100, so if you change
          * these, then change the tests!
          */
         Extent {
@@ -494,6 +604,48 @@ mod test {
             extent_size: 100,
             inner: Mutex::new(inn),
         }
+    }
+
+    pub fn opt_from_string(args: String) -> Result<Opt> {
+        let opt: Opt = Opt::from_iter(args.split(' '));
+        Ok(opt)
+    }
+
+    pub fn test_cleanup() {
+        if Path::new("/tmp/ds_test").exists() {
+            remove_dir_all("/tmp/ds_test").unwrap();
+        }
+    }
+
+    #[test]
+    fn new_region() -> Result<()> {
+        test_cleanup();
+        let my_arg = "-- -c -p 3801 -d /tmp/ds_test/1".to_string();
+        let opt = opt_from_string(my_arg).unwrap();
+        //let opt = Opt::from_string(my_arg).unwrap();
+        let _ = Region::create(&opt.data, Default::default()).unwrap();
+        remove_dir_all("/tmp/ds_test/1").unwrap();
+        Ok(())
+    }
+    #[test]
+    fn new_existing_region() -> Result<()> {
+        test_cleanup();
+        let my_arg = "-- -c -p 3801 -d /tmp/ds_test/2".to_string();
+        let opt = opt_from_string(my_arg).unwrap();
+        let _ = Region::create(&opt.data, Default::default()).unwrap();
+        let _ = Region::open(&opt.data, Default::default());
+        remove_dir_all("/tmp/ds_test/2").unwrap();
+        Ok(())
+    }
+    #[test]
+    #[should_panic]
+    fn bad_import_region() -> () {
+        test_cleanup();
+        let my_arg = "-- -c -p 3801 -d /tmp/ds_test/3".to_string();
+        let opt = opt_from_string(my_arg).unwrap();
+        let _ = Region::open(&opt.data, Default::default()).unwrap();
+        remove_dir_all("/tmp/ds_test/3").unwrap();
+        ()
     }
 
     #[test]

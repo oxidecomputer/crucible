@@ -19,7 +19,7 @@ use region::Region;
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "disk-side storage component")]
-struct Opt {
+pub struct Opt {
     #[structopt(short, long, default_value = "0.0.0.0")]
     address: Ipv4Addr,
 
@@ -28,14 +28,31 @@ struct Opt {
 
     #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
     data: PathBuf,
+
+    #[structopt(short, long = "create")]
+    create: bool,
 }
 
+/*
+ * Parse the command line options and do some sanity checking
+ */
 fn opts() -> Result<Opt> {
     let opt: Opt = Opt::from_args();
     println!("raw options: {:?}", opt);
 
-    if !opt.data.is_dir() {
-        bail!("--data {:?} must be a directory", opt.data);
+    /*
+     * Make sure we don't clobber an existing region, if we are creating
+     * a new one, then it should not exist.
+     * In addition, if we are just opening an existing region, then
+     * expect to find the files where the should exist and return error
+     * if they do not exist.
+     */
+    if opt.create {
+        if opt.data.is_dir() {
+            bail!("Directory {:?} already exists, Cannot create", opt.data);
+        }
+    } else if !opt.data.is_dir() {
+        bail!("--data {:?} must exist as a directory", opt.data);
     }
 
     Ok(opt)
@@ -169,10 +186,17 @@ async fn main() -> Result<()> {
     let opt = opts()?;
 
     /*
-     * Open the region for which we will be responsible.
+     * Open or create the region for which we will be responsible.
      */
-    let mut region = Region::open(&opt.data, Default::default())?;
-    region.extend(10)?;
+    let mut region;
+    if opt.create {
+        println!("Create new region directory");
+        region = Region::create(&opt.data, Default::default())?;
+        region.extend(10)?;
+    } else {
+        println!("Open existing region directory");
+        region = Region::open(&opt.data, Default::default())?;
+    }
 
     println!("Startup Extent values: {:?}", region.versions());
     let d = Arc::new(Downstairs { region });
