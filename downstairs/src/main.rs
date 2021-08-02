@@ -2,6 +2,9 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::fs;
+use std::fs::File;
+use std::io::Read;
 
 use crucible_protocol::*;
 
@@ -31,6 +34,9 @@ pub struct Opt {
 
     #[structopt(short, long = "create")]
     create: bool,
+
+    #[structopt(short, long, parse(from_os_str), name = "FILE")]
+    import_path: Option<PathBuf>,
 }
 
 /*
@@ -192,7 +198,56 @@ async fn main() -> Result<()> {
     if opt.create {
         println!("Create new region directory");
         region = Region::create(&opt.data, Default::default())?;
-        region.extend(10)?;
+
+        if let Some(import_path) = opt.import_path {
+            /*
+             * Import a file in, extending the appropriate number of extents first.
+             */
+            {
+                let file_size = fs::metadata(&import_path)?.len();
+                let (block_size, extent_size, _) = region.region_def();
+
+                // TODO: use a ceiling divide for u32 instead?
+                let mut extents = (file_size / block_size) / extent_size;
+                while (extents * block_size * extent_size) < file_size {
+                    extents += 1;
+                }
+
+                region.extend(extents as u32)?;
+            }
+
+            let (block_size, extent_size, extent_count) = region.region_def();
+
+            println!("Importing {:?} to region with {} extents", import_path, extent_count);
+
+            let space_per_extent = block_size * extent_size;
+            let mut buffer = [0 as u8; 512];
+
+            let mut fp = File::open(import_path)?;
+            let mut offset: u64 = 0;
+
+            while let Ok(n) = fp.read(&mut buffer[..]) {
+                let eid = offset / space_per_extent;
+                let block_offset = (offset % space_per_extent) / block_size;
+
+                if n != 512 {
+                    if n == 0 {
+                        // EOF - how many bytes? who knows! just write them all
+                        // Why do you do this to me POSIX
+                        region.region_write(eid, block_offset, &buffer)?;
+                    } else {
+                        let rest = &buffer[0..n];
+                        region.region_write(eid, block_offset, &rest)?;
+                    }
+                    break;
+                } else {
+                    region.region_write(eid, block_offset, &buffer)?;
+                    offset += n as u64;
+                }
+            }
+        } else {
+            region.extend(10)?;
+        }
     } else {
         println!("Open existing region directory");
         region = Region::open(&opt.data, Default::default())?;
