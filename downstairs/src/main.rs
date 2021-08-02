@@ -224,7 +224,8 @@ async fn main() -> Result<()> {
             );
 
             let space_per_extent = block_size * extent_size;
-            let mut buffer = [0 as u8; 512];
+            let mut buffer = Vec::<u8>::with_capacity(block_size as usize);
+            buffer.resize(block_size as usize, 0);
 
             let mut fp = File::open(import_path)?;
             let mut offset: u64 = 0;
@@ -233,7 +234,7 @@ async fn main() -> Result<()> {
                 let eid = offset / space_per_extent;
                 let block_offset = (offset % space_per_extent) / block_size;
 
-                if n != 512 {
+                if n != (block_size as usize) {
                     if n == 0 {
                         // EOF - how many bytes? who knows! just write them all
                         // Why do you do this to me POSIX
