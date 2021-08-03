@@ -1267,12 +1267,12 @@ pub enum BlockOp {
     Read { offset: u64, data: Buffer },
     Write { offset: u64, data: bytes::Bytes },
     Flush,
-    // Begin testing options.
-    Commit,   // Send update to all tasks that there is work on the queue.
-    ShowWork, // Show the status of the internal work hashmap and done Vec.
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
+    // Begin testing options.
+    Commit,   // Send update to all tasks that there is work on the queue.
+    ShowWork, // Show the status of the internal work hashmap and done Vec.
 }
 
 /*
@@ -1778,14 +1778,6 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
-            // Testing options
-            BlockOp::ShowWork => {
-                show_all_work(up);
-            }
-            BlockOp::Commit => {
-                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
-                lastcast += 1;
-            }
             // Query ops
             BlockOp::QueryBlockSize { data } => {
                 *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
@@ -1794,6 +1786,14 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
             BlockOp::QueryTotalSize { data } => {
                 *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
                 let _ = req.send.send(0);
+            }
+            // Testing options
+            BlockOp::ShowWork => {
+                show_all_work(up);
+            }
+            BlockOp::Commit => {
+                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
+                lastcast += 1;
             }
         }
     }
