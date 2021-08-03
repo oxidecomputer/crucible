@@ -1,5 +1,5 @@
 use std::fs;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
@@ -75,26 +75,6 @@ fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
-fn _downstairs_import(d: &Arc<Downstairs>) -> Result<()> {
-    println!("Import to downstairs");
-
-    let (bs, es, _) = d.region.region_def();
-    let size_per_extent = bs * es;
-
-    println!("Size per extent is: {}", bs * es);
-
-    let path = "./foo.txt".to_string();
-    let mut file = OpenOptions::new().read(true).open(&path)?;
-
-    // let mut data = BytesMut::with_capacity(size_per_extent as usize);
-    let mut data = BytesMut::with_capacity(size_per_extent as usize);
-
-    file.read_exact(&mut data).unwrap();
-    println!("Got data: {:#?} {}", data, data.len());
-
-    Ok(())
-}
-
 fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     region: &mut Region,
     import_path: P,
@@ -103,9 +83,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      * Import a file in, extending the appropriate number of extents first.
      */
     let file_size = fs::metadata(&import_path)?.len();
-    let rm = region.def();
-    let block_size = rm.block_size();
-    let extent_size = rm.extent_size();
+    let (block_size, extent_size, _) = region.region_def();
     let space_per_extent = block_size * extent_size;
 
     let mut extents_needed = file_size / space_per_extent;

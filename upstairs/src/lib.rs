@@ -2088,7 +2088,7 @@ mod test {
         len: usize,
     ) -> Result<Vec<(u64, u64, usize)>> {
         let ddef = up.ddef.lock().unwrap();
-        extent_from_offset(ddef.clone(), offset, len)
+        extent_from_offset(*ddef, offset, len)
     }
 
     #[test]
