@@ -1270,6 +1270,9 @@ pub enum BlockOp {
     // Begin testing options.
     Commit,   // Send update to all tasks that there is work on the queue.
     ShowWork, // Show the status of the internal work hashmap and done Vec.
+    // Query ops
+    QueryBlockSize { data: Arc<Mutex<u64>> },
+    QueryTotalSize { data: Arc<Mutex<u64>> },
 }
 
 /*
@@ -1647,6 +1650,20 @@ impl Guest {
             self.notify.notified().await;
         }
     }
+
+    pub fn query_block_size(&self) -> u64 {
+        let data = Arc::new(Mutex::new(0));
+        let size_query = BlockOp::QueryBlockSize { data: data.clone() };
+        self.send(size_query).block_wait();
+        return *data.lock().unwrap();
+    }
+
+    pub fn query_total_size(&self) -> u64 {
+        let data = Arc::new(Mutex::new(0));
+        let size_query = BlockOp::QueryTotalSize { data: data.clone() };
+        self.send(size_query).block_wait();
+        return *data.lock().unwrap();
+    }
 }
 
 impl Default for Guest {
@@ -1761,12 +1778,22 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
+            // Testing options
             BlockOp::ShowWork => {
                 show_all_work(up);
             }
             BlockOp::Commit => {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
+            }
+            // Query ops
+            BlockOp::QueryBlockSize { data } => {
+                *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
+                let _ = req.send.send(0);
+            }
+            BlockOp::QueryTotalSize { data } => {
+                *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
+                let _ = req.send.send(0);
             }
         }
     }
