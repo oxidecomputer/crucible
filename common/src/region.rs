@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Copy, Clone, Debug, PartialEq)]
 pub struct RegionDefinition {
     /**
      * The size of each block in bytes.  Must be a power of 2, minimum 512.

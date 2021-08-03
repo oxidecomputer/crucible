@@ -1,8 +1,12 @@
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crucible::*;
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
@@ -31,6 +35,9 @@ pub struct Opt {
 
     #[structopt(short, long = "create")]
     create: bool,
+
+    #[structopt(short, long, parse(from_os_str), name = "FILE")]
+    import_path: Option<PathBuf>,
 }
 
 /*
@@ -62,6 +69,108 @@ fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
         .checked_add(Duration::from_secs(secs))
         .unwrap()
+}
+
+fn _downstairs_import(d: &Arc<Downstairs>) -> Result<()> {
+    println!("Import to downstairs");
+
+    let (bs, es, _) = d.region.region_def();
+    let size_per_extent = bs * es;
+
+    println!("Size per extent is: {}", bs * es);
+
+    let path = "./foo.txt".to_string();
+    let mut file = OpenOptions::new().read(true).open(&path)?;
+
+    // let mut data = BytesMut::with_capacity(size_per_extent as usize);
+    let mut data = BytesMut::with_capacity(size_per_extent as usize);
+
+    file.read_exact(&mut data).unwrap();
+    println!("Got data: {:#?} {}", data, data.len());
+
+    Ok(())
+}
+
+fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
+    region: &mut Region,
+    import_path: P,
+) -> Result<()> {
+    /*
+     * Import a file in, extending the appropriate number of extents first.
+     */
+    let file_size = fs::metadata(&import_path)?.len();
+    let (block_size, extent_size, _) = region.region_def();
+
+    // TODO: use a ceiling divide for u32 instead?
+    let mut extents = (file_size / block_size) / extent_size;
+    while (extents * block_size * extent_size) < file_size {
+        extents += 1;
+    }
+
+    let spe = block_size * extent_size;
+    let mut extents_needed = file_size / spe;
+    if file_size % spe != 0 {
+        extents_needed += 1;
+    }
+    println!(
+        "file_size: {}  spe:{}  e_need:{}",
+        file_size, spe, extents_needed
+    );
+    assert_eq!(extents, extents_needed);
+
+    region.extend(extents as u32)?;
+
+    println!(
+        "Importing {:?} to region with {} extents",
+        import_path, extents_needed
+    );
+
+    let space_per_extent = block_size * extent_size;
+    //let mut buffer = Vec::<u8>::with_capacity(block_size as usize);
+    let mut buffer = vec![0; block_size as usize];
+    buffer.resize(block_size as usize, 0);
+
+    let mut fp = File::open(import_path)?;
+    let mut offset: u64 = 0;
+
+    let rm = region.def();
+    let mut blocks_copied = 0;
+    while let Ok(n) = fp.read(&mut buffer[..]) {
+        if n == 0 {
+            /*
+             * If we read 0 without error, then we are done
+             */
+            break;
+        }
+        blocks_copied += 1;
+        /*
+         * Once it works, switch to nwo way
+         */
+        let eid = offset / space_per_extent;
+        let block_offset = (offset % space_per_extent) / block_size;
+        let nwo = extent_from_offset(rm, offset, block_size as usize).unwrap();
+
+        assert_eq!(nwo.len(), 1);
+        assert_eq!(nwo[0].0, eid);
+        assert_eq!(nwo[0].1, block_offset);
+
+        if n != (block_size as usize) {
+            if n != 0 {
+                let rest = &buffer[0..n];
+                region.region_write(eid, block_offset, rest)?;
+            }
+            break;
+        } else {
+            region.region_write(eid, block_offset, &buffer)?;
+            offset += n as u64;
+        }
+    }
+    println!(
+        "Created {} extents and Copied {} blocks",
+        extents_needed, blocks_copied
+    );
+
+    Ok(())
 }
 
 /*
@@ -192,7 +301,13 @@ async fn main() -> Result<()> {
     if opt.create {
         println!("Create new region directory");
         region = Region::create(&opt.data, Default::default())?;
-        region.extend(10)?;
+        if let Some(import_path) = opt.import_path {
+            downstairs_import(&mut region, import_path).unwrap();
+            let dep = Vec::new();
+            region.region_flush(dep, 1)?;
+        } else {
+            region.extend(10)?;
+        }
     } else {
         println!("Open existing region directory");
         region = Region::open(&opt.data, Default::default())?;

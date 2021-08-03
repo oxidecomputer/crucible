@@ -73,8 +73,8 @@ async fn proc_frame(
  * which means we only have to support spanning two extents at most.
  *
  */
-fn extent_from_offset(
-    ddef: MutexGuard<RegionDefinition>,
+pub fn extent_from_offset(
+    ddef: RegionDefinition,
     offset: u64,
     len: usize,
 ) -> Result<Vec<(u64, u64, usize)>> {
@@ -881,8 +881,9 @@ impl Upstairs {
          * block offset that translates into.  Keep in mind that an offset
          * and length may span two extents, and eventually XXX, two regions.
          */
+        // let ddef = self.ddef.lock().unwrap();
         let ddef = self.ddef.lock().unwrap();
-        let nwo = extent_from_offset(ddef, offset, data.len()).unwrap();
+        let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
         println!(
             "nwo: {:?} from offset:{} data: {:p} len:{}",
             nwo,
@@ -967,7 +968,7 @@ impl Upstairs {
          * block offset that translates into.  Keep in mind that an offset
          * and length may span two extents, and eventually, TODO, two regions.
          */
-        let nwo = extent_from_offset(ddef, offset, data.len()).unwrap();
+        let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
         println!(
             "nwo: {:?} from offset:{} data len:{}",
             nwo,
@@ -2087,7 +2088,7 @@ mod test {
         len: usize,
     ) -> Result<Vec<(u64, u64, usize)>> {
         let ddef = up.ddef.lock().unwrap();
-        extent_from_offset(ddef, offset, len)
+        extent_from_offset(ddef.clone(), offset, len)
     }
 
     #[test]

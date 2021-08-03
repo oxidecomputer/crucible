@@ -516,6 +516,9 @@ impl Region {
             self.def.extent_count(),
         )
     }
+    pub fn def(&self) -> RegionDefinition {
+        self.def
+    }
 
     pub fn versions(&self) -> Vec<u64> {
         println!(
