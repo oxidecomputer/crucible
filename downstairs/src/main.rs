@@ -62,6 +62,10 @@ fn opts() -> Result<Opt> {
         bail!("--data {:?} must exist as a directory", opt.data);
     }
 
+    if opt.import_path.is_some() && !opt.create {
+        bail!("Can't import without create option");
+    }
+
     Ok(opt)
 }
 
@@ -99,41 +103,36 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      * Import a file in, extending the appropriate number of extents first.
      */
     let file_size = fs::metadata(&import_path)?.len();
-    let (block_size, extent_size, _) = region.region_def();
+    let rm = region.def();
+    let block_size = rm.block_size();
+    let extent_size = rm.extent_size();
+    let space_per_extent = block_size * extent_size;
 
-    // TODO: use a ceiling divide for u32 instead?
-    let mut extents = (file_size / block_size) / extent_size;
-    while (extents * block_size * extent_size) < file_size {
-        extents += 1;
-    }
-
-    let spe = block_size * extent_size;
-    let mut extents_needed = file_size / spe;
-    if file_size % spe != 0 {
+    let mut extents_needed = file_size / space_per_extent;
+    if file_size % space_per_extent != 0 {
         extents_needed += 1;
     }
     println!(
-        "file_size: {}  spe:{}  e_need:{}",
-        file_size, spe, extents_needed
+        "Import file_size: {}  Extent size:{}  Total Extents:{}",
+        file_size, space_per_extent, extents_needed
     );
-    assert_eq!(extents, extents_needed);
 
-    region.extend(extents as u32)?;
+    /*
+     * Create the number of extents the file will require
+     */
+    region.extend(extents_needed as u32)?;
+    let rm = region.def();
 
     println!(
         "Importing {:?} to region with {} extents",
         import_path, extents_needed
     );
 
-    let space_per_extent = block_size * extent_size;
-    //let mut buffer = Vec::<u8>::with_capacity(block_size as usize);
     let mut buffer = vec![0; block_size as usize];
     buffer.resize(block_size as usize, 0);
 
     let mut fp = File::open(import_path)?;
     let mut offset: u64 = 0;
-
-    let rm = region.def();
     let mut blocks_copied = 0;
     while let Ok(n) = fp.read(&mut buffer[..]) {
         if n == 0 {
@@ -144,15 +143,12 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
         blocks_copied += 1;
         /*
-         * Once it works, switch to nwo way
+         * Use the same function upsairs uses to decide where to put the
+         * data based on the LBA offset.
          */
-        let eid = offset / space_per_extent;
-        let block_offset = (offset % space_per_extent) / block_size;
         let nwo = extent_from_offset(rm, offset, block_size as usize).unwrap();
-
         assert_eq!(nwo.len(), 1);
-        assert_eq!(nwo[0].0, eid);
-        assert_eq!(nwo[0].1, block_offset);
+        let (eid, block_offset, _) = nwo[0];
 
         if n != (block_size as usize) {
             if n != 0 {
@@ -303,17 +299,25 @@ async fn main() -> Result<()> {
         region = Region::create(&opt.data, Default::default())?;
         if let Some(import_path) = opt.import_path {
             downstairs_import(&mut region, import_path).unwrap();
+            /*
+             * The region we just created should now have a flush so the
+             * new data and inital flush number is written to disk.
+             */
             let dep = Vec::new();
             region.region_flush(dep, 1)?;
         } else {
-            region.extend(10)?;
+            region.extend(15)?;
         }
     } else {
         println!("Open existing region directory");
         region = Region::open(&opt.data, Default::default())?;
     }
 
-    println!("Startup Extent values: {:?}", region.versions());
+    let mut ver_slice = region.versions();
+    if ver_slice.len() > 12 {
+        ver_slice = region.versions()[0..12].to_vec();
+    }
+    println!("Startup Extent values [0..12]: {:?}", ver_slice);
     let d = Arc::new(Downstairs { region });
 
     /*

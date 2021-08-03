@@ -521,13 +521,15 @@ impl Region {
     }
 
     pub fn versions(&self) -> Vec<u64> {
-        println!(
-            "Current flush_numbers: {:?}",
-            self.extents
+        let mut ver = self.extents
                 .iter()
                 .map(|e| e.flush_number())
-                .collect::<Vec<_>>()
-        );
+                .collect::<Vec<_>>();
+
+        if ver.len() > 12 {
+            ver = ver[0..12].to_vec();
+        }
+        println!( "Current flush_numbers [0..12]: {:?}", ver);
 
         self.extents
             .iter()
