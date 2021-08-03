@@ -207,8 +207,9 @@ fn process_downstairs(
         || ddef.extent_count() != ec
     {
         // XXX Figure out if we can hande this error.  Possibly not.
-        panic!("New downstaris region info mismatch");
+        panic!("New downstairs region info mismatch");
     }
+
     Ok(())
 }
 
@@ -251,7 +252,7 @@ async fn io_completed(
  * work to the hashmap and notified the worker tasks that new work is ready
  * to be serviced.  The worker task will walk the hashmap and build a list
  * of new work that it needs to do.  It will then iterate through those
- * work items and send them over the wire to this tasks waiting downstaris.
+ * work items and send them over the wire to this tasks waiting downstairs.
  */
 async fn io_send(
     u: &Arc<Upstairs>,
@@ -1043,7 +1044,7 @@ impl FlushInfo {
      * Upstairs flush_info mutex must be held when calling this.
      * In addition, a downstairs request ID should be obtained at the
      * same time the next flush number is obtained, such that any IO that
-     * is given a downstaris request number higer than the request number
+     * is given a downstairs request number higer than the request number
      * for the flush will happen after this flush, never before.
      */
     fn next_flush(&mut self) -> u64 {
@@ -1266,6 +1267,9 @@ pub enum BlockOp {
     Read { offset: u64, data: Buffer },
     Write { offset: u64, data: bytes::Bytes },
     Flush,
+    // Query ops
+    QueryBlockSize { data: Arc<Mutex<u64>> },
+    QueryTotalSize { data: Arc<Mutex<u64>> },
     // Begin testing options.
     Commit,   // Send update to all tasks that there is work on the queue.
     ShowWork, // Show the status of the internal work hashmap and done Vec.
@@ -1646,6 +1650,20 @@ impl Guest {
             self.notify.notified().await;
         }
     }
+
+    pub fn query_block_size(&self) -> u64 {
+        let data = Arc::new(Mutex::new(0));
+        let size_query = BlockOp::QueryBlockSize { data: data.clone() };
+        self.send(size_query).block_wait();
+        return *data.lock().unwrap();
+    }
+
+    pub fn query_total_size(&self) -> u64 {
+        let data = Arc::new(Mutex::new(0));
+        let size_query = BlockOp::QueryTotalSize { data: data.clone() };
+        self.send(size_query).block_wait();
+        return *data.lock().unwrap();
+    }
 }
 
 impl Default for Guest {
@@ -1760,6 +1778,16 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
+            // Query ops
+            BlockOp::QueryBlockSize { data } => {
+                *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
+                let _ = req.send.send(0);
+            }
+            BlockOp::QueryTotalSize { data } => {
+                *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
+                let _ = req.send.send(0);
+            }
+            // Testing options
             BlockOp::ShowWork => {
                 show_all_work(up);
             }
@@ -1816,7 +1844,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
 
     let mut client_id = 0;
     /*
-     * Create one downstaris task (dst) for each target in the opt
+     * Create one downstairs task (dst) for each target in the opt
      * structure that was passed to us.
      */
     let dst = opt

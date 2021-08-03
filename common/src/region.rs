@@ -50,6 +50,10 @@ impl RegionDefinition {
     pub fn set_extent_count(&mut self, ec: u32) {
         self.extent_count = ec;
     }
+
+    pub fn total_size(&self) -> u64 {
+        self.block_size * self.extent_size * (self.extent_count as u64)
+    }
 }
 
 /**
