@@ -207,8 +207,9 @@ fn process_downstairs(
         || ddef.extent_count() != ec
     {
         // XXX Figure out if we can hande this error.  Possibly not.
-        panic!("New downstaris region info mismatch");
+        panic!("New downstairs region info mismatch");
     }
+
     Ok(())
 }
 
@@ -251,7 +252,7 @@ async fn io_completed(
  * work to the hashmap and notified the worker tasks that new work is ready
  * to be serviced.  The worker task will walk the hashmap and build a list
  * of new work that it needs to do.  It will then iterate through those
- * work items and send them over the wire to this tasks waiting downstaris.
+ * work items and send them over the wire to this tasks waiting downstairs.
  */
 async fn io_send(
     u: &Arc<Upstairs>,
@@ -1043,7 +1044,7 @@ impl FlushInfo {
      * Upstairs flush_info mutex must be held when calling this.
      * In addition, a downstairs request ID should be obtained at the
      * same time the next flush number is obtained, such that any IO that
-     * is given a downstaris request number higer than the request number
+     * is given a downstairs request number higer than the request number
      * for the flush will happen after this flush, never before.
      */
     fn next_flush(&mut self) -> u64 {
@@ -1816,7 +1817,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
 
     let mut client_id = 0;
     /*
-     * Create one downstaris task (dst) for each target in the opt
+     * Create one downstairs task (dst) for each target in the opt
      * structure that was passed to us.
      */
     let dst = opt
