@@ -1446,10 +1446,6 @@ impl GuestWork {
                          * different downstairs consistent.  XXX
                          */
                     } else {
-                        println!(
-                            "gw_id:{} Save read buffer for {}",
-                            gw_id, ds_id
-                        );
                     }
                 } // XXX else can we assert we don't expect data?
 
