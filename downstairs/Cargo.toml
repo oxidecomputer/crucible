@@ -1,6 +1,6 @@
 [package]
 name = "crucible-downstairs"
-version = "0.0.0"
+version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 edition = "2018"
 

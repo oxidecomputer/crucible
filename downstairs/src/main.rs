@@ -1,6 +1,6 @@
 use std::fs;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,6 +44,15 @@ pub struct Opt {
 
     #[structopt(short, long)]
     trace_endpoint: Option<String>,
+
+    #[structopt(short, long, parse(from_os_str), name = "OUT_FILE")]
+    export_path: Option<PathBuf>,
+
+    #[structopt(short, long, default_value = "0", name = "SKIP")]
+    skip: u64,
+
+    #[structopt(long, default_value = "0", name = "COUNT")]
+    count: u64,
 }
 
 /*
@@ -51,8 +60,6 @@ pub struct Opt {
  */
 fn opts() -> Result<Opt> {
     let opt: Opt = Opt::from_args();
-    println!("raw options: {:?}", opt);
-
     /*
      * Make sure we don't clobber an existing region, if we are creating
      * a new one, then it should not exist.
@@ -81,12 +88,93 @@ fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
+/*
+ * Export the contents or partial contents of a Downstairs Region to
+ * the file indicated.
+ *
+ * We will start from the provided start_block.
+ * We will stop after "count" blocks are written to the export_path.
+ */
+fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
+    region: &mut Region,
+    export_path: P,
+    start_block: u64,
+    mut count: u64,
+) -> Result<()> {
+    /*
+     * Export an existing downstairs region to a file
+     */
+    let (block_size, extent_size, extent_count) = region.region_def();
+    let space_per_extent = block_size * extent_size;
+    assert!(block_size > 0);
+    assert!(extent_size > 0);
+    assert!(extent_count > 0);
+    assert!(space_per_extent > 0);
+    let file_size = block_size * extent_size * extent_count as u64;
+
+    if count == 0 {
+        count = extent_size * extent_count as u64;
+    }
+
+    println!(
+        "Export total_size: {}  Extent size:{}  Total Extents:{}",
+        file_size, space_per_extent, extent_count
+    );
+    println!(
+        "Exporting from start_block: {}  count:{}",
+        start_block, count
+    );
+
+    let mut data = BytesMut::with_capacity(block_size as usize);
+    data.resize(block_size as usize, 0);
+
+    let mut out_file = File::create(export_path)?;
+    let mut blocks_copied = 0;
+
+    //let count = extent_size * extent_count as u64;
+    'eid_loop: for eid in 0..extent_count {
+        let extent_offset = space_per_extent * eid as u64;
+        for block_offset in 0..extent_size {
+            if extent_offset + block_offset >= start_block {
+                blocks_copied += 1;
+                region
+                    .region_read(eid as u64, block_offset, &mut data)
+                    .unwrap();
+                out_file.write_all(&data).unwrap();
+                data.resize(block_size as usize, 0);
+
+                if blocks_copied >= count {
+                    break 'eid_loop;
+                }
+            }
+        }
+    }
+
+    println!("Read and wrote out {} blocks", blocks_copied);
+
+    Ok(())
+}
+
+/*
+ * Import the contents of a file into a new Region.
+ * The total size of the region will be rounded up to the next largest
+ * extent multiple.
+ */
 fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     region: &mut Region,
     import_path: P,
 ) -> Result<()> {
     /*
-     * Import a file in, extending the appropriate number of extents first.
+     * We are only allowing the import on an empty Region, i.e.
+     * one that has just been created.  If you want to overwrite
+     * an existing region, write more code: TODO
+     */
+    assert!(region.def().extent_count() == 0);
+
+    /*
+     * Get some information about our file and the region defaults
+     * and figure out how many extents we will need to import
+     * this file.
      */
     let file_size = fs::metadata(&import_path)?.len();
     let (block_size, extent_size, _) = region.region_def();
@@ -97,7 +185,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         extents_needed += 1;
     }
     println!(
-        "Import file_size: {}  Extent size:{}  Total Extents:{}",
+        "Import file_size: {}  Extent size:{}  Total extents:{}",
         file_size, space_per_extent, extents_needed
     );
 
@@ -107,10 +195,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     region.extend(extents_needed as u32)?;
     let rm = region.def();
 
-    println!(
-        "Importing {:?} to region with {} extents",
-        import_path, extents_needed
-    );
+    println!("Importing {:?} to new region", import_path);
 
     let mut buffer = vec![0; block_size as usize];
     buffer.resize(block_size as usize, 0);
@@ -145,6 +230,12 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
             offset += n as u64;
         }
     }
+
+    /*
+     * As there is no EOF indication in the downstairs, print the
+     * number of total blocks we wrote to so the caller can, if they
+     * want, use that to extract just this imported file.
+     */
     println!(
         "Created {} extents and Copied {} blocks",
         extents_needed, blocks_copied
@@ -281,9 +372,8 @@ async fn main() -> Result<()> {
      */
     let mut region;
     if opt.create {
-        println!("Create new region directory");
         region = Region::create(&opt.data, Default::default())?;
-        if let Some(import_path) = opt.import_path {
+        if let Some(ref import_path) = opt.import_path {
             downstairs_import(&mut region, import_path).unwrap();
             /*
              * The region we just created should now have a flush so the
@@ -295,15 +385,25 @@ async fn main() -> Result<()> {
             region.extend(15)?;
         }
     } else {
-        println!("Open existing region directory");
         region = Region::open(&opt.data, Default::default())?;
     }
 
-    let mut ver_slice = region.versions();
-    if ver_slice.len() > 12 {
-        ver_slice = region.versions()[0..12].to_vec();
+    if let Some(export_path) = opt.export_path {
+        downstairs_export(&mut region, export_path, opt.skip, opt.count)
+            .unwrap();
+        return Ok(());
     }
-    println!("Startup Extent values [0..12]: {:?}", ver_slice);
+
+    /*
+     * If we imported, then stop now.  It's debatable if this is the typical
+     * use case.  If we decide it is not, then we can remove this. XXX
+     * The check is down here so we can import/export in the same command
+     * if so desired.
+     */
+    if opt.create && opt.import_path.is_some() {
+        println!("Exitng after import");
+        return Ok(());
+    }
     let d = Arc::new(Downstairs { region });
 
     /*

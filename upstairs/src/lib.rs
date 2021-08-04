@@ -876,14 +876,6 @@ impl Upstairs {
         let ddef = self.ddef.lock().unwrap();
 
         let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
-        println!(
-            "nwo: {:?} from offset:{} data: {:p} len:{}",
-            nwo,
-            offset,
-            data.as_ptr(),
-            data.len()
-        );
-
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
          * from extent_from_offset

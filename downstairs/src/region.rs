@@ -422,7 +422,7 @@ impl Region {
             );
         }
         write_json(&cp, &def, false)?;
-        println!("created new region file {:?}", cp);
+        println!("Created new region file {:?}", cp);
 
         /*
          * Open every extent that presently exists.
@@ -454,7 +454,7 @@ impl Region {
             Err(e) => bail!("Error {:?} opening region config {:?}", e, cp),
         };
 
-        println!("opened existing region file {:?}", cp);
+        println!("Opened existing region file {:?}", cp);
         /*
          * Open every extent that presently exists.
          */
