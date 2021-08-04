@@ -120,3 +120,26 @@ OK: connection(1): all done
 ```
 
 That's all for now!
+
+# Tracing #
+
+Run a Jaeger container in order to collect and visualize traces:
+
+    $ docker run --rm -d --name jaeger \
+      -e COLLECTOR_ZIPKIN_HOST_PORT=:9411 \
+      -p 5775:5775/udp \
+      -p 6831:6831/udp \
+      -p 6832:6832/udp \
+      -p 5778:5778 \
+      -p 16686:16686 \
+      -p 14268:14268 \
+      -p 14250:14250 \
+      -p 9411:9411 \
+      jaegertracing/all-in-one:1.24
+
+Pass an option to crucible-downstairs to send traces to Jaeger:
+
+    $ cargo run -q -p crucible-downstairs -- -c -p 3803 -d var/3803 --trace-endpoint localhost:6831
+
+Then, go to `http://localhost:16686` to see the Jaeger UI.
+
