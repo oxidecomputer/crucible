@@ -298,10 +298,6 @@ async fn io_send(
                 block_offset,
                 data,
             } => {
-                println!(
-                    "[{}] Write ds_id:{} eid:{:?} bo:{:?}",
-                    client_id, *new_id, eid, block_offset
-                );
                 fw.send(Message::Write(
                     *new_id,
                     eid,
@@ -315,12 +311,6 @@ async fn io_send(
                 dependencies,
                 flush_number,
             } => {
-                println!(
-                    "Flush ds_id:{} dep:{:?} flush_number:{:?}",
-                    *new_id,
-                    dependencies.len(),
-                    flush_number
-                );
                 fw.send(Message::Flush(
                     *new_id,
                     dependencies.clone(),
@@ -333,10 +323,6 @@ async fn io_send(
                 block_offset,
                 blocks,
             } => {
-                println!(
-                    "Read  ds_id:{} eid:{:?} bo:{:?} blocks:{}",
-                    *new_id, eid, block_offset, blocks,
-                );
                 fw.send(Message::ReadRequest(
                     *new_id,
                     eid,
@@ -704,7 +690,6 @@ impl Work {
          */
         if let Some(data) = data {
             if job.data.is_none() {
-                println!("Save data for ds_id:{}", ds_id);
                 job.data = Some(data);
             }
         } // XXX else assert this is not a read
@@ -853,7 +838,6 @@ impl Upstairs {
         let mut sub = HashMap::new();
         sub.insert(next_id, 0);
 
-        println!("FLUSH: gw_id:{} ds_ids:{:?}", gw_id, sub,);
         let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         gw.active.insert(gw_id, new_gtos);
         crutrace_gw_start!(|| (gw_id));
@@ -890,6 +874,7 @@ impl Upstairs {
          */
         // let ddef = self.ddef.lock().unwrap();
         let ddef = self.ddef.lock().unwrap();
+
         let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
         println!(
             "nwo: {:?} from offset:{} data: {:p} len:{}",
@@ -927,7 +912,6 @@ impl Upstairs {
             new_ds_work.push(wr);
             cur_offset = len;
         }
-        println!("WRITE: gw_id:{} ds_ids:{:?}", gw_id, sub,);
         /*
          * New work created, add to the guest_work HM
          */
@@ -976,13 +960,8 @@ impl Upstairs {
          * block offset that translates into.  Keep in mind that an offset
          * and length may span two extents, and eventually, TODO, two regions.
          */
+
         let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
-        println!(
-            "nwo: {:?} from offset:{} data len:{}",
-            nwo,
-            offset,
-            data.len()
-        );
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
          * will create on behalf of this guest job.
@@ -1012,7 +991,6 @@ impl Upstairs {
             new_ds_work.push(wr);
         }
 
-        println!("READ:  gw_id:{} ds_ids:{:?}", gw_id, sub,);
         /*
          * New work created, add to the guest_work HM.  New work must be put
          * on the guest_work active HM first, before it lands on the downstairs
@@ -1369,7 +1347,6 @@ impl GtoS {
                 }
                 // println!("Final data copy {} {:#?}", ds_id, ds_buf);
             }
-            println!("Final data copy {:?}", self.completed);
         } else {
             /*
              * Should this panic?  If the caller is requesting a transfer,
@@ -1490,10 +1467,6 @@ impl GuestWork {
                          * different downstairs consistent.  XXX
                          */
                     } else {
-                        println!(
-                            "gw_id:{} Save read buffer for {}",
-                            gw_id, ds_id
-                        );
                     }
                 } // XXX else can we assert we don't expect data?
 
@@ -1745,10 +1718,6 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
              */
             let done = work.retire(*ds_id_done);
 
-            println!(
-                "RETIRE:  ds_id {} from gw_id:{:?}",
-                ds_id_done, done.guest_id,
-            );
             drop(work);
 
             let mut gw = up.guest.guest_work.lock().unwrap();
