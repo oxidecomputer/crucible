@@ -195,10 +195,10 @@ async fn main() -> Result<()> {
         let tracer = opentelemetry_jaeger::new_pipeline()
             .with_agent_endpoint(endpoint) // usually port 6831
             .with_service_name("downstairs")
-            .install_simple().expect("Error initializing Jaeger exporter");
+            .install_simple()
+            .expect("Error initializing Jaeger exporter");
 
-        let telemetry = tracing_opentelemetry::layer()
-            .with_tracer(tracer);
+        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
         tracing_subscriber::registry()
             .with(telemetry)
