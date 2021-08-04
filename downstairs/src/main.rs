@@ -14,6 +14,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 mod region;
 use region::Region;
 
@@ -31,6 +34,9 @@ pub struct Opt {
 
     #[structopt(short, long = "create")]
     create: bool,
+
+    #[structopt(short, long)]
+    trace_endpoint: Option<String>,
 }
 
 /*
@@ -184,6 +190,21 @@ struct Downstairs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = opts()?;
+
+    if let Some(endpoint) = opt.trace_endpoint {
+        let tracer = opentelemetry_jaeger::new_pipeline()
+            .with_agent_endpoint(endpoint) // usually port 6831
+            .with_service_name("downstairs")
+            .install_simple().expect("Error initializing Jaeger exporter");
+
+        let telemetry = tracing_opentelemetry::layer()
+            .with_tracer(tracer);
+
+        tracing_subscriber::registry()
+            .with(telemetry)
+            .try_init()
+            .expect("Error init tracing subscriber");
+    }
 
     /*
      * Open or create the region for which we will be responsible.
