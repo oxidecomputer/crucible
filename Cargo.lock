@@ -234,6 +234,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytes",
+ "crucible",
  "crucible-common",
  "crucible-protocol",
  "futures",
