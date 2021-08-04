@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crucible_common::*;
 
+use tracing::instrument;
+
+#[derive(Debug)]
 pub struct Extent {
     number: u32,
     block_size: u64,
@@ -17,6 +20,7 @@ pub struct Extent {
     inner: Mutex<Inner>,
 }
 
+#[derive(Debug)]
 pub struct Inner {
     file: File,
     meta: ExtentMeta,
@@ -26,7 +30,7 @@ pub struct Inner {
  * Warning, changing this struct will change what is written to and expected
  * from the physical storage device.
  */
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ExtentMeta {
     ext_version: u32, // XXX Not currently connected to anything.
     /**
@@ -209,6 +213,7 @@ impl Extent {
         self.inner.lock().unwrap().meta.flush_number
     }
 
+    #[instrument]
     pub fn read_block(
         &self,
         block_offset: u64,
@@ -283,6 +288,7 @@ impl Extent {
         Ok(())
     }
 
+    #[instrument]
     pub fn write_block(&self, block_offset: u64, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
@@ -321,6 +327,7 @@ impl Extent {
         Ok(())
     }
 
+    #[instrument]
     pub fn flush_block(&self, new_flush: u64) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
@@ -381,6 +388,7 @@ extern "C" {
     fn fsync(fildes: i32) -> i32;
 }
 
+#[derive(Debug)]
 pub struct Region {
     dir: PathBuf,
     def: RegionDefinition,
@@ -516,15 +524,21 @@ impl Region {
             self.def.extent_count(),
         )
     }
+    pub fn def(&self) -> RegionDefinition {
+        self.def
+    }
 
     pub fn versions(&self) -> Vec<u64> {
-        println!(
-            "Current flush_numbers: {:?}",
-            self.extents
-                .iter()
-                .map(|e| e.flush_number())
-                .collect::<Vec<_>>()
-        );
+        let mut ver = self
+            .extents
+            .iter()
+            .map(|e| e.flush_number())
+            .collect::<Vec<_>>();
+
+        if ver.len() > 12 {
+            ver = ver[0..12].to_vec();
+        }
+        println!("Current flush_numbers [0..12]: {:?}", ver);
 
         self.extents
             .iter()
@@ -532,6 +546,7 @@ impl Region {
             .collect::<Vec<_>>()
     }
 
+    #[instrument]
     pub fn region_write(
         &self,
         eid: u64,
@@ -543,6 +558,7 @@ impl Region {
         Ok(())
     }
 
+    #[instrument]
     pub fn region_read(
         &self,
         eid: u64,
@@ -558,6 +574,7 @@ impl Region {
      * Send a flush to all extents.  The provided flush number is
      * what an extent should use if a flush is required.
      */
+    #[instrument]
     pub fn region_flush(
         &self,
         _dep: Vec<u64>,

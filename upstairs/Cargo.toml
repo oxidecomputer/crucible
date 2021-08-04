@@ -33,4 +33,5 @@ structopt = "0.3"
 tokio = { version = "1.7.1", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"]}
 toml = "0.5"
+tracing = "0.1.26"
 usdt = "0.1.13"

@@ -1,8 +1,12 @@
+use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crucible::*;
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
@@ -13,6 +17,9 @@ use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
+
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod region;
 use region::Region;
@@ -31,6 +38,12 @@ pub struct Opt {
 
     #[structopt(short, long = "create")]
     create: bool,
+
+    #[structopt(short, long, parse(from_os_str), name = "FILE")]
+    import_path: Option<PathBuf>,
+
+    #[structopt(short, long)]
+    trace_endpoint: Option<String>,
 }
 
 /*
@@ -55,6 +68,10 @@ fn opts() -> Result<Opt> {
         bail!("--data {:?} must exist as a directory", opt.data);
     }
 
+    if opt.import_path.is_some() && !opt.create {
+        bail!("Can't import without create option");
+    }
+
     Ok(opt)
 }
 
@@ -62,6 +79,78 @@ fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
         .checked_add(Duration::from_secs(secs))
         .unwrap()
+}
+
+fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
+    region: &mut Region,
+    import_path: P,
+) -> Result<()> {
+    /*
+     * Import a file in, extending the appropriate number of extents first.
+     */
+    let file_size = fs::metadata(&import_path)?.len();
+    let (block_size, extent_size, _) = region.region_def();
+    let space_per_extent = block_size * extent_size;
+
+    let mut extents_needed = file_size / space_per_extent;
+    if file_size % space_per_extent != 0 {
+        extents_needed += 1;
+    }
+    println!(
+        "Import file_size: {}  Extent size:{}  Total Extents:{}",
+        file_size, space_per_extent, extents_needed
+    );
+
+    /*
+     * Create the number of extents the file will require
+     */
+    region.extend(extents_needed as u32)?;
+    let rm = region.def();
+
+    println!(
+        "Importing {:?} to region with {} extents",
+        import_path, extents_needed
+    );
+
+    let mut buffer = vec![0; block_size as usize];
+    buffer.resize(block_size as usize, 0);
+
+    let mut fp = File::open(import_path)?;
+    let mut offset: u64 = 0;
+    let mut blocks_copied = 0;
+    while let Ok(n) = fp.read(&mut buffer[..]) {
+        if n == 0 {
+            /*
+             * If we read 0 without error, then we are done
+             */
+            break;
+        }
+        blocks_copied += 1;
+        /*
+         * Use the same function upsairs uses to decide where to put the
+         * data based on the LBA offset.
+         */
+        let nwo = extent_from_offset(rm, offset, block_size as usize).unwrap();
+        assert_eq!(nwo.len(), 1);
+        let (eid, block_offset, _) = nwo[0];
+
+        if n != (block_size as usize) {
+            if n != 0 {
+                let rest = &buffer[0..n];
+                region.region_write(eid, block_offset, rest)?;
+            }
+            break;
+        } else {
+            region.region_write(eid, block_offset, &buffer)?;
+            offset += n as u64;
+        }
+    }
+    println!(
+        "Created {} extents and Copied {} blocks",
+        extents_needed, blocks_copied
+    );
+
+    Ok(())
 }
 
 /*
@@ -172,6 +261,21 @@ struct Downstairs {
 async fn main() -> Result<()> {
     let opt = opts()?;
 
+    if let Some(endpoint) = opt.trace_endpoint {
+        let tracer = opentelemetry_jaeger::new_pipeline()
+            .with_agent_endpoint(endpoint) // usually port 6831
+            .with_service_name("downstairs")
+            .install_simple()
+            .expect("Error initializing Jaeger exporter");
+
+        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+        tracing_subscriber::registry()
+            .with(telemetry)
+            .try_init()
+            .expect("Error init tracing subscriber");
+    }
+
     /*
      * Open or create the region for which we will be responsible.
      */
@@ -179,13 +283,27 @@ async fn main() -> Result<()> {
     if opt.create {
         println!("Create new region directory");
         region = Region::create(&opt.data, Default::default())?;
-        region.extend(10)?;
+        if let Some(import_path) = opt.import_path {
+            downstairs_import(&mut region, import_path).unwrap();
+            /*
+             * The region we just created should now have a flush so the
+             * new data and inital flush number is written to disk.
+             */
+            let dep = Vec::new();
+            region.region_flush(dep, 1)?;
+        } else {
+            region.extend(15)?;
+        }
     } else {
         println!("Open existing region directory");
         region = Region::open(&opt.data, Default::default())?;
     }
 
-    println!("Startup Extent values: {:?}", region.versions());
+    let mut ver_slice = region.versions();
+    if ver_slice.len() > 12 {
+        ver_slice = region.versions()[0..12].to_vec();
+    }
+    println!("Startup Extent values [0..12]: {:?}", ver_slice);
     let d = Arc::new(Downstairs { region });
 
     /*
