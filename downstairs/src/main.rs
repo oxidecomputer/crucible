@@ -421,7 +421,7 @@ async fn main() -> Result<()> {
      * if so desired.
      */
     if opt.create && opt.import_path.is_some() {
-        println!("Exitng after import");
+        println!("Exiting after import");
         return Ok(());
     }
     let d = Arc::new(Downstairs { region });
