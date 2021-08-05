@@ -10,7 +10,7 @@ use crucible::*;
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use structopt::StructOpt;
 use tokio::net::tcp::WriteHalf;
@@ -51,8 +51,23 @@ pub struct Opt {
     #[structopt(short, long, default_value = "0", name = "SKIP")]
     skip: u64,
 
+    /*
+     * Number of blocks to export.
+     */
     #[structopt(long, default_value = "0", name = "COUNT")]
     count: u64,
+
+    /*
+     * The next three opts apply during region creation
+     */
+    #[structopt(long, default_value = "512")]
+    block_size: u64,
+
+    #[structopt(long, default_value = "100")]
+    extent_size: u64,
+
+    #[structopt(long, default_value = "15")]
+    extent_count: u64,
 }
 
 /*
@@ -261,7 +276,7 @@ async fn proc_frame(
             fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
                 .await
         }
-        Message::Write(rn, eid, dependencies, block_offset, data) => {
+        Message::Write(rn, eid, _dependencies, block_offset, data) => {
             d.region.region_write(*eid, *block_offset, data)?;
             fw.send(Message::WriteAck(*rn)).await
         }
@@ -275,14 +290,13 @@ async fn proc_frame(
              * XXX Some thought will need to be given to where the read
              * data buffer is created, both on this side and the remote.
              * Also, we (I) need to figure out how to read data into an
-             * uninitialized buffer.  Until then, we have this workaround.
-             *
-             * Also, the 512's here should be block_size  XXX for that.
+             * uninitialized buffer. Until then, we have this workaround.
              */
-            let mut data = BytesMut::with_capacity(*blocks as usize * 512);
-            for _ in 0..*blocks {
-                data.put(&[1; 512][..]);
-            }
+            let (bs, _, _) = d.region.region_def();
+            let sz = *blocks as usize * bs as usize;
+            let mut data = BytesMut::with_capacity(sz);
+            data.resize(sz, 1);
+
             d.region.region_read(*eid, *block_offset, &mut data)?;
             let data = data.freeze();
             fw.send(Message::ReadResponse(*rn, data.clone())).await
@@ -372,7 +386,13 @@ async fn main() -> Result<()> {
      */
     let mut region;
     if opt.create {
-        region = Region::create(&opt.data, Default::default())?;
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(opt.block_size);
+        region_options.set_extent_size(opt.extent_size);
+
+        region = Region::create(&opt.data, region_options)?;
+
         if let Some(ref import_path) = opt.import_path {
             downstairs_import(&mut region, import_path).unwrap();
             /*
@@ -382,7 +402,7 @@ async fn main() -> Result<()> {
             let dep = Vec::new();
             region.region_flush(dep, 1)?;
         } else {
-            region.extend(15)?;
+            region.extend(opt.extent_count as u32)?;
         }
     } else {
         region = Region::open(&opt.data, Default::default())?;
@@ -401,7 +421,7 @@ async fn main() -> Result<()> {
      * if so desired.
      */
     if opt.create && opt.import_path.is_some() {
-        println!("Exitng after import");
+        println!("Exiting after import");
         return Ok(());
     }
     let d = Arc::new(Downstairs { region });

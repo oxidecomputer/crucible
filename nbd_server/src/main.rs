@@ -7,7 +7,6 @@ use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
-use crucible_common::{RegionDefinition, RegionOptions};
 
 use nbd::server::{handshake, transmission, Export};
 use std::io::Result as IOResult;
@@ -206,21 +205,15 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    // TODO: read this from somewhere, instead of defaults
-    let mut region =
-        RegionDefinition::from_options(&RegionOptions::default()).unwrap();
-    region.set_extent_count(10);
-
-    let sz = region.block_size()
-        * region.extent_size()
-        * (region.extent_count() as u64);
+    let block_size = guest.query_block_size() as usize;
+    let sz = guest.query_total_size() as u64;
     println!("NBD advertised size as {} bytes", sz);
 
     // NBD server
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
     let mut cpf = CruciblePseudoFile {
         guest,
-        block_size: region.block_size() as usize,
+        block_size,
         offset: 0,
         sz, // sent to NBD client during handshake through Export struct
     };

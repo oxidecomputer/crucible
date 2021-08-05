@@ -1145,9 +1145,8 @@ pub struct Buffer {
 
 impl Buffer {
     /*
-     * XXX: For now, assert Buffer size is at least hard coded block size 512.
+     * XXX: For now, assert Buffer size is at least the minimum block size 512.
      */
-
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
         assert!(vec.len() >= 512);
 
