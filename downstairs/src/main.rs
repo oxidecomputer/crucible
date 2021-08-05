@@ -386,7 +386,8 @@ async fn main() -> Result<()> {
      */
     let mut region;
     if opt.create {
-        let mut region_options: crucible_common::RegionOptions = Default::default();
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
         region_options.set_block_size(opt.block_size);
         region_options.set_extent_size(opt.extent_size);
 
