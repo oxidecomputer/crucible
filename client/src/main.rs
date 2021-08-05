@@ -69,8 +69,8 @@ fn main() -> Result<()> {
      * get in its own way.
      */
     std::thread::sleep(std::time::Duration::from_secs(5));
-    _run_single_workload(&guest)?;
-    //run_big_workload(&guest, 1)?;
+    //_run_single_workload(&guest)?;
+    _run_big_workload(&guest, 1)?;
     /*
     for _ in 0..1000 {
         _run_single_workload(&guest)?;
