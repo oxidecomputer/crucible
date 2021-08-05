@@ -119,6 +119,12 @@ Read        rn:1004 eid:1 bo:0
 OK: connection(1): all done
 ```
 
+Optionally specify `--block-size` and/or `--extent-size` when creating downstairs regions:
+
+```
+cargo run -q -p crucible-downstairs -- -c -p "380${1}" -d "disks/d${1}/" --block-size 4096 --extent-size 20
+```
+
 # Importing to and exporting from crucible downstairs.
 
 ## To import a file and convert it into a Crucible Region filesystem (tm)
