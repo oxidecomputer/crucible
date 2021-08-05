@@ -113,6 +113,14 @@ impl RegionOptions {
 
         Ok(())
     }
+
+    pub fn set_block_size(&mut self, bs: u64) {
+        self.block_size = bs;
+    }
+
+    pub fn set_extent_size(&mut self, es: u64) {
+        self.extent_size = es;
+    }
 }
 
 impl Default for RegionOptions {
