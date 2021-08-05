@@ -119,6 +119,36 @@ Read        rn:1004 eid:1 bo:0
 OK: connection(1): all done
 ```
 
+# Importing to and exporting from crucible downstairs.
+
+## To import a file and convert it into a Crucible Region filesystem (tm)
+
+To take a file and use it to create a crucible filesystem, you can do the following:, assuming your file to import is called: `alpine-standard-3.14.0-x86_64.iso` and you are creating a crucible region at the directory `var/itest`:
+
+```
+cargo run -q -p crucible-downstairs -- -c -d var/itest -i alpine-standard-3.14.0-x86_64.iso
+```
+
+This will generate a new crucible region filesystem with initial metadata and then exit.  Here is an example of running that command:
+
+```
+$ cargo run -q -p crucible-downstairs -- -c -d var/itest -i alpine-standard-3.14.0-x86_64.iso
+Created new region file "var/itest/region.json"
+Import file_size: 143654912  Extent size:51200  Total extents:2806
+Importing "/Users/alan/Downloads/alpine-standard-3.14.0-x86_64.iso" to new region
+Created 2806 extents and Copied 280576 blocks
+Current flush_numbers [0..12]: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+Exitng after import
+```
+
+## To export from crucible to a file
+depending on your needs, you may need to know the number of blocks that were copied in during import.  In the previous example, the import copied `280576` blocks.  If we want the exact same file (and not, for example, just to archive a Crucible downstairs or pick a specific block) we need to tell the export how many blocks to copy.
+
+To export the file we imported in the previous example:
+```
+cargo run -q -p crucible-downstairs -- -d var/itest -e alan.iso --count 280576
+```
+
 That's all for now!
 
 # Tracing #
