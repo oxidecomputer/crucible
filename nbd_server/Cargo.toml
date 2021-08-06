@@ -21,3 +21,4 @@ tokio = { version = "1.7.1", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"]}
 toml = "0.5"
 nbd = "0.2.3"
+rand = "0.8.4"

@@ -146,14 +146,17 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
     let mut out_file = File::create(export_path)?;
     let mut blocks_copied = 0;
 
-    //let count = extent_size * extent_count as u64;
     'eid_loop: for eid in 0..extent_count {
         let extent_offset = space_per_extent * eid as u64;
         for block_offset in 0..extent_size {
-            if extent_offset + block_offset >= start_block {
+            if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
                 region
-                    .region_read(eid as u64, block_offset, &mut data)
+                    .region_read(
+                        eid as u64,
+                        block_size * block_offset,
+                        &mut data,
+                    )
                     .unwrap();
                 out_file.write_all(&data).unwrap();
                 data.resize(block_size as usize, 0);
@@ -225,23 +228,25 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
              */
             break;
         }
+
         blocks_copied += 1;
+
         /*
          * Use the same function upsairs uses to decide where to put the
          * data based on the LBA offset.
          */
         let nwo = extent_from_offset(rm, offset, block_size as usize).unwrap();
         assert_eq!(nwo.len(), 1);
-        let (eid, block_offset, _) = nwo[0];
+        let (eid, byte_offset, _) = nwo[0];
 
         if n != (block_size as usize) {
             if n != 0 {
                 let rest = &buffer[0..n];
-                region.region_write(eid, block_offset, rest)?;
+                region.region_write(eid, byte_offset, rest)?;
             }
             break;
         } else {
-            region.region_write(eid, block_offset, &buffer)?;
+            region.region_write(eid, byte_offset, &buffer)?;
             offset += n as u64;
         }
     }
@@ -276,8 +281,8 @@ async fn proc_frame(
             fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
                 .await
         }
-        Message::Write(rn, eid, _dependencies, block_offset, data) => {
-            d.region.region_write(*eid, *block_offset, data)?;
+        Message::Write(rn, eid, _dependencies, byte_offset, data) => {
+            d.region.region_write(*eid, *byte_offset, data)?;
             fw.send(Message::WriteAck(*rn)).await
         }
         Message::Flush(rn, dependencies, flush_number) => {
@@ -285,19 +290,18 @@ async fn proc_frame(
                 .region_flush(dependencies.to_vec(), *flush_number)?;
             fw.send(Message::FlushAck(*rn)).await
         }
-        Message::ReadRequest(rn, eid, block_offset, blocks) => {
+        Message::ReadRequest(rn, eid, byte_offset, len) => {
             /*
              * XXX Some thought will need to be given to where the read
              * data buffer is created, both on this side and the remote.
              * Also, we (I) need to figure out how to read data into an
              * uninitialized buffer. Until then, we have this workaround.
              */
-            let (bs, _, _) = d.region.region_def();
-            let sz = *blocks as usize * bs as usize;
+            let sz = *len as usize;
             let mut data = BytesMut::with_capacity(sz);
             data.resize(sz, 1);
 
-            d.region.region_read(*eid, *block_offset, &mut data)?;
+            d.region.region_read(*eid, *byte_offset, &mut data)?;
             let data = data.freeze();
             fw.send(Message::ReadResponse(*rn, data.clone())).await
         }

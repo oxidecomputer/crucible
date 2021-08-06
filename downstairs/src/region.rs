@@ -214,26 +214,17 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn read_block(
-        &self,
-        block_offset: u64,
-        data: &mut BytesMut,
-    ) -> Result<()> {
+    pub fn read(&self, byte_offset: u64, data: &mut BytesMut) -> Result<()> {
+        self.check_input(byte_offset, data)?;
+
+        /*
+         * Skip metadata block
+         */
+        let file_offset = byte_offset + self.block_size;
+
         let mut inner = self.inner.lock().unwrap();
-
-        self.check_input(block_offset, data)?;
-
-        /*
-         * Skip metadata block:
-         */
-        let block_offset = block_offset.checked_add(1).unwrap();
-
-        /*
-         * Calculate offset in file:
-         */
-        let file_offset = self.block_size.checked_mul(block_offset).unwrap();
-
         inner.file.seek(SeekFrom::Start(file_offset))?;
+
         /*
          * XXX This read_exact only works because we have filled our buffer
          * with data ahead of time.  If we want to use an uninitialized
@@ -251,37 +242,16 @@ impl Extent {
      * Note that the checks here do take into account that the first block
      * is the metadata block.
      */
-    fn check_input(&self, block_offset: u64, data: &[u8]) -> Result<()> {
-        if block_offset >= self.extent_size {
-            bail!(
-                "block offset {} is past end of extent {}",
-                block_offset,
-                self.extent_size
-            );
-        }
-        if data.len() < self.block_size as usize {
-            bail!(
-                "buffer {} is less than block size {}",
-                data.len(),
-                self.block_size
-            );
-        }
+    fn check_input(&self, byte_offset: u64, data: &[u8]) -> Result<()> {
+        let total_size = self.block_size * self.extent_size;
 
-        let rem = data.len() % self.block_size as usize;
-        if rem != 0 {
+        if (byte_offset + data.len() as u64) > total_size {
             bail!(
-                "buffer {} is not mutliple of block size {}",
+                "byte offset {} + data.len() {} is past end of extent {} ({})",
+                byte_offset,
                 data.len(),
-                self.block_size
-            );
-        }
-
-        let data_blocks = data.len() as u64 / self.block_size as u64;
-        if data_blocks + block_offset > self.extent_size {
-            bail!(
-                "Start block offset + blocks {} is > extent size {}",
-                data_blocks + block_offset,
-                self.extent_size
+                self.extent_size,
+                total_size,
             );
         }
 
@@ -289,10 +259,10 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn write_block(&self, block_offset: u64, data: &[u8]) -> Result<()> {
+    pub fn write(&self, byte_offset: u64, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        self.check_input(block_offset, data)?;
+        self.check_input(byte_offset, data)?;
 
         if !inner.meta.dirty {
             inner.file.seek(SeekFrom::Start(0))?;
@@ -307,18 +277,14 @@ impl Extent {
                  */
                 bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
             }
+
             inner.meta.dirty = true;
         }
 
         /*
-         * Skip metadata block:
+         * Skip metadata block
          */
-        let block_offset = block_offset.checked_add(1).unwrap();
-
-        /*
-         * Calculate offset in file:
-         */
-        let file_offset = self.block_size.checked_mul(block_offset).unwrap();
+        let file_offset = byte_offset + self.block_size;
 
         inner.file.seek(SeekFrom::Start(file_offset))?;
         inner.file.write_all(data)?;
@@ -352,6 +318,7 @@ impl Extent {
         }
 
         inner.file.seek(SeekFrom::Start(0))?;
+
         /*
          * When we write out the new flush number, the dirty bit in the file
          * should be set back to false
@@ -365,9 +332,11 @@ impl Extent {
             flush_number: new_flush,
             dirty: false,
         };
+
         let encoded: Vec<u8> = bincode::serialize(&new_meta).unwrap();
         inner.file.write_all(&encoded)?;
         inner.file.flush()?;
+
         /*
          * Fsync the metadata update
          */
@@ -378,6 +347,7 @@ impl Extent {
              */
             bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
         }
+
         inner.meta = new_meta;
 
         Ok(())
@@ -550,11 +520,11 @@ impl Region {
     pub fn region_write(
         &self,
         eid: u64,
-        block_offset: u64,
+        byte_offset: u64,
         data: &[u8],
     ) -> Result<()> {
         let extent = &self.extents[eid as usize];
-        extent.write_block(block_offset, data)?;
+        extent.write(byte_offset, data)?;
         Ok(())
     }
 
@@ -562,11 +532,11 @@ impl Region {
     pub fn region_read(
         &self,
         eid: u64,
-        block_offset: u64,
+        byte_offset: u64,
         data: &mut BytesMut,
     ) -> Result<()> {
         let extent = &self.extents[eid as usize];
-        extent.read_block(block_offset, data)?;
+        extent.read(byte_offset, data)?;
         Ok(())
     }
 
@@ -683,7 +653,7 @@ mod test {
         let ext = new_extent();
 
         assert_eq!((), ext.check_input(0, &data).unwrap());
-        assert_eq!((), ext.check_input(98, &data).unwrap());
+        assert_eq!((), ext.check_input(97 * 512, &data).unwrap());
     }
 
     #[test]
@@ -692,11 +662,10 @@ mod test {
         data.put(&[1; 512 * 100][..]);
 
         let ext = new_extent();
-        assert_eq!((), ext.check_input(0, &data).unwrap());
+        ext.check_input(0, &data).unwrap();
     }
 
     #[test]
-    #[should_panic]
     fn extent_io_invalid_size() {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
@@ -706,7 +675,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn extent_io_invalid_size_small() {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
@@ -722,8 +690,9 @@ mod test {
         data.put(&[1; 512][..]);
 
         let ext = new_extent();
-        ext.check_input(100, &data).unwrap();
+        ext.check_input(100 * 512, &data).unwrap();
     }
+
     #[test]
     #[should_panic]
     fn extent_io_invalid_block_buf() {
@@ -731,7 +700,7 @@ mod test {
         data.put(&[1; 1024][..]);
 
         let ext = new_extent();
-        assert_eq!((), ext.check_input(99, &data).unwrap());
+        ext.check_input(99 * 512, &data).unwrap();
     }
 
     #[test]
