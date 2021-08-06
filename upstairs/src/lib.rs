@@ -136,9 +136,15 @@ fn process_downstairs(
     versions: Vec<u64>,
 ) -> Result<()> {
     println!(
-        "{} Evaluate new downstairs : bs:{} es:{} ec:{} versions: {:?}",
-        target, bs, es, ec, versions
+        "{} Evaluate new downstairs : bs:{} es:{} ec:{}",
+        target, bs, es, ec
     );
+
+    if versions.len() > 12 {
+        println!("{} versions[0..12]: {:?}", target, versions[0..12].to_vec());
+    } else {
+        println!("{}  versions: {:?}", target, versions);
+    }
 
     let mut fi = u.flush_info.lock().unwrap();
     if fi.flush_numbers.is_empty() {
@@ -149,10 +155,13 @@ fn process_downstairs(
          */
         fi.flush_numbers = versions;
         fi.next_flush = *fi.flush_numbers.iter().max().unwrap() + 1;
-        println!(
-            "Set inital Extent versions to {:?}\nNext flush: {}",
-            fi.flush_numbers, fi.next_flush
-        );
+        print!("Set inital Extent versions to");
+        if fi.flush_numbers.len() > 12 {
+            println!(" [0..12]{:?}", fi.flush_numbers[0..12].to_vec());
+        } else {
+            println!("{:?}", fi.flush_numbers);
+        }
+        println!("Next flush: {}", fi.next_flush);
     } else if fi.flush_numbers.len() != versions.len() {
         /*
          * I don't think there is much we can do here, the expected number
@@ -840,7 +849,7 @@ impl Upstairs {
 
         let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         gw.active.insert(gw_id, new_gtos);
-        crutrace_gw_start!(|| (gw_id));
+        crutrace_gw_flush_start!(|| (gw_id));
 
         ds_work.enqueue(fl);
         Ok(())
@@ -911,7 +920,7 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        crutrace_gw_start!(|| (gw_id));
+        crutrace_gw_write_start!(|| (gw_id));
 
         for wr in new_ds_work {
             ds_work.enqueue(wr);
@@ -994,7 +1003,7 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        crutrace_gw_start!(|| (gw_id));
+        crutrace_gw_read_start!(|| (gw_id));
 
         for wr in new_ds_work {
             ds_work.enqueue(wr);
@@ -1362,6 +1371,36 @@ impl GtoS {
     }
 }
 
+/*
+ * This function just does the match on IOop type and updates the dtrace
+ * probe for that operaion finishing.
+ */
+fn crutrace_work_done(work: IOop, gw_id: u64) {
+    match work {
+        IOop::Read {
+            eid: _,
+            block_offset: _,
+            blocks: _,
+        } => {
+            crutrace_gw_read_end!(|| (gw_id));
+        }
+        IOop::Write {
+            dependencies: _,
+            eid: _,
+            block_offset: _,
+            data: _,
+        } => {
+            crutrace_gw_write_end!(|| (gw_id));
+        }
+        IOop::Flush {
+            dependencies: _,
+            flush_number: _,
+        } => {
+            crutrace_gw_flush_end!(|| (gw_id));
+        }
+    }
+}
+
 /**
  * This structure keeps track of work that Crucible has accepted from the
  * "Guest", aka, Propolis.
@@ -1399,7 +1438,6 @@ impl GuestWork {
         let gtos_job = self.active.remove(&gw_id).unwrap();
         assert!(gtos_job.submitted.is_empty());
         self.completed.push(gw_id);
-        crutrace_gw_end!(|| (gw_id));
     }
 
     /**
@@ -1479,6 +1517,7 @@ impl GuestWork {
                 }
                 gtos_job.notify();
                 self.complete(gw_id);
+                crutrace_work_done(done.work, gw_id);
             }
         } else {
             /*
@@ -2020,7 +2059,7 @@ fn show_all_work(up: &Arc<Upstairs>) {
         println!();
     }
     let done = work.completed.to_vec();
-    println!("Done tasks: {:?}", done.len());
+    println!("Done tasks count: {:?}", done.len());
     drop(work);
     show_guest_work(&up.guest);
 }
@@ -2047,7 +2086,7 @@ fn show_guest_work(guest: &Arc<Guest>) {
         );
     }
     let done = gw.completed.to_vec();
-    println!("GW_JOB completed:{:?} ", done);
+    println!("GW_JOB completed count:{:?} ", done.len());
 }
 
 #[cfg(test)]
