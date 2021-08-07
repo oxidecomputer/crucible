@@ -2,7 +2,7 @@ use std::net::SocketAddrV4;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use structopt::StructOpt;
 use tokio::runtime::Builder;
 
@@ -13,6 +13,9 @@ use crucible::*;
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddrV4>,
+
+    #[structopt(short, long, default_value = "one")]
+    workload: String,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -57,36 +60,28 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
     /*
      * Create the interactive input scope that will generate and send
      * work to the Crucible thread that listens to work from outside (Propolis).
      */
     //runtime.spawn(run_scope(prop_work));
-
-    /*
-     * XXX The rest of this is just test code
-     * It should all be replaced with a better test that does not
-     * get in its own way.
-     */
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    //_run_single_workload(&guest)?;
-    _run_big_workload(&guest, 1)?;
-    /*
-    for _ in 0..1000 {
-        _run_single_workload(&guest)?;
-        /*
-         * This helps us get around async/non-async issues.
-         * Keeing this process busy means some async tasks will never get
-         * time to run.  Give a little pause here and let some other
-         * tasks go.  Yes, this is a hack.  XXX
-         */
-        std::thread::sleep(std::time::Duration::from_micros(500));
+    match opt.workload.as_str() {
+        "one" => {
+            println!("One test");
+            run_single_workload(&guest)?;
+        }
+        "big" => {
+            println!("Run big test");
+            run_big_workload(&guest)?;
+        }
+        _ => {
+            println!("Unknown workload type {}", opt.workload);
+            return Ok(());
+        }
     }
-    */
-    // show_guest_work(&guest);
-    println!("Tests done, wait");
-    std::thread::sleep(std::time::Duration::from_secs(50));
-    // show_guest_work(&guest);
+
     println!("Tests done");
     loop {
         guest.send(BlockOp::ShowWork);
@@ -97,95 +92,134 @@ fn main() -> Result<()> {
 }
 
 /*
- * This is a test workload that generates a write spanning an extent
- * then trys to read the same.
+ * This is a test workload that generates a single write spanning an extent
+ * then will try to read the same.
+ * TODO: Compare the buffer we wrote with the buffer we read.
  */
-fn _run_single_workload(guest: &Arc<Guest>) -> Result<()> {
-    let my_offset = 512 * 99;
-    let mut data = BytesMut::with_capacity(512 * 2);
-    for seed in 4..6 {
-        data.put(&[seed; 512][..]);
+fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
+    let block_size = guest.query_block_size();
+    let extent_size = guest.query_extent_size();
+    println!("bs: {}  es:{}", extent_size, block_size);
+    /*
+     * Pick the last block in the first extent
+     */
+    let my_offset = (block_size * extent_size) - block_size;
+    let my_length: usize = block_size as usize * 2;
+
+    let mut vec: Vec<u8> = Vec::with_capacity(my_length);
+    for seed in 7..9 {
+        /*
+         * Fill with a unique value for each block
+         */
+        for _ in 0..block_size {
+            vec.push(seed);
+        }
     }
-    let data = data.freeze();
+    let data = Bytes::from(vec);
+
     let wio = BlockOp::Write {
         offset: my_offset,
         data,
     };
-    guest.send(wio);
+    println!("Sending a write spanning two extents");
+    let mut waiter = guest.send(wio);
+    waiter.block_wait();
 
-    guest.send(BlockOp::Flush);
-    //guest.send(BlockOp::ShowWork);
+    println!("Sending a flush");
+    let mut waiter = guest.send(BlockOp::Flush);
+    waiter.block_wait();
 
-    let read_offset = my_offset;
-    const READ_SIZE: usize = 1024;
-    println!("generate a read 1");
-    let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
+    let vec: Vec<u8> = vec![99; my_length];
+    let data = crucible::Buffer::from_vec(vec);
 
-    println!("send read");
     let rio = BlockOp::Read {
-        offset: read_offset,
+        offset: my_offset,
         data,
     };
-    guest.send(rio);
-    // guest.send(BlockOp::ShowWork);
-
-    println!("Final offset: {}", my_offset);
+    println!("Sending a read spanning two extents");
+    waiter = guest.send(rio);
+    waiter.block_wait();
 
     Ok(())
 }
+
 /*
- * This is basically just a test loop that generates a workload then sends the
- * workload to Crucible.
+ * Write, flush, then read every block in the volume.
+ * We wait for each op to finish, so this is all sequential.
  */
-fn _run_big_workload(guest: &Arc<Guest>, loops: u32) -> Result<()> {
-    for _ll in 0..loops {
-        let mut my_offset: u64 = 0;
-        for olc in 0..10 {
-            for lc in 0..100 {
-                let seed = (my_offset % 255) as u8;
-                let mut data = BytesMut::with_capacity(512);
-                data.put(&[seed; 512][..]);
-                let data = data.freeze();
-                println!(
-                    "[{}][{}] send write  offset:{}  len:{}",
-                    olc,
-                    lc,
-                    my_offset,
-                    data.len()
-                );
-                let wio = BlockOp::Write {
-                    offset: my_offset,
-                    data,
-                };
-                guest.send(wio);
+fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
+    let block_size = guest.query_block_size();
+    let total_size = guest.query_total_size();
+    let extent_size = guest.query_extent_size();
 
-                let read_offset = my_offset;
-                const READ_SIZE: usize = 512;
-                let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
-                println!(
-                    "[{}][{}] send read   offset:{} len:{}",
-                    olc,
-                    lc,
-                    read_offset,
-                    data.len(),
-                );
-                let rio = BlockOp::Read {
-                    offset: read_offset,
-                    data,
-                };
-                guest.send(rio);
-
-                println!("[{}][{}] send flush", olc, lc);
-                guest.send(BlockOp::Flush);
-                // guest.send(BlockOp::ShowWork);
-                my_offset += 512;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut my_offset: u64 = 0;
+    let mut cur_block = 0;
+    let mut cur_extent = 0;
+    while my_offset < total_size {
+        /*
+         * Generate a write buffer with a locally unique value.
+         */
+        let seed = (my_offset % 255) as u8;
+        let mut vec: Vec<u8> = Vec::with_capacity(block_size as usize);
+        for _ in 0..block_size {
+            vec.push(seed);
         }
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        println!("Final offset: {}", my_offset);
-        guest.send(BlockOp::ShowWork);
+        let data = Bytes::from(vec);
+
+        println!(
+            "[{}][{}] send write  offset:{}  len:{}",
+            cur_extent,
+            cur_block,
+            my_offset,
+            data.len()
+        );
+        let wio = BlockOp::Write {
+            offset: my_offset,
+            data,
+        };
+        let mut waiter = guest.send(wio);
+        waiter.block_wait();
+
+        println!("[{}][{}] send flush", cur_extent, cur_block);
+        waiter = guest.send(BlockOp::Flush);
+        waiter.block_wait();
+
+        /*
+         * Pre-populate the read buffer with a known pattern so we can
+         * detect if is is not what we expect
+         */
+        let mut vec: Vec<u8> = Vec::with_capacity(block_size as usize);
+        for i in 0..block_size {
+            let seed = (i % 255) as u8;
+            vec.push(seed);
+        }
+        let data = crucible::Buffer::from_vec(vec);
+
+        println!(
+            "[{}][{}] send read   offset:{}  len:{}",
+            cur_extent,
+            cur_block,
+            my_offset,
+            data.len(),
+        );
+        let rio = BlockOp::Read {
+            offset: my_offset,
+            data,
+        };
+        waiter = guest.send(rio);
+        waiter.block_wait();
+
+        my_offset += 512;
+        cur_block += 1;
+        if cur_block >= extent_size {
+            cur_extent += 1;
+            cur_block = 0;
+        }
     }
+    println!("All IOs sent");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    guest.send(BlockOp::ShowWork);
+
     Ok(())
 }
 
