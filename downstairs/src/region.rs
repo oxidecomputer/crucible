@@ -666,7 +666,7 @@ mod test {
     }
 
     #[test]
-    fn extent_io_invalid_size() {
+    fn extent_io_non_aligned_large() {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
@@ -675,7 +675,7 @@ mod test {
     }
 
     #[test]
-    fn extent_io_invalid_size_small() {
+    fn extent_io_non_aligned_small() {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
