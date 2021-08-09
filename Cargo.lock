@@ -252,6 +252,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-hammer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crucible",
+ "crucible-common",
+ "rand",
+ "structopt",
+ "tokio",
+]
+
+[[package]]
 name = "crucible-nbd-server"
 version = "0.1.0"
 dependencies = [
@@ -264,7 +277,6 @@ dependencies = [
  "futures",
  "futures-core",
  "nbd",
- "rand",
  "ringbuffer",
  "serde",
  "serde_json",
