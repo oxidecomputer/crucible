@@ -209,7 +209,7 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
         waiter = guest.send(rio);
         waiter.block_wait();
 
-        my_offset += 512;
+        my_offset += block_size;
         cur_block += 1;
         if cur_block >= extent_size {
             cur_extent += 1;
