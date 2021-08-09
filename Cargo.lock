@@ -264,7 +264,6 @@ dependencies = [
  "futures",
  "futures-core",
  "nbd",
- "rand",
  "ringbuffer",
  "serde",
  "serde_json",
@@ -446,6 +445,19 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "hammer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crucible",
+ "crucible-common",
+ "rand",
+ "structopt",
+ "tokio",
 ]
 
 [[package]]

@@ -7,4 +7,5 @@ members = [
 	"scope",
 	"upstairs",
 	"nbd_server",
+	"hammer",
 ]

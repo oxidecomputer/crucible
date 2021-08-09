@@ -1,3 +1,5 @@
+#![feature(with_options)]
+
 use std::net::SocketAddrV4;
 use std::sync::Arc;
 
@@ -7,26 +9,12 @@ use tokio::runtime::Builder;
 
 use crucible::*;
 
-use nbd::server::{handshake, transmission, Export};
-use std::net::{TcpListener, TcpStream as NetTcpStream};
+use std::io::{Read, Seek, SeekFrom, Write};
 
-/*
- * NBD server commands translate through the CruciblePseudoFile and turn
- * into Guest work ops.
- */
-
-fn handle_nbd_client(
-    cpf: &mut crucible::CruciblePseudoFile,
-    mut stream: NetTcpStream,
-) -> Result<()> {
-    let e = Export {
-        size: cpf.sz(),
-        readonly: false,
-        ..Default::default()
-    };
-    handshake(&mut stream, &e)?;
-    transmission(&mut stream, cpf)?;
-    Ok(())
+// https://stackoverflow.com/questions/29504514/whats-the-best-way-to-compare-2-vectors-or-strings-element-by-element
+fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
+    let matching = a.iter().zip(b.iter()).filter(|&(a, b)| a == b).count();
+    matching == a.len() && matching == b.len()
 }
 
 #[derive(Debug, StructOpt)]
@@ -74,28 +62,40 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    // NBD server
+    let sz = guest.query_total_size() as u64;
+    println!("advertised size as {} bytes", sz);
 
-    let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
     let mut cpf = crucible::CruciblePseudoFile::from_guest(guest);
 
-    // sent to NBD client during handshake through Export struct
-    println!("NBD advertised size as {} bytes", cpf.sz());
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
 
-    for stream in listener.incoming() {
-        println!("waiting on nbd traffic");
-        match stream {
-            Ok(stream) => match handle_nbd_client(&mut cpf, stream) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("handle_nbd_client error: {}", e);
-                }
-            },
-            Err(_) => {
-                println!("Error");
-            }
+    loop {
+        let mut offset: u64 = rng.gen::<u64>() % sz;
+        let mut bsz: usize = rng.gen::<usize>() % 4096;
+
+        while ((offset + bsz as u64) > sz) || (bsz == 0) {
+            offset = rng.gen::<u64>() % sz;
+            bsz = rng.gen::<usize>() % 4096;
+        }
+
+        let vec: Vec<u8> = (0..bsz)
+            .map(|_| rng.sample(rand::distributions::Standard))
+            .collect();
+
+        let mut vec2 = vec![0; bsz];
+
+        cpf.seek(SeekFrom::Start(offset))?;
+        cpf.write_all(&vec[..])?;
+
+        cpf.seek(SeekFrom::Start(offset))?;
+        cpf.read_exact(&mut vec2[..])?;
+
+        if !do_vecs_match(&vec, &vec2) {
+            println!("offset {} bsz {}", offset, bsz);
+            println!("vec : {:?}", vec);
+            println!("vec2: {:?}", vec2);
+            bail!("vec != vec2");
         }
     }
-
-    Ok(())
 }

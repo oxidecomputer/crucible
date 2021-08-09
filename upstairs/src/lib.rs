@@ -1,10 +1,13 @@
 #![feature(asm)]
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddrV4;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crucible_common::*;
 use crucible_protocol::*;
@@ -263,7 +266,7 @@ async fn io_completed(
     up: &Arc<Upstairs>,
     ds_id: u64,
     client_id: u8,
-    data: Option<bytes::Bytes>,
+    data: Option<Bytes>,
     ds_done_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
     let mut gw_work_done = false;
@@ -704,7 +707,7 @@ impl Work {
         &mut self,
         ds_id: u64,
         client_id: u8,
-        data: Option<bytes::Bytes>,
+        data: Option<Bytes>,
     ) -> Result<WorkCounts> {
         let job = self
             .active
@@ -887,7 +890,7 @@ impl Upstairs {
     fn submit_write(
         &self,
         offset: u64,
-        data: bytes::Bytes,
+        data: Bytes,
         sender: std_mpsc::Sender<i32>,
     ) {
         /*
@@ -1086,7 +1089,7 @@ struct DownstairsIO {
     /*
      * If the operation is a Read, this holds the resulting buffer
      */
-    data: Option<bytes::Bytes>,
+    data: Option<Bytes>,
 }
 
 /*
@@ -1098,7 +1101,7 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         eid: u64,
         byte_offset: u64,
-        data: bytes::Bytes,
+        data: Bytes,
     },
     Read {
         eid: u64,
@@ -1254,7 +1257,7 @@ fn test_buffer_len_over_block_size() {
 #[derive(Debug)]
 pub enum BlockOp {
     Read { offset: u64, data: Buffer },
-    Write { offset: u64, data: bytes::Bytes },
+    Write { offset: u64, data: Bytes },
     Flush,
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
@@ -1299,7 +1302,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, bytes::Bytes>,
+    downstairs_buffer: HashMap<u64, Bytes>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -1312,7 +1315,7 @@ impl GtoS {
         submitted: HashMap<u64, usize>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, bytes::Bytes>,
+        downstairs_buffer: HashMap<u64, Bytes>,
         sender: std_mpsc::Sender<i32>,
     ) -> GtoS {
         GtoS {
@@ -1951,7 +1954,7 @@ fn create_write_eob(
     gw_id: u64,
     eid: u64,
     byte_offset: u64,
-    data: bytes::Bytes,
+    data: Bytes,
 ) -> DownstairsIO {
     let awrite = IOop::Write {
         dependencies: Vec::new(), // XXX Coming soon
@@ -2106,6 +2109,123 @@ fn show_guest_work(guest: &Arc<Guest>) {
     }
     let done = gw.completed.to_vec();
     println!("GW_JOB completed count:{:?} ", done.len());
+}
+
+/*
+ * Wrap a Crucible guest and implement Read + Write + Seek traits.
+ */
+pub struct CruciblePseudoFile {
+    guest: Arc<Guest>,
+    offset: u64,
+    sz: u64,
+}
+
+impl CruciblePseudoFile {
+    pub fn from_guest(guest: Arc<Guest>) -> Self {
+        let sz = guest.query_total_size() as u64;
+        CruciblePseudoFile {
+            guest,
+            offset: 0,
+            sz,
+        }
+    }
+
+    pub fn sz(&self) -> u64 {
+        self.sz
+    }
+}
+
+/*
+ * The Read + Write impls here translate arbitrary sized operations into
+ * calls for the underlying Crucible API.
+ */
+impl Read for CruciblePseudoFile {
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+        let data = Buffer::from_slice(buf);
+
+        let rio = BlockOp::Read {
+            offset: self.offset,
+            data: data.clone(),
+        };
+
+        let mut waiter = self.guest.send(rio);
+        waiter.block_wait();
+
+        // TODO: for block devices, we can't increment offset past the
+        // device size but we're supposed to be pretending to be a proper
+        // file here
+        self.offset += buf.len() as u64;
+
+        // TODO: is there a better way to do this fill?
+        {
+            let vec = data.as_vec();
+            for i in 0..buf.len() {
+                buf[i] = vec[i];
+            }
+        }
+
+        Ok(buf.len())
+    }
+}
+
+impl Write for CruciblePseudoFile {
+    fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
+        let mut data = BytesMut::with_capacity(buf.len());
+        data.put_slice(buf);
+
+        let wio = BlockOp::Write {
+            offset: self.offset,
+            data: data.freeze(),
+        };
+
+        let mut waiter = self.guest.send(wio);
+        waiter.block_wait();
+
+        // TODO: can't increment offset past the device size
+        self.offset += buf.len() as u64;
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> IOResult<()> {
+        let mut waiter = self.guest.send(BlockOp::Flush);
+        waiter.block_wait();
+
+        Ok(())
+    }
+}
+
+impl Seek for CruciblePseudoFile {
+    fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
+        // TODO: does not check against block device size
+        let mut offset: i64 = self.offset as i64;
+        match pos {
+            SeekFrom::Start(v) => {
+                offset = v as i64;
+            }
+            SeekFrom::Current(v) => {
+                offset += v;
+            }
+            SeekFrom::End(v) => {
+                offset = self.sz as i64 + v;
+            }
+        }
+
+        if offset < 0 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "offset is negative!",
+            ))
+        } else {
+            // offset >= 0
+            self.offset = offset as u64;
+            Ok(self.offset)
+        }
+    }
+
+    fn stream_position(&mut self) -> IOResult<u64> {
+        self.seek(SeekFrom::Current(0))
+    }
 }
 
 #[cfg(test)]
