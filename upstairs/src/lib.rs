@@ -1175,11 +1175,8 @@ impl Buffer {
     }
 
     pub fn new(len: usize) -> Buffer {
-        let mut vec = Vec::<u8>::with_capacity(len);
-        vec.resize(len, 0);
-
         Buffer {
-            data: Arc::new(Mutex::new(vec)),
+            data: Arc::new(Mutex::new(vec![0; len])),
         }
     }
 
