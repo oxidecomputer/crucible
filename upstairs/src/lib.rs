@@ -63,61 +63,89 @@ async fn proc_frame(
 }
 
 /*
- * Convert a virtual block offset and length into a Vec of:
- *     Extent number (EID), Block offset, Length in bytes
+ * Convert a virtual block offset and length into a Vec of tuples:
  *
- * If the offset + length would fit into a single extent, then we only have
- * one tuple in the Vec.  If the offset + length does not fit into the
- * extent, then add a second tuple with EID + 1, 0, and whatever length
- * is remaining.
+ *     Extent number (EID), Byte offset, Length in bytes
  *
- * We don't support a length greater than a single extent,
- * which means we only have to support spanning two extents at most.
- *
+ * - length in bytes can be up to the region size
  */
 pub fn extent_from_offset(
     ddef: RegionDefinition,
     offset: u64,
     len: usize,
 ) -> Result<Vec<(u64, u64, usize)>> {
-    // TODO Make asserts return error
-    assert!(len as u64 >= ddef.block_size());
-    assert!(len as u64 % ddef.block_size() == 0);
-    assert!(offset % ddef.block_size() == 0);
+    assert!(len > 0);
 
+    let mut result = Vec::new();
     let space_per_extent = ddef.block_size() * ddef.extent_size();
-    /*
-     * XXX We only support a single region (downstairs).  When we grow to
-     * support a LBA size that is larger than a single region, then we will
-     * need to write more code.
-     */
-    let eid: u64 = offset / space_per_extent;
-    assert!((len as u64) <= space_per_extent);
-    assert!((eid as u32) < ddef.extent_count());
-
-    let block_in_extent: u64 =
-        (offset - (eid * space_per_extent)) / ddef.block_size();
-
-    let mut res = Vec::new();
+    assert!(
+        (offset + len as u64)
+            <= (space_per_extent * ddef.extent_count() as u64)
+    );
 
     /*
-     * Check to see if our length extends past the end of this region.
-     * If it fits, then we can just add the tuple to our Vec.  If it
-     * does not fit, then we need to push two things into our Vec and
-     * determine the length that each extent needs.
-     */
-    let data_blocks = (len as u64) / ddef.block_size();
-    if data_blocks + block_in_extent <= ddef.extent_size() {
-        res.push((eid, block_in_extent, len));
-    } else {
-        assert!((eid as u32) + 1 < ddef.extent_count());
-        let new_len =
-            (ddef.extent_size() - block_in_extent) * ddef.block_size();
-        res.push((eid, block_in_extent, new_len as usize));
-        res.push((eid + 1, 0, len - (new_len as usize)));
+
+    |eid0                  |eid1
+         |───────────────────────>│
+    ┌────|─────────────────|──────┼───────────────┐
+    │    |                 |      │               │
+    └────|─────────────────|──────┼───────────────┘
+       offset               offset + len
+    */
+    let mut o = offset;
+    let mut len_left = len;
+
+    while len_left > 0 {
+        /*
+         * XXX We only support a single region (downstairs).  When we grow to
+         * support a LBA size that is larger than a single region, then we will
+         * need to write more code. But - that code may live upstairs?
+         */
+        let eid: u64 = o / space_per_extent;
+        assert!((eid as u32) < ddef.extent_count());
+
+        let extent_offset = o % space_per_extent;
+        let mut sz = space_per_extent as usize - extent_offset as usize;
+        if len_left < sz {
+            sz = len_left;
+        }
+
+        result.push((eid, extent_offset, sz));
+
+        match len_left.checked_sub(sz) {
+            Some(v) => {
+                len_left = v;
+            }
+            None => {
+                break;
+            }
+        }
+
+        o += sz as u64;
     }
 
-    Ok(res)
+    {
+        let mut bytes = 0;
+        for r in &result {
+            bytes += r.2;
+        }
+        assert_eq!(bytes, len);
+    }
+
+    {
+        let mut bytes = 0;
+        for i in 0..result.len() {
+            let r = result[i];
+            if i == (result.len() - 1) {
+                bytes += r.2 as u64;
+            } else {
+                bytes += space_per_extent - r.1;
+            }
+        }
+        assert_eq!(bytes, len as u64);
+    }
+
+    Ok(result)
 }
 
 /*
@@ -304,14 +332,14 @@ async fn io_send(
             IOop::Write {
                 dependencies,
                 eid,
-                block_offset,
+                byte_offset,
                 data,
             } => {
                 fw.send(Message::Write(
                     *new_id,
                     eid,
                     dependencies.clone(),
-                    block_offset,
+                    byte_offset,
                     data.clone(),
                 ))
                 .await?
@@ -329,16 +357,11 @@ async fn io_send(
             }
             IOop::Read {
                 eid,
-                block_offset,
-                blocks,
+                byte_offset,
+                len,
             } => {
-                fw.send(Message::ReadRequest(
-                    *new_id,
-                    eid,
-                    block_offset,
-                    blocks,
-                ))
-                .await?
+                fw.send(Message::ReadRequest(*new_id, eid, byte_offset, len))
+                    .await?
             }
         }
     }
@@ -878,13 +901,12 @@ impl Upstairs {
 
         /*
          * Given the offset and buffer size, figure out what extent and
-         * block offset that translates into.  Keep in mind that an offset
+         * byte offset that translates into.  Keep in mind that an offset
          * and length may span two extents, and eventually XXX, two regions.
          */
-        // let ddef = self.ddef.lock().unwrap();
         let ddef = self.ddef.lock().unwrap();
-
         let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
+
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
          * from extent_from_offset
@@ -950,19 +972,13 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
 
         /*
-         * We need to know the block size to allow us to convert between
-         * bytes and blocks.  Bytes for when we have to slice buffers,
-         * blocks for what we send to the downstairs IO.
+         * Given the offset and buffer size, figure out what extent and
+         * byte offset that translates into. Keep in mind that an offset
+         * and length may span many extents, and eventually, TODO, regions.
          */
         let ddef = self.ddef.lock().unwrap();
-        let block_size = ddef.block_size() as u32;
-        /*
-         * Given the offset and buffer size, figure out what extent and
-         * block offset that translates into.  Keep in mind that an offset
-         * and length may span two extents, and eventually, TODO, two regions.
-         */
-
         let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
+
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
          * will create on behalf of this guest job.
@@ -972,11 +988,10 @@ impl Upstairs {
         let mut next_id: u64;
 
         /*
-         * Now create a downstairs work job for each (eid, bi, len) returned
+         * Now create a downstairs work job for each (eid, bo, len) returned
          * from extent_from_offset
          */
         for (eid, bo, len) in nwo {
-            let blocks: u32 = len as u32 / block_size;
             {
                 next_id = ds_work.next_id();
             }
@@ -988,7 +1003,7 @@ impl Upstairs {
              * sequential.
              */
             sub.insert(next_id, len);
-            let wr = create_read_eob(next_id, gw_id, eid, bo, blocks);
+            let wr = create_read_eob(next_id, gw_id, eid, bo, len);
             new_ds_work.push(wr);
         }
 
@@ -1082,13 +1097,13 @@ pub enum IOop {
     Write {
         dependencies: Vec<u64>, // Jobs that must finish before this
         eid: u64,
-        block_offset: u64,
+        byte_offset: u64,
         data: bytes::Bytes,
     },
     Read {
         eid: u64,
-        block_offset: u64,
-        blocks: u32,
+        byte_offset: u64,
+        len: u32, // in bytes
     },
     Flush {
         dependencies: Vec<u64>, // Jobs that must finish before this
@@ -1153,31 +1168,19 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    /*
-     * XXX: For now, assert Buffer size is at least the minimum block size 512.
-     */
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
-        assert!(vec.len() >= 512);
-
         Buffer {
             data: Arc::new(Mutex::new(vec)),
         }
     }
 
     pub fn new(len: usize) -> Buffer {
-        assert!(len >= 512);
-
-        let mut vec = Vec::<u8>::with_capacity(len);
-        vec.resize(len, 0);
-
         Buffer {
-            data: Arc::new(Mutex::new(vec)),
+            data: Arc::new(Mutex::new(vec![0; len])),
         }
     }
 
     pub fn from_slice(buf: &[u8]) -> Buffer {
-        assert!(buf.len() >= 512);
-
         let mut vec = Vec::<u8>::with_capacity(buf.len());
         for item in buf {
             vec.push(*item);
@@ -1335,6 +1338,7 @@ impl GtoS {
             self.completed.sort_unstable();
             assert!(!self.completed.is_empty());
 
+            let mut offset = 0;
             for ds_id in self.completed.iter() {
                 // println!("Copy buff from {:?}", ds_id);
                 let ds_buf = self.downstairs_buffer.remove(ds_id).unwrap();
@@ -1343,7 +1347,8 @@ impl GtoS {
                         span!(Level::TRACE, "copy to guest buffer").entered();
                     let mut vec = guest_buffer.as_vec();
                     for i in 0..ds_buf.len() {
-                        vec[i] = ds_buf[i];
+                        vec[offset] = ds_buf[i];
+                        offset += 1;
                     }
                 }
                 // println!("Final data copy {} {:#?}", ds_id, ds_buf);
@@ -1380,15 +1385,15 @@ fn crutrace_work_done(work: IOop, gw_id: u64) {
     match work {
         IOop::Read {
             eid: _,
-            block_offset: _,
-            blocks: _,
+            byte_offset: _,
+            len: _,
         } => {
             crutrace_gw_read_end!(|| (gw_id));
         }
         IOop::Write {
             dependencies: _,
             eid: _,
-            block_offset: _,
+            byte_offset: _,
             data: _,
         } => {
             crutrace_gw_write_end!(|| (gw_id));
@@ -1782,7 +1787,6 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
         match req.op {
             BlockOp::Read { offset, data } => {
                 up.submit_read(offset, data, req.send);
-                // Send the message that there is new work to do
                 dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
                 lastcast += 1;
             }
@@ -1946,13 +1950,13 @@ fn create_write_eob(
     ds_id: u64,
     gw_id: u64,
     eid: u64,
-    block_offset: u64,
+    byte_offset: u64,
     data: bytes::Bytes,
 ) -> DownstairsIO {
     let awrite = IOop::Write {
         dependencies: Vec::new(), // XXX Coming soon
         eid,
-        block_offset,
+        byte_offset,
         data,
     };
 
@@ -1960,6 +1964,7 @@ fn create_write_eob(
     for cl in 0..3 {
         state.insert(cl, IOState::New);
     }
+
     DownstairsIO {
         ds_id,
         guest_id: gw_id,
@@ -1971,26 +1976,27 @@ fn create_write_eob(
 
 /*
  * Create a write DownstairsIO structure from an EID, and offset, and the
- * data buffer.  Used for converting a guest IO reead request into a
+ * data buffer.  Used for converting a guest IO read request into a
  * DownstairsIO that the downstairs can understand.
  */
 fn create_read_eob(
     ds_id: u64,
     gw_id: u64,
     eid: u64,
-    block_offset: u64,
-    blocks: u32,
+    byte_offset: u64,
+    len: usize,
 ) -> DownstairsIO {
     let aread = IOop::Read {
         eid,
-        block_offset,
-        blocks,
+        byte_offset,
+        len: len as u32,
     };
 
     let mut state = HashMap::new();
     for cl in 0..3 {
         state.insert(cl, IOState::New);
     }
+
     DownstairsIO {
         ds_id,
         guest_id: gw_id,
@@ -2043,13 +2049,13 @@ fn show_all_work(up: &Arc<Upstairs>) {
         let job_type = match &job.work {
             IOop::Read {
                 eid,
-                block_offset,
-                blocks,
+                byte_offset,
+                len,
             } => "Read ".to_string(),
             IOop::Write {
                 dependencies,
                 eid,
-                block_offset,
+                byte_offset,
                 data,
             } => "Write".to_string(),
             IOop::Flush {
@@ -2105,6 +2111,133 @@ fn show_guest_work(guest: &Arc<Guest>) {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_extent_from_offset() {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(2);
+        ddef.set_extent_count(10);
+
+        // Test less than block size
+        assert_eq!(
+            extent_from_offset(ddef, 0, 128).unwrap(),
+            vec![(0, 0, 128),]
+        );
+
+        // Test block size, less than extent size
+        assert_eq!(
+            extent_from_offset(ddef, 0, 512).unwrap(),
+            vec![(0, 0, 512),]
+        );
+
+        // Test greater than block size, less than extent size
+        assert_eq!(
+            extent_from_offset(ddef, 0, 1024).unwrap(),
+            vec![(0, 0, 1024),]
+        );
+
+        // Test greater than extent size
+        assert_eq!(
+            extent_from_offset(ddef, 0, 2048).unwrap(),
+            vec![(0, 0, 1024), (1, 0, 1024),]
+        );
+
+        // Test offsets
+        assert_eq!(
+            extent_from_offset(ddef, 1, 2048).unwrap(),
+            vec![(0, 1, 1024 - 1), (1, 0, 1024), (2, 0, 1),]
+        );
+        assert_eq!(
+            extent_from_offset(ddef, 1023, 2048).unwrap(),
+            vec![(0, 1023, 1024 - 1023), (1, 0, 1024), (2, 0, 1023),]
+        );
+        assert_eq!(
+            extent_from_offset(ddef, 1024, 2048).unwrap(),
+            vec![(1, 0, 1024), (2, 0, 1024),]
+        );
+        for i in 0..9 {
+            for j in 1..1023 {
+                assert_eq!(
+                    extent_from_offset(ddef, 1024 * i + j, 1).unwrap(),
+                    vec![(i, j, 1),]
+                );
+            }
+        }
+
+        // Test large sizes plus offset
+        assert_eq!(
+            extent_from_offset(ddef, 1024 + 780, 1024 * 8).unwrap(),
+            vec![
+                (1, 780, 1024 - 780),
+                (2, 0, 1024),
+                (3, 0, 1024),
+                (4, 0, 1024),
+                (5, 0, 1024),
+                (6, 0, 1024),
+                (7, 0, 1024),
+                (8, 0, 1024),
+                (9, 0, 780),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extent_from_offset_hammer_fail() {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(100);
+        ddef.set_extent_count(1000);
+
+        // Test hammer fails
+
+        // NBD reads two blocks in, writes out one big block
+        /*
+        NBD_CMD_READ typ=0 handle=144115188831223808 off=17657856 len=4096
+
+        >>> 17657856.0 / (512*100)
+        344.88
+        >>> 17657856 - 344 * (512*100)
+        45056
+        >>> 345 * (512*100) - 17657856
+        6144
+        */
+        assert_eq!(
+            extent_from_offset(ddef, 17657856, 4096).unwrap(),
+            vec![(344, 45056, 4096),],
+        );
+        /*
+        NBD_CMD_READ typ=0 handle=216172782869151744 off=17661952 len=4096
+
+        >>> 17661952 / (512*100)
+        344.96
+        >>> 17661952 - 344 * (512*100)
+        49152
+        >>> 345 * (512*100) - 17661952
+        2048
+        */
+        assert_eq!(
+            extent_from_offset(ddef, 17661952, 4096).unwrap(),
+            vec![(344, 49152, 2048), (345, 0, 2048),],
+        );
+        /*
+        NBD_CMD_WRITE typ=1 handle=288230376990965760 off=17657856 len=8192
+
+        >>> 17657856 / (512*100)
+        344.88
+        >>> 17657856 - 344 * (512*100)
+        45056
+        >>> 345 * (512*100) - 17657856
+        6144
+        >>> 8192 - 6144
+        2048
+        */
+        assert_eq!(
+            extent_from_offset(ddef, 17657856, 8192).unwrap(),
+            vec![(344, 45056, 6144), (345, 0, 2048),],
+        );
+    }
+
     /*
      * Beware, if you change these defaults, then you will have to change
      * all the hard coded tests below that use make_upstairs().
@@ -2144,35 +2277,35 @@ mod test {
     #[test]
     fn off_to_extent_basic() {
         /*
-         * Verify the offsets match the expected block_offset for the
+         * Verify the offsets match the expected byte_offset for the
          * default size region.
          */
         let up = make_upstairs();
 
-        let exv = vec![(0, 0, 512)];
+        let exv = vec![(0, 0 * 512, 512)];
         assert_eq!(up_efo(&up, 0, 512).unwrap(), exv);
-        let exv = vec![(0, 1, 512)];
+        let exv = vec![(0, 1 * 512, 512)];
         assert_eq!(up_efo(&up, 512, 512).unwrap(), exv);
-        let exv = vec![(0, 2, 512)];
+        let exv = vec![(0, 2 * 512, 512)];
         assert_eq!(up_efo(&up, 1024, 512).unwrap(), exv);
-        let exv = vec![(0, 3, 512)];
+        let exv = vec![(0, 3 * 512, 512)];
         assert_eq!(up_efo(&up, 1024 + 512, 512).unwrap(), exv);
-        let exv = vec![(0, 99, 512)];
+        let exv = vec![(0, 99 * 512, 512)];
         assert_eq!(up_efo(&up, 51200 - 512, 512).unwrap(), exv);
 
-        let exv = vec![(1, 0, 512)];
+        let exv = vec![(1, 0 * 512, 512)];
         assert_eq!(up_efo(&up, 51200, 512).unwrap(), exv);
-        let exv = vec![(1, 1, 512)];
+        let exv = vec![(1, 1 * 512, 512)];
         assert_eq!(up_efo(&up, 51200 + 512, 512).unwrap(), exv);
-        let exv = vec![(1, 2, 512)];
+        let exv = vec![(1, 2 * 512, 512)];
         assert_eq!(up_efo(&up, 51200 + 1024, 512).unwrap(), exv);
-        let exv = vec![(1, 99, 512)];
+        let exv = vec![(1, 99 * 512, 512)];
         assert_eq!(up_efo(&up, 102400 - 512, 512).unwrap(), exv);
 
-        let exv = vec![(2, 0, 512)];
+        let exv = vec![(2, 0 * 512, 512)];
         assert_eq!(up_efo(&up, 102400, 512).unwrap(), exv);
 
-        let exv = vec![(9, 99, 512)];
+        let exv = vec![(9, 99 * 512, 512)];
         assert_eq!(up_efo(&up, (512 * 100 * 10) - 512, 512).unwrap(), exv);
     }
 
@@ -2183,28 +2316,28 @@ mod test {
          */
         let up = make_upstairs();
 
-        let exv = vec![(0, 0, 1024)];
+        let exv = vec![(0, 0 * 512, 1024)];
         assert_eq!(up_efo(&up, 0, 1024).unwrap(), exv);
-        let exv = vec![(0, 1, 1024)];
+        let exv = vec![(0, 1 * 512, 1024)];
         assert_eq!(up_efo(&up, 512, 1024).unwrap(), exv);
-        let exv = vec![(0, 2, 1024)];
+        let exv = vec![(0, 2 * 512, 1024)];
         assert_eq!(up_efo(&up, 1024, 1024).unwrap(), exv);
-        let exv = vec![(0, 98, 1024)];
+        let exv = vec![(0, 98 * 512, 1024)];
         assert_eq!(up_efo(&up, 51200 - 1024, 1024).unwrap(), exv);
 
-        let exv = vec![(1, 0, 1024)];
+        let exv = vec![(1, 0 * 512, 1024)];
         assert_eq!(up_efo(&up, 51200, 1024).unwrap(), exv);
-        let exv = vec![(1, 1, 1024)];
+        let exv = vec![(1, 1 * 512, 1024)];
         assert_eq!(up_efo(&up, 51200 + 512, 1024).unwrap(), exv);
-        let exv = vec![(1, 2, 1024)];
+        let exv = vec![(1, 2 * 512, 1024)];
         assert_eq!(up_efo(&up, 51200 + 1024, 1024).unwrap(), exv);
-        let exv = vec![(1, 98, 1024)];
+        let exv = vec![(1, 98 * 512, 1024)];
         assert_eq!(up_efo(&up, 102400 - 1024, 1024).unwrap(), exv);
 
-        let exv = vec![(2, 0, 1024)];
+        let exv = vec![(2, 0 * 512, 1024)];
         assert_eq!(up_efo(&up, 102400, 1024).unwrap(), exv);
 
-        let exv = vec![(9, 98, 1024)];
+        let exv = vec![(9, 98 * 512, 1024)];
         assert_eq!(up_efo(&up, (512 * 100 * 10) - 1024, 1024).unwrap(), exv);
     }
 
@@ -2231,25 +2364,25 @@ mod test {
         /*
          * 1024 buffer
          */
-        let exv = vec![(0, 99, 512), (1, 0, 512)];
+        let exv = vec![(0, 99 * 512, 512), (1, 0, 512)];
         assert_eq!(up_efo(&up, 51200 - 512, 1024).unwrap(), exv);
-        let exv = vec![(0, 98, 1024), (1, 0, 1024)];
+        let exv = vec![(0, 98 * 512, 1024), (1, 0, 1024)];
         assert_eq!(up_efo(&up, 51200 - 1024, 2048).unwrap(), exv);
 
         /*
          * Largest buffer
          */
-        let exv = vec![(0, 1, 51200 - 512), (1, 0, 512)];
+        let exv = vec![(0, 1 * 512, 51200 - 512), (1, 0, 512)];
         assert_eq!(up_efo(&up, 512, 51200).unwrap(), exv);
-        let exv = vec![(0, 2, 51200 - 1024), (1, 0, 1024)];
+        let exv = vec![(0, 2 * 512, 51200 - 1024), (1, 0, 1024)];
         assert_eq!(up_efo(&up, 1024, 51200).unwrap(), exv);
-        let exv = vec![(0, 4, 51200 - 2048), (1, 0, 2048)];
+        let exv = vec![(0, 4 * 512, 51200 - 2048), (1, 0, 2048)];
         assert_eq!(up_efo(&up, 2048, 51200).unwrap(), exv);
 
         /*
          * Largest buffer, last block offset possible
          */
-        let exv = vec![(0, 99, 512), (1, 0, 51200 - 512)];
+        let exv = vec![(0, 99 * 512, 512), (1, 0, 51200 - 512)];
         assert_eq!(up_efo(&up, 51200 - 512, 51200).unwrap(), exv);
     }
 
@@ -2263,39 +2396,25 @@ mod test {
         up_efo(&up, 0, 0).unwrap();
     }
     #[test]
-    #[should_panic]
-    fn off_to_extent_block_align() {
+    fn off_to_extent_length_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 0, 511).unwrap();
+        up_efo(&up, 0, 512 * 100 * 10).unwrap();
     }
     #[test]
     #[should_panic]
-    fn off_to_extent_block_align2() {
+    fn off_to_extent_length_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 0, 513).unwrap();
+        up_efo(&up, 0, 512 * 100 * 10 + 1).unwrap();
+    }
+    #[test]
+    fn off_to_extent_length_and_offset_almost_too_big() {
+        let up = make_upstairs();
+        up_efo(&up, 512 * 100 * 9, 512 * 100).unwrap();
     }
     #[test]
     #[should_panic]
-    fn off_to_extent_length_big() {
+    fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 0, 51200 + 512).unwrap();
-    }
-    #[test]
-    #[should_panic]
-    fn off_to_extent_offset_align() {
-        let up = make_upstairs();
-        up_efo(&up, 511, 512).unwrap();
-    }
-    #[test]
-    #[should_panic]
-    fn off_to_extent_offset_align2() {
-        let up = make_upstairs();
-        up_efo(&up, 513, 512).unwrap();
-    }
-    #[test]
-    #[should_panic]
-    fn off_to_extent_offset_big() {
-        let up = make_upstairs();
-        up_efo(&up, 512000, 512).unwrap();
+        up_efo(&up, 512 * 100 * 9, 512 * 100 + 1).unwrap();
     }
 }

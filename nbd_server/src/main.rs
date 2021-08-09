@@ -20,13 +20,16 @@ use std::net::{TcpListener, TcpStream as NetTcpStream};
 
 struct CruciblePseudoFile {
     guest: Arc<Guest>,
-    block_size: usize,
     offset: u64,
     sz: u64,
 }
 
-impl CruciblePseudoFile {
-    fn _read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+/*
+ * The Read + Write impls here translate arbitrary sized operations into
+ * calls for the underlying Crucible API.
+ */
+impl Read for CruciblePseudoFile {
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         let data = crucible::Buffer::from_slice(buf);
 
         let rio = BlockOp::Read {
@@ -52,8 +55,10 @@ impl CruciblePseudoFile {
 
         Ok(buf.len())
     }
+}
 
-    fn _write(&mut self, buf: &[u8]) -> IOResult<usize> {
+impl Write for CruciblePseudoFile {
+    fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
         let mut data = BytesMut::with_capacity(buf.len());
         data.put_slice(buf);
 
@@ -69,38 +74,6 @@ impl CruciblePseudoFile {
         self.offset += buf.len() as u64;
 
         Ok(buf.len())
-    }
-}
-
-/*
- * The Read + Write impls here translate arbitrary sized operations into
- * sector size calls for the underlying Crucible API.
- */
-impl Read for CruciblePseudoFile {
-    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        assert!((buf.len() % self.block_size) == 0);
-
-        let mut result: usize = 0;
-
-        for i in (0..buf.len()).step_by(self.block_size) {
-            result += self._read(&mut buf[i..(i + self.block_size)])?;
-        }
-
-        Ok(result)
-    }
-}
-
-impl Write for CruciblePseudoFile {
-    fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        assert!((buf.len() % self.block_size) == 0);
-
-        let mut result: usize = 0;
-
-        for i in (0..buf.len()).step_by(self.block_size) {
-            result += self._write(&buf[i..(i + self.block_size)])?;
-        }
-
-        Ok(result)
     }
 
     fn flush(&mut self) -> IOResult<()> {
@@ -125,7 +98,7 @@ impl Seek for CruciblePseudoFile {
             }
             SeekFrom::End(v) => {
                 // TODO: as checked add?
-                offset += v;
+                offset = self.sz as i64 + v;
             }
         }
 
@@ -146,12 +119,16 @@ impl Seek for CruciblePseudoFile {
     }
 }
 
-fn handle_nbd_client(
-    cpf: &mut CruciblePseudoFile,
+fn handle_nbd_client<F>(
+    cpf: &mut F,
+    sz: u64,
     mut stream: NetTcpStream,
-) -> Result<()> {
+) -> Result<()>
+where
+    F: Read + Write + Seek,
+{
     let e = Export {
-        size: cpf.sz,
+        size: sz,
         readonly: false,
         ..Default::default()
     };
@@ -205,7 +182,6 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    let block_size = guest.query_block_size() as usize;
     let sz = guest.query_total_size() as u64;
     println!("NBD advertised size as {} bytes", sz);
 
@@ -213,7 +189,6 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
     let mut cpf = CruciblePseudoFile {
         guest,
-        block_size,
         offset: 0,
         sz, // sent to NBD client during handshake through Export struct
     };
@@ -221,7 +196,7 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         println!("waiting on nbd traffic");
         match stream {
-            Ok(stream) => match handle_nbd_client(&mut cpf, stream) {
+            Ok(stream) => match handle_nbd_client(&mut cpf, sz, stream) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("handle_nbd_client error: {}", e);
