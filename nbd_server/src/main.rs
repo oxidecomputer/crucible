@@ -26,7 +26,7 @@ struct CruciblePseudoFile {
 
 /*
  * The Read + Write impls here translate arbitrary sized operations into
- * sector size calls for the underlying Crucible API.
+ * calls for the underlying Crucible API.
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
