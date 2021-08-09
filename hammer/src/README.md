@@ -1,5 +1,4 @@
 
-
 This directory contains a stress test for Crucible called Hammer, which does
 the following:
 
@@ -10,9 +9,12 @@ the following:
 1. read from that offset
 1. compare the two buffers, and bail if they're not correct.
 
-This tool is written in Rust. There's also a hammer.c which does the same but
-uses `/dev/nbd0` instead of sending work directly to the guest (through the
-pseudo file).
+This tool is written in Rust. When running, supply a list of targets:
+
+    cargo run -p crucible-hammer -- -t 127.0.0.1:3801 -t 127.0.0.1:3802 -t 127.0.0.1:3803
+
+There's also a hammer.c which does the same but uses `/dev/nbd0` instead of
+sending work directly to the guest (through the pseudo file).
 
     gcc -o hammer hammer.c
     sudo ./hammer

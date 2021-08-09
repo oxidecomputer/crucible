@@ -79,6 +79,8 @@ fn main() -> Result<()> {
             bsz = rng.gen::<usize>() % 4096;
         }
 
+        println!("testing: offset {} sz {}", offset, bsz);
+
         let vec: Vec<u8> = (0..bsz)
             .map(|_| rng.sample(rand::distributions::Standard))
             .collect();
