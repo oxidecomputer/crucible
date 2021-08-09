@@ -1257,6 +1257,7 @@ pub enum BlockOp {
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
     // Begin testing options.
+    QueryExtentSize { data: Arc<Mutex<u64>> },
     Commit,   // Send update to all tasks that there is work on the queue.
     ShowWork, // Show the status of the internal work hashmap and done Vec.
 }
@@ -1679,6 +1680,13 @@ impl Guest {
         self.send(size_query).block_wait();
         return *data.lock().unwrap();
     }
+
+    pub fn query_extent_size(&self) -> u64 {
+        let data = Arc::new(Mutex::new(0));
+        let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
+        self.send(extent_query).block_wait();
+        return *data.lock().unwrap();
+    }
 }
 
 impl Default for Guest {
@@ -1798,6 +1806,11 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
                 let _ = req.send.send(0);
             }
             // Testing options
+            BlockOp::QueryExtentSize { data } => {
+                // Yes, test only
+                *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
+                let _ = req.send.send(0);
+            }
             BlockOp::ShowWork => {
                 show_all_work(up);
             }
