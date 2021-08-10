@@ -1255,7 +1255,7 @@ fn test_buffer_len_over_block_size() {
  * tell the upstairs to behave in specific ways.
  */
 #[derive(Debug)]
-pub enum BlockOp {
+enum BlockOp {
     Read { offset: u64, data: Buffer },
     Write { offset: u64, data: Bytes },
     Flush,
@@ -1654,7 +1654,7 @@ impl Guest {
     /*
      * This is used to submit a new BlockOp IO request to Crucible.
      */
-    pub fn send(&self, op: BlockOp) -> BlockReqWaiter {
+    fn send(&self, op: BlockOp) -> BlockReqWaiter {
         let (send, recv) = std_mpsc::channel();
 
         self.reqs.lock().unwrap().push_back(BlockReq::new(op, send));
@@ -1666,13 +1666,34 @@ impl Guest {
     /*
      * A crucible task will listen for new work using this.
      */
-    pub async fn recv(&self) -> BlockReq {
+    async fn recv(&self) -> BlockReq {
         loop {
             if let Some(req) = self.reqs.lock().unwrap().pop_front() {
                 return req;
             }
             self.notify.notified().await;
         }
+    }
+
+    // TODO: get status from waiter, bubble that up as a Result?
+
+    pub fn read(&self, offset: u64, data: Buffer) {
+        let rio = BlockOp::Read { offset, data };
+
+        let mut waiter = self.send(rio);
+        waiter.block_wait();
+    }
+
+    pub fn write(&self, offset: u64, data: Bytes) {
+        let wio = BlockOp::Write { offset, data };
+
+        let mut waiter = self.send(wio);
+        waiter.block_wait();
+    }
+
+    pub fn flush(&self) {
+        let mut waiter = self.send(BlockOp::Flush);
+        waiter.block_wait();
     }
 
     pub fn query_block_size(&self) -> u64 {
@@ -1694,6 +1715,10 @@ impl Guest {
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
         self.send(extent_query).block_wait();
         return *data.lock().unwrap();
+    }
+
+    pub fn show_work(&self) {
+        self.send(BlockOp::ShowWork);
     }
 }
 
@@ -2143,13 +2168,7 @@ impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         let data = Buffer::from_slice(buf);
 
-        let rio = BlockOp::Read {
-            offset: self.offset,
-            data: data.clone(),
-        };
-
-        let mut waiter = self.guest.send(rio);
-        waiter.block_wait();
+        self.guest.read(self.offset, data.clone());
 
         // TODO: for block devices, we can't increment offset past the
         // device size but we're supposed to be pretending to be a proper
@@ -2173,13 +2192,7 @@ impl Write for CruciblePseudoFile {
         let mut data = BytesMut::with_capacity(buf.len());
         data.put_slice(buf);
 
-        let wio = BlockOp::Write {
-            offset: self.offset,
-            data: data.freeze(),
-        };
-
-        let mut waiter = self.guest.send(wio);
-        waiter.block_wait();
+        self.guest.write(self.offset, data.freeze());
 
         // TODO: can't increment offset past the device size
         self.offset += buf.len() as u64;
@@ -2188,9 +2201,7 @@ impl Write for CruciblePseudoFile {
     }
 
     fn flush(&mut self) -> IOResult<()> {
-        let mut waiter = self.guest.send(BlockOp::Flush);
-        waiter.block_wait();
-
+        self.guest.flush();
         Ok(())
     }
 }

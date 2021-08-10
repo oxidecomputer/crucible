@@ -84,10 +84,10 @@ fn main() -> Result<()> {
 
     println!("Tests done");
     loop {
-        guest.send(BlockOp::ShowWork);
+        guest.show_work();
         std::thread::sleep(std::time::Duration::from_secs(30));
         println!("\n\n   Loop send flush");
-        guest.send(BlockOp::Flush);
+        guest.flush();
     }
 }
 
@@ -117,28 +117,17 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     }
     let data = Bytes::from(vec);
 
-    let wio = BlockOp::Write {
-        offset: my_offset,
-        data,
-    };
     println!("Sending a write spanning two extents");
-    let mut waiter = guest.send(wio);
-    waiter.block_wait();
+    guest.write(my_offset, data);
 
     println!("Sending a flush");
-    let mut waiter = guest.send(BlockOp::Flush);
-    waiter.block_wait();
+    guest.flush();
 
     let vec: Vec<u8> = vec![99; my_length];
     let data = crucible::Buffer::from_vec(vec);
 
-    let rio = BlockOp::Read {
-        offset: my_offset,
-        data,
-    };
     println!("Sending a read spanning two extents");
-    waiter = guest.send(rio);
-    waiter.block_wait();
+    guest.read(my_offset, data);
 
     Ok(())
 }
@@ -173,16 +162,10 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len()
         );
-        let wio = BlockOp::Write {
-            offset: my_offset,
-            data,
-        };
-        let mut waiter = guest.send(wio);
-        waiter.block_wait();
+        guest.write(my_offset, data);
 
         println!("[{}][{}] send flush", cur_extent, cur_block);
-        waiter = guest.send(BlockOp::Flush);
-        waiter.block_wait();
+        guest.flush();
 
         /*
          * Pre-populate the read buffer with a known pattern so we can
@@ -202,12 +185,7 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len(),
         );
-        let rio = BlockOp::Read {
-            offset: my_offset,
-            data,
-        };
-        waiter = guest.send(rio);
-        waiter.block_wait();
+        guest.read(my_offset, data);
 
         my_offset += block_size;
         cur_block += 1;
@@ -218,7 +196,7 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
     }
     println!("All IOs sent");
     std::thread::sleep(std::time::Duration::from_secs(5));
-    guest.send(BlockOp::ShowWork);
+    guest.show_work();
 
     Ok(())
 }
@@ -233,17 +211,14 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         for seed in 44..46 {
             data.put(&[seed; 512][..]);
         }
-        let data = data.freeze();
-        let wio = BlockOp::Write {
-            offset: my_offset,
-            data,
-        };
         my_offset += 512 * 2;
         scope.wait_for("write 1").await;
+
         println!("send write 1");
-        guest.send(wio);
+        guest.write(my_offset, data.freeze());
+
         scope.wait_for("show work").await;
-        guest.send(BlockOp::ShowWork);
+        guest.show_work();
 
         let mut read_offset = 512 * 99;
         const READ_SIZE: usize = 4096;
@@ -251,34 +226,26 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
             let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
 
             println!("send a read");
-            let rio = BlockOp::Read {
-                offset: read_offset,
-                data,
-            };
             // scope.wait_for("send Read").await;
-            guest.send(rio);
+            guest.read(read_offset, data);
             read_offset += READ_SIZE as u64;
             // scope.wait_for("show work").await;
-            guest.send(BlockOp::ShowWork);
+            guest.show_work();
         }
 
         // scope.wait_for("Flush step").await;
         println!("send flush");
-        guest.send(BlockOp::Flush);
+        guest.flush();
 
         let mut data = BytesMut::with_capacity(512);
         data.put(&[0xbb; 512][..]);
-        let data = data.freeze();
-        let wio = BlockOp::Write {
-            offset: my_offset,
-            data,
-        };
+
         // scope.wait_for("write 2").await;
         println!("send write 2");
-        guest.send(wio);
+        guest.write(my_offset, data.freeze());
         my_offset += 512;
         // scope.wait_for("show work").await;
-        guest.send(BlockOp::ShowWork);
+        guest.show_work();
         //scope.wait_for("at the bottom").await;
     }
 }
