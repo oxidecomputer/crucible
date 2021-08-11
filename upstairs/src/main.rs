@@ -113,27 +113,19 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     for seed in 4..6 {
         data.put(&[seed; 512][..]);
     }
-    let data = data.freeze();
-    let wio = BlockOp::Write {
-        offset: my_offset,
-        data,
-    };
+
     println!("send a write");
-    guest.send(wio);
+    guest.write(my_offset, data.freeze());
 
     println!("send a flush");
-    guest.send(BlockOp::Flush);
+    guest.flush();
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;
     let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
 
     println!("send a read");
-    let rio = BlockOp::Read {
-        offset: read_offset,
-        data,
-    };
-    guest.send(rio);
+    guest.read(read_offset, data);
 
     Ok(())
 }
