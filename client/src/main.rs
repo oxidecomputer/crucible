@@ -118,16 +118,19 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
-    guest.write(my_offset, data);
+    let mut waiter = guest.write(my_offset, data);
+    waiter.block_wait();
 
     println!("Sending a flush");
-    guest.flush();
+    let mut waiter = guest.flush();
+    waiter.block_wait();
 
     let vec: Vec<u8> = vec![99; my_length];
     let data = crucible::Buffer::from_vec(vec);
 
     println!("Sending a read spanning two extents");
-    guest.read(my_offset, data);
+    waiter = guest.read(my_offset, data);
+    waiter.block_wait();
 
     Ok(())
 }
@@ -162,10 +165,12 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len()
         );
-        guest.write(my_offset, data);
+        let mut waiter = guest.write(my_offset, data);
+        waiter.block_wait();
 
         println!("[{}][{}] send flush", cur_extent, cur_block);
-        guest.flush();
+        waiter = guest.flush();
+        waiter.block_wait();
 
         /*
          * Pre-populate the read buffer with a known pattern so we can
@@ -185,7 +190,8 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len(),
         );
-        guest.read(my_offset, data);
+        waiter = guest.read(my_offset, data);
+        waiter.block_wait();
 
         my_offset += block_size;
         cur_block += 1;

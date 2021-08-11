@@ -1677,23 +1677,18 @@ impl Guest {
 
     // TODO: get status from waiter, bubble that up as a Result?
 
-    pub fn read(&self, offset: u64, data: Buffer) {
+    pub fn read(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
         let rio = BlockOp::Read { offset, data };
-
-        let mut waiter = self.send(rio);
-        waiter.block_wait();
+        self.send(rio)
     }
 
-    pub fn write(&self, offset: u64, data: Bytes) {
+    pub fn write(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
         let wio = BlockOp::Write { offset, data };
-
-        let mut waiter = self.send(wio);
-        waiter.block_wait();
+        self.send(wio)
     }
 
-    pub fn flush(&self) {
-        let mut waiter = self.send(BlockOp::Flush);
-        waiter.block_wait();
+    pub fn flush(&self) -> BlockReqWaiter {
+        self.send(BlockOp::Flush)
     }
 
     pub fn query_block_size(&self) -> u64 {
@@ -1718,7 +1713,7 @@ impl Guest {
     }
 
     pub fn show_work(&self) {
-        self.send(BlockOp::ShowWork);
+        self.send(BlockOp::ShowWork).block_wait();
     }
 }
 
@@ -2168,7 +2163,8 @@ impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         let data = Buffer::from_slice(buf);
 
-        self.guest.read(self.offset, data.clone());
+        let mut waiter = self.guest.read(self.offset, data.clone());
+        waiter.block_wait();
 
         // TODO: for block devices, we can't increment offset past the
         // device size but we're supposed to be pretending to be a proper
@@ -2192,7 +2188,8 @@ impl Write for CruciblePseudoFile {
         let mut data = BytesMut::with_capacity(buf.len());
         data.put_slice(buf);
 
-        self.guest.write(self.offset, data.freeze());
+        let mut waiter = self.guest.write(self.offset, data.freeze());
+        waiter.block_wait();
 
         // TODO: can't increment offset past the device size
         self.offset += buf.len() as u64;
@@ -2201,7 +2198,9 @@ impl Write for CruciblePseudoFile {
     }
 
     fn flush(&mut self) -> IOResult<()> {
-        self.guest.flush();
+        let mut waiter = self.guest.flush();
+        waiter.block_wait();
+
         Ok(())
     }
 }
