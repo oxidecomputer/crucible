@@ -149,7 +149,10 @@ fn main() -> Result<()> {
 
             for i in 0..len {
                 if verify_vec[i as usize] != 0 {
-                    bail!("Not isolated! non-zero byte at {}", (offset + bsz as u64) + i);
+                    bail!(
+                        "Not isolated! non-zero byte at {}",
+                        (offset + bsz as u64) + i
+                    );
                 }
             }
 

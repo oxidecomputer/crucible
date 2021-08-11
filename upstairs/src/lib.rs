@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddrV4;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -149,6 +150,25 @@ pub fn extent_from_offset(
     }
 
     Ok(result)
+}
+
+/*
+ * Return all blocks that are affected by sz sized operation at offset.
+ */
+pub fn blocks_from_offset_and_size(offset: u64, sz: u64, bs: u64) -> Vec<u64> {
+    let shift = offset % bs;
+    let block_aligned_offset = offset - shift;
+    let start_block = block_aligned_offset / bs;
+
+    let mut blocks = 1;
+    let mut result = vec![start_block];
+
+    while ((start_block + blocks) * bs) < (offset + sz) {
+        result.push(start_block + blocks);
+        blocks += 1;
+    }
+
+    result
 }
 
 /*
@@ -1262,6 +1282,7 @@ enum BlockOp {
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
+    QueryOnlyBlockSizedOperations { data: Arc<AtomicBool> },
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<u64>> },
     Commit,   // Send update to all tasks that there is work on the queue.
@@ -1562,19 +1583,48 @@ impl BlockReq {
 /**
  * When BlockOps are sent to a guest, the calling function receives a
  * waiter that it can block on.
+ *
+ * BlockReqWaiters can wait on more than one BlockOp, and/or can be chained together.
  */
 pub struct BlockReqWaiter {
-    recv: std_mpsc::Receiver<i32>,
+    receivers: Vec<std_mpsc::Receiver<i32>>,
 }
 
 impl BlockReqWaiter {
+    fn empty() -> Self {
+        Self { receivers: vec![] }
+    }
+
     fn new(recv: std_mpsc::Receiver<i32>) -> BlockReqWaiter {
-        Self { recv }
+        Self {
+            receivers: vec![recv],
+        }
+    }
+
+    /*
+     * A no-op BlockReqWaiter returns immediately.
+     */
+    fn noop() -> BlockReqWaiter {
+        let (send, recv) = std_mpsc::channel();
+        let _ = send.send(0);
+        BlockReqWaiter::new(recv)
+    }
+
+    /*
+     * Chain BlockReqWaiters together, waiting for each one to complete.
+     *
+     * This consumes the receivers from the argument BlockReqWaiter: calling block_wait
+     * later will be a no-op for it. The wait will occur when this one's block_wait is called.
+     */
+    fn chain(&mut self, waiter: &mut BlockReqWaiter) {
+        self.receivers.append(&mut waiter.receivers);
     }
 
     pub fn block_wait(&mut self) {
-        // TODO: Instead of i32, errors should be bubbled up.
-        let _ = self.recv.recv();
+        for recv in &self.receivers {
+            // TODO: Instead of i32, errors should be bubbled up.
+            let _ = recv.recv();
+        }
     }
 }
 
@@ -1678,13 +1728,98 @@ impl Guest {
     // TODO: get status from waiter, bubble that up as a Result?
 
     pub fn read(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
-        let rio = BlockOp::Read { offset, data };
-        self.send(rio)
+        if !self.query_only_block_sized_operations() {
+            let rio = BlockOp::Read { offset, data };
+            return self.send(rio);
+        }
+
+        let bs = self.query_block_size();
+        let shift = offset % bs;
+        let data_length = data.len() as u64;
+
+        if (shift == 0) && ((data_length % bs) == 0) {
+            let rio = BlockOp::Read { offset, data };
+            self.send(rio)
+        } else {
+            let blocks =
+                blocks_from_offset_and_size(offset, data.len() as u64, bs);
+
+            let data_blocks: Vec<Buffer> = blocks
+                .iter()
+                .map(|i| {
+                    let buf = Buffer::new(bs as usize);
+                    let mut waiter = self.read(i * bs, buf.clone());
+                    waiter.block_wait();
+                    buf
+                })
+                .collect();
+
+            let mut vec = data.as_vec();
+
+            for i in 0..vec.len() {
+                let block = (offset as usize + i) / bs as usize;
+                let block_offset = (offset as usize + i) - block * bs as usize;
+
+                vec[i] = data_blocks[block - blocks[0] as usize].as_vec()
+                    [block_offset];
+            }
+
+            BlockReqWaiter::noop()
+        }
     }
 
     pub fn write(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
-        let wio = BlockOp::Write { offset, data };
-        self.send(wio)
+        if !self.query_only_block_sized_operations() {
+            let wio = BlockOp::Write { offset, data };
+            return self.send(wio);
+        }
+
+        let bs = self.query_block_size();
+        let shift = offset % bs;
+        let data_length = data.len() as u64;
+
+        if (shift == 0) && ((data_length % bs) == 0) {
+            let wio = BlockOp::Write { offset, data };
+            self.send(wio)
+        } else {
+            /*
+             * Note: if only submitting block sized writes to Upstairs, do read+modify+write here.
+             */
+
+            // read blocks first
+            let blocks =
+                blocks_from_offset_and_size(offset, data.len() as u64, bs);
+
+            let data_blocks: Vec<Buffer> = blocks
+                .iter()
+                .map(|i| {
+                    let buf = Buffer::new(bs as usize);
+                    let mut waiter = self.read(i * bs, buf.clone());
+                    waiter.block_wait();
+                    buf
+                })
+                .collect();
+
+            // modify
+            for i in 0..data.len() {
+                let block = (offset as usize + i) / bs as usize;
+                let block_offset = (offset as usize + i) - block * bs as usize;
+
+                data_blocks[block - blocks[0] as usize].as_vec()
+                    [block_offset] = data[i];
+            }
+
+            let mut waiter = BlockReqWaiter::empty();
+
+            // write modified blocks
+            for i in 0..blocks.len() {
+                let vec = &*data_blocks[i as usize].as_vec();
+                let bytes = Bytes::from((*vec).clone());
+                waiter.chain(&mut self.write(blocks[i] * bs, bytes));
+            }
+
+            waiter
+        }
     }
 
     pub fn flush(&self) -> BlockReqWaiter {
@@ -1703,6 +1838,19 @@ impl Guest {
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
         self.send(size_query).block_wait();
         return *data.lock().unwrap();
+    }
+
+    /*
+     * Ask the Upstairs if it requires block sized operations only.
+     *
+     * XXX: could cache this, although - would this change during use?
+     */
+    pub fn query_only_block_sized_operations(&self) -> bool {
+        let data = Arc::new(AtomicBool::new(false));
+        let only_block_sized_ops_query =
+            BlockOp::QueryOnlyBlockSizedOperations { data: data.clone() };
+        self.send(only_block_sized_ops_query).block_wait();
+        data.load(Ordering::SeqCst)
     }
 
     pub fn query_extent_size(&self) -> u64 {
@@ -1830,6 +1978,11 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
             }
             BlockOp::QueryTotalSize { data } => {
                 *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
+                let _ = req.send.send(0);
+            }
+            BlockOp::QueryOnlyBlockSizedOperations { data } => {
+                // XXX: if doing encryption, limited to block sized operations
+                data.store(false, Ordering::SeqCst);
                 let _ = req.send.send(0);
             }
             // Testing options
@@ -2366,6 +2519,14 @@ mod test {
             extent_from_offset(ddef, 17657856, 8192).unwrap(),
             vec![(344, 45056, 6144), (345, 0, 2048),],
         );
+    }
+
+    #[test]
+    fn test_blocks_from_offset_and_size() {
+        let result = blocks_from_offset_and_size(272172, 830, 512);
+
+        //assert_eq!(result.len(), 3);
+        assert_eq!(result, vec![531, 532, 533]);
     }
 
     /*
