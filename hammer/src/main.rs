@@ -127,28 +127,35 @@ fn main() -> Result<()> {
         }
 
         if opt.verify_isolation {
-            // Write back zeros, read back every block to make sure it's zero
-            cpf.seek(SeekFrom::Start(offset))?;
-            cpf.write_all(&vec![0; bsz])?;
-
+            // Read back every byte not written to to make sure it's zero
             cpf.seek(SeekFrom::Start(0))?;
-            for _ in 0..(sz / bs) {
-                let old_stream_pos = cpf.stream_position().unwrap();
 
-                let mut vec3 = vec![0; bs as usize];
-                cpf.read_exact(&mut vec3[..])?;
+            // - read from 0 -> offset
+            let mut verify_vec: Vec<u8> = vec![0; offset as usize];
+            cpf.read_exact(&mut verify_vec[..])?;
 
-                for j in 0..(bs as usize) {
-                    if vec3[j] != 0 {
-                        println!(
-                            "offset {} j {} is {}",
-                            old_stream_pos, j, vec3[j]
-                        );
-                        println!("{:?}", vec3);
-                        bail!("not isolated!");
-                    }
+            for i in 0..offset {
+                if verify_vec[i as usize] != 0 {
+                    bail!("Not isolated! non-zero byte at {}", i);
                 }
             }
+
+            // - read from (offset + bsz) -> sz
+            cpf.seek(SeekFrom::Start(offset + bsz as u64))?;
+
+            let len = sz - (offset + bsz as u64);
+            let mut verify_vec: Vec<u8> = vec![0; len as usize];
+            cpf.read_exact(&mut verify_vec[..])?;
+
+            for i in 0..len {
+                if verify_vec[i as usize] != 0 {
+                    bail!("Not isolated! non-zero byte at {}", (offset + bsz as u64) + i);
+                }
+            }
+
+            // Once done, zero out the write
+            cpf.seek(SeekFrom::Start(offset))?;
+            cpf.write_all(&vec![0; bsz])?;
         }
     }
 }
