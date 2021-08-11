@@ -22,6 +22,12 @@ fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddrV4>,
+
+    /*
+     * Verify that writes don't extend before or after the actual location.
+     */
+    #[structopt(short, long)]
+    verify_isolation: bool,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -62,13 +68,22 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
+    let bs = guest.query_block_size() as u64;
     let sz = guest.query_total_size() as u64;
-    println!("advertised size as {} bytes", sz);
+    println!("advertised size as {} bytes ({} byte blocks)", sz, bs);
 
     let mut cpf = crucible::CruciblePseudoFile::from_guest(guest);
 
     use rand::Rng;
     let mut rng = rand::thread_rng();
+
+    if opt.verify_isolation {
+        println!("clearing...");
+        cpf.seek(SeekFrom::Start(0))?;
+        for _ in 0..(sz / bs) {
+            cpf.write_all(&vec![0; bs as usize])?;
+        }
+    }
 
     loop {
         let mut offset: u64 = rng.gen::<u64>() % sz;
@@ -97,7 +112,50 @@ fn main() -> Result<()> {
             println!("offset {} bsz {}", offset, bsz);
             println!("vec : {:?}", vec);
             println!("vec2: {:?}", vec2);
+
+            assert_eq!(vec.len(), vec2.len());
+
+            for i in 0..vec.len() {
+                if vec[i] != vec2[i] {
+                    println!("vec offset {}: {} != {}", i, vec[i], vec2[i]);
+                } else {
+                    println!("vec offset {} ok", i);
+                }
+            }
+
             bail!("vec != vec2");
+        }
+
+        if opt.verify_isolation {
+            // Read back every byte not written to to make sure it's zero
+            cpf.seek(SeekFrom::Start(0))?;
+
+            // - read from 0 -> offset
+            let mut verify_vec: Vec<u8> = vec![0; offset as usize];
+            cpf.read_exact(&mut verify_vec[..])?;
+
+            for i in 0..offset {
+                if verify_vec[i as usize] != 0 {
+                    bail!("Not isolated! non-zero byte at {}", i);
+                }
+            }
+
+            // - read from (offset + bsz) -> sz
+            cpf.seek(SeekFrom::Start(offset + bsz as u64))?;
+
+            let len = sz - (offset + bsz as u64);
+            let mut verify_vec: Vec<u8> = vec![0; len as usize];
+            cpf.read_exact(&mut verify_vec[..])?;
+
+            for i in 0..len {
+                if verify_vec[i as usize] != 0 {
+                    bail!("Not isolated! non-zero byte at {}", (offset + bsz as u64) + i);
+                }
+            }
+
+            // Once done, zero out the write
+            cpf.seek(SeekFrom::Start(offset))?;
+            cpf.write_all(&vec![0; bsz])?;
         }
     }
 }
