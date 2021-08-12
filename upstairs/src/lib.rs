@@ -3,7 +3,6 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddrV4;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -1263,7 +1262,6 @@ enum BlockOp {
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
-    QueryOnlyBlockSizedOperations { data: Arc<AtomicBool> },
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<u64>> },
     Commit,   // Send update to all tasks that there is work on the queue.
@@ -1783,11 +1781,6 @@ impl Guest {
 
     #[instrument]
     pub fn read(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
-        if !self.query_only_block_sized_operations() {
-            let rio = BlockOp::Read { offset, data };
-            return self.send(rio);
-        }
-
         let mut span =
             IOSpan::new(offset, data.len() as u64, self.query_block_size());
 
@@ -1806,11 +1799,6 @@ impl Guest {
 
     #[instrument]
     pub fn write(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
-        if !self.query_only_block_sized_operations() {
-            let wio = BlockOp::Write { offset, data };
-            return self.send(wio);
-        }
-
         let mut span =
             IOSpan::new(offset, data.len() as u64, self.query_block_size());
 
@@ -1846,19 +1834,6 @@ impl Guest {
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
         self.send(size_query).block_wait();
         return *data.lock().unwrap();
-    }
-
-    /*
-     * Ask the Upstairs if it requires block sized operations only.
-     *
-     * XXX: could cache this, although - would this change during use?
-     */
-    pub fn query_only_block_sized_operations(&self) -> bool {
-        let data = Arc::new(AtomicBool::new(false));
-        let only_block_sized_ops_query =
-            BlockOp::QueryOnlyBlockSizedOperations { data: data.clone() };
-        self.send(only_block_sized_ops_query).block_wait();
-        data.load(Ordering::SeqCst)
     }
 
     pub fn query_extent_size(&self) -> u64 {
@@ -1986,11 +1961,6 @@ async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
             }
             BlockOp::QueryTotalSize { data } => {
                 *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
-                let _ = req.send.send(0);
-            }
-            BlockOp::QueryOnlyBlockSizedOperations { data } => {
-                // XXX: if doing encryption, limited to block sized operations
-                data.store(false, Ordering::SeqCst);
                 let _ = req.send.send(0);
             }
             // Testing options
