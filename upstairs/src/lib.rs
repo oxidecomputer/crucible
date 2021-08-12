@@ -1615,24 +1615,20 @@ struct IOSpan {
 impl IOSpan {
     // Create an IOSpan given a IO operation at offset and size.
     fn new(offset: u64, sz: u64, block_size: u64) -> IOSpan {
-        let phase = offset % block_size;
-        let block_aligned_offset = offset - phase;
-        let start_block = block_aligned_offset / block_size;
+        let start_block = offset / block_size;
+        let end_block = (offset + sz - 1) / block_size;
 
-        let mut affected_block_numbers = vec![start_block];
-        let mut blocks = 1;
-
-        while ((start_block + blocks) * block_size) < (offset + sz) {
-            affected_block_numbers.push(start_block + blocks);
-            blocks += 1;
-        }
+        let affected_block_numbers: Vec<u64> =
+            (start_block..=end_block).collect();
 
         Self {
             offset,
             sz,
             block_size,
-            phase,
-            buffer: Buffer::new(blocks as usize * block_size as usize),
+            phase: offset % block_size,
+            buffer: Buffer::new(
+                affected_block_numbers.len() * block_size as usize,
+            ),
             affected_block_numbers,
         }
     }
@@ -2561,6 +2557,13 @@ mod test {
         let span = IOSpan::new(500, 4096 * 3 + (4096 - 500 + 1), 4096);
         assert!(!span.is_block_aligned_and_block_sized());
         assert_eq!(span.number_of_affected_blocks(), 3 + 2);
+
+        // Some from hammer
+
+        let span = IOSpan::new(137690, 1340, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 4);
+        assert_eq!(span.affected_block_numbers, vec![268, 269, 270, 271]);
     }
 
     #[test]
