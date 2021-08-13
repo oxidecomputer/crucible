@@ -1562,8 +1562,6 @@ impl BlockReq {
 /**
  * When BlockOps are sent to a guest, the calling function receives a
  * waiter that it can block on.
- *
- * BlockReqWaiters can wait on more than one BlockOp, and/or can be chained together.
  */
 pub struct BlockReqWaiter {
     recv: std_mpsc::Receiver<i32>,
@@ -1809,6 +1807,10 @@ impl Guest {
             /*
              * Note: if only submitting block sized writes to Upstairs, do read+modify+write here.
              */
+
+            // XXX: RMW here has atomicity problem
+            println!("atomicity fail! write of {} size {}", offset, data.len());
+
             let mut waiter = span.read_affected_blocks_from_guest(self);
             waiter.block_wait();
 
