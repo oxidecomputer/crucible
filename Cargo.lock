@@ -259,9 +259,13 @@ dependencies = [
  "bytes",
  "crucible",
  "crucible-common",
+ "opentelemetry",
+ "opentelemetry-jaeger",
  "rand",
  "structopt",
  "tokio",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -11,6 +11,9 @@ use crucible::*;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 // https://stackoverflow.com/questions/29504514/whats-the-best-way-to-compare-2-vectors-or-strings-element-by-element
 fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     let matching = a.iter().zip(b.iter()).filter(|&(a, b)| a == b).count();
@@ -28,6 +31,9 @@ pub struct Opt {
      */
     #[structopt(short, long)]
     verify_isolation: bool,
+
+    #[structopt(short, long)]
+    tracing_endpoint: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -44,6 +50,23 @@ pub fn opts() -> Result<Opt> {
 fn main() -> Result<()> {
     let opt = opts()?;
     let crucible_opts = CrucibleOpts { target: opt.target };
+
+    if let Some(tracing_endpoint) = opt.tracing_endpoint {
+        let tracer = opentelemetry_jaeger::new_pipeline()
+            .with_agent_endpoint(tracing_endpoint)
+            .with_service_name("crucible-hammer")
+            .install_simple()
+            .expect("Error initializing Jaeger exporter");
+
+        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+        tracing_subscriber::registry()
+            .with(telemetry)
+            .try_init()
+            .expect("Error init tracing subscriber");
+
+        println!("Set up tracing!");
+    }
 
     /*
      * Crucible needs a runtime as it will create several async tasks to
