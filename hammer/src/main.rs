@@ -49,7 +49,10 @@ pub fn opts() -> Result<Opt> {
 
 fn main() -> Result<()> {
     let opt = opts()?;
-    let crucible_opts = CrucibleOpts { target: opt.target };
+    let crucible_opts = CrucibleOpts {
+        target: opt.target,
+        lossy: false,
+    };
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {
         let tracer = opentelemetry_jaeger::new_pipeline()
