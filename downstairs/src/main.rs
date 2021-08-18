@@ -1,10 +1,12 @@
 // Copyright 2021 Oxide Computer Company
+use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crucible::*;
@@ -266,51 +268,236 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 }
 
 /*
- * A new IO request has been received.
+ * Given a DownstairsWork struct, do the work for that IO.
  *
- * For writes and flushes, we put them on the work queue.
+ * We assume the job was taken correctly off the active hashmap.
  */
-async fn proc_frame(
-    d: &Arc<Downstairs>,
-    m: &Message,
+async fn do_work(
+    ds: &Arc<Downstairs>,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+    job: DownstairsWork,
 ) -> Result<()> {
-    match m {
-        Message::Ruok => fw.send(Message::Imok).await,
-        Message::ExtentVersionsPlease => {
-            let (bs, es, ec) = d.region.region_def();
-            fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
-                .await
-        }
-        Message::Write(rn, eid, _dependencies, byte_offset, data) => {
-            d.region.region_write(*eid, *byte_offset, data)?;
-            fw.send(Message::WriteAck(*rn)).await
-        }
-        Message::Flush(rn, dependencies, flush_number) => {
-            d.region
-                .region_flush(dependencies.to_vec(), *flush_number)?;
-            fw.send(Message::FlushAck(*rn)).await
-        }
-        Message::ReadRequest(rn, eid, byte_offset, len) => {
+    assert_eq!(job.state, WorkState::InProgress);
+
+    match job.work {
+        IOop::Read {
+            dependencies: _dependencies,
+            eid,
+            byte_offset,
+            len,
+        } => {
             /*
              * XXX Some thought will need to be given to where the read
              * data buffer is created, both on this side and the remote.
              * Also, we (I) need to figure out how to read data into an
              * uninitialized buffer. Until then, we have this workaround.
              */
-            let sz = *len as usize;
+            let sz = len as usize;
             let mut data = BytesMut::with_capacity(sz);
             data.resize(sz, 1);
-
-            d.region.region_read(*eid, *byte_offset, &mut data)?;
+            ds.region.region_read(eid, byte_offset, &mut data)?;
+            /*
+             * Any error from an IO should be intercepted here and passed
+             * back to the upstairs.
+             */
             let data = data.freeze();
-            fw.send(Message::ReadResponse(*rn, data.clone())).await
+            fw.send(Message::ReadResponse(job.ds_id, data.clone()))
+                .await?;
+            ds.complete_work(job.ds_id, false);
+            Ok(())
         }
-        x => bail!("unexpected frame {:?}", x),
+        IOop::Write {
+            dependencies: _dependencies,
+            eid,
+            byte_offset,
+            data,
+        } => {
+            ds.region.region_write(eid, byte_offset, &data)?;
+            fw.send(Message::WriteAck(job.ds_id)).await?;
+            ds.complete_work(job.ds_id, false);
+            Ok(())
+        }
+        IOop::Flush {
+            dependencies: _dependencies,
+            flush_number,
+        } => {
+            ds.region.region_flush(flush_number)?;
+            fw.send(Message::FlushAck(job.ds_id)).await?;
+            ds.complete_work(job.ds_id, true);
+            Ok(())
+        }
     }
 }
 
-async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
+/*
+ * Look at all the work outstanding for this downstairs and make a list
+ * if jobs that are new or are waiting for dependencies.
+ * Once we have that list, walk them and see if any are ready to go.  If
+ * so, then do that work.
+ * We return the number of jobs completed so any caller can make use of
+ * that.
+ */
+async fn do_work_loop(
+    ds: &Arc<Downstairs>,
+    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+) -> Result<usize> {
+    let mut completed = 0;
+    /*
+     * Build ourselves a list of all the jobs on the work hashmap that
+     * have the job state for our client id in the IOState::New
+     */
+    let mut new_work = ds.work.lock().unwrap().new_work();
+
+    /*
+     * We don't have to do jobs in order, but the dependencies are, at
+     * least for now, always going to be in order of job id.  So, to best
+     * move things forward it is going to be fewer laps through the list
+     * if we take the lowest job id first.
+     */
+    new_work.sort_unstable();
+    for new_id in new_work.iter() {
+        /*
+         * If this job is still new, take it and go to work.  The in_progress
+         * method will only return a job if all dependencies are met.  Because
+         * we build the list of potential work, then release the lock, it is
+         * possible to have things change, so we need to verify that the job
+         * is still in a new or dep wait state.
+         */
+        let job = ds.work.lock().unwrap().in_progress(*new_id);
+        match job {
+            Some(job) => {
+                do_work(ds, fw, job).await?;
+                completed += 1;
+            }
+            None => {
+                continue;
+            }
+        }
+    }
+    Ok(completed)
+}
+
+/*
+ * Debug function to dump the work list.
+ */
+fn _show_work(ds: &Arc<Downstairs>) {
+    let work = ds.work.lock().unwrap();
+    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    println!("--------------------------------------");
+    if kvec.is_empty() {
+        println!("Crucible Downstairs work queue:  Empty");
+    } else {
+        println!("Crucible Downstairs work queue:");
+        kvec.sort_unstable();
+        for id in kvec.iter() {
+            let dsw = work.active.get(id).unwrap();
+            let dsw_type;
+            let dep_list;
+            match &dsw.work {
+                IOop::Read {
+                    dependencies,
+                    eid: _eid,
+                    byte_offset: _byte_offset,
+                    len: _len,
+                } => {
+                    dsw_type = "Read ".to_string();
+                    dep_list = dependencies.to_vec();
+                }
+                IOop::Write {
+                    dependencies,
+                    eid: _eid,
+                    byte_offset: _byte_offset,
+                    data: _data,
+                } => {
+                    dsw_type = "Write".to_string();
+                    dep_list = dependencies.to_vec();
+                }
+                IOop::Flush {
+                    dependencies,
+                    flush_number: _flush_number,
+                } => {
+                    dsw_type = "Flush".to_string();
+                    dep_list = dependencies.to_vec();
+                }
+            };
+            println!(
+                "DSW:[{:04}] {} {:?} deps:{:?}",
+                id, dsw_type, dsw.state, dep_list,
+            );
+        }
+    }
+    println!("Done tasks {:?}", work.completed);
+    println!("last_flush: {:?}", work.last_flush);
+    println!("--------------------------------------");
+}
+
+/*
+ * A new IO request has been received.
+ * Put the new work onto the work hashmap.
+ * Call do_work_loop() to see if we can perform any job on the work hashmap.
+ * Keep looping the work hashmap until we no longer make progress.
+ */
+async fn proc_frame(
+    d: &Arc<Downstairs>,
+    m: &Message,
+    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+) -> Result<()> {
+    let mut completed = 0;
+    match m {
+        Message::Ruok => {
+            fw.send(Message::Imok).await?;
+        }
+        Message::ExtentVersionsPlease => {
+            let (bs, es, ec) = d.region.region_def();
+            fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
+                .await?;
+        }
+        Message::Write(ds_id, eid, dependencies, byte_offset, data) => {
+            let new_write = IOop::Write {
+                dependencies: dependencies.to_vec(),
+                eid: *eid,
+                byte_offset: *byte_offset,
+                data: data.clone(),
+            };
+
+            d.add_work(*ds_id, new_write);
+            completed = do_work_loop(d, fw).await?;
+        }
+        Message::Flush(ds_id, dependencies, flush_number) => {
+            /* Add flush work */
+            let new_flush = IOop::Flush {
+                dependencies: dependencies.to_vec(),
+                flush_number: *flush_number,
+            };
+
+            d.add_work(*ds_id, new_flush);
+            completed = do_work_loop(d, fw).await?;
+        }
+        Message::ReadRequest(ds_id, dependencies, eid, byte_offset, len) => {
+            /* Add read work */
+            let new_read = IOop::Read {
+                dependencies: dependencies.to_vec(),
+                eid: *eid,
+                byte_offset: *byte_offset,
+                len: *len,
+            };
+
+            d.add_work(*ds_id, new_read);
+            completed = do_work_loop(d, fw).await?;
+        }
+        x => bail!("unexpected frame {:?}", x),
+    }
+
+    while completed > 0 {
+        /*
+         * While we are making progress, keep calling the do_work_loop()
+         */
+        completed = do_work_loop(d, fw).await?;
+    }
+    Ok(())
+}
+
+async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
     let (read, write) = sock.split();
     let mut fr = FramedRead::new(read, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
@@ -322,6 +509,18 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
     let mut deadline = deadline_secs(50);
     let mut negotiated = false;
 
+    /*
+     * Clear out the last flush and completed information, as
+     * that will not be valid any longer.
+     * TODO: Really work through this error case
+     */
+    let mut work = ds.work.lock().unwrap();
+    if work.active.keys().len() > 0 {
+        bail!("Crucible Downstairs reconnect with work in progress");
+    }
+    work.completed = Vec::with_capacity(32);
+    work.last_flush = 0;
+    drop(work);
     loop {
         tokio::select! {
             _ = sleep_until(deadline) => {
@@ -352,7 +551,7 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                             bail!("expected HereIAm first");
                         }
 
-                        proc_frame(d, &msg, &mut fw).await?;
+                        proc_frame(ds, &msg, &mut fw).await?;
                         deadline = deadline_secs(50);
                     }
                 }
@@ -361,10 +560,209 @@ async fn proc(d: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
     }
 }
 
+/*
+ * Overall structure for things the downstaris is tracking.
+ * This includes the extents and their status as well as the
+ * downstairs work queue.
+ */
 struct Downstairs {
     region: Region,
-    // completed ringbuf?
-    // in_progress ringbuff.
+    work: Mutex<Work>,
+}
+
+impl Downstairs {
+    fn add_work(&self, ds_id: u64, work: IOop) {
+        let dsw = DownstairsWork {
+            ds_id,
+            work,
+            state: WorkState::New,
+        };
+        let mut work = self.work.lock().unwrap();
+        work.active.insert(ds_id, dsw);
+    }
+
+    /*
+     * Remove a job from the active list and put it on the completed list.
+     * This should only be done after the upstairs has been notified.
+     */
+    fn complete_work(&self, ds_id: u64, is_flush: bool) {
+        let mut work = self.work.lock().unwrap();
+        let done = work.active.remove(&ds_id).unwrap();
+        assert_eq!(done.state, WorkState::InProgress);
+        if is_flush {
+            work.last_flush = ds_id;
+            work.completed = Vec::with_capacity(32);
+        } else {
+            work.completed.push(ds_id);
+        }
+    }
+}
+
+/*
+ * The structure that tracks downstairs work in progress
+ */
+#[derive(Debug)]
+pub struct Work {
+    active: HashMap<u64, DownstairsWork>,
+    /*
+     * We have to keep track of all IOs that have been issued since
+     * our last flush, as that is how we make sure dependencies are respected.
+     * The last_flush is the downstairs job ID number (ds_id typically) for
+     * the most recent flush.
+     */
+    last_flush: u64,
+    completed: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct DownstairsWork {
+    ds_id: u64,
+    work: IOop,
+    state: WorkState,
+}
+
+impl Work {
+    /**
+     * Return a list of downstairs request IDs that are new or have
+     * been waiting for other dependencies to finish.
+     */
+    fn new_work(&self) -> Vec<u64> {
+        self.active
+            .values()
+            .filter_map(|job| {
+                if job.state == WorkState::New
+                    || job.state == WorkState::DepWait
+                {
+                    Some(job.ds_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /**
+     * If the requested job is still new, and the dependencies are all met,
+     * return the DownstairsWork struct and let the caller take action
+     * with it, leaving the state as InProgress.
+     * If this job is not new, then just return none.  This can be okay as
+     * we build or work list with the new_work fn above, but we drop and
+     * re-aquire the Work mutex and things can change.
+     */
+    fn in_progress(&mut self, ds_id: u64) -> Option<DownstairsWork> {
+        /*
+         * Once we support multiple threads, we can obtain a ds_id that looked
+         * valid when we made a list of jobs, but something else moved that
+         * job along and now it no longer exists.  We need to handle that
+         * case correctly.
+         */
+        if let Some(job) = self.active.get_mut(&ds_id) {
+            if job.state == WorkState::New || job.state == WorkState::DepWait {
+                /*
+                 * Before we can make this in_progress, we have to, while
+                 * holding this locked, check the dep list if there is one
+                 * and make sure all dependencies are completed.
+                 */
+                let dep_list = match &job.work {
+                    IOop::Write {
+                        dependencies,
+                        eid: _eid,
+                        byte_offset: _byte_offset,
+                        data: _data,
+                    } => dependencies,
+                    IOop::Flush {
+                        dependencies,
+                        flush_number: _flush_number,
+                    } => dependencies,
+                    IOop::Read {
+                        dependencies,
+                        eid: _eid,
+                        byte_offset: _byte_offset,
+                        len: _len,
+                    } => dependencies,
+                };
+
+                /*
+                 * See which of our dependencies are met.
+                 * XXX Make this better/faster by removing the ones that
+                 * are met, so next lap we don't have to check again?  There
+                 * may be some debug value to knowing what the dep list was,
+                 * so consider that before making this faster.
+                 */
+                'dep_walk: for dep in dep_list.iter() {
+                    if dep <= &self.last_flush {
+                        continue;
+                    }
+                    for dd in self.completed.iter() {
+                        if dep == dd {
+                            continue 'dep_walk;
+                        }
+                    }
+
+                    /*
+                     * If we got here, then the dep is not met.
+                     * Set DepWait if not already set.
+                     */
+                    if job.state == WorkState::New {
+                        job.state = WorkState::DepWait;
+                    }
+                    return None;
+                }
+                /*
+                 * We had no dependencies, or they are all completed, we
+                 * can go ahead and work on this job.
+                 */
+                job.state = WorkState::InProgress;
+                Some(job.clone())
+            } else {
+                /*
+                 * job id is not new, we can't run it.
+                 */
+                None
+            }
+        } else {
+            /*
+             * This ID is no longer a valid job id.  That would be ok
+             * if there a multiple things running at the same time.
+             */
+            None
+        }
+    }
+}
+
+/*
+ * We may not need Done or Error.  At the moment all we actually look
+ * at is New or InProgress.
+ */
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkState {
+    New,
+    DepWait,
+    InProgress,
+    Done,
+    Error,
+}
+
+impl fmt::Display for WorkState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkState::New => {
+                write!(f, " New")
+            }
+            WorkState::DepWait => {
+                write!(f, "DepW")
+            }
+            WorkState::InProgress => {
+                write!(f, "In P")
+            }
+            WorkState::Done => {
+                write!(f, "Done")
+            }
+            WorkState::Error => {
+                write!(f, " Err")
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -404,8 +802,7 @@ async fn main() -> Result<()> {
              * The region we just created should now have a flush so the
              * new data and inital flush number is written to disk.
              */
-            let dep = Vec::new();
-            region.region_flush(dep, 1)?;
+            region.region_flush(1)?;
         } else {
             region.extend(opt.extent_count as u32)?;
         }
@@ -429,7 +826,19 @@ async fn main() -> Result<()> {
         println!("Exiting after import");
         return Ok(());
     }
-    let d = Arc::new(Downstairs { region });
+
+    let work = Work {
+        active: HashMap::new(),
+        last_flush: 0,
+        completed: Vec::with_capacity(32),
+    };
+    let d = Arc::new(Downstairs {
+        region,
+        work: Mutex::new(work),
+    });
+
+    // XXX Add a "find me the last flush number" function to region so
+    // we can set the last_flush in Work.
 
     /*
      * Establish a listen server on the port.

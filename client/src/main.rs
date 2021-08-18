@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use rand::prelude::*;
 use structopt::StructOpt;
 use tokio::runtime::Builder;
 
@@ -17,6 +18,17 @@ pub struct Opt {
 
     #[structopt(short, long, default_value = "one")]
     workload: String,
+
+    /*
+     * This allows the Upstairs to run in a mode where it will not
+     * always submit new work to downstairs when it first receives
+     * it.  This is for testing dependencies and should not be
+     * used in production.  Passing args like this to the upstairs
+     * may not be the best way to test, but until we have something
+     * better... XXX
+     */
+    #[structopt(long)]
+    lossy: bool,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -36,7 +48,10 @@ pub fn opts() -> Result<Opt> {
  */
 fn main() -> Result<()> {
     let opt = opts()?;
-    let crucible_opts = CrucibleOpts { target: opt.target };
+    let crucible_opts = CrucibleOpts {
+        target: opt.target,
+        lossy: opt.lossy,
+    };
 
     /*
      * Crucible needs a runtime as it will create several async tasks to
@@ -65,17 +80,39 @@ fn main() -> Result<()> {
 
     /*
      * Create the interactive input scope that will generate and send
-     * work to the Crucible thread that listens to work from outside (Propolis).
+     * work to the Crucible thread that listens to work from outside
+     * (Propolis).  XXX Test code here..
+     * runtime.spawn(run_scope(prop_work));
      */
-    //runtime.spawn(run_scope(prop_work));
+
+    /*
+     * Figure out the workload option passed to us on the command line.
+     */
     match opt.workload.as_str() {
         "one" => {
             println!("One test");
-            run_single_workload(&guest)?;
+            single_workload(&guest)?;
         }
         "big" => {
             println!("Run big test");
-            run_big_workload(&guest)?;
+            big_workload(&guest)?;
+        }
+        "dep" => {
+            println!("Run dep test");
+            /*
+             * Attempted workaround to handle tokio async issues
+             * between this and the actual upstairs runtime.  I'm
+             * not convinced this actually does any better.
+            let dep_runtime = Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("crucible-deptest")
+                .enable_all()
+                .build()
+                .unwrap();
+            println!("dep runtime started");
+             */
+            runtime.block_on(dep_workload(guest))?;
+            return Ok(());
         }
         _ => {
             println!("Unknown workload type {}", opt.workload);
@@ -97,7 +134,7 @@ fn main() -> Result<()> {
  * then will try to read the same.
  * TODO: Compare the buffer we wrote with the buffer we read.
  */
-fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
+fn single_workload(guest: &Arc<Guest>) -> Result<()> {
     let block_size = guest.query_block_size();
     let extent_size = guest.query_extent_size();
     println!("bs: {}  es:{}", extent_size, block_size);
@@ -140,7 +177,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
+fn big_workload(guest: &Arc<Guest>) -> Result<()> {
     let block_size = guest.query_block_size();
     let total_size = guest.query_total_size();
     let extent_size = guest.query_extent_size();
@@ -169,10 +206,6 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
         let mut waiter = guest.write(my_offset, data);
         waiter.block_wait();
 
-        println!("[{}][{}] send flush", cur_extent, cur_block);
-        waiter = guest.flush();
-        waiter.block_wait();
-
         /*
          * Pre-populate the read buffer with a known pattern so we can
          * detect if is is not what we expect
@@ -199,12 +232,87 @@ fn run_big_workload(guest: &Arc<Guest>) -> Result<()> {
         if cur_block >= extent_size {
             cur_extent += 1;
             cur_block = 0;
+            println!("[{}][{}] send flush", cur_extent, cur_block);
+            waiter = guest.flush();
+            waiter.block_wait();
         }
     }
     println!("All IOs sent");
     std::thread::sleep(std::time::Duration::from_secs(5));
     guest.show_work();
 
+    Ok(())
+}
+
+/*
+ * A loop that generates a bunch of random reads and writes, increasing the
+ * offset each operation.  After 20 are submitted, we wait for all to finish.
+ * Use this test and pass the --lossy flag and upstairs will at random skip
+ * sending jobs to the downstairs, creating dependencys that it will
+ * eventually resolve.
+ */
+async fn dep_workload(guest: Arc<Guest>) -> Result<()> {
+    let block_size = guest.query_block_size();
+    let total_size = guest.query_total_size();
+    let final_offset = total_size - block_size;
+
+    let mut my_offset: u64 = 0;
+    for my_count in 1..15 {
+        let mut waiterlist = Vec::new();
+
+        /*
+         * Generate some numbero of operations
+         */
+        for ioc in 0..20 {
+            my_offset += block_size % final_offset;
+            if random() {
+                /*
+                 * Generate a write buffer with a locally unique value.
+                 */
+                let mut vec: Vec<u8> = Vec::with_capacity(block_size as usize);
+                let seed = ((my_offset % 254) + 1) as u8;
+                for _ in 0..block_size {
+                    vec.push(seed);
+                }
+                let data = Bytes::from(vec);
+
+                println!(
+                    "Loop:{} send write {} @ offset:{}  len:{}",
+                    my_count,
+                    ioc,
+                    my_offset,
+                    data.len()
+                );
+                let waiter = guest.write(my_offset, data);
+                waiterlist.push(waiter);
+            } else {
+                let vec: Vec<u8> = vec![0; block_size as usize];
+                let data = crucible::Buffer::from_vec(vec);
+
+                println!(
+                    "Loop:{} send read  {} @ offset:{} len:{}",
+                    my_count,
+                    ioc,
+                    my_offset,
+                    data.len()
+                );
+                let waiter = guest.read(my_offset, data);
+                waiterlist.push(waiter);
+            }
+        }
+
+        println!("Loop:{} send a final flush and wait", my_count);
+        let mut flush_waiter = guest.flush();
+        flush_waiter.block_wait();
+
+        println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
+        for wa in waiterlist.iter_mut() {
+            wa.block_wait();
+        }
+        println!("Loop:{} all waiters done", my_count);
+    }
+
+    println!("dep test done");
     Ok(())
 }
 

@@ -359,6 +359,9 @@ extern "C" {
     fn fsync(fildes: i32) -> i32;
 }
 
+/**
+ * The main structure describing a region.
+ */
 #[derive(Debug)]
 pub struct Region {
     dir: PathBuf,
@@ -546,15 +549,9 @@ impl Region {
      * what an extent should use if a flush is required.
      */
     #[instrument]
-    pub fn region_flush(
-        &self,
-        _dep: Vec<u64>,
-        flush_number: u64,
-    ) -> Result<()> {
+    pub fn region_flush(&self, flush_number: u64) -> Result<()> {
         // XXX How to we convert between usize and u32 correctly?
         for eid in 0..self.def.extent_count() {
-            // We will need to pull out the value from dep that
-            // each extent needs to use for flush number
             let extent = &self.extents[eid as usize];
             extent.flush_block(flush_number)?;
         }

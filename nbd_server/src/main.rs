@@ -50,7 +50,10 @@ pub fn opts() -> Result<Opt> {
 
 fn main() -> Result<()> {
     let opt = opts()?;
-    let crucible_opts = CrucibleOpts { target: opt.target };
+    let crucible_opts = CrucibleOpts {
+        target: opt.target,
+        lossy: false,
+    };
 
     /*
      * Crucible needs a runtime as it will create several async tasks to

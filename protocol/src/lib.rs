@@ -17,7 +17,7 @@ pub enum Message {
     WriteAck(u64),
     Flush(u64, Vec<u64>, u64),
     FlushAck(u64),
-    ReadRequest(u64, u64, u64, u32),
+    ReadRequest(u64, Vec<u64>, u64, u64, u32),
     ReadResponse(u64, bytes::Bytes),
     Unknown(u32, BytesMut),
 }
@@ -179,12 +179,29 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::ReadRequest(rn, eid, byte_offset, byte_len) => {
-                let len = 4 + 4 + 8 + 8 + 8 + 4;
+            Message::ReadRequest(
+                rn,
+                dependencies,
+                eid,
+                byte_offset,
+                byte_len,
+            ) => {
+                let len = 4 // length field
+                    + 4     // message ID
+                    + 8     // rn
+                    + 4     // dep Vec len
+                    + dependencies.len() * 8  // dep Vec
+                    + 8     // eid
+                    + 8     // byte offset
+                    + 4; // byte len.
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(11);
                 dst.put_u64_le(rn);
+                dst.put_u32_le(dependencies.len() as u32);
+                for v in dependencies.iter() {
+                    dst.put_u64_le(*v);
+                }
                 dst.put_u64_le(eid);
                 dst.put_u64_le(byte_offset);
                 dst.put_u32_le(byte_len);
@@ -349,10 +366,22 @@ impl Decoder for CrucibleDecoder {
             11 => {
                 chklen(src, 28)?;
                 let rn = src.get_u64_le();
+                let depend_count = src.get_u32_le() as usize;
+                chklen(src, depend_count.checked_mul(8).unwrap())?;
+                let mut dependencies = Vec::new();
+                for _ in 0..depend_count {
+                    dependencies.push(src.get_u64_le());
+                }
                 let eid = src.get_u64_le();
                 let byte_offset = src.get_u64_le();
                 let bytes = src.get_u32_le();
-                Some(Message::ReadRequest(rn, eid, byte_offset, bytes))
+                Some(Message::ReadRequest(
+                    rn,
+                    dependencies,
+                    eid,
+                    byte_offset,
+                    bytes,
+                ))
             }
             12 => {
                 chklen(src, 8 + 4)?;

@@ -74,7 +74,10 @@ mod tests {
 
 fn main() -> Result<()> {
     let opt = opts()?;
-    let crucible_opts = CrucibleOpts { target: opt.target };
+    let crucible_opts = CrucibleOpts {
+        target: opt.target,
+        lossy: false,
+    };
 
     let runtime = Builder::new_multi_thread()
         .worker_threads(10)
