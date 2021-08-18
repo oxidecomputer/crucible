@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use anyhow::{anyhow, bail, Result};
 use std::io::ErrorKind;
 use std::time::Duration;

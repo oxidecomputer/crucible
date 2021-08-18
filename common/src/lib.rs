@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;

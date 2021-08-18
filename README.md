@@ -1,6 +1,8 @@
 # Oxide Crucible
 
-A prototype storage service.  There are two components:
+A prototype storage service.
+
+There are two components:
 
 * `crucible-downstairs`: will reside with the target disk storage and provide
   access to it via the network for those upstairs
@@ -179,3 +181,6 @@ Pass an option to crucible-downstairs to send traces to Jaeger:
 
 Then, go to `http://localhost:16686` to see the Jaeger UI.
 
+## License
+
+Unless otherwise noted, all components are licensed under the [Mozilla Public License Version 2.0](LICENSE).

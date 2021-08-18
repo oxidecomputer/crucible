@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};

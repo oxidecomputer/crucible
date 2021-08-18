@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 

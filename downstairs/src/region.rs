@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;

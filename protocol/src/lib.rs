@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};

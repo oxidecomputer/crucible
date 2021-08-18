@@ -2,6 +2,7 @@
 name = "crucible-protocol"
 version = "0.0.0"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>"]
+license = "MPL-2.0"
 edition = "2018"
 
 [dependencies]
