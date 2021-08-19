@@ -122,6 +122,26 @@ extern "C" {
         iter: *mut scf_iter_t,
         out: *mut scf_service_t,
     ) -> c_int;
+
+    pub fn scf_instance_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_instance_t;
+    pub fn scf_instance_destroy(instance: *mut scf_instance_t);
+
+    pub fn scf_instance_get_name(
+        instance: *mut scf_instance_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
+
+    pub fn scf_iter_service_instances(
+        iter: *mut scf_iter_t,
+        service: *const scf_service_t,
+    ) -> c_int;
+    pub fn scf_iter_next_instance(
+        iter: *mut scf_iter_t,
+        out: *mut scf_instance_t,
+    ) -> c_int;
 }
 
 #[cfg(test)]

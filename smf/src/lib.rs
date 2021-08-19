@@ -257,15 +257,72 @@ impl<'a> Service<'a> {
         str_from(&mut buf, ret)
     }
 
+    fn instances(&self) -> Result<Instances> {
+        Instances::new(self)
+    }
+
     /*
      * XXX fn delete(&self) -> Result<()> {
      * scf_service_delete(3SCF)
+     */
+
+    /*
+     * XXX fn instance(&self, name: &str) -> Result<()> {
+     * scf_service_get_instance(3SCF)
+     */
+
+    /*
+     * XXX fn add(&self, name: &str) -> Result<()> {
+     * scf_service_add_instance(3SCF)
      */
 }
 
 impl Drop for Service<'_> {
     fn drop(&mut self) {
         unsafe { scf_service_destroy(self.service.as_ptr()) };
+    }
+}
+
+#[derive(Debug)]
+pub struct Instance<'a> {
+    scf: &'a Scf,
+    instance: NonNull<scf_instance_t>,
+}
+
+impl<'a> Instance<'a> {
+    fn new(scf: &'a Scf) -> Result<Instance> {
+        if let Some(instance) =
+            NonNull::new(unsafe { scf_instance_create(scf.handle.as_ptr()) })
+        {
+            Ok(Instance { scf, instance })
+        } else {
+            Err(ScfError::last())
+        }
+    }
+
+    fn name(&self) -> Result<String> {
+        let mut buf = buf_for(SCF_LIMIT_MAX_NAME_LENGTH)?;
+
+        let ret = unsafe {
+            scf_instance_get_name(
+                self.instance.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+
+        str_from(&mut buf, ret)
+    }
+
+    /*
+     * XXX fn delete(&self) -> Result<()> {
+     * scf_instance_delete(3SCF)
+     */
+}
+
+impl Drop for Instance<'_> {
+    fn drop(&mut self) {
+        unsafe { scf_instance_destroy(self.instance.as_ptr()) };
     }
 }
 
@@ -384,6 +441,54 @@ impl<'a> Iterator for Services<'a> {
     }
 }
 
+pub struct Instances<'a> {
+    service: &'a Service<'a>,
+    iter: Iter<'a>,
+}
+
+impl<'a> Instances<'a> {
+    fn new(service: &'a Service) -> Result<Instances<'a>> {
+        let iter = Iter::new(service.scf)?;
+
+        if unsafe {
+            scf_iter_service_instances(
+                iter.iter.as_ptr(),
+                service.service.as_ptr(),
+            )
+        } != 0
+        {
+            Err(ScfError::last())
+        } else {
+            Ok(Instances { service, iter })
+        }
+    }
+
+    fn get(&self) -> Result<Option<Instance<'a>>> {
+        let instance = Instance::new(self.service.scf)?;
+
+        let res = unsafe {
+            scf_iter_next_instance(
+                self.iter.iter.as_ptr(),
+                instance.instance.as_ptr(),
+            )
+        };
+
+        match res {
+            0 => Ok(None),
+            1 => Ok(Some(instance)),
+            _ => Err(ScfError::last()),
+        }
+    }
+}
+
+impl<'a> Iterator for Instances<'a> {
+    type Item = Result<Instance<'a>>;
+
+    fn next(&mut self) -> Option<Result<Instance<'a>>> {
+        self.get().transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Iter, Scf, ScfError, Scope};
@@ -437,6 +542,25 @@ mod tests {
             println!("{:?}", s);
             let s = s.expect("service");
             println!("{}", s.name().expect("service name"));
+        }
+    }
+
+    #[test]
+    fn instance_iter() {
+        let scf = Scf::new().expect("scf");
+        let local = scf.scope_local().expect("local scope");
+        let services = local.services().expect("service iterator");
+        for s in services {
+            println!("{:?}", s);
+            let s = s.expect("service");
+            println!("{}", s.name().expect("service name"));
+
+            let instances = s.instances().expect("instance iterator");
+            for i in instances {
+                println!("    {:?}", i);
+                let i = i.expect("instance");
+                println!("    {}", i.name().expect("instance name"));
+            }
         }
     }
 }
