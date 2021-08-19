@@ -5,6 +5,15 @@ use thiserror::Error;
 mod libscf;
 use libscf::*;
 
+mod service;
+pub use service::{Service, Services};
+
+mod instance;
+pub use instance::{Instance, Instances};
+
+mod scope;
+pub use scope::{Scope, Scopes};
+
 type Result<T> = std::result::Result<T, ScfError>;
 
 #[derive(Error, Debug)]
@@ -122,7 +131,7 @@ impl Scf {
     }
 
     pub fn scope_local(&self) -> Result<Scope> {
-        let mut scope = Scope::new(self)?;
+        let scope = Scope::new(self)?;
 
         if unsafe {
             scf_handle_get_scope(
@@ -175,158 +184,6 @@ fn str_from(buf: &mut Vec<u8>, ret: libc::ssize_t) -> Result<String> {
 }
 
 #[derive(Debug)]
-pub struct Scope<'a> {
-    scf: &'a Scf,
-    scope: NonNull<scf_scope_t>,
-}
-
-impl<'a> Scope<'a> {
-    fn new(scf: &'a Scf) -> Result<Scope> {
-        if let Some(scope) =
-            NonNull::new(unsafe { scf_scope_create(scf.handle.as_ptr()) })
-        {
-            Ok(Scope { scf, scope })
-        } else {
-            Err(ScfError::last())
-        }
-    }
-
-    fn name(&self) -> Result<String> {
-        let mut buf = buf_for(SCF_LIMIT_MAX_NAME_LENGTH)?;
-
-        let ret = unsafe {
-            scf_scope_get_name(
-                self.scope.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
-        };
-
-        str_from(&mut buf, ret)
-    }
-
-    fn services(&self) -> Result<Services> {
-        Services::new(self)
-    }
-
-    /*
-     * XXX fn service(&self, name: &str) -> Result<Service> {
-     * scf_scope_get_service(3SCF)
-     */
-
-    /*
-     * XXX fn add(&self, name: &str) -> Result<Service> {
-     * scf_scope_add_service(3SCF)
-     */
-}
-
-impl Drop for Scope<'_> {
-    fn drop(&mut self) {
-        unsafe { scf_scope_destroy(self.scope.as_ptr()) };
-    }
-}
-
-#[derive(Debug)]
-pub struct Service<'a> {
-    scf: &'a Scf,
-    service: NonNull<scf_service_t>,
-}
-
-impl<'a> Service<'a> {
-    fn new(scf: &'a Scf) -> Result<Service> {
-        if let Some(service) =
-            NonNull::new(unsafe { scf_service_create(scf.handle.as_ptr()) })
-        {
-            Ok(Service { scf, service })
-        } else {
-            Err(ScfError::last())
-        }
-    }
-
-    fn name(&self) -> Result<String> {
-        let mut buf = buf_for(SCF_LIMIT_MAX_NAME_LENGTH)?;
-
-        let ret = unsafe {
-            scf_service_get_name(
-                self.service.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
-        };
-
-        str_from(&mut buf, ret)
-    }
-
-    fn instances(&self) -> Result<Instances> {
-        Instances::new(self)
-    }
-
-    /*
-     * XXX fn delete(&self) -> Result<()> {
-     * scf_service_delete(3SCF)
-     */
-
-    /*
-     * XXX fn instance(&self, name: &str) -> Result<()> {
-     * scf_service_get_instance(3SCF)
-     */
-
-    /*
-     * XXX fn add(&self, name: &str) -> Result<()> {
-     * scf_service_add_instance(3SCF)
-     */
-}
-
-impl Drop for Service<'_> {
-    fn drop(&mut self) {
-        unsafe { scf_service_destroy(self.service.as_ptr()) };
-    }
-}
-
-#[derive(Debug)]
-pub struct Instance<'a> {
-    scf: &'a Scf,
-    instance: NonNull<scf_instance_t>,
-}
-
-impl<'a> Instance<'a> {
-    fn new(scf: &'a Scf) -> Result<Instance> {
-        if let Some(instance) =
-            NonNull::new(unsafe { scf_instance_create(scf.handle.as_ptr()) })
-        {
-            Ok(Instance { scf, instance })
-        } else {
-            Err(ScfError::last())
-        }
-    }
-
-    fn name(&self) -> Result<String> {
-        let mut buf = buf_for(SCF_LIMIT_MAX_NAME_LENGTH)?;
-
-        let ret = unsafe {
-            scf_instance_get_name(
-                self.instance.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
-        };
-
-        str_from(&mut buf, ret)
-    }
-
-    /*
-     * XXX fn delete(&self) -> Result<()> {
-     * scf_instance_delete(3SCF)
-     */
-}
-
-impl Drop for Instance<'_> {
-    fn drop(&mut self) {
-        unsafe { scf_instance_destroy(self.instance.as_ptr()) };
-    }
-}
-
-#[derive(Debug)]
 pub struct Iter<'a> {
     scf: &'a Scf,
     iter: NonNull<scf_iter_t>,
@@ -343,6 +200,7 @@ impl<'a> Iter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn reset(&self) {
         unsafe { scf_iter_reset(self.iter.as_ptr()) };
     }
@@ -351,141 +209,6 @@ impl<'a> Iter<'a> {
 impl Drop for Iter<'_> {
     fn drop(&mut self) {
         unsafe { scf_iter_destroy(self.iter.as_ptr()) };
-    }
-}
-
-pub struct Scopes<'a> {
-    scf: &'a Scf,
-    iter: Iter<'a>,
-}
-
-impl<'a> Scopes<'a> {
-    fn new(scf: &'a Scf) -> Result<Scopes> {
-        let iter = Iter::new(scf)?;
-
-        if unsafe {
-            scf_iter_handle_scopes(iter.iter.as_ptr(), scf.handle.as_ptr())
-        } != 0
-        {
-            Err(ScfError::last())
-        } else {
-            Ok(Scopes { scf, iter })
-        }
-    }
-
-    fn get(&self) -> Result<Option<Scope<'a>>> {
-        let scope = Scope::new(&self.scf)?;
-
-        let res = unsafe {
-            scf_iter_next_scope(self.iter.iter.as_ptr(), scope.scope.as_ptr())
-        };
-
-        match res {
-            0 => Ok(None),
-            1 => Ok(Some(scope)),
-            _ => Err(ScfError::last()),
-        }
-    }
-}
-
-impl<'a> Iterator for Scopes<'a> {
-    type Item = Result<Scope<'a>>;
-
-    fn next(&mut self) -> Option<Result<Scope<'a>>> {
-        self.get().transpose()
-    }
-}
-
-pub struct Services<'a> {
-    scope: &'a Scope<'a>,
-    iter: Iter<'a>,
-}
-
-impl<'a> Services<'a> {
-    fn new(scope: &'a Scope) -> Result<Services<'a>> {
-        let iter = Iter::new(scope.scf)?;
-
-        if unsafe {
-            scf_iter_scope_services(iter.iter.as_ptr(), scope.scope.as_ptr())
-        } != 0
-        {
-            Err(ScfError::last())
-        } else {
-            Ok(Services { scope, iter })
-        }
-    }
-
-    fn get(&self) -> Result<Option<Service<'a>>> {
-        let service = Service::new(self.scope.scf)?;
-
-        let res = unsafe {
-            scf_iter_next_service(
-                self.iter.iter.as_ptr(),
-                service.service.as_ptr(),
-            )
-        };
-
-        match res {
-            0 => Ok(None),
-            1 => Ok(Some(service)),
-            _ => Err(ScfError::last()),
-        }
-    }
-}
-
-impl<'a> Iterator for Services<'a> {
-    type Item = Result<Service<'a>>;
-
-    fn next(&mut self) -> Option<Result<Service<'a>>> {
-        self.get().transpose()
-    }
-}
-
-pub struct Instances<'a> {
-    service: &'a Service<'a>,
-    iter: Iter<'a>,
-}
-
-impl<'a> Instances<'a> {
-    fn new(service: &'a Service) -> Result<Instances<'a>> {
-        let iter = Iter::new(service.scf)?;
-
-        if unsafe {
-            scf_iter_service_instances(
-                iter.iter.as_ptr(),
-                service.service.as_ptr(),
-            )
-        } != 0
-        {
-            Err(ScfError::last())
-        } else {
-            Ok(Instances { service, iter })
-        }
-    }
-
-    fn get(&self) -> Result<Option<Instance<'a>>> {
-        let instance = Instance::new(self.service.scf)?;
-
-        let res = unsafe {
-            scf_iter_next_instance(
-                self.iter.iter.as_ptr(),
-                instance.instance.as_ptr(),
-            )
-        };
-
-        match res {
-            0 => Ok(None),
-            1 => Ok(Some(instance)),
-            _ => Err(ScfError::last()),
-        }
-    }
-}
-
-impl<'a> Iterator for Instances<'a> {
-    type Item = Result<Instance<'a>>;
-
-    fn next(&mut self) -> Option<Result<Instance<'a>>> {
-        self.get().transpose()
     }
 }
 
