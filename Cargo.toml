@@ -8,4 +8,5 @@ members = [
 	"upstairs",
 	"nbd_server",
 	"hammer",
+	"smf",
 ]
