@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::path::Path;

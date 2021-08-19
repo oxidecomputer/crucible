@@ -1,3 +1,4 @@
+// Copyright 2021 Oxide Computer Company
 #![feature(asm)]
 use std::collections::{HashMap, VecDeque};
 use std::fmt;

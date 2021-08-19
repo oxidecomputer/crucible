@@ -1,6 +1,7 @@
 [package]
 name = "crucible-scope"
 version = "0.0.0"
+license = "MPL-2.0"
 edition = "2018"
 description = "crucible debugging tool for development work"
 
