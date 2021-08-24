@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{Result, Scf, ScfError, Iter, Scope, Instances, buf_for, str_from};
+use super::{Result, Scf, ScfError, Iter, PropertyGroups, Scope, Instances, buf_for, str_from};
 
 #[derive(Debug)]
 pub struct Service<'a> {
@@ -22,7 +22,6 @@ impl<'a> Service<'a> {
 
     pub fn name(&self) -> Result<String> {
         let mut buf = buf_for(SCF_LIMIT_MAX_NAME_LENGTH)?;
-
         let ret = unsafe {
             scf_service_get_name(
                 self.service.as_ptr(),
@@ -36,6 +35,10 @@ impl<'a> Service<'a> {
 
     pub fn instances(&self) -> Result<Instances> {
         Instances::new(self)
+    }
+
+    pub fn pgs(&self) -> Result<PropertyGroups> {
+        PropertyGroups::new_service(self)
     }
 
     /*

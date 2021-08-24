@@ -1,7 +1,10 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{Result, Scf, ScfError, Iter, Service, buf_for, str_from};
+use super::{
+    buf_for, str_from, Iter, PropertyGroups, Result, Scf, ScfError, Service,
+    Snapshots,
+};
 
 #[derive(Debug)]
 pub struct Instance<'a> {
@@ -32,6 +35,14 @@ impl<'a> Instance<'a> {
         };
 
         str_from(&mut buf, ret)
+    }
+
+    pub fn snapshots(&self) -> Result<Snapshots> {
+        Snapshots::new(self)
+    }
+
+    pub fn pgs(&self) -> Result<PropertyGroups> {
+        PropertyGroups::new_instance(self)
     }
 
     /*

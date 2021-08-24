@@ -25,6 +25,11 @@ opaque_handle!(scf_iter_t);
 opaque_handle!(scf_scope_t);
 opaque_handle!(scf_service_t);
 opaque_handle!(scf_instance_t);
+opaque_handle!(scf_snapshot_t);
+opaque_handle!(scf_propertygroup_t);
+opaque_handle!(scf_property_t);
+opaque_handle!(scf_value_t);
+opaque_handle!(scf_snaplevel_t);
 
 #[derive(Debug)]
 #[repr(C)]
@@ -52,6 +57,30 @@ pub enum scf_error_t {
     SCF_ERROR_TEMPLATE_INVALID,       /* template data is invalid */
     SCF_ERROR_CALLBACK_FAILED = 1080, /* user callback function failed */
     SCF_ERROR_INTERNAL = 1101,        /* internal error */
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub enum scf_type_t {
+    SCF_TYPE_INVALID = 0,
+
+    SCF_TYPE_BOOLEAN,
+    SCF_TYPE_COUNT,
+    SCF_TYPE_INTEGER,
+    SCF_TYPE_TIME,
+    SCF_TYPE_ASTRING,
+    SCF_TYPE_OPAQUE,
+
+    SCF_TYPE_USTRING = 100,
+
+    SCF_TYPE_URI = 200,
+    SCF_TYPE_FMRI,
+
+    SCF_TYPE_HOST = 300,
+    SCF_TYPE_HOSTNAME,
+    SCF_TYPE_NET_ADDR_V4,
+    SCF_TYPE_NET_ADDR_V6,
+    SCF_TYPE_NET_ADDR,
 }
 
 pub const SCF_LIMIT_MAX_NAME_LENGTH: u32 = 0xfffff830;
@@ -141,6 +170,77 @@ extern "C" {
     pub fn scf_iter_next_instance(
         iter: *mut scf_iter_t,
         out: *mut scf_instance_t,
+    ) -> c_int;
+
+    pub fn scf_snapshot_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_snapshot_t;
+    pub fn scf_snapshot_destroy(snapshot: *mut scf_snapshot_t);
+
+    pub fn scf_snapshot_get_name(
+        snapshot: *mut scf_snapshot_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
+    pub fn scf_snapshot_get_parent(
+        snapshot: *const scf_snapshot_t,
+        inst: *mut scf_instance_t,
+    ) -> c_int;
+
+    pub fn scf_iter_instance_snapshots(
+        iter: *mut scf_iter_t,
+        instance: *const scf_instance_t,
+    ) -> c_int;
+    pub fn scf_iter_next_snapshot(
+        iter: *mut scf_iter_t,
+        out: *mut scf_snapshot_t,
+    ) -> c_int;
+
+    pub fn scf_iter_instance_pgs(
+        iter: *mut scf_iter_t,
+        instance: *const scf_instance_t,
+    ) -> c_int;
+    pub fn scf_iter_instance_pgs_composed(
+        iter: *mut scf_iter_t,
+        instance: *const scf_instance_t,
+        snapshot: *const scf_snapshot_t,
+    ) -> c_int;
+    pub fn scf_iter_service_pgs(
+        iter: *mut scf_iter_t,
+        service: *const scf_service_t,
+    ) -> c_int;
+    pub fn scf_iter_next_pg(
+        iter: *mut scf_iter_t,
+        out: *mut scf_propertygroup_t,
+    ) -> c_int;
+
+    pub fn scf_pg_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_propertygroup_t;
+    pub fn scf_pg_destroy(pg: *mut scf_propertygroup_t);
+
+    pub fn scf_pg_get_name(
+        pg: *mut scf_propertygroup_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
+
+    pub fn scf_iter_pg_properties(
+        iter: *mut scf_iter_t,
+        pg: *const scf_propertygroup_t,
+    ) -> c_int;
+    pub fn scf_iter_next_property(
+        iter: *mut scf_iter_t,
+        out: *mut scf_property_t,
+    ) -> c_int;
+
+    pub fn scf_iter_property_values(
+        iter: *mut scf_iter_t,
+        prop: *const scf_property_t,
+    ) -> c_int;
+    pub fn scf_iter_next_value(
+        iter: *mut scf_iter_t,
+        out: *mut scf_value_t,
     ) -> c_int;
 }
 

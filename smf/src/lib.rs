@@ -5,16 +5,22 @@ use thiserror::Error;
 mod libscf;
 use libscf::*;
 
+mod scope;
+pub use scope::{Scope, Scopes};
+
 mod service;
 pub use service::{Service, Services};
 
 mod instance;
 pub use instance::{Instance, Instances};
 
-mod scope;
-pub use scope::{Scope, Scopes};
+mod snapshot;
+pub use snapshot::{Snapshot, Snapshots};
 
-type Result<T> = std::result::Result<T, ScfError>;
+mod propertygroup;
+pub use propertygroup::{PropertyGroup, PropertyGroups};
+
+pub type Result<T> = std::result::Result<T, ScfError>;
 
 #[derive(Error, Debug)]
 pub enum ScfError {
@@ -283,6 +289,32 @@ mod tests {
                 println!("    {:?}", i);
                 let i = i.expect("instance");
                 println!("    {}", i.name().expect("instance name"));
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_iter() {
+        let scf = Scf::new().expect("scf");
+        let local = scf.scope_local().expect("local scope");
+        let services = local.services().expect("service iterator");
+        for s in services {
+            println!("{:?}", s);
+            let s = s.expect("service");
+            println!("{}", s.name().expect("service name"));
+
+            let instances = s.instances().expect("instance iterator");
+            for i in instances {
+                println!("    {:?}", i);
+                let i = i.expect("instance");
+                println!("    {}", i.name().expect("instance name"));
+
+                let snapshots = i.snapshots().expect("snapshot iterator");
+                for sn in snapshots {
+                    println!("    {:?}", i);
+                    let sn = sn.expect("snapshot");
+                    println!("        {}", sn.name().expect("snapshot name"));
+                }
             }
         }
     }
