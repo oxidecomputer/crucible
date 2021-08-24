@@ -224,6 +224,11 @@ extern "C" {
         buf: *mut c_char,
         size: size_t,
     ) -> ssize_t;
+    pub fn scf_pg_get_type(
+        pg: *mut scf_propertygroup_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
 
     pub fn scf_iter_pg_properties(
         iter: *mut scf_iter_t,

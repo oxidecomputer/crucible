@@ -14,7 +14,7 @@ fn main() -> Result<()> {
 
             let mut pgs = service.pgs()?;
             while let Some(pg) = pgs.next().transpose()? {
-                println!("    pg(s): {}", pg.name()?);
+                println!("    pg(s): {} ({})", pg.name()?, pg.type_()?);
             }
 
             let mut instances = service.instances()?;
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
 
                 let mut pgs = instance.pgs()?;
                 while let Some(pg) = pgs.next().transpose()? {
-                    println!("      pg(i): {}", pg.name()?);
+                    println!("      pg(i): {} ({})", pg.name()?, pg.type_()?);
                 }
 
                 let mut snapshots = instance.snapshots()?;
@@ -32,7 +32,8 @@ fn main() -> Result<()> {
 
                     let mut pgs = snapshot.pgs()?;
                     while let Some(pg) = pgs.next().transpose()? {
-                        println!("        pg(c): {}", pg.name()?);
+                        println!("        pg(c): {} ({})", pg.name()?,
+                            pg.type_()?);
                     }
                 }
             }

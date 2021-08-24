@@ -34,8 +34,22 @@ impl<'a> PropertyGroup<'a> {
         str_from(&mut buf, ret)
     }
 
+    pub fn type_(&self) -> Result<String> {
+        let mut buf = buf_for(SCF_LIMIT_MAX_PG_TYPE_LENGTH)?;
+
+        let ret = unsafe {
+            scf_pg_get_type(
+                self.propertygroup.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+
+        str_from(&mut buf, ret)
+    }
+
     /*
-     * XXX fn proptype(&self) -> Result<PropType> {
+     * XXX fn type_(&self) -> Result<String> {
      * scf_pg_get_type(3SCF)
      */
 
