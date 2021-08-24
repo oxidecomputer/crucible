@@ -6,8 +6,8 @@ use thiserror::Error;
 #[macro_use]
 extern crate num_derive;
 
-mod libscf;
-use libscf::*;
+mod scf_sys;
+use scf_sys::*;
 
 mod scope;
 pub use scope::{Scope, Scopes};

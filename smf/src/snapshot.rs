@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-use super::libscf::*;
+use super::scf_sys::*;
 use super::{
     buf_for, str_from, Instance, Iter, PropertyGroups, Result, ScfError,
 };
