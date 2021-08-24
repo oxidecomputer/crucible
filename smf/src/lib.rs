@@ -2,6 +2,9 @@ use std::ffi::CStr;
 use std::ptr::NonNull;
 use thiserror::Error;
 
+#[macro_use]
+extern crate num_derive;
+
 mod libscf;
 use libscf::*;
 
@@ -19,6 +22,12 @@ pub use snapshot::{Snapshot, Snapshots};
 
 mod propertygroup;
 pub use propertygroup::{PropertyGroup, PropertyGroups};
+
+mod property;
+pub use property::{Property, Properties};
+
+mod value;
+pub use value::{Value, Values};
 
 pub type Result<T> = std::result::Result<T, ScfError>;
 

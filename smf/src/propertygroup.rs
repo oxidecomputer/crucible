@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{buf_for, str_from, Service, Instance, Snapshot, Iter, Result, Scf, ScfError};
+use super::{buf_for, str_from, Service, Instance, Snapshot, Properties, Iter, Result, Scf, ScfError};
 
 #[derive(Debug)]
 pub struct PropertyGroup<'a> {
@@ -46,6 +46,10 @@ impl<'a> PropertyGroup<'a> {
         };
 
         str_from(&mut buf, ret)
+    }
+
+    pub fn properties(&self) -> Result<Properties> {
+        Properties::new(self)
     }
 
     /*

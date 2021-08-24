@@ -34,6 +34,21 @@ fn main() -> Result<()> {
                     while let Some(pg) = pgs.next().transpose()? {
                         println!("        pg(c): {} ({})", pg.name()?,
                             pg.type_()?);
+
+                        let mut properties = pg.properties()?;
+                        while let Some(prop) = properties.next().transpose()? {
+                            println!("          prop: {} ({:?})", prop.name()?,
+                                prop.type_()?);
+
+                            let mut values = prop.values()?;
+                            while let Some(v) = values.next().transpose()? {
+                                println!("            \
+                                    value: \"{}\" ({:?}, base {:?})",
+                                    v.as_string()?,
+                                    v.type_()?,
+                                    v.base_type()?);
+                            }
+                        }
                     }
                 }
             }

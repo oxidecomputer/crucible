@@ -3,6 +3,7 @@
 
 use libc::{size_t, ssize_t};
 use std::os::raw::{c_char, c_int, c_ulong};
+use num_traits::{FromPrimitive, ToPrimitive};
 
 type scf_version_t = c_ulong;
 
@@ -31,7 +32,7 @@ opaque_handle!(scf_property_t);
 opaque_handle!(scf_value_t);
 opaque_handle!(scf_snaplevel_t);
 
-#[derive(Debug)]
+#[derive(Debug, FromPrimitive, ToPrimitive)]
 #[repr(C)]
 pub enum scf_error_t {
     SCF_ERROR_NONE = 1000,            /* no error */
@@ -59,7 +60,7 @@ pub enum scf_error_t {
     SCF_ERROR_INTERNAL = 1101,        /* internal error */
 }
 
-#[derive(Debug)]
+#[derive(Debug, FromPrimitive, ToPrimitive)]
 #[repr(C)]
 pub enum scf_type_t {
     SCF_TYPE_INVALID = 0,
@@ -239,6 +240,21 @@ extern "C" {
         out: *mut scf_property_t,
     ) -> c_int;
 
+    pub fn scf_property_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_property_t;
+    pub fn scf_property_destroy(prop: *mut scf_property_t);
+
+    pub fn scf_property_get_name(
+        prop: *mut scf_property_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
+    pub fn scf_property_type(
+        prop: *mut scf_property_t,
+        typ: *mut scf_type_t,
+    ) -> ssize_t;
+
     pub fn scf_iter_property_values(
         iter: *mut scf_iter_t,
         prop: *const scf_property_t,
@@ -247,6 +263,23 @@ extern "C" {
         iter: *mut scf_iter_t,
         out: *mut scf_value_t,
     ) -> c_int;
+
+    pub fn scf_value_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_value_t;
+    pub fn scf_value_destroy(val: *mut scf_value_t);
+    pub fn scf_value_reset(val: *mut scf_value_t);
+
+    pub fn scf_value_type(val: *mut scf_value_t) -> c_int;
+    pub fn scf_value_base_type(val: *mut scf_value_t) -> c_int;
+
+    pub fn scf_value_get_as_string(
+        val: *mut scf_value_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
+
+    pub fn scf_type_base_type(typ: scf_type_t, out: *mut scf_type_t) -> c_int;
 }
 
 #[cfg(test)]
