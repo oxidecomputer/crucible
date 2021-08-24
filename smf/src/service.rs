@@ -1,7 +1,10 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{Result, Scf, ScfError, Iter, PropertyGroups, Scope, Instances, buf_for, str_from};
+use super::{
+    buf_for, str_from, Instances, Iter, PropertyGroups, Result, Scf, ScfError,
+    Scope,
+};
 
 #[derive(Debug)]
 pub struct Service<'a> {

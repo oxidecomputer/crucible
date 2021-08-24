@@ -1,7 +1,9 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{buf_for, str_from, Service, Instance, Snapshot, PropertyGroup, Iter, Values, Result, Scf, ScfError};
+use super::{
+    buf_for, str_from, Iter, PropertyGroup, Result, Scf, ScfError, Values,
+};
 
 #[derive(Debug)]
 pub struct Property<'a> {
@@ -37,13 +39,7 @@ impl<'a> Property<'a> {
     pub fn type_(&self) -> Result<scf_type_t> {
         let mut typ: scf_type_t = scf_type_t::SCF_TYPE_INVALID;
 
-        if unsafe {
-            scf_property_type(
-                self.property.as_ptr(),
-                &mut typ,
-            )
-        } == 0
-        {
+        if unsafe { scf_property_type(self.property.as_ptr(), &mut typ) } == 0 {
             Ok(typ)
         } else {
             Err(ScfError::last())
@@ -72,9 +68,7 @@ pub struct Properties<'a> {
 }
 
 impl<'a> Properties<'a> {
-    pub(crate) fn new(
-        pg: &'a PropertyGroup,
-    ) -> Result<Properties<'a>> {
+    pub(crate) fn new(pg: &'a PropertyGroup) -> Result<Properties<'a>> {
         let scf = pg.scf;
         let iter = Iter::new(scf)?;
 

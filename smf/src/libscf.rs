@@ -3,11 +3,12 @@
 
 use libc::{size_t, ssize_t};
 use std::os::raw::{c_char, c_int, c_ulong};
-use num_traits::{FromPrimitive, ToPrimitive};
 
 type scf_version_t = c_ulong;
 
 pub const SCF_VERSION: scf_version_t = 1;
+
+pub const SCF_PG_FLAG_NONPERSISTENT: u32 = 0x1;
 
 macro_rules! opaque_handle {
     ($type_name:ident) => {
@@ -104,7 +105,7 @@ extern "C" {
         sz: size_t,
     ) -> ssize_t;
 
-    pub fn scf_error() -> scf_error_t; /* XXX what about unknown values sigh */
+    pub fn scf_error() -> u32;
     pub fn scf_strerror(error: scf_error_t) -> *const c_char;
 
     pub fn scf_limit(name: u32) -> ssize_t;
@@ -215,9 +216,8 @@ extern "C" {
         out: *mut scf_propertygroup_t,
     ) -> c_int;
 
-    pub fn scf_pg_create(
-        handle: *mut scf_handle_t,
-    ) -> *mut scf_propertygroup_t;
+    pub fn scf_pg_create(handle: *mut scf_handle_t)
+        -> *mut scf_propertygroup_t;
     pub fn scf_pg_destroy(pg: *mut scf_propertygroup_t);
 
     pub fn scf_pg_get_name(
@@ -230,6 +230,10 @@ extern "C" {
         buf: *mut c_char,
         size: size_t,
     ) -> ssize_t;
+    pub fn scf_pg_get_flags(
+        pg: *mut scf_propertygroup_t,
+        out: *mut u32,
+    ) -> c_int;
 
     pub fn scf_iter_pg_properties(
         iter: *mut scf_iter_t,
@@ -264,9 +268,7 @@ extern "C" {
         out: *mut scf_value_t,
     ) -> c_int;
 
-    pub fn scf_value_create(
-        handle: *mut scf_handle_t,
-    ) -> *mut scf_value_t;
+    pub fn scf_value_create(handle: *mut scf_handle_t) -> *mut scf_value_t;
     pub fn scf_value_destroy(val: *mut scf_value_t);
     pub fn scf_value_reset(val: *mut scf_value_t);
 

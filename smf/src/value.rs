@@ -3,7 +3,7 @@ use std::ptr::NonNull;
 use num_traits::cast::FromPrimitive;
 
 use super::libscf::*;
-use super::{buf_for, str_from, Service, Instance, Snapshot, Property, Iter, Result, Scf, ScfError};
+use super::{buf_for, str_from, Iter, Property, Result, Scf, ScfError};
 
 #[derive(Debug)]
 pub struct Value<'a> {
@@ -37,8 +37,6 @@ impl<'a> Value<'a> {
     }
 
     pub fn type_(&self) -> Result<scf_type_t> {
-        let mut typ: scf_type_t = scf_type_t::SCF_TYPE_INVALID;
-
         let ret = unsafe { scf_value_type(self.value.as_ptr()) };
         match scf_type_t::from_i32(ret) {
             Some(scf_type_t::SCF_TYPE_INVALID) => Err(ScfError::last()),
@@ -48,8 +46,6 @@ impl<'a> Value<'a> {
     }
 
     pub fn base_type(&self) -> Result<scf_type_t> {
-        let mut typ: scf_type_t = scf_type_t::SCF_TYPE_INVALID;
-
         let ret = unsafe { scf_value_base_type(self.value.as_ptr()) };
         match scf_type_t::from_i32(ret) {
             Some(scf_type_t::SCF_TYPE_INVALID) => Err(ScfError::last()),
@@ -81,17 +77,12 @@ pub struct Values<'a> {
 }
 
 impl<'a> Values<'a> {
-    pub(crate) fn new(
-        prop: &'a Property,
-    ) -> Result<Values<'a>> {
+    pub(crate) fn new(prop: &'a Property) -> Result<Values<'a>> {
         let scf = prop.scf;
         let iter = Iter::new(scf)?;
 
         if unsafe {
-            scf_iter_property_values(
-                iter.iter.as_ptr(),
-                prop.property.as_ptr(),
-            )
+            scf_iter_property_values(iter.iter.as_ptr(), prop.property.as_ptr())
         } != 0
         {
             Err(ScfError::last())
@@ -104,10 +95,7 @@ impl<'a> Values<'a> {
         let value = Value::new(self.scf)?;
 
         let res = unsafe {
-            scf_iter_next_value(
-                self.iter.iter.as_ptr(),
-                value.value.as_ptr(),
-            )
+            scf_iter_next_value(self.iter.iter.as_ptr(), value.value.as_ptr())
         };
 
         match res {

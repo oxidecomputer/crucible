@@ -1,7 +1,10 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{buf_for, str_from, Service, Instance, Snapshot, Properties, Iter, Result, Scf, ScfError};
+use super::{
+    buf_for, str_from, Instance, Iter, Properties, Result, Scf, ScfError,
+    Service, Snapshot,
+};
 
 #[derive(Debug)]
 pub struct PropertyGroup<'a> {
@@ -50,6 +53,18 @@ impl<'a> PropertyGroup<'a> {
 
     pub fn properties(&self) -> Result<Properties> {
         Properties::new(self)
+    }
+
+    pub fn is_persistent(&self) -> Result<bool> {
+        let mut flags = 0;
+
+        if unsafe { scf_pg_get_flags(self.propertygroup.as_ptr(), &mut flags) }
+            == 0
+        {
+            Ok((flags & SCF_PG_FLAG_NONPERSISTENT) == 0)
+        } else {
+            Err(ScfError::last())
+        }
     }
 
     /*
@@ -132,29 +147,7 @@ impl<'a> PropertyGroups<'a> {
         let iter = Iter::new(scf)?;
 
         if unsafe {
-            scf_iter_service_pgs(
-                iter.iter.as_ptr(),
-                service.service.as_ptr(),
-            )
-        } != 0
-        {
-            Err(ScfError::last())
-        } else {
-            Ok(PropertyGroups { scf, iter })
-        }
-    }
-
-    pub(crate) fn new_snapshot(
-        service: &'a Service,
-    ) -> Result<PropertyGroups<'a>> {
-        let scf = service.scf;
-        let iter = Iter::new(scf)?;
-
-        if unsafe {
-            scf_iter_service_pgs(
-                iter.iter.as_ptr(),
-                service.service.as_ptr(),
-            )
+            scf_iter_service_pgs(iter.iter.as_ptr(), service.service.as_ptr())
         } != 0
         {
             Err(ScfError::last())

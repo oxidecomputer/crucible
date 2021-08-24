@@ -1,3 +1,4 @@
+use num_traits::FromPrimitive;
 use std::ffi::CStr;
 use std::ptr::NonNull;
 use thiserror::Error;
@@ -24,7 +25,7 @@ mod propertygroup;
 pub use propertygroup::{PropertyGroup, PropertyGroups};
 
 mod property;
-pub use property::{Property, Properties};
+pub use property::{Properties, Property};
 
 mod value;
 pub use value::{Value, Values};
@@ -83,36 +84,36 @@ pub enum ScfError {
     Unknown(u32),
 }
 
-impl From<scf_error_t> for ScfError {
-    fn from(error: scf_error_t) -> Self {
+impl From<u32> for ScfError {
+    fn from(error: u32) -> Self {
         use scf_error_t::*;
         use ScfError::*;
 
-        match error {
-            SCF_ERROR_NONE => None,
-            SCF_ERROR_NOT_BOUND => NotBound,
-            SCF_ERROR_NOT_SET => NotSet,
-            SCF_ERROR_NOT_FOUND => NotFound,
-            SCF_ERROR_TYPE_MISMATCH => TypeMismatch,
-            SCF_ERROR_IN_USE => InUse,
-            SCF_ERROR_CONNECTION_BROKEN => ConnectionBroken,
-            SCF_ERROR_INVALID_ARGUMENT => InvalidArgument,
-            SCF_ERROR_NO_MEMORY => NoMemory,
-            SCF_ERROR_CONSTRAINT_VIOLATED => ConstraintViolated,
-            SCF_ERROR_EXISTS => Exists,
-            SCF_ERROR_NO_SERVER => NoServer,
-            SCF_ERROR_NO_RESOURCES => NoResources,
-            SCF_ERROR_PERMISSION_DENIED => PermissionDenied,
-            SCF_ERROR_BACKEND_ACCESS => BackendAccess,
-            SCF_ERROR_HANDLE_MISMATCH => HandleMismatch,
-            SCF_ERROR_HANDLE_DESTROYED => HandleDestroyed,
-            SCF_ERROR_VERSION_MISMATCH => VersionMismatch,
-            SCF_ERROR_BACKEND_READONLY => BackendReadonly,
-            SCF_ERROR_DELETED => Deleted,
-            SCF_ERROR_TEMPLATE_INVALID => TemplateInvalid,
-            SCF_ERROR_CALLBACK_FAILED => CallbackFailed,
-            SCF_ERROR_INTERNAL => Internal,
-            unk => Unknown(unk as u32),
+        match scf_error_t::from_u32(error) {
+            Some(SCF_ERROR_NONE) => None,
+            Some(SCF_ERROR_NOT_BOUND) => NotBound,
+            Some(SCF_ERROR_NOT_SET) => NotSet,
+            Some(SCF_ERROR_NOT_FOUND) => NotFound,
+            Some(SCF_ERROR_TYPE_MISMATCH) => TypeMismatch,
+            Some(SCF_ERROR_IN_USE) => InUse,
+            Some(SCF_ERROR_CONNECTION_BROKEN) => ConnectionBroken,
+            Some(SCF_ERROR_INVALID_ARGUMENT) => InvalidArgument,
+            Some(SCF_ERROR_NO_MEMORY) => NoMemory,
+            Some(SCF_ERROR_CONSTRAINT_VIOLATED) => ConstraintViolated,
+            Some(SCF_ERROR_EXISTS) => Exists,
+            Some(SCF_ERROR_NO_SERVER) => NoServer,
+            Some(SCF_ERROR_NO_RESOURCES) => NoResources,
+            Some(SCF_ERROR_PERMISSION_DENIED) => PermissionDenied,
+            Some(SCF_ERROR_BACKEND_ACCESS) => BackendAccess,
+            Some(SCF_ERROR_HANDLE_MISMATCH) => HandleMismatch,
+            Some(SCF_ERROR_HANDLE_DESTROYED) => HandleDestroyed,
+            Some(SCF_ERROR_VERSION_MISMATCH) => VersionMismatch,
+            Some(SCF_ERROR_BACKEND_READONLY) => BackendReadonly,
+            Some(SCF_ERROR_DELETED) => Deleted,
+            Some(SCF_ERROR_TEMPLATE_INVALID) => TemplateInvalid,
+            Some(SCF_ERROR_CALLBACK_FAILED) => CallbackFailed,
+            Some(SCF_ERROR_INTERNAL) => Internal,
+            Option::None => Unknown(error),
         }
     }
 }

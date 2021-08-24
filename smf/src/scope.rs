@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{Result, Scf, ScfError, Iter, Services, buf_for, str_from};
+use super::{buf_for, str_from, Iter, Result, Scf, ScfError, Services};
 
 #[derive(Debug)]
 pub struct Scope<'a> {
@@ -75,7 +75,7 @@ impl<'a> Scopes<'a> {
     }
 
     fn get(&self) -> Result<Option<Scope<'a>>> {
-        let scope = Scope::new(&self.scf)?;
+        let scope = Scope::new(self.scf)?;
 
         let res = unsafe {
             scf_iter_next_scope(self.iter.iter.as_ptr(), scope.scope.as_ptr())

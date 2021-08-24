@@ -1,7 +1,9 @@
 use std::ptr::NonNull;
 
 use super::libscf::*;
-use super::{Result, Scf, ScfError, Iter, Instance, PropertyGroups , buf_for, str_from};
+use super::{
+    buf_for, str_from, Instance, Iter, PropertyGroups, Result, ScfError,
+};
 
 #[derive(Debug)]
 pub struct Snapshot<'a> {
@@ -11,9 +13,9 @@ pub struct Snapshot<'a> {
 
 impl<'a> Snapshot<'a> {
     pub(crate) fn new(instance: &'a Instance) -> Result<Snapshot<'a>> {
-        if let Some(snapshot) =
-            NonNull::new(unsafe { scf_snapshot_create(instance.scf.handle.as_ptr()) })
-        {
+        if let Some(snapshot) = NonNull::new(unsafe {
+            scf_snapshot_create(instance.scf.handle.as_ptr())
+        }) {
             Ok(Snapshot { instance, snapshot })
         } else {
             Err(ScfError::last())
