@@ -1,0 +1,21 @@
+[package]
+name = "crucible-agent"
+version = "0.0.0"
+edition = "2018"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = [ "serde" ] }
+dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
+futures = "0.3.15"
+http = "0.2.0"
+hyper = "0.14"
+schemars = { version = "0.8", features = [ "chrono", "uuid" ] }
+serde = { version = "1.0", features = [ "derive" ] }
+serde_json = "1.0"
+slog = { version = "2.5", features = [ "max_level_trace", "release_max_level_debug" ] }
+crucible-common = { path = "../common" }
+crucible-smf = { path = "../smf" }
+structopt = "0.3"
+tokio = { version = "1.10", features = [ "full" ] }
+uuid = { version = "0.8", features = [ "serde", "v4" ] }
