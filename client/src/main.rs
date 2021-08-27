@@ -48,6 +48,17 @@ pub fn opts() -> Result<Opt> {
  */
 fn main() -> Result<()> {
     let opt = opts()?;
+
+    /*
+     * If any of our async tasks in our runtime panic, then we should
+     * exit the program right away.
+     */
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: opt.lossy,
@@ -78,6 +89,8 @@ fn main() -> Result<()> {
 
     std::thread::sleep(std::time::Duration::from_secs(5));
 
+    println!("Wait for a show_work command to finish before sending IO");
+    guest.show_work();
     /*
      * Create the interactive input scope that will generate and send
      * work to the Crucible thread that listens to work from outside
@@ -135,6 +148,7 @@ fn main() -> Result<()> {
  * TODO: Compare the buffer we wrote with the buffer we read.
  */
 fn single_workload(guest: &Arc<Guest>) -> Result<()> {
+    println!("Run single workload");
     let block_size = guest.query_block_size();
     let extent_size = guest.query_extent_size();
     println!("bs: {}  es:{}", extent_size, block_size);
