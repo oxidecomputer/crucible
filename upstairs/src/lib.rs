@@ -969,7 +969,7 @@ impl Upstairs {
                 sub_data,
             );
             new_ds_work.push(wr);
-            cur_offset = len;
+            cur_offset += len;
         }
         /*
          * New work created, add to the guest_work HM
