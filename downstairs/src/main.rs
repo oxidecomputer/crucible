@@ -186,13 +186,6 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     import_path: P,
 ) -> Result<()> {
     /*
-     * We are only allowing the import on an empty Region, i.e.
-     * one that has just been created.  If you want to overwrite
-     * an existing region, write more code: TODO
-     */
-    assert!(region.def().extent_count() == 0);
-
-    /*
      * Get some information about our file and the region defaults
      * and figure out how many extents we will need to import
      * this file.
@@ -206,17 +199,23 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         extents_needed += 1;
     }
     println!(
-        "Import file_size: {}  Extent size:{}  Total extents:{}",
+        "Import file_size: {}  Extent size: {}  Needed extents: {}",
         file_size, space_per_extent, extents_needed
     );
 
-    /*
-     * Create the number of extents the file will require
-     */
-    region.extend(extents_needed as u32)?;
-    let rm = region.def();
+    if extents_needed > region.def().extent_count().into() {
+        /*
+         * The file to import would require more extents than we have.  Extend
+         * the region to fit the file.
+         */
+        println!("Extending region to fit image");
+        region.extend(extents_needed as u32)?;
+    } else {
+        println!("Region already large enough for image");
+    }
 
-    println!("Importing {:?} to new region", import_path);
+    let rm = region.def();
+    println!("Importing {:?} to region", import_path);
 
     let mut buffer = vec![0; block_size as usize];
     buffer.resize(block_size as usize, 0);
@@ -260,7 +259,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      * want, use that to extract just this imported file.
      */
     println!(
-        "Created {} extents and Copied {} blocks",
+        "Populated {} extents by copying {} blocks",
         extents_needed, blocks_copied
     );
 
@@ -796,6 +795,8 @@ async fn main() -> Result<()> {
 
         region = Region::create(&opt.data, region_options)?;
 
+        region.extend(opt.extent_count as u32)?;
+
         if let Some(ref import_path) = opt.import_path {
             downstairs_import(&mut region, import_path).unwrap();
             /*
@@ -803,8 +804,6 @@ async fn main() -> Result<()> {
              * new data and inital flush number is written to disk.
              */
             region.region_flush(1)?;
-        } else {
-            region.extend(opt.extent_count as u32)?;
         }
     } else {
         region = Region::open(&opt.data, Default::default())?;
