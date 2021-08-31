@@ -15,18 +15,23 @@ pub enum State {
 pub struct Region {
     pub id: RegionId,
     pub volume_id: String,
+
+    pub block_size: u64,
+    pub extent_size: u64,
+    pub extent_count: u64,
+
     pub port_number: u16,
     pub state: State,
-    pub block_size: u32,
-    pub block_count: u32,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct CreateRegion {
     pub id: RegionId,
     pub volume_id: String,
-    pub block_size: u32,
-    pub block_count: u32,
+
+    pub block_size: u64,
+    pub extent_size: u64,
+    pub extent_count: u64,
 }
 
 impl CreateRegion {
@@ -41,10 +46,15 @@ impl CreateRegion {
                 "block size {} instead of requested {}",
                 self.block_size, r.block_size
             ))
-        } else if self.block_count != r.block_count {
+        } else if self.extent_size != r.extent_size {
             Some(format!(
-                "block count {} instead of requested {}",
-                self.block_count, r.block_count
+                "extent size {} instead of requested {}",
+                self.extent_size, r.extent_size
+            ))
+        } else if self.extent_count != r.extent_count {
+            Some(format!(
+                "extent count {} instead of requested {}",
+                self.extent_count, r.extent_count
             ))
         } else {
             None

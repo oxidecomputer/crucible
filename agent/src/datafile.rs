@@ -137,7 +137,8 @@ impl DataFile {
             id: create.id.clone(),
             volume_id: create.volume_id,
             block_size: create.block_size,
-            block_count: create.block_count,
+            extent_size: create.extent_size,
+            extent_count: create.extent_count,
             port_number,
             state: State::Requested,
         };
@@ -175,6 +176,59 @@ impl DataFile {
         r.state = nstate;
 
         self.store(inner);
+    }
+
+    /**
+     * Mark a particular region as provisioned.
+     */
+    pub fn created(&self, id: &RegionId) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+
+        let mut r = inner.regions.get_mut(id).unwrap();
+        let nstate = State::Created;
+        match &r.state {
+            State::Requested => (),
+            State::Tombstoned => {
+                /*
+                 * Nexus requested that we destroy this region before we
+                 * finished provisioning it.
+                 */
+                return Ok(());
+            }
+            x => bail!("created region in weird state {:?}", x),
+        }
+
+        info!(
+            self.log,
+            "region {} state: {:?} -> {:?}", r.id.0, r.state, nstate,
+        );
+        r.state = nstate;
+
+        self.store(inner);
+        Ok(())
+    }
+
+    /**
+     * Mark a particular region as destroyed.
+     */
+    pub fn destroyed(&self, id: &RegionId) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+
+        let mut r = inner.regions.get_mut(id).unwrap();
+        let nstate = State::Destroyed;
+        match &r.state {
+            State::Tombstoned => (),
+            x => bail!("region to destroy in weird state {:?}", x),
+        }
+
+        info!(
+            self.log,
+            "region {} state: {:?} -> {:?}", r.id.0, r.state, nstate,
+        );
+        r.state = nstate;
+
+        self.store(inner);
+        Ok(())
     }
 
     /**

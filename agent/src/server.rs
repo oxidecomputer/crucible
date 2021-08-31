@@ -44,8 +44,10 @@ async fn region_create(
 
     match rc.context().request(create) {
         Ok(r) => Ok(HttpResponseOk(r)),
-        Err(e) => Err(HttpError::for_internal_error(
-            format!("region create failure: {:?}", e))),
+        Err(e) => Err(HttpError::for_internal_error(format!(
+            "region create failure: {:?}",
+            e
+        ))),
     }
 }
 
@@ -74,15 +76,40 @@ async fn region_get(
     }
 }
 
+#[endpoint {
+    method = DELETE,
+    path = "/crucible/0/regions/{id}",
+}]
+async fn region_delete(
+    rc: Arc<RequestContext<Arc<DataFile>>>,
+    path: TypedPath<RegionPath>,
+) -> SResult<HttpResponseOk<()>, HttpError> {
+    let p = path.into_inner();
+    let id = model::RegionId(p.id);
+
+    match rc.context().destroy(&id) {
+        Ok(_) => Ok(HttpResponseOk(())),
+        Err(e) => Err(HttpError::for_bad_request(None, e.to_string())),
+    }
+}
+
+pub fn make_api() -> Result<dropshot::ApiDescription<Arc<DataFile>>> {
+    let mut api = dropshot::ApiDescription::new();
+    api.register(region_list).or_bail("registration failure")?;
+    api.register(region_create)
+        .or_bail("registration failure")?;
+    api.register(region_get).or_bail("registration failure")?;
+    api.register(region_delete)
+        .or_bail("registration failure")?;
+    Ok(api)
+}
+
 pub async fn run_server(
     log: &Logger,
     bind_address: SocketAddr,
     df: Arc<DataFile>,
 ) -> Result<()> {
-    let mut api = dropshot::ApiDescription::new();
-    api.register(region_list).or_bail("registration failure")?;
-    api.register(region_create).or_bail("registration failure")?;
-    api.register(region_get).or_bail("registration failure")?;
+    let api = make_api()?;
 
     let server = dropshot::HttpServerStarter::new(
         &dropshot::ConfigDropshot {
