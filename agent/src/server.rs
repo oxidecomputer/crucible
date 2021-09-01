@@ -53,7 +53,7 @@ async fn region_create(
 
 #[derive(Deserialize, JsonSchema)]
 struct RegionPath {
-    id: String,
+    id: model::RegionId,
 }
 
 #[endpoint {
@@ -65,13 +65,12 @@ async fn region_get(
     path: TypedPath<RegionPath>,
 ) -> SResult<HttpResponseOk<model::Region>, HttpError> {
     let p = path.into_inner();
-    let id = model::RegionId(p.id);
 
-    match rc.context().get(&id) {
+    match rc.context().get(&p.id) {
         Some(r) => Ok(HttpResponseOk(r)),
         None => Err(HttpError::for_not_found(
             None,
-            format!("region {:?} not found", id.0),
+            format!("region {:?} not found", p.id),
         )),
     }
 }
@@ -85,9 +84,8 @@ async fn region_delete(
     path: TypedPath<RegionPath>,
 ) -> SResult<HttpResponseOk<()>, HttpError> {
     let p = path.into_inner();
-    let id = model::RegionId(p.id);
 
-    match rc.context().destroy(&id) {
+    match rc.context().destroy(&p.id) {
         Ok(_) => Ok(HttpResponseOk(())),
         Err(e) => Err(HttpError::for_bad_request(None, e.to_string())),
     }
