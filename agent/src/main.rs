@@ -21,15 +21,21 @@ use model::State;
 #[structopt(name = PROG, about = "Crucible zone management agent")]
 enum Args {
     OpenApi {
-        #[structopt(short = "o", name = "FILE", parse(try_from_str))]
+        #[structopt(short = "o", parse(try_from_str))]
         output: PathBuf,
     },
     Run {
-        #[structopt(short = "d", name = "DATA_DIR", parse(try_from_str))]
+        #[structopt(short = "d", parse(try_from_str))]
         data_dir: PathBuf,
 
-        #[structopt(short = "l", name = "IP:PORT", parse(try_from_str))]
+        #[structopt(short = "l", parse(try_from_str))]
         listen: SocketAddr,
+
+        #[structopt(short = "i", parse(try_from_str))]
+        uuid: uuid::Uuid,
+
+        #[structopt(short = "n", parse(try_from_str))]
+        nexus: Option<SocketAddr>,
     },
 }
 
@@ -48,7 +54,7 @@ async fn main() -> Result<()> {
             api.openapi("Crucible Agent", "0.0.0").write(&mut f)?;
             Ok(())
         }
-        Args::Run { data_dir, listen } => {
+        Args::Run { data_dir, listen, uuid, nexus } => {
             let log = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
             }
@@ -79,6 +85,37 @@ async fn main() -> Result<()> {
             let log0 = log.new(o!("component" => "worker"));
             let df0 = Arc::clone(&df);
             std::thread::spawn(|| worker(log0, df0, datapath));
+
+            if let Some(nexus) = nexus {
+                use omicron_common::api::internal::nexus;
+
+                let log0 = log.new(o!("component" => "nexus"));
+                let listen0 = listen.clone();
+                tokio::spawn(async move {
+                    let log = log0.clone();
+                    let c = omicron_common::NexusClient::new(nexus, log0);
+
+                    loop {
+                        let casi = nexus::CrucibleAgentStartupInfo {
+                            address: listen0.clone(),
+                        };
+                        let r = c.notify_crucible_agent_online(
+                            uuid,
+                            casi,
+                        ).await;
+
+                        let dur = if let Err(e) = r {
+                            error!(log, "notify nexus failed: {:?}", e);
+                            std::time::Duration::from_secs(1)
+                        } else {
+                            info!(log, "notify nexus ok");
+                            std::time::Duration::from_secs(30)
+                        };
+
+                        tokio::time::sleep(dur).await;
+                    }
+                });
+            }
 
             server::run_server(&log, listen, df).await
         }

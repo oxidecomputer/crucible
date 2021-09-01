@@ -16,6 +16,7 @@ serde_json = "1.0"
 slog = { version = "2.5", features = [ "max_level_trace", "release_max_level_debug" ] }
 crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
+omicron-common = { path = "../../omicron/omicron-common" }
 structopt = "0.3"
 tokio = { version = "1.10", features = [ "full" ] }
 uuid = { version = "0.8", features = [ "serde", "v4" ] }
