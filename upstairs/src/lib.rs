@@ -948,7 +948,7 @@ impl Upstairs {
         let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
         /*
-         * TODO: Walk the list of guest work struts and build the same list
+         * TODO: Walk the list of guest work structs and build the same list
          * and make sure it matches.
          */
 
