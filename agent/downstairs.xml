@@ -14,7 +14,7 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/ws/crucible/target/debug/crucible-downstairs
+    exec='/opt/oxide/crucible/bin/downstairs
       --data %{config/directory}
       --port %{config/port}'
     timeout_seconds='30'
