@@ -1,15 +1,46 @@
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Iter, PropertyGroups, Result, Scf, ScfError, Service,
-    Snapshots,
+    buf_for, str_from, Iter, PropertyGroup, PropertyGroups, Result, Scf,
+    ScfError, Service, Snapshot, Snapshots,
 };
 
 #[derive(Debug)]
 pub struct Instance<'a> {
     pub(crate) scf: &'a Scf,
     pub(crate) instance: NonNull<scf_instance_t>,
+}
+
+#[derive(Debug)]
+pub enum State {
+    Uninitialized,
+    Maintenance,
+    Offline,
+    Disabled,
+    Online,
+    Degraded,
+    LegacyRun,
+    Unknown(String),
+}
+
+impl State {
+    fn parse(v: &str) -> Option<State> {
+        use State::*;
+
+        match v {
+            "none" => None,
+            "uninitialized" => Some(Uninitialized),
+            "maintenance" => Some(Maintenance),
+            "offline" => Some(Offline),
+            "disabled" => Some(Disabled),
+            "online" => Some(Online),
+            "degraded" => Some(Degraded),
+            "legacy_run" => Some(LegacyRun),
+            other => Some(Unknown(other.to_string())),
+        }
+    }
 }
 
 impl<'a> Instance<'a> {
@@ -37,12 +68,145 @@ impl<'a> Instance<'a> {
         str_from(&mut buf, ret)
     }
 
+    pub fn fmri(&self) -> Result<String> {
+        let mut buf = buf_for(SCF_LIMIT_MAX_FMRI_LENGTH)?;
+
+        let ret = unsafe {
+            scf_instance_to_fmri(
+                self.instance.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+
+        str_from(&mut buf, ret)
+    }
+
+    pub fn enable(&self, temporary: bool) -> Result<()> {
+        let fmri = CString::new(self.fmri()?).unwrap();
+        let flags = if temporary { SMF_TEMPORARY } else { 0 };
+
+        if unsafe { smf_enable_instance(fmri.as_ptr(), flags) } == 0 {
+            Ok(())
+        } else {
+            Err(ScfError::last())
+        }
+    }
+
+    pub fn disable(&self, temporary: bool) -> Result<()> {
+        let fmri = CString::new(self.fmri()?).unwrap();
+        let flags = if temporary { SMF_TEMPORARY } else { 0 };
+
+        if unsafe { smf_disable_instance(fmri.as_ptr(), flags) } == 0 {
+            Ok(())
+        } else {
+            Err(ScfError::last())
+        }
+    }
+
+    /**
+     * Get the current state and the next state (if any) of the instance from
+     * the restarter.
+     */
+    pub fn states(&self) -> Result<(Option<State>, Option<State>)> {
+        let restarter = self.get_pg("restarter")?.ok_or(ScfError::NotFound)?;
+
+        fn get_val(pg: &PropertyGroup, n: &str) -> Result<Option<String>> {
+            let prop = pg.get_property(n)?;
+            if let Some(prop) = prop {
+                let val = prop.value()?;
+                if let Some(val) = val {
+                    Ok(Some(val.as_string()?))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                Ok(None)
+            }
+        }
+
+        let state = get_val(&restarter, "state")?
+            .map(|v| State::parse(&v))
+            .flatten();
+        let next_state = get_val(&restarter, "next_state")?
+            .map(|v| State::parse(&v))
+            .flatten();
+
+        Ok((state, next_state))
+    }
+
     pub fn snapshots(&self) -> Result<Snapshots> {
         Snapshots::new(self)
     }
 
+    pub fn get_snapshot(&self, name: &str) -> Result<Option<Snapshot>> {
+        let name = CString::new(name).unwrap();
+        let snap = Snapshot::new(self)?;
+
+        let ret = unsafe {
+            scf_instance_get_snapshot(
+                self.instance.as_ptr(),
+                name.as_ptr(),
+                snap.snapshot.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(Some(snap))
+        } else {
+            match ScfError::last() {
+                ScfError::NotFound => Ok(None),
+                other => Err(other),
+            }
+        }
+    }
+
     pub fn pgs(&self) -> Result<PropertyGroups> {
         PropertyGroups::new_instance(self)
+    }
+
+    pub fn get_pg(&self, name: &str) -> Result<Option<PropertyGroup>> {
+        let name = CString::new(name).unwrap();
+        let pg = PropertyGroup::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_instance_get_pg(
+                self.instance.as_ptr(),
+                name.as_ptr(),
+                pg.propertygroup.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(Some(pg))
+        } else {
+            match ScfError::last() {
+                ScfError::NotFound => Ok(None),
+                other => Err(other),
+            }
+        }
+    }
+
+    pub fn add_pg(&self, name: &str, pgtype: &str) -> Result<PropertyGroup> {
+        let name = CString::new(name).unwrap();
+        let pgtype = CString::new(pgtype).unwrap();
+        let pg = PropertyGroup::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_instance_add_pg(
+                self.instance.as_ptr(),
+                name.as_ptr(),
+                pgtype.as_ptr(),
+                0,
+                pg.propertygroup.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(pg)
+        } else {
+            Err(ScfError::last())
+        }
     }
 
     /*

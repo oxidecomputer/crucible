@@ -1,9 +1,10 @@
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Instances, Iter, PropertyGroups, Result, Scf, ScfError,
-    Scope,
+    buf_for, str_from, Instance, Instances, Iter, PropertyGroups, Result, Scf,
+    ScfError, Scope,
 };
 
 #[derive(Debug)]
@@ -49,10 +50,46 @@ impl<'a> Service<'a> {
      * scf_service_delete(3SCF)
      */
 
-    /*
-     * XXX fn instance(&self, name: &str) -> Result<()> {
-     * scf_service_get_instance(3SCF)
-     */
+    pub fn get_instance(&self, name: &str) -> Result<Option<Instance>> {
+        let name = CString::new(name).unwrap();
+        let instance = Instance::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_service_get_instance(
+                self.service.as_ptr(),
+                name.as_ptr(),
+                instance.instance.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(Some(instance))
+        } else {
+            match ScfError::last() {
+                ScfError::NotFound => Ok(None),
+                other => Err(other),
+            }
+        }
+    }
+
+    pub fn add_instance(&self, name: &str) -> Result<Instance> {
+        let name = CString::new(name).unwrap();
+        let instance = Instance::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_service_add_instance(
+                self.service.as_ptr(),
+                name.as_ptr(),
+                instance.instance.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(instance)
+        } else {
+            Err(ScfError::last())
+        }
+    }
 
     /*
      * XXX fn add(&self, name: &str) -> Result<()> {

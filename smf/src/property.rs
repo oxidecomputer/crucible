@@ -2,7 +2,8 @@ use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Iter, PropertyGroup, Result, Scf, ScfError, Values,
+    buf_for, str_from, Iter, PropertyGroup, Result, Scf, ScfError, Value,
+    Values,
 };
 
 #[derive(Debug)]
@@ -53,6 +54,15 @@ impl<'a> Property<'a> {
 
     pub fn values(&self) -> Result<Values> {
         Values::new(self)
+    }
+
+    pub fn value(&self) -> Result<Option<Value>> {
+        let mut values = Values::new(self)?.collect::<Result<Vec<_>>>()?;
+        match values.len() {
+            0 => Ok(None),
+            1 => Ok(values.pop()),
+            n => Err(ScfError::Internal),
+        }
     }
 }
 

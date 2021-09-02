@@ -1,8 +1,10 @@
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Instance, Iter, PropertyGroups, Result, ScfError,
+    buf_for, str_from, Instance, Iter, PropertyGroup, PropertyGroups, Result,
+    ScfError,
 };
 
 #[derive(Debug)]
@@ -38,6 +40,29 @@ impl<'a> Snapshot<'a> {
 
     pub fn pgs(&self) -> Result<PropertyGroups> {
         PropertyGroups::new_composed(self.instance, self)
+    }
+
+    pub fn get_pg(&self, name: &str) -> Result<Option<PropertyGroup>> {
+        let name = CString::new(name).unwrap();
+        let pg = PropertyGroup::new(self.instance.scf)?;
+
+        let ret = unsafe {
+            scf_instance_get_pg_composed(
+                self.instance.instance.as_ptr(),
+                self.snapshot.as_ptr(),
+                name.as_ptr(),
+                pg.propertygroup.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(Some(pg))
+        } else {
+            match ScfError::last() {
+                ScfError::NotFound => Ok(None),
+                other => Err(other),
+            }
+        }
     }
 
     /*

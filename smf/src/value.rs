@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use num_traits::cast::FromPrimitive;
@@ -34,6 +35,20 @@ impl<'a> Value<'a> {
         };
 
         str_from(&mut buf, ret)
+    }
+
+    pub fn set_from_string(&self, typ: scf_type_t, val: &str) -> Result<()> {
+        let val = CString::new(val).unwrap();
+
+        let ret = unsafe {
+            scf_value_set_from_string(self.value.as_ptr(), typ, val.as_ptr())
+        };
+
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(ScfError::last())
+        }
     }
 
     pub fn type_(&self) -> Result<scf_type_t> {

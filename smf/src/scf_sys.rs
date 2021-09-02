@@ -10,6 +10,13 @@ pub const SCF_VERSION: scf_version_t = 1;
 
 pub const SCF_PG_FLAG_NONPERSISTENT: u32 = 0x1;
 
+/*
+ * Flags for the smf_enable_instance(3SCF) family of functions:
+ */
+pub const SMF_IMMEDIATE: c_int = 0x1;
+pub const SMF_TEMPORARY: c_int = 0x2;
+pub const SMF_AT_NEXT_BOOT: c_int = 0x4;
+
 macro_rules! opaque_handle {
     ($type_name:ident) => {
         pub enum $type_name {}
@@ -32,6 +39,8 @@ opaque_handle!(scf_propertygroup_t);
 opaque_handle!(scf_property_t);
 opaque_handle!(scf_value_t);
 opaque_handle!(scf_snaplevel_t);
+opaque_handle!(scf_transaction_t);
+opaque_handle!(scf_transaction_entry_t);
 
 #[derive(Debug, FromPrimitive, ToPrimitive)]
 #[repr(C)]
@@ -127,6 +136,17 @@ extern "C" {
         out: *mut scf_scope_t,
     ) -> c_int;
 
+    pub fn scf_scope_get_service(
+        scope: *mut scf_scope_t,
+        name: *const c_char,
+        out: *mut scf_service_t,
+    ) -> c_int;
+    pub fn scf_scope_add_service(
+        scope: *mut scf_scope_t,
+        name: *const c_char,
+        out: *mut scf_service_t,
+    ) -> c_int;
+
     pub fn scf_iter_handle_scopes(
         iter: *mut scf_iter_t,
         handle: *const scf_handle_t,
@@ -144,6 +164,16 @@ extern "C" {
         buf: *mut c_char,
         size: size_t,
     ) -> ssize_t;
+    pub fn scf_service_get_instance(
+        service: *mut scf_service_t,
+        name: *const c_char,
+        out: *mut scf_instance_t,
+    ) -> c_int;
+    pub fn scf_service_add_instance(
+        service: *mut scf_service_t,
+        name: *const c_char,
+        out: *mut scf_instance_t,
+    ) -> c_int;
 
     pub fn scf_iter_scope_services(
         iter: *mut scf_iter_t,
@@ -161,6 +191,34 @@ extern "C" {
 
     pub fn scf_instance_get_name(
         instance: *mut scf_instance_t,
+        buf: *mut c_char,
+        size: size_t,
+    ) -> ssize_t;
+    pub fn scf_instance_get_pg(
+        instance: *mut scf_instance_t,
+        name: *const c_char,
+        out: *mut scf_propertygroup_t,
+    ) -> c_int;
+    pub fn scf_instance_add_pg(
+        instance: *mut scf_instance_t,
+        name: *const c_char,
+        pgtype: *const c_char,
+        flags: u32,
+        out: *mut scf_propertygroup_t,
+    ) -> c_int;
+    pub fn scf_instance_get_pg_composed(
+        instance: *mut scf_instance_t,
+        snapshot: *mut scf_snapshot_t,
+        name: *const c_char,
+        out: *mut scf_propertygroup_t,
+    ) -> c_int;
+    pub fn scf_instance_get_snapshot(
+        instance: *mut scf_instance_t,
+        name: *const c_char,
+        out: *mut scf_snapshot_t,
+    ) -> c_int;
+    pub fn scf_instance_to_fmri(
+        instance: *const scf_instance_t,
         buf: *mut c_char,
         size: size_t,
     ) -> ssize_t;
@@ -234,6 +292,12 @@ extern "C" {
         pg: *mut scf_propertygroup_t,
         out: *mut u32,
     ) -> c_int;
+    pub fn scf_pg_update(pg: *mut scf_propertygroup_t) -> c_int;
+    pub fn scf_pg_get_property(
+        pg: *mut scf_propertygroup_t,
+        name: *const c_char,
+        out: *mut scf_property_t,
+    ) -> c_int;
 
     pub fn scf_iter_pg_properties(
         iter: *mut scf_iter_t,
@@ -280,8 +344,66 @@ extern "C" {
         buf: *mut c_char,
         size: size_t,
     ) -> ssize_t;
+    pub fn scf_value_set_from_string(
+        val: *mut scf_value_t,
+        valtype: scf_type_t,
+        valstr: *const c_char,
+    ) -> c_int;
 
     pub fn scf_type_base_type(typ: scf_type_t, out: *mut scf_type_t) -> c_int;
+
+    pub fn scf_transaction_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_transaction_t;
+    pub fn scf_transaction_destroy(tran: *mut scf_transaction_t);
+    pub fn scf_transaction_reset(tran: *mut scf_transaction_t);
+    pub fn scf_transaction_reset_all(tran: *mut scf_transaction_t);
+
+    pub fn scf_transaction_start(
+        tran: *mut scf_transaction_t,
+        pg: *mut scf_propertygroup_t,
+    ) -> c_int;
+    pub fn scf_transaction_commit(tran: *mut scf_transaction_t) -> c_int;
+
+    pub fn scf_transaction_property_delete(
+        tran: *mut scf_transaction_t,
+        entry: *mut scf_transaction_entry_t,
+        name: *const c_char,
+    ) -> c_int;
+    pub fn scf_transaction_property_new(
+        tran: *mut scf_transaction_t,
+        entry: *mut scf_transaction_entry_t,
+        name: *const c_char,
+        proptype: scf_type_t,
+    ) -> c_int;
+    pub fn scf_transaction_property_change(
+        tran: *mut scf_transaction_t,
+        entry: *mut scf_transaction_entry_t,
+        name: *const c_char,
+        proptype: scf_type_t,
+    ) -> c_int;
+    pub fn scf_transaction_property_change_type(
+        tran: *mut scf_transaction_t,
+        entry: *mut scf_transaction_entry_t,
+        name: *const c_char,
+        proptype: scf_type_t,
+    ) -> c_int;
+
+    pub fn scf_entry_create(
+        handle: *mut scf_handle_t,
+    ) -> *mut scf_transaction_entry_t;
+    pub fn scf_entry_destroy(tran: *mut scf_transaction_entry_t);
+    pub fn scf_entry_destroy_children(tran: *mut scf_transaction_entry_t);
+    pub fn scf_entry_reset(tran: *mut scf_transaction_entry_t);
+
+    pub fn scf_entry_add_value(
+        tran: *mut scf_transaction_entry_t,
+        value: *mut scf_value_t,
+    ) -> c_int;
+
+    pub fn smf_disable_instance(instance: *const c_char, flags: c_int)
+        -> c_int;
+    pub fn smf_enable_instance(instance: *const c_char, flags: c_int) -> c_int;
 }
 
 #[cfg(test)]

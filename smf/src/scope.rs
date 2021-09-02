@@ -1,7 +1,10 @@
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use super::scf_sys::*;
-use super::{buf_for, str_from, Iter, Result, Scf, ScfError, Services};
+use super::{
+    buf_for, str_from, Iter, Result, Scf, ScfError, Service, Services,
+};
 
 #[derive(Debug)]
 pub struct Scope<'a> {
@@ -38,10 +41,46 @@ impl<'a> Scope<'a> {
         Services::new(self)
     }
 
-    /*
-     * XXX fn service(&self, name: &str) -> Result<Service> {
-     * scf_scope_get_service(3SCF)
-     */
+    pub fn get_service(&self, name: &str) -> Result<Option<Service>> {
+        let name = CString::new(name).unwrap();
+        let service = Service::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_scope_get_service(
+                self.scope.as_ptr(),
+                name.as_ptr(),
+                service.service.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(Some(service))
+        } else {
+            match ScfError::last() {
+                ScfError::NotFound => Ok(None),
+                other => Err(other),
+            }
+        }
+    }
+
+    pub fn add_service(&self, name: &str) -> Result<Service> {
+        let name = CString::new(name).unwrap();
+        let service = Service::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_scope_add_service(
+                self.scope.as_ptr(),
+                name.as_ptr(),
+                service.service.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(service)
+        } else {
+            Err(ScfError::last())
+        }
+    }
 
     /*
      * XXX fn add(&self, name: &str) -> Result<Service> {

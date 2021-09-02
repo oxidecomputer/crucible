@@ -7,6 +7,7 @@ use thiserror::Error;
 extern crate num_derive;
 
 mod scf_sys;
+pub use scf_sys::scf_type_t;
 use scf_sys::*;
 
 mod scope;
@@ -29,6 +30,9 @@ pub use property::{Properties, Property};
 
 mod value;
 pub use value::{Value, Values};
+
+mod transaction;
+pub use transaction::{CommitResult, Transaction, TransactionEntry};
 
 pub type Result<T> = std::result::Result<T, ScfError>;
 

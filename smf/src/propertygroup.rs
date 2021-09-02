@@ -1,9 +1,10 @@
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Instance, Iter, Properties, Result, Scf, ScfError,
-    Service, Snapshot,
+    buf_for, str_from, Instance, Iter, Properties, Property, Result, Scf,
+    ScfError, Service, Snapshot, Transaction,
 };
 
 #[derive(Debug)]
@@ -55,6 +56,28 @@ impl<'a> PropertyGroup<'a> {
         Properties::new(self)
     }
 
+    pub fn get_property(&self, name: &str) -> Result<Option<Property>> {
+        let name = CString::new(name).unwrap();
+        let prop = Property::new(self.scf)?;
+
+        let ret = unsafe {
+            scf_pg_get_property(
+                self.propertygroup.as_ptr(),
+                name.as_ptr(),
+                prop.property.as_ptr(),
+            )
+        };
+
+        if ret == 0 {
+            Ok(Some(prop))
+        } else {
+            match ScfError::last() {
+                ScfError::NotFound => Ok(None),
+                other => Err(other),
+            }
+        }
+    }
+
     pub fn is_persistent(&self) -> Result<bool> {
         let mut flags = 0;
 
@@ -65,6 +88,19 @@ impl<'a> PropertyGroup<'a> {
         } else {
             Err(ScfError::last())
         }
+    }
+
+    pub fn update(&self) -> Result<()> {
+        if unsafe { scf_pg_update(self.propertygroup.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(ScfError::last())
+        }
+    }
+
+    pub fn transaction(&self) -> Result<Transaction> {
+        let tx = Transaction::new(self)?;
+        Ok(tx)
     }
 
     /*

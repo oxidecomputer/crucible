@@ -1,6 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
 use slog::{error, info, o, Logger};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,6 +9,7 @@ use std::sync::Arc;
 use structopt::StructOpt;
 
 const PROG: &str = "crucible-agent";
+const SERVICE: &str = "oxide/crucible/downstairs";
 
 mod datafile;
 mod model;
@@ -90,6 +92,22 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&datapath)?;
 
             /*
+             * Ensure that the SMF service we will use exists already.  If not,
+             * something is seriously wrong with this machine.
+             */
+            {
+                let scf = crucible_smf::Scf::new()?;
+                let scope = scf.scope_local()?;
+
+                let svc = scope.get_service(SERVICE)?;
+                if svc.is_none() {
+                    bail!("SMF service {} does not exist", SERVICE);
+                }
+            }
+
+            apply_smf(&log, &df, datapath.clone())?;
+
+            /*
              * Create the worker thread that will perform provisioning and
              * deprovisioning tasks.
              */
@@ -117,7 +135,7 @@ async fn main() -> Result<()> {
 
                         let dur = if let Err(e) = r {
                             error!(log, "notify nexus failed: {:?}", e);
-                            std::time::Duration::from_secs(1)
+                            std::time::Duration::from_secs(5)
                         } else {
                             info!(log, "notify nexus ok");
                             std::time::Duration::from_secs(30)
@@ -131,6 +149,186 @@ async fn main() -> Result<()> {
             server::run_server(&log, listen, df).await
         }
     }
+}
+
+/**
+ * Provisioning requests will update the local intent store, and provision
+ * downstairs data files, but SMF services are a bit different.
+ *
+ * If the zone is upgraded, we will likely start from a blank SMF repository
+ * database and will need to set up all of our instances again.  As such, the
+ * process of aligning SMF with the intent datastore is a separate idempotent
+ * routine that we can call both at startup and after any changes to the intent
+ * store.
+ */
+fn apply_smf(
+    log: &Logger,
+    df: &Arc<datafile::DataFile>,
+    datapath: PathBuf,
+) -> Result<()> {
+    let all = df.all();
+
+    let scf = crucible_smf::Scf::new()?;
+    let scope = scf.scope_local()?;
+    let svc = scope
+        .get_service(SERVICE)?
+        .ok_or(anyhow!("service missing"))?;
+
+    /*
+     * First, check to see if there are any instances that we do not expect, and
+     * remove them.
+     */
+    let expected_instances = all
+        .iter()
+        .filter(|r| r.state == State::Created)
+        .map(|r| format!("downstairs-{}", r.id.0))
+        .collect::<HashSet<_>>();
+    let mut insts = svc.instances()?;
+    while let Some(inst) = insts.next().transpose()? {
+        let n = inst.name()?;
+
+        if &n == "default" {
+            continue;
+        }
+
+        if !expected_instances.contains(&n) {
+            error!(log, "remove instance: {}", n);
+            info!(log, "instance states: {:?}", inst.states()?);
+            /*
+             * XXX just disable for now.
+             */
+            inst.disable(false)?;
+            continue;
+        }
+
+        info!(log, "found expected instance: {}", n);
+    }
+
+    /*
+     * Second, create any instances that are missing.
+     */
+    for r in all.iter() {
+        if r.state != State::Created {
+            continue;
+        }
+
+        let name = format!("downstairs-{}", r.id.0);
+        let mut dir = datapath.clone();
+        dir.push(&r.id.0);
+        let datadir = dir.to_str().unwrap().to_string();
+
+        let inst = if let Some(inst) = svc.get_instance(&name)? {
+            inst
+        } else {
+            info!(log, "creating missing instance {}", name);
+            let inst = svc.add_instance(&name)?;
+            info!(log, "ok, have {}", inst.fmri()?);
+            inst
+        };
+
+        /*
+         * Determine the contents of the running snapshot.
+         */
+        let reconfig = if let Some(snap) = inst.get_snapshot("running")? {
+            /*
+             * Just check the values.
+             */
+            if let Some(pg) = snap.get_pg("config")? {
+                let mut found_directory = false;
+                let dir = pg.get_property("directory")?;
+                if let Some(dir) = dir {
+                    if let Some(val) = dir.value()? {
+                        if val.as_string()? == datadir {
+                            found_directory = true;
+                        }
+                    }
+                }
+
+                let mut found_port = false;
+                let dir = pg.get_property("port")?;
+                if let Some(dir) = dir {
+                    if let Some(val) = dir.value()? {
+                        if val.as_string()? == r.port_number.to_string() {
+                            found_port = true;
+                        }
+                    }
+                }
+
+                !found_port || !found_directory
+            } else {
+                true
+            }
+        } else {
+            /*
+             * No running snapshot means the service has never started.  Prod
+             * the restarter by disabling it, then we'll create everything from
+             * scratch.
+             */
+            inst.disable(false)?;
+            true
+        };
+
+        if reconfig {
+            use crucible_smf::scf_type_t::*;
+
+            /*
+             * Ensure that there is a "config" property group:
+             */
+            let pg = if let Some(pg) = inst.get_pg("config")? {
+                pg
+            } else {
+                inst.add_pg("config", "application")?
+            };
+
+            info!(log, "reconfiguring {}", inst.fmri()?);
+
+            let tx = pg.transaction()?;
+            tx.start()?;
+            let mut entries = Vec::new();
+
+            /*
+             * An expression of our values:
+             */
+            let mut e = if pg.get_property("directory")?.is_some() {
+                info!(log, "change directory");
+                tx.property_change("directory", SCF_TYPE_ASTRING)?
+            } else {
+                info!(log, "add directory");
+                tx.property_new("directory", SCF_TYPE_ASTRING)?
+            };
+            e.add_from_string(SCF_TYPE_ASTRING, &datadir)?;
+            entries.push(e);
+
+            let mut e = if pg.get_property("port")?.is_some() {
+                info!(log, "change port");
+                tx.property_change("port", SCF_TYPE_COUNT)?
+            } else {
+                info!(log, "add port");
+                tx.property_new("port", SCF_TYPE_COUNT)?
+            };
+            e.add_from_string(SCF_TYPE_COUNT, &r.port_number.to_string())?;
+            entries.push(e);
+
+            info!(log, "commit");
+            match tx.commit()? {
+                crucible_smf::CommitResult::Success => {
+                    info!(log, "ok!");
+                }
+                crucible_smf::CommitResult::OutOfDate => {
+                    error!(log, "concurrent modification?!");
+                }
+            }
+        } else {
+            info!(log, "do not need to reconfigure {}", inst.fmri()?);
+        }
+
+        /*
+         * Finally, make sure the instance is enabled.
+         */
+        inst.enable(false)?;
+    }
+
+    Ok(())
 }
 
 fn worker(
@@ -172,6 +370,13 @@ fn worker(
                 eprintln!("worker got unexpected region state: {:?}", r);
                 std::process::exit(1);
             }
+        }
+
+        info!(log, "applying SMF actions...");
+        if let Err(e) = apply_smf(&log, &df, datapath.clone()) {
+            error!(log, "SMF application failure: {:?}", e);
+        } else {
+            info!(log, "SMF ok!");
         }
     }
 }
@@ -227,6 +432,12 @@ fn worker_region_create(
 
     /*
      * - create/enable SMF instance
+     */
+    let scf = crucible_smf::Scf::new()?;
+    let scope = scf.scope_local()?;
+
+    /*
+     * First, ensure that the service exists.
      */
 
     Ok(())
