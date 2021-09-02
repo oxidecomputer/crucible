@@ -8,8 +8,6 @@ use std::sync::Arc;
 use structopt::StructOpt;
 
 const PROG: &str = "crucible-agent";
-const PORT_MIN: u16 = 17000;
-const PORT_MAX: u16 = 17999;
 
 mod datafile;
 mod model;
@@ -34,6 +32,12 @@ enum Args {
         #[structopt(short = "i", parse(try_from_str))]
         uuid: uuid::Uuid,
 
+        #[structopt(short = "D", parse(try_from_str))]
+        downstairs_program: PathBuf,
+
+        #[structopt(short = "P", parse(try_from_str))]
+        lowport: u16,
+
         #[structopt(short = "n", parse(try_from_str))]
         nexus: Option<SocketAddr>,
     },
@@ -54,7 +58,14 @@ async fn main() -> Result<()> {
             api.openapi("Crucible Agent", "0.0.0").write(&mut f)?;
             Ok(())
         }
-        Args::Run { data_dir, listen, uuid, nexus } => {
+        Args::Run {
+            data_dir,
+            listen,
+            uuid,
+            nexus,
+            downstairs_program,
+            lowport,
+        } => {
             let log = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
             }
@@ -70,8 +81,8 @@ async fn main() -> Result<()> {
             let df = Arc::new(datafile::DataFile::new(
                 log.new(o!("component" => "datafile")),
                 &dfpath,
-                PORT_MIN,
-                PORT_MAX,
+                lowport,
+                lowport + 999,
             )?);
 
             let mut datapath = data_dir.clone();
@@ -84,7 +95,9 @@ async fn main() -> Result<()> {
              */
             let log0 = log.new(o!("component" => "worker"));
             let df0 = Arc::clone(&df);
-            std::thread::spawn(|| worker(log0, df0, datapath));
+            std::thread::spawn(|| {
+                worker(log0, df0, datapath, downstairs_program)
+            });
 
             if let Some(nexus) = nexus {
                 use omicron_common::api::internal::nexus;
@@ -99,10 +112,8 @@ async fn main() -> Result<()> {
                         let casi = nexus::CrucibleAgentStartupInfo {
                             address: listen0.clone(),
                         };
-                        let r = c.notify_crucible_agent_online(
-                            uuid,
-                            casi,
-                        ).await;
+                        let r =
+                            c.notify_crucible_agent_online(uuid, casi).await;
 
                         let dur = if let Err(e) = r {
                             error!(log, "notify nexus failed: {:?}", e);
@@ -122,9 +133,12 @@ async fn main() -> Result<()> {
     }
 }
 
-fn worker(log: Logger, df: Arc<datafile::DataFile>, datapath: PathBuf) {
-    let prog = "/ws/oxide/crucible/target/debug/crucible-downstairs";
-
+fn worker(
+    log: Logger,
+    df: Arc<datafile::DataFile>,
+    datapath: PathBuf,
+    downstairs_program: PathBuf,
+) {
     loop {
         let r = df.first_in_states(&[State::Tombstoned, State::Requested]);
 
@@ -145,8 +159,9 @@ fn worker(log: Logger, df: Arc<datafile::DataFile>, datapath: PathBuf) {
                 let mut dir = datapath.clone();
                 dir.push(&r.id.0);
 
-                let res = worker_region_create(&log, prog, &r, &dir)
-                    .and_then(|_| df.created(&r.id));
+                let res =
+                    worker_region_create(&log, &downstairs_program, &r, &dir)
+                        .and_then(|_| df.created(&r.id));
 
                 if let Err(e) = res {
                     error!(log, "region {:?} create failed: {:?}", r.id.0, e);
@@ -163,7 +178,7 @@ fn worker(log: Logger, df: Arc<datafile::DataFile>, datapath: PathBuf) {
 
 fn worker_region_create(
     log: &Logger,
-    prog: &str,
+    prog: &Path,
     region: &model::Region,
     dir: &Path,
 ) -> Result<()> {

@@ -92,7 +92,7 @@ checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 [[package]]
 name = "bhyve_api"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b6da043d#b6da043dd8c2a3aef44f84aed1f43c6a7369e77f"
+source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#f7a6e51c47e7f5c1d09a39ded2893bb9a98f18b9"
 dependencies = [
  "libc",
  "num_enum",
@@ -524,7 +524,7 @@ dependencies = [
 [[package]]
 name = "dladm"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b6da043d#b6da043dd8c2a3aef44f84aed1f43c6a7369e77f"
+source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#f7a6e51c47e7f5c1d09a39ded2893bb9a98f18b9"
 dependencies = [
  "libc",
  "num_enum",
@@ -1573,7 +1573,7 @@ dependencies = [
 [[package]]
 name = "propolis"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b6da043d#b6da043dd8c2a3aef44f84aed1f43c6a7369e77f"
+source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#f7a6e51c47e7f5c1d09a39ded2893bb9a98f18b9"
 dependencies = [
  "bhyve_api",
  "bitflags",
@@ -1590,7 +1590,7 @@ dependencies = [
 [[package]]
 name = "propolis-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b6da043d#b6da043dd8c2a3aef44f84aed1f43c6a7369e77f"
+source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#f7a6e51c47e7f5c1d09a39ded2893bb9a98f18b9"
 dependencies = [
  "reqwest",
  "ring",
@@ -1606,7 +1606,7 @@ dependencies = [
 [[package]]
 name = "propolis-server"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b6da043d#b6da043dd8c2a3aef44f84aed1f43c6a7369e77f"
+source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#f7a6e51c47e7f5c1d09a39ded2893bb9a98f18b9"
 dependencies = [
  "anyhow",
  "dropshot",
@@ -2775,7 +2775,7 @@ checksum = "b5a972e5669d67ba988ce3dc826706fb0a8b01471c088cb0b6110b805cc36aed"
 [[package]]
 name = "viona_api"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b6da043d#b6da043dd8c2a3aef44f84aed1f43c6a7369e77f"
+source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#f7a6e51c47e7f5c1d09a39ded2893bb9a98f18b9"
 
 [[package]]
 name = "walkdir"
