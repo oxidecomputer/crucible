@@ -1999,14 +1999,33 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * to the outside until we know that all our downstairs are ready to
      * take IO operations.
      */
+
+    // async tasks need to tell us they are alive, but they also need to
+    // tell us the extent list from any attached downstairs.
+    // That part is not connected yet. XXX
+    let mut ds_count = 0u32;
+    while ds_count < 3 {
+        let c = crx.recv().await.unwrap();
+        if c.connected {
+            ds_count += 1;
+            println!(
+                "#### {:?} #### CONNECTED ######## {}/{}",
+                c.target,
+                ds_count,
+                opt.target.len()
+            );
+        } else {
+            println!("#### {:?} #### DISCONNECTED! ####", c.target);
+            ds_count -= 1;
+        }
+    }
+
+    println!("Three connections, start listenting for work");
     let upl = Arc::clone(&up);
     tokio::spawn(async move {
         up_listen(&upl, dst).await;
     });
 
-    // async tasks need to tell us they are alive, but they also need to
-    // tell us the extent list from any attached downstairs.
-    // That part is not connected yet. XXX
     let mut ds_count = 0u32;
     loop {
         let c = crx.recv().await.unwrap();
@@ -2022,11 +2041,6 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
             println!("#### {:?} #### DISCONNECTED! ####", c.target);
             ds_count -= 1;
         }
-        /*
-         * We need some additional way to indicate that this upstairs is ready
-         * to receive work.  Just connecting to n downstairs is not enough,
-         * we need to also know that they all have the same data.
-         */
     }
 }
 
