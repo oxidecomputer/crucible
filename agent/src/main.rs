@@ -416,7 +416,8 @@ fn worker_region_create(
      * Run the downstairs program in the mode where it will create the data
      * files.
      */
-    let image = "/dev/null"; /* XXX */
+    //let image = "/dev/null"; /* XXX */
+    let image = "/var/tmp/alpine.iso";
     info!(log, "creating region files from image {:?}", image);
     let cmd = Command::new(prog)
         .env_clear()
