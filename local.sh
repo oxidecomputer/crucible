@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 
 cargo build
 for bin in agent downstairs; do
-	rp='opt/ooce/pgsql-13/lib/amd64:/usr/gcc/10/lib/amd64'
+	rp='/opt/ooce/pgsql-13/lib/amd64:/usr/gcc/10/lib/amd64'
 	/usr/bin/elfedit \
 	    -e "dyn:runpath $rp" \
 	    "target/debug/crucible-$bin"
