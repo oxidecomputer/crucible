@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Write, BufReader};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -217,13 +217,17 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     let rm = region.def();
     println!("Importing {:?} to region", import_path);
 
-    let mut buffer = vec![0; block_size as usize];
-    buffer.resize(block_size as usize, 0);
-
+    /*
+     * We want to try to read as much as an entire extent at once.
+     */
+    let mut buffer = vec![0; space_per_extent as usize];
     let mut fp = File::open(import_path)?;
-    let mut offset: u64 = 0;
-    let mut blocks_copied = 0;
-    while let Ok(n) = fp.read(&mut buffer[..]) {
+    let mut br = BufReader::with_capacity(space_per_extent as usize, fp);
+    let mut pos = 0;
+    loop {
+        buffer.resize(space_per_extent as usize, 0);
+        let n = br.read(&mut buffer)?;
+
         if n == 0 {
             /*
              * If we read 0 without error, then we are done
@@ -231,26 +235,18 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
             break;
         }
 
-        blocks_copied += 1;
-
         /*
          * Use the same function upsairs uses to decide where to put the
          * data based on the LBA offset.
          */
-        let nwo = extent_from_offset(rm, offset, block_size as usize).unwrap();
-        assert_eq!(nwo.len(), 1);
-        let (eid, byte_offset, _) = nwo[0];
-
-        if n != (block_size as usize) {
-            if n != 0 {
-                let rest = &buffer[0..n];
-                region.region_write(eid, byte_offset, rest)?;
-            }
-            break;
-        } else {
-            region.region_write(eid, byte_offset, &buffer)?;
-            offset += n as u64;
+        let mut bufpos = 0;
+        for (eid, offset, len) in extent_from_offset(rm, pos, n).unwrap() {
+            let data = &buffer[bufpos..(bufpos + len)];
+            region.region_write(eid, offset, data)?;
+            bufpos += len;
         }
+        assert_eq!(n, bufpos);
+        pos += n as u64;
     }
 
     /*
@@ -259,8 +255,8 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      * want, use that to extract just this imported file.
      */
     println!(
-        "Populated {} extents by copying {} blocks",
-        extents_needed, blocks_copied
+        "Populated {} extents by copying {} bytes ({} blocks)",
+        extents_needed, pos, pos / block_size
     );
 
     Ok(())
