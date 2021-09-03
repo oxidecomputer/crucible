@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
-use slog::{error, info, o, Logger};
+use slog::{error, warn, info, o, Logger};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,9 @@ enum Args {
         #[structopt(short = "P", parse(try_from_str))]
         lowport: u16,
 
+        #[structopt(short = "p", parse(try_from_str))]
+        prefix: String,
+
         #[structopt(short = "n", parse(try_from_str))]
         nexus: Option<SocketAddr>,
     },
@@ -67,6 +70,7 @@ async fn main() -> Result<()> {
             nexus,
             downstairs_program,
             lowport,
+            prefix,
         } => {
             let log = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
@@ -75,6 +79,7 @@ async fn main() -> Result<()> {
 
             info!(log, "data directory: {:?}", data_dir);
             info!(log, "listen IP: {:?}", listen);
+            info!(log, "SMF instance name prefix: {:?}", prefix);
 
             let mut dfpath = data_dir.clone();
             std::fs::create_dir_all(&dfpath)?;
@@ -105,7 +110,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            apply_smf(&log, &df, datapath.clone())?;
+            apply_smf(&log, &df, datapath.clone(), &prefix)?;
 
             /*
              * Create the worker thread that will perform provisioning and
@@ -114,7 +119,7 @@ async fn main() -> Result<()> {
             let log0 = log.new(o!("component" => "worker"));
             let df0 = Arc::clone(&df);
             std::thread::spawn(|| {
-                worker(log0, df0, datapath, downstairs_program)
+                worker(log0, df0, datapath, downstairs_program, prefix)
             });
 
             if let Some(nexus) = nexus {
@@ -165,6 +170,7 @@ fn apply_smf(
     log: &Logger,
     df: &Arc<datafile::DataFile>,
     datapath: PathBuf,
+    prefix: &str,
 ) -> Result<()> {
     let all = df.all();
 
@@ -181,13 +187,18 @@ fn apply_smf(
     let expected_instances = all
         .iter()
         .filter(|r| r.state == State::Created)
-        .map(|r| format!("downstairs-{}", r.id.0))
+        .map(|r| format!("{}-{}", prefix, r.id.0))
         .collect::<HashSet<_>>();
     let mut insts = svc.instances()?;
     while let Some(inst) = insts.next().transpose()? {
         let n = inst.name()?;
 
         if &n == "default" {
+            continue;
+        }
+
+        if !n.starts_with(&format!("{}-", prefix)) {
+            warn!(log, "ignoring instance with other prefix: {:?}", n);
             continue;
         }
 
@@ -212,7 +223,7 @@ fn apply_smf(
             continue;
         }
 
-        let name = format!("downstairs-{}", r.id.0);
+        let name = format!("{}-{}", prefix, r.id.0);
         let mut dir = datapath.clone();
         dir.push(&r.id.0);
         let datadir = dir.to_str().unwrap().to_string();
@@ -336,6 +347,7 @@ fn worker(
     df: Arc<datafile::DataFile>,
     datapath: PathBuf,
     downstairs_program: PathBuf,
+    prefix: String,
 ) {
     loop {
         let r = df.first_in_states(&[State::Tombstoned, State::Requested]);
@@ -373,7 +385,7 @@ fn worker(
         }
 
         info!(log, "applying SMF actions...");
-        if let Err(e) = apply_smf(&log, &df, datapath.clone()) {
+        if let Err(e) = apply_smf(&log, &df, datapath.clone(), &prefix) {
             error!(log, "SMF application failure: {:?}", e);
         } else {
             info!(log, "SMF ok!");

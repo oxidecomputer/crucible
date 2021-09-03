@@ -16,11 +16,12 @@
   <exec_method type='method' name='start'
     exec='/opt/oxide/crucible/bin/agent run
       -D /opt/oxide/crucible/bin/downstairs
-      -d /data/crucible
+      -d %{config/datadir}
       -l %{config/listen}
       -i %{config/uuid}
       -n %{config/nexus}
-      -P 19000'
+      -P %{config/portbase}
+      -p %{config/prefix}'
     timeout_seconds='30'
     />
 
@@ -31,9 +32,12 @@
   </property_group>
 
   <property_group name='config' type='application'>
+    <propval name='datadir' type='astring' value='/data/crucible' />
     <propval name='listen' type='astring' value='127.0.0.1:17000' />
     <propval name='uuid' type='astring' value='' />
     <propval name='nexus' type='astring' value='127.0.0.1:12221' />
+    <propval name='portbase' type='astring' value='19000' />
+    <propval name='prefix' type='astring' value='downstairs' />
   </property_group>
 
   <stability value='Unstable' />
