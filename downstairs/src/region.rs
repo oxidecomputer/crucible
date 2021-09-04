@@ -33,13 +33,18 @@ pub struct Inner {
  */
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExtentMeta {
-    ext_version: u32, // XXX Not currently connected to anything.
+    /**
+     * Version information regarding the extent structure.
+     * Not currently connected to anything XXX
+     */
+    ext_version: u32,
     /**
      * Increasing value provided from upstairs every time it connects to
      * a downstairs.  Used to help break ties if flash numbers are the same
      * on extents.
+     * Not currently connected to anything XXX
      */
-    gen: u64, // XXX Not currently connected to anything.
+    gen: u64,
     /**
      * Increasing value incremented on every write to an extent.
      * All mirrors of an extent should have the same value.

@@ -769,6 +769,16 @@ impl fmt::Display for WorkState {
 async fn main() -> Result<()> {
     let opt = opts()?;
 
+    /*
+     * If any of our async tasks in our runtime panic, then we should
+     * exit the program right away.
+     */
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     if let Some(endpoint) = opt.trace_endpoint {
         let tracer = opentelemetry_jaeger::new_pipeline()
             .with_agent_endpoint(endpoint) // usually port 6831
@@ -818,9 +828,9 @@ async fn main() -> Result<()> {
 
     /*
      * If we imported, then stop now.  It's debatable if this is the typical
-     * use case.  If we decide it is not, then we can remove this. XXX
-     * The check is down here so we can import/export in the same command
-     * if so desired.
+     * use case.  If we decide it is not, then we can remove this.
+     * The check is after the export path so we can import then export in
+     * the same command if so desired.
      */
     if opt.create && opt.import_path.is_some() {
         println!("Exiting after import");

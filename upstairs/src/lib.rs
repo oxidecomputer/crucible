@@ -164,8 +164,9 @@ pub fn extent_from_offset(
  * Decide what to do with a downstairs that has just connected and has
  * sent us information about its extents.
  *
- * This will eventually need to message the main thread so it knows
- * when it can starting doing I/O.
+ * XXX At the moment we are doing both wait quorum and verify consistency
+ * in the same function.  This will soon break out into two separate places
+ * where we then decide what to do with each downstairs.
  */
 fn process_downstairs(
     target: &SocketAddrV4,
@@ -415,8 +416,9 @@ async fn proc(
     fw.send(Message::HereIAm(1)).await?;
 
     /*
-     * Don't wait more than 5 seconds to hear from the other side.
+     * Don't wait more than 50 seconds to hear from the other side.
      * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
+     * TODO: 50 is too long, but what is the correct value?
      */
     let mut deadline = deadline_secs(50);
     let mut negotiated = false;
@@ -431,14 +433,20 @@ async fn proc(
     loop {
         /*
          * XXX Just a thought here, could we send so much input that the
-         * select would always have input.changed() and starve out the
+         * select would always have ds_work_rx.changed() and starve out the
          * fr.next() select?  Does this select ever work that way?
          */
         tokio::select! {
             _ = sleep_until(deadline) => {
                 if !negotiated {
+                    up.ds_transition(up_coms.client_id, DsState::Disconnected);
                     bail!("did not negotiate a protocol");
                 }
+                /*
+                 * XXX What should happen here?  At the moment we just
+                 * ignore it..
+                 */
+                println!("Deadline ignored");
             }
             _ = sleep_until(pingat), if needping => {
                 fw.send(Message::Ruok).await?;
@@ -453,9 +461,16 @@ async fn proc(
                     io_send(up, &mut fw, up_coms.client_id, lossy).await?;
                 }
             }
-            _ = up_coms.input.changed() => {
+            _ = up_coms.ds_work_rx.changed() => {
                 /*
-                let iv = *input.borrow();
+                 * A change here indicates the work hashmap has changed
+                 * and we should go look for new work to do.  It is possible
+                 * that there is no new work but we won't know until we
+                 * check.
+                 */
+                /*
+                 * Debug XXX
+                let iv = *ds_work_rx.borrow();
                 println!("[{}] Input changed with {}", up_coms.client_id, iv);
                  */
                 io_send(up, &mut fw, up_coms.client_id, lossy).await?;
@@ -477,8 +492,16 @@ async fn proc(
                          * from main task
                          */
                         if version != 1 {
+                            up.ds_transition(up_coms.client_id, DsState::BadVersion);
                             bail!("expected version 1, got {}", version);
                         }
+                        /*
+                         * XXX BadRegion check will come when the upstairs
+                         * starts with the expected region size and we can
+                         * validate it.
+                         *
+                         * Until then, we just jump to waiting for quorum.
+                         */
                         negotiated = true;
                         needping = true;
                         deadline = deadline_secs(50);
@@ -492,22 +515,25 @@ async fn proc(
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
-                        process_downstairs(target, up, bs, es, ec, versions)?;
 
                         /*
-                         *  XXX I moved this here for now so we can use this
-                         * signal to move forward with I/O.  Eventually this
-                         * connected being true state should be sent from the
-                         * initial YesItsMe case, and we send something else
-                         * through a different watcher that tells the main
-                         * task the list of versions, or something like that.
+                         * We should be able to verify the bs, es, and ec
+                         * based on what the upstairs knows already.
+                         * For comparing the region data, we need to collect
+                         * version and dirty bit info from all three
+                         * downstairs, and make the decision on which data is
+                         * correct once we have everything.
                          */
+                        process_downstairs(target, up, bs, es, ec, versions)?;
+
+                        up.ds_transition(up_coms.client_id, DsState::WaitQuorum);
+                        up.ds_state_show();
 
                         /*
                          * If we get here, we are ready to receive IO
                          */
                         *connected = true;
-                        up_coms.output.send(Condition {
+                        up_coms.ds_status_tx.send(Condition {
                             target: *target,
                             connected: true,
                         }).await
@@ -517,6 +543,11 @@ async fn proc(
                         if !negotiated {
                             bail!("expected YesItsMe first");
                         }
+                        /*
+                         * TODO: Add a check here to make sure we are
+                         * connected and in the proper state before we
+                         * accept any commands.
+                         */
                         proc_frame(up, &m, up_coms.clone()).await?;
                         deadline = deadline_secs(50);
                         pingat = deadline_secs(10);
@@ -534,16 +565,31 @@ async fn proc(
  */
 #[derive(Clone)]
 struct UpComs {
+    /**
+     * The client ID who will be using these channels.
+     */
     client_id: u8,
-    input: watch::Receiver<u64>,
-    output: mpsc::Sender<Condition>,
+    /**
+     * This channel is used to receive a notification that new work has
+     * (possibly) arrived on the work queue and this client should go
+     * see what new work has arrived
+     */
+    ds_work_rx: watch::Receiver<u64>,
+    /**
+     * This channel is used to transmit that the state of the connection
+     * to this downstairs has changed.
+     */
+    ds_status_tx: mpsc::Sender<Condition>,
+    /**
+     * This channel is used to transmit that an IO request sent by the
+     * upstairs to all required downstairs has completed.
+     */
     ds_done_tx: mpsc::Sender<u64>,
 }
 
 /*
- * This task is responsible for the connection to and traffic between
- * a specific downstairs instance.  In here we handle taking work off of
- * the global work list and performing that work for a specific downstairs.
+ * This task is responsible for the connection to a specific downstairs
+ * instance.
  */
 async fn looper(
     target: SocketAddrV4,
@@ -608,10 +654,20 @@ async fn looper(
         {
             eprintln!("ERROR: {}: proc: {:?}", target, e);
         }
+        /*
+         * If the connection goes down here, we need to know what state we
+         * were in to decide what state to transition to.
+         */
+        up.ds_transition(up_coms.client_id, DsState::Disconnected);
+        up.ds_state_show();
 
+        println!(
+            "{0}[{1}] connection to {0} closed",
+            target, up_coms.client_id
+        );
         if connected {
             up_coms
-                .output
+                .ds_status_tx
                 .send(Condition {
                     target,
                     connected: false,
@@ -790,6 +846,13 @@ pub struct Upstairs {
      */
     guest: Arc<Guest>,
     /*
+     * The state of a downstairs connection, based on client ID
+     * Ready here indicates it can receive IO.
+     * TODO: When growing to more than one region, should this become
+     * a 2d Vec? index for region, then index for the DS?
+     */
+    ds_state: Mutex<Vec<DsState>>,
+    /*
      * This Work struct keeps track of IO operations going between upstairs
      * and downstairs.  New work for downstairs is generated inside the
      * upstairs on behalf of IO requests coming from the guest.
@@ -818,17 +881,19 @@ pub struct Upstairs {
      * enables us to tranlate an LBA to an extent and block offset.
      */
     ddef: Mutex<RegionDefinition>,
-    /*
-     * The state of a downstairs connection, based on client ID
-     * Ready here indicates it can receive IO.
-     */
-    downstairs: Mutex<Vec<DownstairsState>>,
 }
 
 impl Upstairs {
     pub fn new(opt: &CrucibleOpts, guest: Arc<Guest>) -> Arc<Upstairs> {
+        /*
+         * XXX Make sure we have three and only three downstairs
+         */
+        assert_eq!(opt.target.len(), 3);
+
+        let ds_state = vec![DsState::New; 3];
         Arc::new(Upstairs {
             guest,
+            ds_state: Mutex::new(ds_state),
             ds_work: Mutex::new(Work {
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2048),
@@ -836,7 +901,6 @@ impl Upstairs {
             }),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(RegionDefinition::default()),
-            downstairs: Mutex::new(Vec::with_capacity(opt.target.len())),
         })
     }
 
@@ -1062,6 +1126,48 @@ impl Upstairs {
             ds_work.enqueue(wr);
         }
     }
+
+    /*
+     * Move a single downstairs to this new state.
+     */
+    fn ds_transition(&self, client_id: u8, new_state: DsState) {
+        let mut state = self.ds_state.lock().unwrap();
+        println!(
+            "Transition [{}] from {:?} to {:?}",
+            client_id, state[client_id as usize], new_state,
+        );
+        state[client_id as usize] = new_state;
+    }
+
+    fn ds_state_show(&self) {
+        let state = self.ds_state.lock().unwrap();
+        for (index, dst) in state.iter().enumerate() {
+            println!("[{}] State {:?}", index, dst);
+        }
+    }
+
+    /*
+     * Move all downstairs to this new state.
+     */
+    fn ds_transition_all(&self, new_state: DsState) {
+        let mut state = self.ds_state.lock().unwrap();
+
+        state.iter_mut().for_each(|ds_state| {
+            println!("Transition from {:?} to {:?}", *ds_state, new_state,);
+            match new_state {
+                DsState::Active => {
+                    assert_eq!(*ds_state, DsState::WaitQuorum);
+                    *ds_state = new_state;
+                }
+                _ => {
+                    panic!(
+                        "Unsupported state transition {:?} -> {:?}",
+                        *ds_state, new_state
+                    );
+                }
+            }
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -1094,13 +1200,63 @@ impl FlushInfo {
     }
 }
 /*
- * I think we will have more states.  If not, then this should just become
- * a bool.
+ * States a downstairs can be in.
+ * XXX This very much still under development.  Most of these are place
+ * holders and the final set of states will change.
  */
-#[derive(Debug, Clone)]
-enum DownstairsState {
-    _NotReady,
-    _Ready,
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum DsState {
+    /*
+     * New connection
+     */
+    New,
+    /*
+     * Incompatable software version reported.
+     */
+    BadVersion,
+    /*
+     * Waiting for the minimum number of downstairs to be present.
+     */
+    WaitQuorum,
+    /*
+     * Incompatable region format reported.
+     */
+    _BadRegion,
+    /*
+     * We were connected, but have since gone offline.
+     */
+    Disconnected,
+    /*
+     * Comparing downstairs for consistency.
+     */
+    _Verifying,
+    /*
+     * Failed when attempting to make consistent.
+     */
+    _FailedRepair,
+    /*
+     * Ready for and/or currently receiving IO
+     */
+    Active,
+    /*
+     * IO attempts to this downstairs are failing at too high of a
+     * rate, or it is not able to keep up., or it is having some
+     * error such that we can no longer use it.
+     */
+    _Failed,
+    /*
+     * This downstairs is being migrated to a new location
+     */
+    _Migrating,
+    /*
+     * This downstairs was active, but is now no longer connected.
+     */
+    _Offline,
+    /*
+     * This downstairs was offline but is now back online and we are
+     * sending it all the I/O it missed when it was unavailable.
+     */
+    _Replay,
 }
 
 /*
@@ -1779,7 +1935,7 @@ impl Default for Guest {
 pub struct Target {
     #[allow(dead_code)]
     target: SocketAddrV4,
-    input: watch::Sender<u64>,
+    ds_work_tx: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
@@ -1796,7 +1952,7 @@ struct Condition {
 fn _send_work(t: &[Target], val: u64) {
     for d_client in t.iter() {
         // println!("#### send to client {:?}", d_client.target);
-        let res = d_client.input.send(val);
+        let res = d_client.ds_work_tx.send(val);
         if let Err(e) = res {
             panic!("#### error {:#?} sending work to {:?}", e, d_client.target);
             /*
@@ -1843,65 +1999,143 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             gw.ds_complete(done);
         }
     }
+    println!("up_ds_listen loop done");
 }
-/*
- * This task will loop forever and watch the Guest structure for new IO
- * operations showing up.  When one is detected, the type is checked and the
- * operation is translated into the corresponding upstairs IO type and put on
- * the internal upstairs queue.
- */
-async fn up_listen(up: &Arc<Upstairs>, dst: Vec<Target>) {
-    /*
-     * XXX Once we move this function to being called after all downstairs are
-     * online, we can remove this sleep
-     */
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
+/**
+ * The upstairs has recieved a new IO request from the guest.  Here we
+ * decide what to for that request.
+ * For IO operations, we build the downstairs work and if required split
+ * the single IO into multiple IOs to the downstairs.  Once we have built
+ * the work and updated the upstairs and downstairs work queues, we signal
+ * to all the downstairs tasks there is new work for them to do.
+ */
+fn process_new_io(
+    up: &Arc<Upstairs>,
+    dst: &[Target],
+    req: BlockReq,
+    lastcast: &mut u64,
+) {
+    match req.op {
+        BlockOp::Read { offset, data } => {
+            up.submit_read(offset, data, req.send);
+            dst.iter()
+                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            *lastcast += 1;
+        }
+        BlockOp::Write { offset, data } => {
+            up.submit_write(offset, data, req.send);
+            dst.iter()
+                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            *lastcast += 1;
+        }
+        BlockOp::Flush => {
+            up.submit_flush(req.send).unwrap();
+            dst.iter()
+                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            *lastcast += 1;
+        }
+        // Query ops
+        BlockOp::QueryBlockSize { data } => {
+            *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
+            let _ = req.send.send(0);
+        }
+        BlockOp::QueryTotalSize { data } => {
+            *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
+            let _ = req.send.send(0);
+        }
+        // Testing options
+        BlockOp::QueryExtentSize { data } => {
+            // Yes, test only
+            *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
+            let _ = req.send.send(0);
+        }
+        BlockOp::QueryActive { data } => {
+            *data.lock().unwrap() =
+                up.guest.guest_work.lock().unwrap().active_count();
+            let _ = req.send.send(0);
+        }
+        BlockOp::ShowWork => {
+            show_all_work(up);
+        }
+        BlockOp::Commit => {
+            dst.iter()
+                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            *lastcast += 1;
+        }
+    }
+}
+
+/*
+ * This task will loop forever and wait for three downstairs to get into the
+ * ready state.  We are notified of that through the ds_status_rx channel.
+ * Once we have three connections, we then also listen for work requests
+ * to come over the guest channel.
+ * If we lose a connection to downstairs, we just panic. XXX Eventually we
+ * will handle that situation.
+ */
+async fn up_listen(
+    up: &Arc<Upstairs>,
+    dst: Vec<Target>,
+    mut ds_status_rx: mpsc::Receiver<Condition>,
+) {
+    println!("Wait for all three downstairs to come online");
+    let mut ds_count = 0u32;
     let mut lastcast = 1;
+
     loop {
-        let req = up.guest.recv().await;
-        match req.op {
-            BlockOp::Read { offset, data } => {
-                up.submit_read(offset, data, req.send);
-                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
-                lastcast += 1;
+        /*
+         * For now, we need all three connections to proceed.
+         */
+        while ds_count < 3 {
+            let c = ds_status_rx.recv().await.unwrap();
+            if c.connected {
+                ds_count += 1;
+                println!(
+                    "#### {:?} #### CONNECTED ######## {}/??",
+                    c.target, ds_count,
+                );
+            } else {
+                println!("#### {:?} #### DISCONNECTED! ####", c.target);
+                ds_count -= 1;
             }
-            BlockOp::Write { offset, data } => {
-                up.submit_write(offset, data, req.send);
-                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
-                lastcast += 1;
-            }
-            BlockOp::Flush => {
-                up.submit_flush(req.send).unwrap();
-                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
-                lastcast += 1;
-            }
-            // Query ops
-            BlockOp::QueryBlockSize { data } => {
-                *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
-                let _ = req.send.send(0);
-            }
-            BlockOp::QueryTotalSize { data } => {
-                *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
-                let _ = req.send.send(0);
-            }
-            // Testing options
-            BlockOp::QueryExtentSize { data } => {
-                // Yes, test only
-                *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
-                let _ = req.send.send(0);
-            }
-            BlockOp::QueryActive { data } => {
-                *data.lock().unwrap() =
-                    up.guest.guest_work.lock().unwrap().active_count();
-                let _ = req.send.send(0);
-            }
-            BlockOp::ShowWork => {
-                show_all_work(up);
-            }
-            BlockOp::Commit => {
-                dst.iter().for_each(|t| t.input.send(lastcast).unwrap());
-                lastcast += 1;
+        }
+
+        println!("All expected targets are online, Now accepting IO requests");
+        up.ds_transition_all(DsState::Active);
+        up.ds_state_show();
+
+        /*
+         * We have three connections, so we can now start listening for
+         * more IO to come in.  We also need to make sure our downstairs
+         * stay connected, and we watch the ds_status_rx.recv() for that
+         * to change which is our notification that a disconnect has happened.
+         */
+        loop {
+            tokio::select! {
+                c = ds_status_rx.recv() => {
+                    /*
+                     * If this is anything other than a disconnect, then
+                     * panic at this time.  Given our outer loop is doing the
+                     * work of connecting all three downstairs, all this
+                     * should ever have to do (right now) is detatch a
+                     * downstairs and stop taking I/O.
+                     */
+                    if let Some(ref c) = c {
+                        if !c.connected {
+                            println!("{} offline, stop IO ", c.target);
+                            panic!("Can't recover if downstairs goes offline");
+                        }
+                    }
+                    /*
+                     * Any thing other than a transition from connected to
+                     * disconnected is wrong.
+                     */
+                    panic!("error n ds_status_rx: {:?}", c);
+                }
+                req = up.guest.recv() => {
+                    process_new_io(up, &dst, req, &mut lastcast);
+                }
             }
         }
     }
@@ -1934,7 +2168,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Use this channel to receive updates on target status from each task
      * we create to connect to a downstairs.
      */
-    let (ctx, mut crx) = mpsc::channel::<Condition>(32);
+    let (ds_status_tx, ds_status_rx) = mpsc::channel::<Condition>(32);
 
     /*
      * Use this channel to indicate in the upstairs that all downstairs
@@ -1964,17 +2198,15 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
              * Create the channel that we will use to request that the loop
              * check for work to do in the central structure.
              */
-            let (itx, irx) = watch::channel(100); // XXX 100?
+            let (ds_work_tx, ds_work_rx) = watch::channel(100); // XXX 100?
 
             let up = Arc::clone(&up);
-            let ctx = ctx.clone();
             let t0 = *dst;
-            let ds_done_tx = ds_done_tx.clone();
             let up_coms = UpComs {
                 client_id,
-                input: irx,
-                output: ctx,
-                ds_done_tx,
+                ds_work_rx,
+                ds_status_tx: ds_status_tx.clone(),
+                ds_done_tx: ds_done_tx.clone(),
             };
             tokio::spawn(async move {
                 looper(t0, &up, up_coms, lossy).await;
@@ -1983,51 +2215,19 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
 
             Target {
                 target: *dst,
-                input: itx,
+                ds_work_tx,
             }
         })
         .collect::<Vec<_>>();
 
     /*
-     * Create a task to listen for work from outside.
-     *
-     * The role of this task is to move work between the outside
-     * work queue and the internal Upstairs work queue, as well as send
-     * completion messages and/or copy data back to the outside.
-     *
-     * XXX This needs a little more work.  We should not start to listen
-     * to the outside until we know that all our downstairs are ready to
-     * take IO operations.
+     * The final step is to call this function to wait for our downstairs
+     * tasks to connect to their respective downstairs instance.
+     * Once connected, we then take work requests from the guest and
+     * submit them into the upstairs
      */
-    let upl = Arc::clone(&up);
-    tokio::spawn(async move {
-        up_listen(&upl, dst).await;
-    });
-
-    // async tasks need to tell us they are alive, but they also need to
-    // tell us the extent list from any attached downstairs.
-    // That part is not connected yet. XXX
-    let mut ds_count = 0u32;
-    loop {
-        let c = crx.recv().await.unwrap();
-        if c.connected {
-            ds_count += 1;
-            println!(
-                "#### {:?} #### CONNECTED ######## {}/{}",
-                c.target,
-                ds_count,
-                opt.target.len()
-            );
-        } else {
-            println!("#### {:?} #### DISCONNECTED! ####", c.target);
-            ds_count -= 1;
-        }
-        /*
-         * We need some additional way to indicate that this upstairs is ready
-         * to receive work.  Just connecting to n downstairs is not enough,
-         * we need to also know that they all have the same data.
-         */
-    }
+    up_listen(&up, dst, ds_status_rx).await;
+    Ok(())
 }
 
 /*
@@ -2455,6 +2655,8 @@ mod test {
         def.set_extent_count(10);
 
         Arc::new(Upstairs {
+            guest: Arc::new(Guest::new()),
+            ds_state: Mutex::new(vec![DsState::New; 3]),
             ds_work: Mutex::new(Work {
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2),
@@ -2462,8 +2664,6 @@ mod test {
             }),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
-            downstairs: Mutex::new(Vec::with_capacity(1)),
-            guest: Arc::new(Guest::new()),
         })
     }
 
