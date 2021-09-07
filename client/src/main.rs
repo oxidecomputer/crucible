@@ -53,6 +53,9 @@ pub struct Opt {
      */
     #[structopt(short, long)]
     quit: bool,
+
+    #[structopt(short, long)]
+    key: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -96,6 +99,7 @@ fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: opt.lossy,
+        key: opt.key,
     };
 
     /*
