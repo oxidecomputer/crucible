@@ -1770,9 +1770,109 @@ impl BlockReqWaiter {
         Self { recv }
     }
 
+    /*
+     * A no-op BlockReqWaiter returns immediately.
+     */
+    fn noop() -> BlockReqWaiter {
+        let (send, recv) = std_mpsc::channel();
+        let _ = send.send(0);
+        BlockReqWaiter::new(recv)
+    }
+
     pub fn block_wait(&mut self) {
         // TODO: Instead of i32, errors should be bubbled up.
         let _ = self.recv.recv();
+    }
+}
+
+/*
+ * IO operations are ok to submit directly to Upstairs if:
+ *
+ * - the offset is block aligned, and
+ * - the size is a multiple of block size
+ *
+ * If either of these is not true, then perform some fixup here.
+ */
+#[derive(Debug)]
+struct IOSpan {
+    // IOP details
+    offset: u64,
+    sz: u64,
+
+    // Block and Guest details
+    block_size: u64,
+    phase: u64,
+    buffer: Buffer,
+    affected_block_numbers: Vec<u64>,
+}
+
+impl IOSpan {
+    // Create an IOSpan given a IO operation at offset and size.
+    fn new(offset: u64, sz: u64, block_size: u64) -> IOSpan {
+        let start_block = offset / block_size;
+        let end_block = (offset + sz - 1) / block_size;
+
+        let affected_block_numbers: Vec<u64> =
+            (start_block..=end_block).collect();
+
+        Self {
+            offset,
+            sz,
+            block_size,
+            phase: offset % block_size,
+            buffer: Buffer::new(
+                affected_block_numbers.len() * block_size as usize,
+            ),
+            affected_block_numbers,
+        }
+    }
+
+    fn is_block_aligned_and_block_sized(&self) -> bool {
+        let is_block_aligned = (self.offset % self.block_size) == 0;
+        let is_block_sized = (self.sz % self.block_size) == 0;
+
+        is_block_aligned && is_block_sized
+    }
+
+    #[cfg(test)]
+    fn number_of_affected_blocks(&self) -> usize {
+        self.affected_block_numbers.len()
+    }
+
+    #[instrument]
+    fn read_affected_blocks_from_guest(
+        &mut self,
+        guest: &Guest,
+    ) -> BlockReqWaiter {
+        guest.read(
+            self.affected_block_numbers[0] * self.block_size,
+            self.buffer.clone(),
+        )
+    }
+
+    #[instrument]
+    fn write_affected_blocks_to_guest(&self, guest: &Guest) -> BlockReqWaiter {
+        let bytes = Bytes::from(self.buffer.as_vec().clone());
+        guest.write(self.affected_block_numbers[0] * self.block_size, bytes)
+    }
+
+    #[instrument]
+    fn read_from_blocks_into_buffer(&self, data: &Buffer) {
+        assert_eq!(data.len(), self.sz as usize);
+
+        let mut vec = data.as_vec();
+        for i in 0..vec.len() {
+            vec[i] = self.buffer.as_vec()[self.phase as usize + i];
+        }
+    }
+
+    #[instrument]
+    fn write_from_buffer_into_blocks(&self, data: &Bytes) {
+        assert_eq!(data.len(), self.sz as usize);
+
+        for i in 0..data.len() {
+            self.buffer.as_vec()[self.phase as usize + i] = data[i];
+        }
     }
 }
 
@@ -1876,13 +1976,44 @@ impl Guest {
     // TODO: get status from waiter, bubble that up as a Result?
 
     pub fn read(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
-        let rio = BlockOp::Read { offset, data };
-        self.send(rio)
+        let mut span =
+            IOSpan::new(offset, data.len() as u64, self.query_block_size());
+
+        if span.is_block_aligned_and_block_sized() {
+            let rio = BlockOp::Read { offset, data };
+            self.send(rio)
+        } else {
+            let mut waiter = span.read_affected_blocks_from_guest(self);
+            waiter.block_wait();
+
+            span.read_from_blocks_into_buffer(&data);
+
+            BlockReqWaiter::noop()
+        }
     }
 
     pub fn write(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
-        let wio = BlockOp::Write { offset, data };
-        self.send(wio)
+        let mut span =
+            IOSpan::new(offset, data.len() as u64, self.query_block_size());
+
+        if span.is_block_aligned_and_block_sized() {
+            let wio = BlockOp::Write { offset, data };
+            self.send(wio)
+        } else {
+            /*
+             * Note: if only submitting block sized writes to Upstairs, do read+modify+write here.
+             */
+
+            // XXX: RMW here has atomicity problem
+            println!("ATOMICITY FAIL! write of {} size {}", offset, data.len());
+
+            let mut waiter = span.read_affected_blocks_from_guest(self);
+            waiter.block_wait();
+
+            span.write_from_buffer_into_blocks(&data);
+
+            span.write_affected_blocks_to_guest(self)
+        }
     }
 
     pub fn flush(&self) -> BlockReqWaiter {
@@ -2410,6 +2541,7 @@ fn show_guest_work(guest: &Arc<Guest>) {
 /*
  * Wrap a Crucible guest and implement Read + Write + Seek traits.
  */
+#[derive(Debug)]
 pub struct CruciblePseudoFile {
     guest: Arc<Guest>,
     offset: u64,
@@ -2436,6 +2568,7 @@ impl CruciblePseudoFile {
  * calls for the underlying Crucible API.
  */
 impl Read for CruciblePseudoFile {
+    #[instrument(name = "pseudofile-read")]
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         let data = Buffer::from_slice(buf);
 
@@ -2460,6 +2593,7 @@ impl Read for CruciblePseudoFile {
 }
 
 impl Write for CruciblePseudoFile {
+    #[instrument(name = "pseudofile-write")]
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
         let mut data = BytesMut::with_capacity(buf.len());
         data.put_slice(buf);
@@ -2473,6 +2607,7 @@ impl Write for CruciblePseudoFile {
         Ok(buf.len())
     }
 
+    #[instrument(name = "pseudofile-flush")]
     fn flush(&mut self) -> IOResult<()> {
         let mut waiter = self.guest.flush();
         waiter.block_wait();
@@ -2642,6 +2777,68 @@ mod test {
             extent_from_offset(ddef, 17657856, 8192).unwrap(),
             vec![(344, 45056, 6144), (345, 0, 2048),],
         );
+    }
+
+    #[test]
+    fn test_iospan() {
+        let span = IOSpan::new(512, 1024, 512);
+        assert!(span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 2);
+
+        let span = IOSpan::new(513, 1024, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 3);
+
+        let span = IOSpan::new(512, 500, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 1);
+
+        let span = IOSpan::new(512, 512, 4096);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 1);
+
+        let span = IOSpan::new(500, 4096 * 10, 4096);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 10 + 1);
+
+        let span = IOSpan::new(500, 4096 * 3 + (4096 - 500 + 1), 4096);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 3 + 2);
+
+        // Some from hammer
+        let span = IOSpan::new(137690, 1340, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 4);
+        assert_eq!(span.affected_block_numbers, vec![268, 269, 270, 271]);
+    }
+
+    #[test]
+    fn test_iospan_buffer_read_write() {
+        let span = IOSpan::new(500, 64, 512);
+        assert_eq!(span.number_of_affected_blocks(), 2);
+        assert_eq!(span.affected_block_numbers, vec![0, 1]);
+
+        span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]));
+
+        for i in 0..500 {
+            assert_eq!(span.buffer.as_vec()[i], 0);
+        }
+        for i in 500..512 {
+            assert_eq!(span.buffer.as_vec()[i], 1);
+        }
+        for i in 512..(512 + 64 - 12) {
+            assert_eq!(span.buffer.as_vec()[i], 1);
+        }
+        for i in (512 + 64 - 12)..1024 {
+            assert_eq!(span.buffer.as_vec()[i], 0);
+        }
+
+        let data = Buffer::new(64);
+        span.read_from_blocks_into_buffer(&data);
+
+        for i in 0..64 {
+            assert_eq!(data.as_vec()[i], 1);
+        }
     }
 
     /*

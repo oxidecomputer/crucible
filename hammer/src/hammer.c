@@ -9,7 +9,11 @@
 int main() {
   srandom(clock());
 
-  const size_t total_size = 512*100*1000; // TODO: get from region.json
+  // TODO: get from region.json
+  const size_t block_size = 512;
+  const size_t extent_size = 512;
+  const size_t extent_count = 32768;
+  const size_t total_size = block_size * extent_size * extent_count;
 
   while (1) {
     size_t offset = random() % total_size;
@@ -28,7 +32,7 @@ int main() {
     size_t r;
 
     // get some random data
-    fp = fopen("/dev/random", "rb");
+    fp = fopen("/dev/urandom", "rb");
     fn = fileno(fp);
 
     if (sz != read(fn, buf, sz)) {
