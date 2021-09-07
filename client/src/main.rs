@@ -5,19 +5,35 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::prelude::*;
+use rand_chacha::rand_core::SeedableRng;
+use structopt::clap::arg_enum;
 use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
 
+/*
+ * The various tests this program supports.
+ */
+arg_enum! {
+    #[derive(Debug, StructOpt)]
+    enum Workload {
+        One,
+        Big,
+        Dep,
+        Rand,
+        Baloon,
+    }
+}
+
 #[derive(Debug, StructOpt)]
-#[structopt(about = "volume-side storage component")]
+#[structopt(about = "crucible upstairs test client")]
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddrV4>,
 
-    #[structopt(short, long, default_value = "one")]
-    workload: String,
+    #[structopt(short, long, possible_values = &Workload::variants(), default_value = "One", case_insensitive = true)]
+    workload: Workload,
 
     /*
      * This allows the Upstairs to run in a mode where it will not
@@ -29,6 +45,14 @@ pub struct Opt {
      */
     #[structopt(long)]
     lossy: bool,
+
+    /*
+     * quit after tests finish.
+     * By default, the client remains running and sends a flush
+     * request every so often to the downstairs.
+     */
+    #[structopt(short, long)]
+    quit: bool,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -47,6 +71,16 @@ pub fn opts() -> Result<Opt> {
  * Here we make use of the interfaces that Crucible exposes.
  */
 fn main() -> Result<()> {
+    /*
+     * If any of our async tasks in our runtime panic, then we should
+     * exit the program right away.
+     */
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     let opt = opts()?;
 
     /*
@@ -99,18 +133,18 @@ fn main() -> Result<()> {
      */
 
     /*
-     * Figure out the workload option passed to us on the command line.
+     * Call the function for the workload option passed from the command line.
      */
-    match opt.workload.as_str() {
-        "one" => {
+    match opt.workload {
+        Workload::One => {
             println!("One test");
             single_workload(&guest)?;
         }
-        "big" => {
+        Workload::Big => {
             println!("Run big test");
             big_workload(&guest)?;
         }
-        "dep" => {
+        Workload::Dep => {
             println!("Run dep test");
             /*
              * Attempted workaround to handle tokio async issues
@@ -124,22 +158,322 @@ fn main() -> Result<()> {
                 .unwrap();
             println!("dep runtime started");
              */
-            runtime.block_on(dep_workload(guest))?;
-            return Ok(());
+            runtime.block_on(dep_workload(&guest))?;
         }
-        _ => {
-            println!("Unknown workload type {}", opt.workload);
-            return Ok(());
+        Workload::Rand => {
+            println!("Run random test");
+            runtime.block_on(rand_workload(&guest))?;
+        }
+        Workload::Baloon => {
+            println!("Run baloon test");
+            runtime.block_on(baloon_workload(&guest))?;
         }
     }
 
     println!("Tests done");
+    if opt.quit {
+        return Ok(());
+    }
+
     loop {
         guest.show_work();
         std::thread::sleep(std::time::Duration::from_secs(30));
         println!("\n\n   Loop send flush");
         guest.flush();
     }
+}
+
+/*
+ * Given the write count vec and the index, pick the seed value we use when
+ * writing or expect when reading block.
+ * TODO: This can be improved on.  The mod at 250 was me leaving some room
+ * for some special values, though I may or may not use them.
+ */
+fn get_seed(index: usize, wc: &[u32]) -> u8 {
+    (wc[index] % 250) as u8
+}
+
+/*
+ * Fill a vec based on the write count at our index.
+ * This is fine for an initial fill/verify framework of sorts, but there
+ * are many kinds of errors this will not find.  There are also many high
+ * performance better coverage kinds of data integrity tests, and the intent
+ * here is to balance urgency with rigor in that we can make use of external
+ * tests for the more complicated cases, and catch the easy ones here.
+ *
+ * block_index: What block we started reading from.
+ * blocks:      The length of the read in blocks.
+ * wc:          The write count vec, indexed by block number.
+ * bs:          Crucible's block size.
+ */
+fn fill_vec(block_index: usize, blocks: usize, wc: &[u32], bs: u64) -> Vec<u8> {
+    assert_ne!(blocks, 0);
+    assert_ne!(bs, 0);
+    /*
+     * Each block we are filling the buffer for can have a different
+     * seed value.  For multiple block sized writes, we need to create
+     * the write buffer with the correct seed value.
+     */
+    let mut vec: Vec<u8> = Vec::with_capacity(blocks * bs as usize);
+    for block_offset in block_index..(block_index + blocks) {
+        /*
+         * The start of each block contains that blocks index mod 255
+         */
+        let seed = get_seed(block_offset, wc);
+        /*
+         * Fill the rest of the buffer with the new write count
+         */
+        vec.push((block_offset % 255) as u8);
+        for _ in 1..bs {
+            vec.push(seed);
+        }
+    }
+    vec
+}
+
+/*
+ * Compare a vec buffer with what we expect to be written for that offset.
+ * This assumes you used the fill_vec function (with get_seed) to write
+ * the buffer originally.
+ *
+ * data:        The filled in buffer to be verified.
+ * block_index: What block we started reading from.
+ * wc:          The write count vec, indexed by block number.
+ * bs:          Crucible's block size.
+ */
+fn validate_vec(
+    data: Vec<u8>,
+    block_index: usize,
+    wc: &[u32],
+    bs: u64,
+) -> bool {
+    let bs = bs as usize;
+    assert_eq!(data.len() % bs, 0);
+    assert_ne!(data.len(), 0);
+
+    let blocks = data.len() / bs;
+    let mut data_offset: usize = 0;
+    let mut res = true;
+    /*
+     * The outer loop walks the buffer by blocks, as each block will have
+     * its own unique write count.
+     */
+    for block_offset in block_index..(block_index + blocks) {
+        /*
+         * Skip blocks we don't know the expected value of
+         */
+        if wc[block_offset] == 0 {
+            data_offset += bs;
+            continue;
+        }
+
+        /*
+         * First check the initial value to verify it has the block number.
+         */
+        if data[data_offset] != (block_offset % 255) as u8 {
+            let byte_offset = bs as u64 * block_offset as u64;
+            println!(
+                "BO:{} Offset:{}  Expected: {} != Got: {} Block Index",
+                block_offset,
+                byte_offset,
+                block_offset % 255,
+                data[data_offset],
+            );
+            res = false;
+        }
+
+        let seed = get_seed(block_offset, wc);
+        for i in 1..bs {
+            if data[data_offset + i] != seed {
+                let byte_offset = bs as u64 * block_offset as u64;
+                println!(
+                    "BO:{} Offset:{}  Expected: {} != Got: {}",
+                    block_offset,
+                    byte_offset + i as u64,
+                    seed,
+                    data[i],
+                );
+                res = false;
+            }
+        }
+        data_offset += bs as usize;
+    }
+    res
+}
+
+/*
+ * Write then read (and verify) to every possible block, with every size that
+ * block can possibly support.
+ * I named it baloon because each loop on a block "baloons" from the minimum
+ * IO size to the largest possible.
+ */
+async fn baloon_workload(guest: &Arc<Guest>) -> Result<()> {
+    /*
+     * These query requests have the side effect of preventing the test from
+     * starting before the upstairs is ready.
+     */
+    let block_size = guest.query_block_size();
+    let extent_size = guest.query_extent_size();
+    let total_size = guest.query_total_size();
+    let total_blocks = (total_size / block_size) as usize;
+
+    println!(
+        "Baloon workload starting with  es: {}  bs:{}  ts:{}  tb:{}",
+        extent_size, block_size, total_size, total_blocks
+    );
+
+    /*
+     * Create an array that tracks the number of writes to each block, so
+     * we can know what to expect for reads.
+     */
+    let mut write_count = vec![0_u32; total_blocks];
+
+    for block_index in 0..total_blocks {
+        /*
+         * Loop over all the IO sizes (in blocks) that an IO can
+         * have, given our starting block and the total number of blocks
+         * We always have at least one block, and possibly more.
+         */
+        for size in 1..=(total_blocks - block_index) {
+            /*
+             * Update the write count for all blocks we plan to write to.
+             */
+            for i in 0..size {
+                write_count[block_index + i] += 1;
+            }
+
+            let vec = fill_vec(block_index, size, &write_count, block_size);
+            let data = Bytes::from(vec);
+            /*
+             * Convert block_index to its byte value.
+             */
+            let offset = (block_index as u64 * block_size) as u64;
+
+            let mut waiter = guest.write(offset, data);
+            waiter.block_wait();
+
+            let mut waiter = guest.flush();
+            waiter.block_wait();
+
+            let length: usize = size * block_size as usize;
+            let vec: Vec<u8> = vec![255; length];
+            let data = crucible::Buffer::from_vec(vec);
+            let mut waiter = guest.read(offset, data.clone());
+            waiter.block_wait();
+
+            let dl = data.as_vec().to_vec();
+            if !validate_vec(dl.clone(), block_index, &write_count, block_size)
+            {
+                bail!("Error at {}", block_index);
+            }
+        }
+    }
+
+    print_write_count(write_count, total_blocks, extent_size);
+    Ok(())
+}
+
+/*
+ * Print out the contents of the write count vector where each line
+ * is an extent and each column is a block.
+ */
+fn print_write_count(
+    write_count: Vec<u32>,
+    total_blocks: usize,
+    extent_size: u64,
+) {
+    println!(" Write IO count to each extent");
+    println!("###############################");
+    for (i, wc) in write_count.iter().enumerate().take(total_blocks) {
+        print!("{:5} ", wc);
+        if (i + 1) % (extent_size as usize) == 0 {
+            println!();
+        }
+    }
+}
+
+/*
+ * Generate a random offset and length, and write to then read from
+ * that offset/lenght.  Verify the data is what we expect.
+ */
+async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
+    /*
+     * These query requests have the side effect of preventing the test from
+     * starting before the upstairs is ready.
+     */
+    let block_size = guest.query_block_size();
+    let extent_size = guest.query_extent_size();
+    let total_size = guest.query_total_size();
+    let total_blocks = (total_size / block_size) as usize;
+
+    println!(
+        "Random workload starting with  es: {}  bs:{}  ts:{}  tb:{}",
+        extent_size, block_size, total_size, total_blocks
+    );
+
+    /*
+     * Create an array that tracks the number of writes to each block, so
+     * we can know what to expect for reads.
+     */
+    let mut write_count = vec![0_u32; total_blocks];
+
+    /*
+     * TODO: Allow the user to specify a seed here.
+     */
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    /*
+     * TODO: Let the user select the number of loops
+     */
+    for _ in 0..1000 {
+        /*
+         * Pick a random size (in blocks) for the IO, up to the size of the
+         * entire region.
+         */
+        let size = rng.gen_range(1..=total_blocks) as usize;
+
+        /*
+         * Once we have our IO size, decide where the starting offset should
+         * be, which is the total possible size minus the randomly chosen
+         * IO size.
+         */
+        let block_max = total_blocks - size + 1;
+        let block_index = rng.gen_range(0..block_max) as usize;
+
+        /*
+         * Convert offset and length to their byte values.
+         */
+        let offset = (block_index as u64 * block_size) as u64;
+
+        /*
+         * Update the write count for all blocks we plan to write to.
+         */
+        for i in 0..size {
+            write_count[block_index + i] += 1;
+        }
+
+        let vec = fill_vec(block_index, size, &write_count, block_size);
+        let data = Bytes::from(vec);
+        let mut waiter = guest.write(offset, data);
+        waiter.block_wait();
+
+        let mut waiter = guest.flush();
+        waiter.block_wait();
+
+        let length: usize = size * block_size as usize;
+        let vec: Vec<u8> = vec![255; length];
+        let data = crucible::Buffer::from_vec(vec);
+        let mut waiter = guest.read(offset, data.clone());
+        waiter.block_wait();
+
+        let dl = data.as_vec().to_vec();
+        if !validate_vec(dl.clone(), block_index, &write_count, block_size) {
+            bail!("Error at {}", block_index);
+        }
+    }
+
+    print_write_count(write_count, total_blocks, extent_size);
+    Ok(())
 }
 
 /*
@@ -265,7 +599,7 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
  * sending jobs to the downstairs, creating dependencys that it will
  * eventually resolve.
  */
-async fn dep_workload(guest: Arc<Guest>) -> Result<()> {
+async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
     let block_size = guest.query_block_size();
     let total_size = guest.query_total_size();
     let final_offset = total_size - block_size;
@@ -275,10 +609,10 @@ async fn dep_workload(guest: Arc<Guest>) -> Result<()> {
         let mut waiterlist = Vec::new();
 
         /*
-         * Generate some numbero of operations
+         * Generate some number of operations
          */
         for ioc in 0..20 {
-            my_offset += block_size % final_offset;
+            my_offset = (my_offset + block_size) % final_offset;
             if random() {
                 /*
                  * Generate a write buffer with a locally unique value.
@@ -376,5 +710,149 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         // scope.wait_for("show work").await;
         guest.show_work();
         //scope.wait_for("at the bottom").await;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_read_compare() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        write_count[0] = 1;
+
+        let vec = fill_vec(0, 1, &write_count, bs);
+        assert_eq!(validate_vec(vec, 0, &write_count, bs), true);
+    }
+
+    #[test]
+    fn test_read_compare_fail() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        write_count[0] = 2;
+
+        let vec = fill_vec(0, 1, &write_count, bs);
+        write_count[0] = 1;
+        assert_eq!(validate_vec(vec, 0, &write_count, bs), false);
+    }
+
+    #[test]
+    fn test_read_compare_fail_buf() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        write_count[0] = 2;
+
+        let mut vec = fill_vec(0, 1, &write_count, bs);
+        vec[2] = 1;
+        assert_eq!(validate_vec(vec, 0, &write_count, bs), false);
+    }
+
+    #[test]
+    fn test_read_compare_fail_block() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        write_count[0] = 2;
+
+        let mut vec = fill_vec(0, 1, &write_count, bs);
+        vec[0] = 3;
+        assert_eq!(validate_vec(vec, 0, &write_count, bs), false);
+    }
+
+    #[test]
+    fn test_read_compare_1() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        let block_index = 1;
+        write_count[block_index] += 1;
+
+        let vec = fill_vec(block_index, 1, &write_count, bs);
+        assert_eq!(validate_vec(vec, block_index, &write_count, bs), true);
+    }
+
+    #[test]
+    fn test_read_compare_large() {
+        let bs: u64 = 512;
+        let total_blocks = 100;
+        let block_index = 0;
+        /*
+         * Simulate having written to all blocks
+         */
+        let write_count = vec![1_u32; total_blocks];
+        let vec = fill_vec(block_index, total_blocks, &write_count, bs);
+
+        assert_eq!(validate_vec(vec, block_index, &write_count, bs), true);
+    }
+
+    #[test]
+    fn test_read_compare_large_fail() {
+        let bs: u64 = 512;
+        let total_blocks = 100;
+        let block_index = 0;
+        /*
+         * Simulate having written to all blocks
+         */
+        let write_count = vec![1_u32; total_blocks];
+        let mut vec = fill_vec(block_index, total_blocks, &write_count, bs);
+        let x = vec.len() - 1;
+        vec[x] = 9;
+        assert_eq!(validate_vec(vec, block_index, &write_count, bs), false);
+    }
+
+    #[test]
+    fn test_read_compare_span() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        let block_index = 1;
+        write_count[block_index] = 1;
+        write_count[block_index + 1] = 2;
+        write_count[block_index + 2] = 3;
+
+        let vec = fill_vec(block_index, 3, &write_count, bs);
+        assert_eq!(validate_vec(vec, block_index, &write_count, bs), true);
+    }
+
+    #[test]
+    fn test_read_compare_span_fail() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        let block_index = 1;
+        write_count[block_index] = 1;
+        write_count[block_index + 1] = 2;
+        write_count[block_index + 2] = 3;
+
+        let mut vec = fill_vec(block_index, 3, &write_count, bs);
+        /*
+         * Replace the first value in the second block
+         */
+        vec[(bs + 1) as usize] = 9;
+        assert_eq!(validate_vec(vec, block_index, &write_count, bs), false);
+    }
+
+    #[test]
+    fn test_read_compare_span_fail_2() {
+        let bs: u64 = 512;
+        let mut write_count = vec![0_u32; 10];
+        let block_index = 1;
+        write_count[block_index] = 1;
+        write_count[block_index + 1] = 2;
+        write_count[block_index + 2] = 3;
+
+        let mut vec = fill_vec(block_index, 3, &write_count, bs);
+        /*
+         * Replace the second value in the second block
+         */
+        vec[(bs + 2) as usize] = 9;
+        assert_eq!(validate_vec(vec, block_index, &write_count, bs), false);
+    }
+
+    #[test]
+    fn test_read_compare_empty() {
+        let bs: u64 = 512;
+        let write_count = vec![0_u32; 10];
+
+        let vec = fill_vec(0, 1, &write_count, bs);
+        assert_eq!(validate_vec(vec, 0, &write_count, bs), true);
     }
 }
