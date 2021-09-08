@@ -1,13 +1,14 @@
 // Copyright 2021 Oxide Computer Company
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
+use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRM_LEN: usize = 1024 * 1024;
 
 use crucible_common::Block;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     HereIAm(u32),
     YesItsMe(u32),
@@ -38,193 +39,27 @@ impl Default for CrucibleEncoder {
     }
 }
 
+/*
+ * A frame is [len | serialized message].
+ */
+
 impl Encoder<Message> for CrucibleEncoder {
     type Error = anyhow::Error;
 
-    /*
-     * XXX Is there some Rusty way to auto generate this?  It seems like
-     * there could be some code generator that will produce the desired
-     * sequence, as it is the same for every command.
-     */
     fn encode(
         &mut self,
         m: Message,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        match m {
-            Message::Unknown(code, buf) => {
-                if code == 0 {
-                    bail!("message code must be non-zero");
-                }
+        let bytes = bincode::serialize(&m)?;
 
-                let len = buf.len() + 2 * 4;
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(code);
-                dst.extend_from_slice(&buf);
+        let len = bytes.len() + 4;
 
-                Ok(())
-            }
-            Message::HereIAm(version) => {
-                let len = 3 * 4;
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(1);
-                dst.put_u32_le(version);
+        dst.reserve(len);
+        dst.put_u32_le(len as u32);
+        dst.extend_from_slice(&bytes);
 
-                Ok(())
-            }
-            Message::YesItsMe(version) => {
-                let len = 3 * 4;
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(2);
-                dst.put_u32_le(version);
-
-                Ok(())
-            }
-            Message::Ruok => {
-                dst.reserve(8);
-                dst.put_u32_le(8);
-                dst.put_u32_le(3);
-
-                Ok(())
-            }
-            Message::Imok => {
-                dst.reserve(8);
-                dst.put_u32_le(8);
-                dst.put_u32_le(4);
-
-                Ok(())
-            }
-            Message::ExtentVersionsPlease => {
-                dst.reserve(8);
-                dst.put_u32_le(8);
-                dst.put_u32_le(5);
-
-                Ok(())
-            }
-            Message::ExtentVersions(bs, es, ec, versions) => {
-                let len = 4 + 8 + 8 + 4 + 4 + versions.len() * 8;
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(6);
-                dst.put_u64_le(bs);
-                dst.put_u64_le(es);
-                dst.put_u32_le(ec);
-                dst.put_u32_le(versions.len() as u32);
-                for v in versions.iter() {
-                    dst.put_u64_le(*v);
-                }
-
-                Ok(())
-            }
-            Message::Write(rn, eid, dependencies, offset, data) => {
-                let len = 4 // length field
-                    + 4     // message ID
-                    + 8     // rn
-                    + 8     // eid
-                    + 4     // dep Vec len
-                    + dependencies.len() * 8  // dep Vec
-                    + 8     // block offset
-                    + 4     // block shift
-                    + 4     // data len.
-                    + data.len(); // data
-
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(7);
-                dst.put_u64_le(rn);
-                dst.put_u64_le(eid);
-                dst.put_u32_le(dependencies.len() as u32);
-                for v in dependencies.iter() {
-                    dst.put_u64_le(*v);
-                }
-                dst.put_u64_le(offset.value);
-                dst.put_u32_le(offset.shift);
-                dst.put_u32_le(data.len() as u32);
-                dst.extend_from_slice(&data);
-
-                Ok(())
-            }
-            Message::WriteAck(rn) => {
-                let len = 4 + 4 + 8;
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(8);
-                dst.put_u64_le(rn);
-
-                Ok(())
-            }
-            Message::Flush(rn, dependencies, flush_number) => {
-                let len = 4  // length
-                    + 4      // Message ID
-                    + 8      // rn
-                    + 4      // dep Vec len
-                    + dependencies.len() * 8  // dep Vec
-                    + 8; // flush number
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(9);
-                dst.put_u64_le(rn);
-                dst.put_u32_le(dependencies.len() as u32);
-                for v in dependencies.iter() {
-                    dst.put_u64_le(*v);
-                }
-                dst.put_u64_le(flush_number);
-
-                Ok(())
-            }
-            Message::FlushAck(rn) => {
-                let len = 4 + 4 + 8;
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(10);
-                dst.put_u64_le(rn);
-
-                Ok(())
-            }
-            Message::ReadRequest(rn, dependencies, eid, offset, blen) => {
-                let len = 4 // length field
-                    + 4     // message ID
-                    + 8     // rn
-                    + 4     // dep Vec len
-                    + dependencies.len() * 8 // dep Vec
-                    + 8     // eid
-                    + 8     // block offset value
-                    + 4     // block offset shift
-                    + 8; // block len value
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(11);
-                dst.put_u64_le(rn);
-                dst.put_u32_le(dependencies.len() as u32);
-                for v in dependencies.iter() {
-                    dst.put_u64_le(*v);
-                }
-                dst.put_u64_le(eid);
-                dst.put_u64_le(offset.value);
-                dst.put_u32_le(offset.shift);
-                dst.put_u64_le(blen);
-
-                Ok(())
-            }
-            Message::ReadResponse(rn, data) => {
-                /*
-                 * Total size is:
-                 * length field + message ID + rn + buf len + buf
-                 */
-                let len = 4 + 4 + 8 + 4 + data.len();
-                dst.reserve(len);
-                dst.put_u32_le(len as u32);
-                dst.put_u32_le(12);
-                dst.put_u64_le(rn);
-                dst.put_u32_le(data.len() as u32);
-                dst.extend_from_slice(&data);
-
-                Ok(())
-            }
-        }
+        Ok(())
     }
 }
 
@@ -275,201 +110,23 @@ impl Decoder for CrucibleDecoder {
             src.reserve(len);
             return Ok(None);
         }
+
         src.advance(4);
 
-        let chklen = |src: &BytesMut, n: usize| -> Result<(), Self::Error> {
-            if src.len() < n {
-                bail!("expected at least {} bytes, have {}", n, src.len());
-            }
-            Ok(())
-        };
+        // src may contain more frames, so truncate based on this frame's length
+        let message = bincode::deserialize(&src[0..(len - 4)]);
 
-        Ok(match src.get_u32_le() {
-            0 => bail!("message code must be non-zero"),
-            // HereIAm
-            1 => {
-                chklen(src, 4)?;
+        // deserializing does not consume from src, make sure to do so here
+        src.advance(len - 4);
 
-                let version = src.get_u32_le();
-                Some(Message::HereIAm(version))
-            }
-            // YesItsMe
-            2 => {
-                chklen(src, 4)?;
-
-                let version = src.get_u32_le();
-                Some(Message::YesItsMe(version))
-            }
-            // Ruok
-            3 => {
-                chklen(src, 0)?;
-                Some(Message::Ruok)
-            }
-            // Imok
-            4 => {
-                chklen(src, 0)?;
-                Some(Message::Imok)
-            }
-            // ExtentVersionsPlease
-            5 => {
-                chklen(src, 0)?;
-                Some(Message::ExtentVersionsPlease)
-            }
-            // ExtentVersions
-            6 => {
-                chklen(src, 8 + 8 + 4 + 4)?;
-                let bs = src.get_u64_le();
-                let es = src.get_u64_le();
-                let ec = src.get_u32_le();
-                let extent_count = src.get_u32_le() as usize;
-                chklen(src, extent_count.checked_mul(8).unwrap())?;
-                let mut versions = Vec::new();
-                for _ in 0..extent_count {
-                    versions.push(src.get_u64_le());
-                }
-                Some(Message::ExtentVersions(bs, es, ec, versions))
-            }
-            // Write
-            7 => {
-                chklen(src, 8 + 8 + 4)?;
-                let rn = src.get_u64_le();
-                let eid = src.get_u64_le();
-                let depend_count = src.get_u32_le() as usize;
-                chklen(src, depend_count.checked_mul(8).unwrap())?;
-                let mut dependencies = Vec::new();
-                for _ in 0..depend_count {
-                    dependencies.push(src.get_u64_le());
-                }
-                chklen(src, 8 + 4 + 4)?;
-                let offset = Block {
-                    value: src.get_u64_le(),
-                    shift: src.get_u32_le(),
-                };
-                let data_len = src.get_u32_le() as usize;
-                chklen(src, data_len)?;
-                let data = src.split_to(data_len).freeze();
-                Some(Message::Write(rn, eid, dependencies, offset, data))
-            }
-            // WriteAck
-            8 => {
-                chklen(src, 8)?;
-                let rn = src.get_u64_le();
-                Some(Message::WriteAck(rn))
-            }
-            // Flush
-            9 => {
-                chklen(src, 8 + 4)?;
-                let rn = src.get_u64_le();
-                let depend_count = src.get_u32_le() as usize;
-                chklen(src, depend_count.checked_mul(8).unwrap())?;
-                let mut dependencies = Vec::new();
-                for _ in 0..depend_count {
-                    dependencies.push(src.get_u64_le());
-                }
-                chklen(src, 8)?;
-                let flush_number = src.get_u64_le();
-                Some(Message::Flush(rn, dependencies, flush_number))
-            }
-            // FlushAck
-            10 => {
-                chklen(src, 8)?;
-                let rn = src.get_u64_le();
-                Some(Message::FlushAck(rn))
-            }
-            // ReadRequest
-            11 => {
-                chklen(src, 8 + 4)?;
-                let rn = src.get_u64_le();
-                let depend_count = src.get_u32_le() as usize;
-                chklen(src, depend_count.checked_mul(8).unwrap())?;
-                let mut dependencies = Vec::new();
-                for _ in 0..depend_count {
-                    dependencies.push(src.get_u64_le());
-                }
-                chklen(src, 8 + 8 + 4 + 8)?;
-                let eid = src.get_u64_le();
-                let offset = Block {
-                    value: src.get_u64_le(),
-                    shift: src.get_u32_le(),
-                };
-                let num_blocks = src.get_u64_le();
-                Some(Message::ReadRequest(
-                    rn,
-                    dependencies,
-                    eid,
-                    offset,
-                    num_blocks,
-                ))
-            }
-            // ReadResponse
-            12 => {
-                chklen(src, 8 + 4)?;
-                let rn = src.get_u64_le();
-                let data_len = src.get_u32_le() as usize;
-                chklen(src, data_len)?;
-                let data = src.split_to(data_len).freeze();
-                Some(Message::ReadResponse(rn, data))
-            }
-            // Unknown
-            code => {
-                let buf = src.split_to(len - 2 * 4);
-                Some(Message::Unknown(code, buf))
-            }
-        })
+        Ok(Some(message?))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CrucibleDecoder, CrucibleEncoder, Message};
-    use anyhow::{bail, Result};
-    use bytes::BytesMut;
-    use tokio_util::codec::{Decoder, Encoder};
-
-    #[test]
-    fn basic_encode() -> Result<()> {
-        let expect: Vec<u8> = vec![
-            0x0B, 0x00, 0x00, 0x00, /* length */
-            0x99, 0x00, 0x00, 0x00, /* code */
-            0xAA, 0xBB, 0xCC, /* data */
-        ];
-        let mut data = BytesMut::new();
-        data.resize(expect.len() - 8, 0);
-        data.copy_from_slice(&expect[8..]);
-        let m = Message::Unknown(153, data);
-
-        let mut buf = BytesMut::new();
-
-        let mut enc = CrucibleEncoder::new();
-        enc.encode(m, &mut buf)?;
-
-        assert_eq!(buf, expect);
-        Ok(())
-    }
-
-    #[test]
-    fn basic_decode() -> Result<()> {
-        let expect: Vec<u8> = vec![
-            0x0B, 0x00, 0x00, 0x00, /* length */
-            0x99, 0x00, 0x00, 0x00, /* code */
-            0xAA, 0xBB, 0xCC, /* data */
-        ];
-
-        let mut data = BytesMut::new();
-        data.resize(expect.len() - 8, 0);
-        data.copy_from_slice(&expect[8..]);
-        let m = Message::Unknown(153, data);
-
-        let mut buf = BytesMut::new();
-        buf.resize(expect.len(), 0);
-        buf.copy_from_slice(expect.as_slice());
-
-        let mut dec = CrucibleDecoder::new();
-        let res = dec.decode(&mut buf)?;
-
-        assert_eq!(Some(m), res);
-        Ok(())
-    }
+    use super::*;
+    use anyhow::Result;
 
     fn round_trip(input: &Message) -> Result<Message> {
         let mut enc = CrucibleEncoder::new();

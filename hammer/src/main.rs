@@ -112,7 +112,7 @@ fn main() -> Result<()> {
         }
     }
 
-    loop {
+    for _ in 0..5000 {
         let mut offset: u64 = rng.gen::<u64>() % sz;
         let mut bsz: usize = rng.gen::<usize>() % 4096;
 
@@ -121,7 +121,7 @@ fn main() -> Result<()> {
             bsz = rng.gen::<usize>() % 4096;
         }
 
-        println!("testing: offset {} sz {}", offset, bsz);
+        // println!("testing {}: offset {} sz {}", idx, offset, bsz);
 
         let vec: Vec<u8> = (0..bsz)
             .map(|_| rng.sample(rand::distributions::Standard))
@@ -188,4 +188,6 @@ fn main() -> Result<()> {
             cpf.write_all(&vec![0; bsz])?;
         }
     }
+
+    Ok(())
 }
