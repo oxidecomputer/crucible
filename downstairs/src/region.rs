@@ -17,7 +17,7 @@ use tracing::instrument;
 pub struct Extent {
     number: u32,
     block_size: u64,
-    extent_size: u64,
+    extent_size: Block,
     inner: Mutex<Inner>,
 }
 
@@ -106,7 +106,7 @@ impl Extent {
          * Leave a block at the beginning of the file as a place to scribble
          * metadata.
          */
-        let bcount = def.extent_size().checked_add(1).unwrap();
+        let bcount = def.extent_size().value.checked_add(1).unwrap();
         let size = def.block_size().checked_mul(bcount).unwrap();
 
         /*
@@ -181,7 +181,7 @@ impl Extent {
          * Leave a block at the beginning of the file as a place to scribble
          * metadata.
          */
-        let bcount = def.extent_size().checked_add(1).unwrap();
+        let bcount = def.extent_size().value.checked_add(1).unwrap();
         let size = def.block_size().checked_mul(bcount).unwrap();
 
         mkdir_for_file(&path)?;
@@ -220,16 +220,16 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn read(&self, byte_offset: u64, data: &mut BytesMut) -> Result<()> {
-        self.check_input(byte_offset, data)?;
+    pub fn read(&self, offset: Block, data: &mut BytesMut) -> Result<()> {
+        self.check_input(offset, data)?;
 
         /*
          * Skip metadata block
          */
-        let file_offset = byte_offset + self.block_size;
+        let byte_offset = (offset.value + 1) * self.block_size;
 
         let mut inner = self.inner.lock().unwrap();
-        inner.file.seek(SeekFrom::Start(file_offset))?;
+        inner.file.seek(SeekFrom::Start(byte_offset))?;
 
         /*
          * XXX This read_exact only works because we have filled our buffer
@@ -248,12 +248,24 @@ impl Extent {
      * Note that the checks here do take into account that the first block
      * is the metadata block.
      */
-    fn check_input(&self, byte_offset: u64, data: &[u8]) -> Result<()> {
-        let total_size = self.block_size * self.extent_size;
+    fn check_input(&self, offset: Block, data: &[u8]) -> Result<()> {
+        if (data.len() % self.block_size as usize) != 0 {
+            bail!("data length not divisible by self block size!");
+        }
+
+        if offset.block_size_in_bytes() != self.block_size as u32 {
+            bail!("offset block size != self block size!");
+        }
+        if offset.shift != self.extent_size.shift {
+            bail!("offset shift != extent shift!");
+        }
+
+        let total_size = self.block_size * self.extent_size.value;
+        let byte_offset = offset.value * self.block_size;
 
         if (byte_offset + data.len() as u64) > total_size {
             bail!(
-                "byte offset {} + data.len() {} is past end of extent {} ({})",
+                "byte offset {} + data.len() {} is past end of extent {:?} ({})",
                 byte_offset,
                 data.len(),
                 self.extent_size,
@@ -265,10 +277,10 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn write(&self, byte_offset: u64, data: &[u8]) -> Result<()> {
+    pub fn write(&self, offset: Block, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        self.check_input(byte_offset, data)?;
+        self.check_input(offset, data)?;
 
         if !inner.meta.dirty {
             inner.file.seek(SeekFrom::Start(0))?;
@@ -290,9 +302,9 @@ impl Extent {
         /*
          * Skip metadata block
          */
-        let file_offset = byte_offset + self.block_size;
+        let byte_offset = (offset.value + 1) * self.block_size;
 
-        inner.file.seek(SeekFrom::Start(file_offset))?;
+        inner.file.seek(SeekFrom::Start(byte_offset))?;
         inner.file.write_all(data)?;
         inner.file.flush()?;
 
@@ -496,7 +508,7 @@ impl Region {
         Ok(())
     }
 
-    pub fn region_def(&self) -> (u64, u64, u32) {
+    pub fn region_def(&self) -> (u64, Block, u32) {
         (
             self.def.block_size(),
             self.def.extent_size(),
@@ -529,11 +541,11 @@ impl Region {
     pub fn region_write(
         &self,
         eid: u64,
-        byte_offset: u64,
+        offset: Block,
         data: &[u8],
     ) -> Result<()> {
         let extent = &self.extents[eid as usize];
-        extent.write(byte_offset, data)?;
+        extent.write(offset, data)?;
         Ok(())
     }
 
@@ -541,11 +553,11 @@ impl Region {
     pub fn region_read(
         &self,
         eid: u64,
-        byte_offset: u64,
+        offset: Block,
         data: &mut BytesMut,
     ) -> Result<()> {
         let extent = &self.extents[eid as usize];
-        extent.read(byte_offset, data)?;
+        extent.read(offset, data)?;
         Ok(())
     }
 
@@ -585,13 +597,13 @@ mod test {
         let inn = Inner { file: ff, meta: em };
 
         /*
-         * Note:  All the tests expect 512 and 100, so if you change
+         * Note: All the tests expect 512 and 100, so if you change
          * these, then change the tests!
          */
         Extent {
             number: 0,
             block_size: 512,
-            extent_size: 100,
+            extent_size: Block::new_512(100),
             inner: Mutex::new(inn),
         }
     }
@@ -642,8 +654,8 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        assert_eq!((), ext.check_input(0, &data).unwrap());
-        assert_eq!((), ext.check_input(99, &data).unwrap());
+        assert_eq!((), ext.check_input(Block::new_512(0), &data).unwrap());
+        assert_eq!((), ext.check_input(Block::new_512(99), &data).unwrap());
     }
 
     #[test]
@@ -653,8 +665,8 @@ mod test {
 
         let ext = new_extent();
 
-        assert_eq!((), ext.check_input(0, &data).unwrap());
-        assert_eq!((), ext.check_input(97 * 512, &data).unwrap());
+        assert_eq!((), ext.check_input(Block::new_512(0), &data).unwrap());
+        assert_eq!((), ext.check_input(Block::new_512(97), &data).unwrap());
     }
 
     #[test]
@@ -663,25 +675,27 @@ mod test {
         data.put(&[1; 512 * 100][..]);
 
         let ext = new_extent();
-        ext.check_input(0, &data).unwrap();
+        ext.check_input(Block::new_512(0), &data).unwrap();
     }
 
     #[test]
+    #[should_panic]
     fn extent_io_non_aligned_large() {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
         let ext = new_extent();
-        ext.check_input(0, &data).unwrap();
+        ext.check_input(Block::new_512(0), &data).unwrap();
     }
 
     #[test]
+    #[should_panic]
     fn extent_io_non_aligned_small() {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
         let ext = new_extent();
-        ext.check_input(0, &data).unwrap();
+        ext.check_input(Block::new_512(0), &data).unwrap();
     }
 
     #[test]
@@ -691,7 +705,7 @@ mod test {
         data.put(&[1; 512][..]);
 
         let ext = new_extent();
-        ext.check_input(100 * 512, &data).unwrap();
+        ext.check_input(Block::new_512(100), &data).unwrap();
     }
 
     #[test]
@@ -701,7 +715,7 @@ mod test {
         data.put(&[1; 1024][..]);
 
         let ext = new_extent();
-        ext.check_input(99 * 512, &data).unwrap();
+        ext.check_input(Block::new_512(99), &data).unwrap();
     }
 
     #[test]
@@ -711,7 +725,7 @@ mod test {
         data.put(&[1; 512 * 100][..]);
 
         let ext = new_extent();
-        assert_eq!((), ext.check_input(1, &data).unwrap());
+        assert_eq!((), ext.check_input(Block::new_512(1), &data).unwrap());
     }
 
     #[test]

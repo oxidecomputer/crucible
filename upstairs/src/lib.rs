@@ -5,14 +5,14 @@ use std::fmt;
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddrV4;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use crucible_common::*;
 use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
@@ -77,84 +77,70 @@ async fn proc_frame(
 /*
  * Convert a virtual block offset and length into a Vec of tuples:
  *
- *     Extent number (EID), Byte offset, Length in bytes
+ *     Extent number (EID), Block offset, Length in Blocks
  *
- * - length in bytes can be up to the region size
+ * - length in blocks can be up to the region size
  */
 pub fn extent_from_offset(
     ddef: RegionDefinition,
-    offset: u64,
-    len: usize,
-) -> Result<Vec<(u64, u64, usize)>> {
-    assert!(len > 0);
-
-    let mut result = Vec::new();
-    let space_per_extent = ddef.block_size() * ddef.extent_size();
+    offset: Block,
+    num_blocks: u64,
+) -> Result<Vec<(u64, Block, u64)>> {
+    assert!(num_blocks > 0);
     assert!(
-        (offset + len as u64)
-            <= (space_per_extent * ddef.extent_count() as u64)
+        (offset.value + num_blocks)
+            <= (ddef.extent_size().value * ddef.extent_count() as u64)
     );
+    assert_eq!(offset.block_size_in_bytes() as u64, ddef.block_size());
 
     /*
      *
      *  |eid0                  |eid1
-     *       |───────────────────────>│
-     *  ┌────|─────────────────|──────┼───────────────┐
-     *  │    |                 |      │               │
-     *  └────|─────────────────|──────┼───────────────┘
-     *     offset               offset + len
+     *  |────────────────────────────────────────────>│
+     *  ┌──────────────────────|──────────────────────┐
+     *  │                      |                      │
+     *  └──────────────────────|──────────────────────┘
+     *  |offset                                       |offset + len
      */
-    let mut o = offset;
-    let mut len_left = len;
+    let mut result = Vec::new();
+    let mut o: u64 = offset.value;
+    let mut blocks_left: u64 = num_blocks;
 
-    while len_left > 0 {
+    while blocks_left > 0 {
         /*
          * XXX We only support a single region (downstairs).  When we grow to
          * support a LBA size that is larger than a single region, then we will
          * need to write more code. But - that code may live upstairs?
          */
-        let eid: u64 = o / space_per_extent;
+        let eid: u64 = o / ddef.extent_size().value;
         assert!((eid as u32) < ddef.extent_count());
 
-        let extent_offset = o % space_per_extent;
-        let mut sz = space_per_extent as usize - extent_offset as usize;
-        if len_left < sz {
-            sz = len_left;
+        let extent_offset: u64 = o % ddef.extent_size().value;
+        let mut sz: u64 = ddef.extent_size().value - extent_offset;
+        if blocks_left < sz {
+            sz = blocks_left;
         }
 
-        result.push((eid, extent_offset, sz));
+        result.push((eid, Block::new_with_ddef(extent_offset, &ddef), sz));
 
-        match len_left.checked_sub(sz) {
+        match blocks_left.checked_sub(sz) {
             Some(v) => {
-                len_left = v;
+                blocks_left = v;
             }
             None => {
                 break;
             }
         }
 
-        o += sz as u64;
+        o += sz;
     }
 
     {
-        let mut bytes = 0;
+        let mut blocks = 0;
         for r in &result {
-            bytes += r.2;
+            blocks += r.2;
         }
-        assert_eq!(bytes, len);
-    }
-
-    {
-        let mut bytes = 0;
-        for i in 0..result.len() {
-            let r = result[i];
-            if i == (result.len() - 1) {
-                bytes += r.2 as u64;
-            } else {
-                bytes += space_per_extent - r.1;
-            }
-        }
-        assert_eq!(bytes, len as u64);
+        assert_eq!(blocks, num_blocks);
     }
 
     Ok(result)
@@ -249,13 +235,14 @@ fn process_downstairs(
     let mut ddef = u.ddef.lock().unwrap();
     if ddef.block_size() == 0 {
         ddef.set_block_size(bs);
-        ddef.set_extent_size(es);
+        ddef.set_extent_size(Block::new(es, bs.trailing_zeros()));
         ddef.set_extent_count(ec);
         println!("Global using: bs:{} es:{} ec:{}", bs, es, ec);
     }
 
     if ddef.block_size() != bs
-        || ddef.extent_size() != es
+        || ddef.extent_size().value != es
+        || ddef.extent_size().block_size_in_bytes() != bs as u32
         || ddef.extent_count() != ec
     {
         // XXX Figure out if we can hande this error.  Possibly not.
@@ -348,14 +335,14 @@ async fn io_send(
             IOop::Write {
                 dependencies,
                 eid,
-                byte_offset,
+                offset,
                 data,
             } => {
                 fw.send(Message::Write(
                     *new_id,
                     eid,
                     dependencies.clone(),
-                    byte_offset,
+                    offset,
                     data.clone(),
                 ))
                 .await?
@@ -374,15 +361,15 @@ async fn io_send(
             IOop::Read {
                 dependencies,
                 eid,
-                byte_offset,
-                len,
+                offset,
+                num_blocks,
             } => {
                 fw.send(Message::ReadRequest(
                     *new_id,
                     dependencies.clone(),
                     eid,
-                    byte_offset,
-                    len,
+                    offset,
+                    num_blocks,
                 ))
                 .await?
             }
@@ -977,7 +964,7 @@ impl Upstairs {
     #[instrument]
     fn submit_write(
         &self,
-        offset: u64,
+        offset: Block,
         data: Bytes,
         sender: std_mpsc::Sender<i32>,
     ) {
@@ -996,7 +983,12 @@ impl Upstairs {
          * and length may span two extents, and eventually XXX, two regions.
          */
         let ddef = self.ddef.lock().unwrap();
-        let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
+        let nwo = extent_from_offset(
+            *ddef,
+            offset,
+            data.len() as u64 / ddef.block_size(),
+        )
+        .unwrap();
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -1008,12 +1000,12 @@ impl Upstairs {
         let mut sub = HashMap::new();
         let mut new_ds_work = Vec::new();
         let mut next_id: u64;
-        let mut cur_offset = 0;
+        let mut cur_offset: usize = 0;
 
         let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
         /* Lock here, through both jobs submitted */
-        for (eid, bo, len) in nwo {
+        for (eid, bo, num_blocks) in nwo {
             {
                 next_id = ds_work.next_id();
             }
@@ -1021,8 +1013,10 @@ impl Upstairs {
              * TODO: This is where encryption will happen, which will probably
              * mean a refactor of how this job is built.
              */
-            let sub_data = data.slice(cur_offset..(cur_offset + len));
-            sub.insert(next_id, len);
+            let byte_len: usize =
+                num_blocks as usize * ddef.block_size() as usize;
+            let sub_data = data.slice(cur_offset..(cur_offset + byte_len));
+            sub.insert(next_id, num_blocks);
 
             let wr = create_write_eob(
                 next_id,
@@ -1033,7 +1027,7 @@ impl Upstairs {
                 sub_data,
             );
             new_ds_work.push(wr);
-            cur_offset += len;
+            cur_offset += byte_len;
         }
         /*
          * New work created, add to the guest_work HM
@@ -1058,7 +1052,7 @@ impl Upstairs {
     #[instrument]
     pub fn submit_read(
         &self,
-        offset: u64,
+        offset: Block,
         data: Buffer,
         sender: std_mpsc::Sender<i32>,
     ) {
@@ -1077,7 +1071,12 @@ impl Upstairs {
          * and length may span many extents, and eventually, TODO, regions.
          */
         let ddef = self.ddef.lock().unwrap();
-        let nwo = extent_from_offset(*ddef, offset, data.len()).unwrap();
+        let nwo = extent_from_offset(
+            *ddef,
+            offset,
+            data.len() as u64 / ddef.block_size(),
+        )
+        .unwrap();
 
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
@@ -1093,7 +1092,7 @@ impl Upstairs {
          */
         let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
-        for (eid, bo, len) in nwo {
+        for (eid, bo, num_blocks) in nwo {
             {
                 next_id = ds_work.next_id();
             }
@@ -1104,8 +1103,15 @@ impl Upstairs {
              * corresponds to the lower next_id.  The ID's don't need to be
              * sequential.
              */
-            sub.insert(next_id, len);
-            let wr = create_read_eob(next_id, dep.clone(), gw_id, eid, bo, len);
+            sub.insert(next_id, num_blocks);
+            let wr = create_read_eob(
+                next_id,
+                dep.clone(),
+                gw_id,
+                eid,
+                bo,
+                num_blocks,
+            );
             new_ds_work.push(wr);
         }
 
@@ -1291,14 +1297,14 @@ pub enum IOop {
     Write {
         dependencies: Vec<u64>, // Jobs that must finish before this
         eid: u64,
-        byte_offset: u64,
+        offset: Block,
         data: Bytes,
     },
     Read {
         dependencies: Vec<u64>, // Jobs that must finish before this
         eid: u64,
-        byte_offset: u64,
-        len: u32, // in bytes
+        offset: Block,
+        num_blocks: u64,
     },
     Flush {
         dependencies: Vec<u64>, // Jobs that must finish before this
@@ -1448,14 +1454,14 @@ fn test_buffer_len_over_block_size() {
  */
 #[derive(Debug)]
 enum BlockOp {
-    Read { offset: u64, data: Buffer },
-    Write { offset: u64, data: Bytes },
+    Read { offset: Block, data: Buffer },
+    Write { offset: Block, data: Bytes },
     Flush,
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
     // Begin testing options.
-    QueryExtentSize { data: Arc<Mutex<u64>> },
+    QueryExtentSize { data: Arc<Mutex<Block>> },
     QueryActive { data: Arc<Mutex<usize>> },
     Commit,   // Send update to all tasks that there is work on the queue.
     ShowWork, // Show the status of the internal work hashmap and done Vec.
@@ -1475,9 +1481,10 @@ struct GtoS {
      * Jobs we have submitted (or will soon submit) to the storage side
      * of the upstairs process to send on to the downstairs.
      * The key for the hashmap is the ds_id number in the hashmap for
-     * downstairs work.  The value is the buffer size of the operation.
+     * downstairs work. The value is the buffer size of the operation in
+     * blocks.
      */
-    submitted: HashMap<u64, usize>,
+    submitted: HashMap<u64, u64>,
     completed: Vec<u64>,
 
     /*
@@ -1505,7 +1512,7 @@ struct GtoS {
 
 impl GtoS {
     pub fn new(
-        submitted: HashMap<u64, usize>,
+        submitted: HashMap<u64, u64>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, Bytes>,
@@ -1582,15 +1589,15 @@ fn crutrace_work_done(work: IOop, gw_id: u64) {
         IOop::Read {
             dependencies: _,
             eid: _,
-            byte_offset: _,
-            len: _,
+            offset: _,
+            num_blocks: _,
         } => {
             crutrace_gw_read_end!(|| (gw_id));
         }
         IOop::Write {
             dependencies: _,
             eid: _,
-            byte_offset: _,
+            offset: _,
             data: _,
         } => {
             crutrace_gw_write_end!(|| (gw_id));
@@ -1875,14 +1882,45 @@ impl Guest {
 
     // TODO: get status from waiter, bubble that up as a Result?
 
-    pub fn read(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
+    /*
+     * `read` and `write` accept a block offset, and data must be a multiple of block size.
+     */
+    pub fn read(&self, offset: Block, data: Buffer) -> BlockReqWaiter {
+        let bs = self.query_block_size();
+        // XXX: return Err instead
+        assert!((data.len() % bs as usize) == 0);
+        assert!(offset.block_size_in_bytes() as u64 == bs);
+
         let rio = BlockOp::Read { offset, data };
         self.send(rio)
     }
 
-    pub fn write(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
+    pub fn write(&self, offset: Block, data: Bytes) -> BlockReqWaiter {
+        let bs = self.query_block_size();
+        // XXX: return Err instead
+        assert!((data.len() % bs as usize) == 0);
+        assert!(offset.block_size_in_bytes() as u64 == bs);
+
         let wio = BlockOp::Write { offset, data };
         self.send(wio)
+    }
+
+    /*
+     * `bread` and `bwrite` accept a byte offset, and data must be a multiple of block size.
+     *
+     * note these functions assert that the byte offset is divisible by the block size and should
+     * only be used in non-production code.
+     */
+    pub fn bread(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
+        let bs = self.query_block_size();
+        assert!((offset % bs) == 0);
+        self.read(Block::new(offset / bs, bs.trailing_zeros()), data)
+    }
+
+    pub fn bwrite(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
+        let bs = self.query_block_size();
+        assert!((offset % bs) == 0);
+        self.write(Block::new(offset / bs, bs.trailing_zeros()), data)
     }
 
     pub fn flush(&self) -> BlockReqWaiter {
@@ -1903,8 +1941,8 @@ impl Guest {
         return *data.lock().unwrap();
     }
 
-    pub fn query_extent_size(&self) -> u64 {
-        let data = Arc::new(Mutex::new(0));
+    pub fn query_extent_size(&self) -> Block {
+        let data = Arc::new(Mutex::new(Block::new(0, 0)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
         self.send(extent_query).block_wait();
         return *data.lock().unwrap();
@@ -2239,7 +2277,7 @@ fn create_write_eob(
     dependencies: Vec<u64>,
     gw_id: u64,
     eid: u64,
-    byte_offset: u64,
+    offset: Block,
     data: Bytes,
 ) -> DownstairsIO {
     /*
@@ -2249,7 +2287,7 @@ fn create_write_eob(
     let awrite = IOop::Write {
         dependencies,
         eid,
-        byte_offset,
+        offset,
         data,
     };
 
@@ -2277,14 +2315,14 @@ fn create_read_eob(
     dependencies: Vec<u64>,
     gw_id: u64,
     eid: u64,
-    byte_offset: u64,
-    len: usize,
+    offset: Block,
+    num_blocks: u64,
 ) -> DownstairsIO {
     let aread = IOop::Read {
         dependencies,
         eid,
-        byte_offset,
-        len: len as u32,
+        offset,
+        num_blocks,
     };
 
     let mut state = HashMap::new();
@@ -2347,13 +2385,13 @@ fn show_all_work(up: &Arc<Upstairs>) {
                 IOop::Read {
                     dependencies,
                     eid,
-                    byte_offset,
-                    len,
+                    offset,
+                    num_blocks,
                 } => "Read ".to_string(),
                 IOop::Write {
                     dependencies,
                     eid,
-                    byte_offset,
+                    offset,
                     data,
                 } => "Write".to_string(),
                 IOop::Flush {
@@ -2408,21 +2446,125 @@ fn show_guest_work(guest: &Arc<Guest>) {
 }
 
 /*
+ * IO operations are ok to submit directly to Upstairs if:
+ *
+ * - the offset is block aligned, and
+ * - the size is a multiple of block size
+ *
+ * If either of these is not true, then perform some fixup here.
+ */
+#[derive(Debug)]
+struct IOSpan {
+    // IOP details
+    offset: u64,
+    sz: u64,
+
+    // Block and Guest details
+    block_size: u64,
+    phase: u64,
+    buffer: Buffer,
+    affected_block_numbers: Vec<u64>,
+}
+
+impl IOSpan {
+    // Create an IOSpan given a IO operation at offset and size.
+    fn new(offset: u64, sz: u64, block_size: u64) -> IOSpan {
+        let start_block = offset / block_size;
+        let end_block = (offset + sz - 1) / block_size;
+
+        let affected_block_numbers: Vec<u64> =
+            (start_block..=end_block).collect();
+
+        Self {
+            offset,
+            sz,
+            block_size,
+            phase: offset % block_size,
+            buffer: Buffer::new(
+                affected_block_numbers.len() * block_size as usize,
+            ),
+            affected_block_numbers,
+        }
+    }
+
+    fn is_block_aligned_and_block_sized(&self) -> bool {
+        let is_block_aligned = (self.offset % self.block_size) == 0;
+        let is_block_sized = (self.sz % self.block_size) == 0;
+
+        is_block_aligned && is_block_sized
+    }
+
+    #[cfg(test)]
+    fn number_of_affected_blocks(&self) -> usize {
+        self.affected_block_numbers.len()
+    }
+
+    #[instrument]
+    fn read_affected_blocks_from_guest(
+        &mut self,
+        guest: &Guest,
+    ) -> BlockReqWaiter {
+        guest.read(
+            Block::new(
+                self.affected_block_numbers[0],
+                self.block_size.trailing_zeros(),
+            ),
+            self.buffer.clone(),
+        )
+    }
+
+    #[instrument]
+    fn write_affected_blocks_to_guest(&self, guest: &Guest) -> BlockReqWaiter {
+        let bytes = Bytes::from(self.buffer.as_vec().clone());
+        guest.write(
+            Block::new(
+                self.affected_block_numbers[0],
+                self.block_size.trailing_zeros(),
+            ),
+            bytes,
+        )
+    }
+
+    #[instrument]
+    fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
+        assert_eq!(data.len(), self.sz as usize);
+
+        for (i, item) in data.iter_mut().enumerate() {
+            *item = self.buffer.as_vec()[self.phase as usize + i];
+        }
+    }
+
+    #[instrument]
+    fn write_from_buffer_into_blocks(&self, data: &[u8]) {
+        assert_eq!(data.len(), self.sz as usize);
+
+        for (i, item) in data.iter().enumerate() {
+            self.buffer.as_vec()[self.phase as usize + i] = *item;
+        }
+    }
+}
+
+/*
  * Wrap a Crucible guest and implement Read + Write + Seek traits.
  */
 pub struct CruciblePseudoFile {
     guest: Arc<Guest>,
     offset: u64,
     sz: u64,
+    block_size: u64,
+    rmw_lock: RwLock<bool>,
 }
 
 impl CruciblePseudoFile {
     pub fn from_guest(guest: Arc<Guest>) -> Self {
         let sz = guest.query_total_size() as u64;
+        let block_size = guest.query_block_size() as u64;
         CruciblePseudoFile {
             guest,
             offset: 0,
             sz,
+            block_size,
+            rmw_lock: RwLock::new(false),
         }
     }
 
@@ -2437,23 +2579,20 @@ impl CruciblePseudoFile {
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        let data = Buffer::from_slice(buf);
+        let _guard = self.rmw_lock.read().unwrap();
 
-        let mut waiter = self.guest.read(self.offset, data.clone());
+        let mut span =
+            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
+
+        let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
         waiter.block_wait();
+
+        span.read_from_blocks_into_buffer(buf);
 
         // TODO: for block devices, we can't increment offset past the
         // device size but we're supposed to be pretending to be a proper
         // file here
         self.offset += buf.len() as u64;
-
-        // TODO: is there a better way to do this fill?
-        {
-            let vec = data.as_vec();
-            for i in 0..buf.len() {
-                buf[i] = vec[i];
-            }
-        }
 
         Ok(buf.len())
     }
@@ -2461,11 +2600,29 @@ impl Read for CruciblePseudoFile {
 
 impl Write for CruciblePseudoFile {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        let mut data = BytesMut::with_capacity(buf.len());
-        data.put_slice(buf);
+        let mut span =
+            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
-        let mut waiter = self.guest.write(self.offset, data.freeze());
-        waiter.block_wait();
+        if !span.is_block_aligned_and_block_sized() {
+            // RMW here!
+            let _guard = self.rmw_lock.write().unwrap();
+
+            let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
+            waiter.block_wait();
+
+            span.write_from_buffer_into_blocks(buf);
+
+            let mut waiter = span.write_affected_blocks_to_guest(&self.guest);
+            waiter.block_wait();
+        } else {
+            let offset = Block::new(
+                self.offset / self.block_size,
+                self.block_size.trailing_zeros(),
+            );
+            let bytes = BytesMut::from(buf);
+            let mut waiter = self.guest.write(offset, bytes.freeze());
+            waiter.block_wait();
+        }
 
         // TODO: can't increment offset past the device size
         self.offset += buf.len() as u64;
@@ -2483,7 +2640,9 @@ impl Write for CruciblePseudoFile {
 
 impl Seek for CruciblePseudoFile {
     fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
+        // TODO: let guard = self.rmw_lock.write().unwrap() ?
         // TODO: does not check against block device size
+
         let mut offset: i64 = self.offset as i64;
         match pos {
             SeekFrom::Start(v) => {
@@ -2522,126 +2681,117 @@ mod test {
     fn test_extent_from_offset() {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
-        ddef.set_extent_size(2);
+        ddef.set_extent_size(Block::new_512(2));
         ddef.set_extent_count(10);
-
-        // Test less than block size
-        assert_eq!(
-            extent_from_offset(ddef, 0, 128).unwrap(),
-            vec![(0, 0, 128),]
-        );
 
         // Test block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, 0, 512).unwrap(),
-            vec![(0, 0, 512),]
+            extent_from_offset(ddef, Block::new_512(0), 1).unwrap(),
+            vec![(0, Block::new_512(0), 1),]
         );
 
         // Test greater than block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, 0, 1024).unwrap(),
-            vec![(0, 0, 1024),]
+            extent_from_offset(ddef, Block::new_512(0), 2).unwrap(),
+            vec![(0, Block::new_512(0), 2),]
         );
 
         // Test greater than extent size
         assert_eq!(
-            extent_from_offset(ddef, 0, 2048).unwrap(),
-            vec![(0, 0, 1024), (1, 0, 1024),]
+            extent_from_offset(ddef, Block::new_512(0), 4).unwrap(),
+            vec![(0, Block::new_512(0), 2), (1, Block::new_512(0), 2),]
         );
 
         // Test offsets
         assert_eq!(
-            extent_from_offset(ddef, 1, 2048).unwrap(),
-            vec![(0, 1, 1024 - 1), (1, 0, 1024), (2, 0, 1),]
-        );
-        assert_eq!(
-            extent_from_offset(ddef, 1023, 2048).unwrap(),
-            vec![(0, 1023, 1024 - 1023), (1, 0, 1024), (2, 0, 1023),]
-        );
-        assert_eq!(
-            extent_from_offset(ddef, 1024, 2048).unwrap(),
-            vec![(1, 0, 1024), (2, 0, 1024),]
-        );
-        for i in 0..9 {
-            for j in 1..1023 {
-                assert_eq!(
-                    extent_from_offset(ddef, 1024 * i + j, 1).unwrap(),
-                    vec![(i, j, 1),]
-                );
-            }
-        }
-
-        // Test large sizes plus offset
-        assert_eq!(
-            extent_from_offset(ddef, 1024 + 780, 1024 * 8).unwrap(),
+            extent_from_offset(ddef, Block::new_512(1), 4).unwrap(),
             vec![
-                (1, 780, 1024 - 780),
-                (2, 0, 1024),
-                (3, 0, 1024),
-                (4, 0, 1024),
-                (5, 0, 1024),
-                (6, 0, 1024),
-                (7, 0, 1024),
-                (8, 0, 1024),
-                (9, 0, 780),
+                (0, Block::new_512(1), 1),
+                (1, Block::new_512(0), 2),
+                (2, Block::new_512(0), 1),
+            ]
+        );
+
+        assert_eq!(
+            extent_from_offset(ddef, Block::new_512(2), 4).unwrap(),
+            vec![(1, Block::new_512(0), 2), (2, Block::new_512(0), 2),]
+        );
+
+        assert_eq!(
+            extent_from_offset(ddef, Block::new_512(2), 16).unwrap(),
+            vec![
+                (1, Block::new_512(0), 2),
+                (2, Block::new_512(0), 2),
+                (3, Block::new_512(0), 2),
+                (4, Block::new_512(0), 2),
+                (5, Block::new_512(0), 2),
+                (6, Block::new_512(0), 2),
+                (7, Block::new_512(0), 2),
+                (8, Block::new_512(0), 2),
             ]
         );
     }
 
     #[test]
-    fn test_extent_from_offset_hammer_fail() {
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(100);
-        ddef.set_extent_count(1000);
+    fn test_iospan() {
+        let span = IOSpan::new(512, 1024, 512);
+        assert!(span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 2);
 
-        // Test hammer fails
+        let span = IOSpan::new(513, 1024, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 3);
 
-        // NBD reads two blocks in, writes out one big block
-        /*
-        NBD_CMD_READ typ=0 handle=144115188831223808 off=17657856 len=4096
+        let span = IOSpan::new(512, 500, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 1);
 
-        >>> 17657856.0 / (512*100)
-        344.88
-        >>> 17657856 - 344 * (512*100)
-        45056
-        >>> 345 * (512*100) - 17657856
-        6144
-        */
-        assert_eq!(
-            extent_from_offset(ddef, 17657856, 4096).unwrap(),
-            vec![(344, 45056, 4096),],
-        );
-        /*
-        NBD_CMD_READ typ=0 handle=216172782869151744 off=17661952 len=4096
+        let span = IOSpan::new(512, 512, 4096);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 1);
 
-        >>> 17661952 / (512*100)
-        344.96
-        >>> 17661952 - 344 * (512*100)
-        49152
-        >>> 345 * (512*100) - 17661952
-        2048
-        */
-        assert_eq!(
-            extent_from_offset(ddef, 17661952, 4096).unwrap(),
-            vec![(344, 49152, 2048), (345, 0, 2048),],
-        );
-        /*
-        NBD_CMD_WRITE typ=1 handle=288230376990965760 off=17657856 len=8192
+        let span = IOSpan::new(500, 4096 * 10, 4096);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 10 + 1);
 
-        >>> 17657856 / (512*100)
-        344.88
-        >>> 17657856 - 344 * (512*100)
-        45056
-        >>> 345 * (512*100) - 17657856
-        6144
-        >>> 8192 - 6144
-        2048
-        */
-        assert_eq!(
-            extent_from_offset(ddef, 17657856, 8192).unwrap(),
-            vec![(344, 45056, 6144), (345, 0, 2048),],
-        );
+        let span = IOSpan::new(500, 4096 * 3 + (4096 - 500 + 1), 4096);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 3 + 2);
+
+        // Some from hammer
+        let span = IOSpan::new(137690, 1340, 512);
+        assert!(!span.is_block_aligned_and_block_sized());
+        assert_eq!(span.number_of_affected_blocks(), 4);
+        assert_eq!(span.affected_block_numbers, vec![268, 269, 270, 271]);
+    }
+
+    #[test]
+    fn test_iospan_buffer_read_write() {
+        let span = IOSpan::new(500, 64, 512);
+        assert_eq!(span.number_of_affected_blocks(), 2);
+        assert_eq!(span.affected_block_numbers, vec![0, 1]);
+
+        span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]));
+
+        for i in 0..500 {
+            assert_eq!(span.buffer.as_vec()[i], 0);
+        }
+        for i in 500..512 {
+            assert_eq!(span.buffer.as_vec()[i], 1);
+        }
+        for i in 512..(512 + 64 - 12) {
+            assert_eq!(span.buffer.as_vec()[i], 1);
+        }
+        for i in (512 + 64 - 12)..1024 {
+            assert_eq!(span.buffer.as_vec()[i], 0);
+        }
+
+        let data = Buffer::new(64);
+        span.read_from_blocks_into_buffer(&mut data.as_vec()[..]);
+
+        for i in 0..64 {
+            assert_eq!(data.as_vec()[i], 1);
+        }
     }
 
     /*
@@ -2651,7 +2801,7 @@ mod test {
     fn make_upstairs() -> Arc<Upstairs> {
         let mut def = RegionDefinition::default();
         def.set_block_size(512);
-        def.set_extent_size(100);
+        def.set_extent_size(Block::new_512(100));
         def.set_extent_count(10);
 
         Arc::new(Upstairs {
@@ -2673,92 +2823,59 @@ mod test {
      */
     fn up_efo(
         up: &Arc<Upstairs>,
-        offset: u64,
-        len: usize,
-    ) -> Result<Vec<(u64, u64, usize)>> {
+        offset: Block,
+        num_blocks: u64,
+    ) -> Result<Vec<(u64, Block, u64)>> {
         let ddef = up.ddef.lock().unwrap();
-        extent_from_offset(*ddef, offset, len)
+        extent_from_offset(*ddef, offset, num_blocks)
     }
 
     #[test]
-    fn off_to_extent_basic() {
-        /*
-         * Verify the offsets match the expected byte_offset for the
-         * default size region.
-         */
+    fn off_to_extent_one_block() {
         let up = make_upstairs();
 
-        let exv = vec![(0, 0 * 512, 512)];
-        assert_eq!(up_efo(&up, 0, 512).unwrap(), exv);
-        let exv = vec![(0, 1 * 512, 512)];
-        assert_eq!(up_efo(&up, 512, 512).unwrap(), exv);
-        let exv = vec![(0, 2 * 512, 512)];
-        assert_eq!(up_efo(&up, 1024, 512).unwrap(), exv);
-        let exv = vec![(0, 3 * 512, 512)];
-        assert_eq!(up_efo(&up, 1024 + 512, 512).unwrap(), exv);
-        let exv = vec![(0, 99 * 512, 512)];
-        assert_eq!(up_efo(&up, 51200 - 512, 512).unwrap(), exv);
-
-        let exv = vec![(1, 0 * 512, 512)];
-        assert_eq!(up_efo(&up, 51200, 512).unwrap(), exv);
-        let exv = vec![(1, 1 * 512, 512)];
-        assert_eq!(up_efo(&up, 51200 + 512, 512).unwrap(), exv);
-        let exv = vec![(1, 2 * 512, 512)];
-        assert_eq!(up_efo(&up, 51200 + 1024, 512).unwrap(), exv);
-        let exv = vec![(1, 99 * 512, 512)];
-        assert_eq!(up_efo(&up, 102400 - 512, 512).unwrap(), exv);
-
-        let exv = vec![(2, 0 * 512, 512)];
-        assert_eq!(up_efo(&up, 102400, 512).unwrap(), exv);
-
-        let exv = vec![(9, 99 * 512, 512)];
-        assert_eq!(up_efo(&up, (512 * 100 * 10) - 512, 512).unwrap(), exv);
-    }
-
-    #[test]
-    fn off_to_extent_buffer() {
-        /*
-         * Testing a buffer size larger than the default 512
-         */
-        let up = make_upstairs();
-
-        let exv = vec![(0, 0 * 512, 1024)];
-        assert_eq!(up_efo(&up, 0, 1024).unwrap(), exv);
-        let exv = vec![(0, 1 * 512, 1024)];
-        assert_eq!(up_efo(&up, 512, 1024).unwrap(), exv);
-        let exv = vec![(0, 2 * 512, 1024)];
-        assert_eq!(up_efo(&up, 1024, 1024).unwrap(), exv);
-        let exv = vec![(0, 98 * 512, 1024)];
-        assert_eq!(up_efo(&up, 51200 - 1024, 1024).unwrap(), exv);
-
-        let exv = vec![(1, 0 * 512, 1024)];
-        assert_eq!(up_efo(&up, 51200, 1024).unwrap(), exv);
-        let exv = vec![(1, 1 * 512, 1024)];
-        assert_eq!(up_efo(&up, 51200 + 512, 1024).unwrap(), exv);
-        let exv = vec![(1, 2 * 512, 1024)];
-        assert_eq!(up_efo(&up, 51200 + 1024, 1024).unwrap(), exv);
-        let exv = vec![(1, 98 * 512, 1024)];
-        assert_eq!(up_efo(&up, 102400 - 1024, 1024).unwrap(), exv);
-
-        let exv = vec![(2, 0 * 512, 1024)];
-        assert_eq!(up_efo(&up, 102400, 1024).unwrap(), exv);
-
-        let exv = vec![(9, 98 * 512, 1024)];
-        assert_eq!(up_efo(&up, (512 * 100 * 10) - 1024, 1024).unwrap(), exv);
-    }
-
-    #[test]
-    fn off_to_extent_vbuff() {
-        let up = make_upstairs();
-
-        /*
-         * Walk the buffer sizes from 512 to the whole extent, make sure
-         * it all works as expected
-         */
-        for bsize in (512..=51200).step_by(512) {
-            let exv = vec![(0, 0, bsize)];
-            assert_eq!(up_efo(&up, 0, bsize).unwrap(), exv);
+        for i in 0..100 {
+            let exv = vec![(0, Block::new_512(i), 1)];
+            assert_eq!(up_efo(&up, Block::new_512(i), 1).unwrap(), exv);
         }
+
+        for i in 0..100 {
+            let exv = vec![(1, Block::new_512(i), 1)];
+            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).unwrap(), exv);
+        }
+
+        let exv = vec![(2, Block::new_512(0), 1)];
+        assert_eq!(up_efo(&up, Block::new_512(200), 1).unwrap(), exv);
+
+        let exv = vec![(9, Block::new_512(99), 1)];
+        assert_eq!(up_efo(&up, Block::new_512(999), 1).unwrap(), exv);
+    }
+
+    #[test]
+    fn off_to_extent_two_blocks() {
+        let up = make_upstairs();
+
+        for i in 0..99 {
+            let exv = vec![(0, Block::new_512(i), 2)];
+            assert_eq!(up_efo(&up, Block::new_512(i), 2).unwrap(), exv);
+        }
+
+        let exv = vec![(0, Block::new_512(99), 1), (1, Block::new_512(0), 1)];
+        assert_eq!(up_efo(&up, Block::new_512(99), 2).unwrap(), exv);
+
+        for i in 0..99 {
+            let exv = vec![(1, Block::new_512(i), 1)];
+            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).unwrap(), exv);
+        }
+
+        let exv = vec![(1, Block::new_512(99), 1), (2, Block::new_512(0), 1)];
+        assert_eq!(up_efo(&up, Block::new_512(199), 2).unwrap(), exv);
+
+        let exv = vec![(2, Block::new_512(0), 2)];
+        assert_eq!(up_efo(&up, Block::new_512(200), 2).unwrap(), exv);
+
+        let exv = vec![(9, Block::new_512(98), 2)];
+        assert_eq!(up_efo(&up, Block::new_512(998), 2).unwrap(), exv);
     }
 
     #[test]
@@ -2767,29 +2884,30 @@ mod test {
          * Testing when our buffer crosses extents.
          */
         let up = make_upstairs();
+
         /*
          * 1024 buffer
          */
-        let exv = vec![(0, 99 * 512, 512), (1, 0, 512)];
-        assert_eq!(up_efo(&up, 51200 - 512, 1024).unwrap(), exv);
-        let exv = vec![(0, 98 * 512, 1024), (1, 0, 1024)];
-        assert_eq!(up_efo(&up, 51200 - 1024, 2048).unwrap(), exv);
+        let exv = vec![(0, Block::new_512(99), 1), (1, Block::new_512(0), 1)];
+        assert_eq!(up_efo(&up, Block::new_512(99), 2).unwrap(), exv);
+        let exv = vec![(0, Block::new_512(98), 2), (1, Block::new_512(0), 2)];
+        assert_eq!(up_efo(&up, Block::new_512(98), 4).unwrap(), exv);
 
         /*
          * Largest buffer
          */
-        let exv = vec![(0, 1 * 512, 51200 - 512), (1, 0, 512)];
-        assert_eq!(up_efo(&up, 512, 51200).unwrap(), exv);
-        let exv = vec![(0, 2 * 512, 51200 - 1024), (1, 0, 1024)];
-        assert_eq!(up_efo(&up, 1024, 51200).unwrap(), exv);
-        let exv = vec![(0, 4 * 512, 51200 - 2048), (1, 0, 2048)];
-        assert_eq!(up_efo(&up, 2048, 51200).unwrap(), exv);
+        let exv = vec![(0, Block::new_512(1), 99), (1, Block::new_512(0), 1)];
+        assert_eq!(up_efo(&up, Block::new_512(1), 100).unwrap(), exv);
+        let exv = vec![(0, Block::new_512(2), 98), (1, Block::new_512(0), 2)];
+        assert_eq!(up_efo(&up, Block::new_512(2), 100).unwrap(), exv);
+        let exv = vec![(0, Block::new_512(4), 96), (1, Block::new_512(0), 4)];
+        assert_eq!(up_efo(&up, Block::new_512(4), 100).unwrap(), exv);
 
         /*
          * Largest buffer, last block offset possible
          */
-        let exv = vec![(0, 99 * 512, 512), (1, 0, 51200 - 512)];
-        assert_eq!(up_efo(&up, 51200 - 512, 51200).unwrap(), exv);
+        let exv = vec![(0, Block::new_512(99), 1), (1, Block::new_512(0), 99)];
+        assert_eq!(up_efo(&up, Block::new_512(99), 100).unwrap(), exv);
     }
 
     /*
@@ -2799,28 +2917,39 @@ mod test {
     #[should_panic]
     fn off_to_extent_length_zero() {
         let up = make_upstairs();
-        up_efo(&up, 0, 0).unwrap();
+        up_efo(&up, Block::new_512(0), 0).unwrap();
     }
+
     #[test]
     fn off_to_extent_length_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 0, 512 * 100 * 10).unwrap();
+        up_efo(&up, Block::new_512(0), 1000).unwrap();
     }
+
     #[test]
     #[should_panic]
     fn off_to_extent_length_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 0, 512 * 100 * 10 + 1).unwrap();
+        up_efo(&up, Block::new_512(0), 1001).unwrap();
     }
+
     #[test]
     fn off_to_extent_length_and_offset_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 512 * 100 * 9, 512 * 100).unwrap();
+        up_efo(&up, Block::new_512(900), 100).unwrap();
     }
+
     #[test]
     #[should_panic]
     fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
-        up_efo(&up, 512 * 100 * 9, 512 * 100 + 1).unwrap();
+        up_efo(&up, Block::new_512(900), 101).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_right_block_size() {
+        let up = make_upstairs();
+        up_efo(&up, Block::new(900 * 4096, 4096), 101).unwrap();
     }
 }

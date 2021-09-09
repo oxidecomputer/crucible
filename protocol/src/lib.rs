@@ -5,6 +5,8 @@ use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRM_LEN: usize = 1024 * 1024;
 
+use crucible_common::Block;
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Message {
     HereIAm(u32),
@@ -13,11 +15,11 @@ pub enum Message {
     Imok,
     ExtentVersionsPlease,
     ExtentVersions(u64, u64, u32, Vec<u64>),
-    Write(u64, u64, Vec<u64>, u64, bytes::Bytes),
+    Write(u64, u64, Vec<u64>, Block, bytes::Bytes),
     WriteAck(u64),
     Flush(u64, Vec<u64>, u64),
     FlushAck(u64),
-    ReadRequest(u64, Vec<u64>, u64, u64, u32),
+    ReadRequest(u64, Vec<u64>, u64, Block, u64),
     ReadResponse(u64, bytes::Bytes),
     Unknown(u32, BytesMut),
 }
@@ -117,16 +119,18 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::Write(rn, eid, dependencies, byte_offset, data) => {
+            Message::Write(rn, eid, dependencies, offset, data) => {
                 let len = 4 // length field
                     + 4     // message ID
                     + 8     // rn
                     + 8     // eid
                     + 4     // dep Vec len
                     + dependencies.len() * 8  // dep Vec
-                    + 8     // byte offset
+                    + 8     // block offset
+                    + 4     // block shift
                     + 4     // data len.
                     + data.len(); // data
+
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(7);
@@ -136,7 +140,8 @@ impl Encoder<Message> for CrucibleEncoder {
                 for v in dependencies.iter() {
                     dst.put_u64_le(*v);
                 }
-                dst.put_u64_le(byte_offset);
+                dst.put_u64_le(offset.value);
+                dst.put_u32_le(offset.shift);
                 dst.put_u32_le(data.len() as u32);
                 dst.extend_from_slice(&data);
 
@@ -179,21 +184,16 @@ impl Encoder<Message> for CrucibleEncoder {
 
                 Ok(())
             }
-            Message::ReadRequest(
-                rn,
-                dependencies,
-                eid,
-                byte_offset,
-                byte_len,
-            ) => {
+            Message::ReadRequest(rn, dependencies, eid, offset, blen) => {
                 let len = 4 // length field
                     + 4     // message ID
                     + 8     // rn
                     + 4     // dep Vec len
-                    + dependencies.len() * 8  // dep Vec
+                    + dependencies.len() * 8 // dep Vec
                     + 8     // eid
-                    + 8     // byte offset
-                    + 4; // byte len.
+                    + 8     // block offset value
+                    + 4     // block offset shift
+                    + 8; // block len value
                 dst.reserve(len);
                 dst.put_u32_le(len as u32);
                 dst.put_u32_le(11);
@@ -203,8 +203,9 @@ impl Encoder<Message> for CrucibleEncoder {
                     dst.put_u64_le(*v);
                 }
                 dst.put_u64_le(eid);
-                dst.put_u64_le(byte_offset);
-                dst.put_u32_le(byte_len);
+                dst.put_u64_le(offset.value);
+                dst.put_u32_le(offset.shift);
+                dst.put_u64_le(blen);
 
                 Ok(())
             }
@@ -285,30 +286,36 @@ impl Decoder for CrucibleDecoder {
 
         Ok(match src.get_u32_le() {
             0 => bail!("message code must be non-zero"),
+            // HereIAm
             1 => {
                 chklen(src, 4)?;
 
                 let version = src.get_u32_le();
                 Some(Message::HereIAm(version))
             }
+            // YesItsMe
             2 => {
                 chklen(src, 4)?;
 
                 let version = src.get_u32_le();
                 Some(Message::YesItsMe(version))
             }
+            // Ruok
             3 => {
                 chklen(src, 0)?;
                 Some(Message::Ruok)
             }
+            // Imok
             4 => {
                 chklen(src, 0)?;
                 Some(Message::Imok)
             }
+            // ExtentVersionsPlease
             5 => {
                 chklen(src, 0)?;
                 Some(Message::ExtentVersionsPlease)
             }
+            // ExtentVersions
             6 => {
                 chklen(src, 8 + 8 + 4 + 4)?;
                 let bs = src.get_u64_le();
@@ -322,8 +329,8 @@ impl Decoder for CrucibleDecoder {
                 }
                 Some(Message::ExtentVersions(bs, es, ec, versions))
             }
+            // Write
             7 => {
-                // Write
                 chklen(src, 8 + 8 + 4)?;
                 let rn = src.get_u64_le();
                 let eid = src.get_u64_le();
@@ -333,18 +340,23 @@ impl Decoder for CrucibleDecoder {
                 for _ in 0..depend_count {
                     dependencies.push(src.get_u64_le());
                 }
-                chklen(src, 8 + 4)?;
-                let byte_offset = src.get_u64_le();
+                chklen(src, 8 + 4 + 4)?;
+                let offset = Block {
+                    value: src.get_u64_le(),
+                    shift: src.get_u32_le(),
+                };
                 let data_len = src.get_u32_le() as usize;
                 chklen(src, data_len)?;
                 let data = src.split_to(data_len).freeze();
-                Some(Message::Write(rn, eid, dependencies, byte_offset, data))
+                Some(Message::Write(rn, eid, dependencies, offset, data))
             }
+            // WriteAck
             8 => {
                 chklen(src, 8)?;
                 let rn = src.get_u64_le();
                 Some(Message::WriteAck(rn))
             }
+            // Flush
             9 => {
                 chklen(src, 8 + 4)?;
                 let rn = src.get_u64_le();
@@ -358,13 +370,15 @@ impl Decoder for CrucibleDecoder {
                 let flush_number = src.get_u64_le();
                 Some(Message::Flush(rn, dependencies, flush_number))
             }
+            // FlushAck
             10 => {
                 chklen(src, 8)?;
                 let rn = src.get_u64_le();
                 Some(Message::FlushAck(rn))
             }
+            // ReadRequest
             11 => {
-                chklen(src, 28)?;
+                chklen(src, 8 + 4)?;
                 let rn = src.get_u64_le();
                 let depend_count = src.get_u32_le() as usize;
                 chklen(src, depend_count.checked_mul(8).unwrap())?;
@@ -372,17 +386,22 @@ impl Decoder for CrucibleDecoder {
                 for _ in 0..depend_count {
                     dependencies.push(src.get_u64_le());
                 }
+                chklen(src, 8 + 8 + 4 + 8)?;
                 let eid = src.get_u64_le();
-                let byte_offset = src.get_u64_le();
-                let bytes = src.get_u32_le();
+                let offset = Block {
+                    value: src.get_u64_le(),
+                    shift: src.get_u32_le(),
+                };
+                let num_blocks = src.get_u64_le();
                 Some(Message::ReadRequest(
                     rn,
                     dependencies,
                     eid,
-                    byte_offset,
-                    bytes,
+                    offset,
+                    num_blocks,
                 ))
             }
+            // ReadResponse
             12 => {
                 chklen(src, 8 + 4)?;
                 let rn = src.get_u64_le();
@@ -391,6 +410,7 @@ impl Decoder for CrucibleDecoder {
                 let data = src.split_to(data_len).freeze();
                 Some(Message::ReadResponse(rn, data))
             }
+            // Unknown
             code => {
                 let buf = src.split_to(len - 2 * 4);
                 Some(Message::Unknown(code, buf))

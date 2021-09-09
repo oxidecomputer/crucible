@@ -119,7 +119,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     }
 
     println!("send a write");
-    guest.write(my_offset, data.freeze());
+    guest.bwrite(my_offset, data.freeze());
 
     println!("send a flush");
     guest.flush();
@@ -129,7 +129,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
 
     println!("send a read");
-    guest.read(read_offset, data);
+    guest.bread(read_offset, data);
 
     Ok(())
 }
