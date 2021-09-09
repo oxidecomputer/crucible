@@ -22,7 +22,7 @@ arg_enum! {
         Big,
         Dep,
         Rand,
-        Baloon,
+        Balloon,
     }
 }
 
@@ -164,9 +164,9 @@ fn main() -> Result<()> {
             println!("Run random test");
             runtime.block_on(rand_workload(&guest))?;
         }
-        Workload::Baloon => {
-            println!("Run baloon test");
-            runtime.block_on(baloon_workload(&guest))?;
+        Workload::Balloon => {
+            println!("Run balloon test");
+            runtime.block_on(balloon_workload(&guest))?;
         }
     }
 
@@ -304,10 +304,10 @@ fn validate_vec(
 /*
  * Write then read (and verify) to every possible block, with every size that
  * block can possibly support.
- * I named it baloon because each loop on a block "baloons" from the minimum
+ * I named it balloon because each loop on a block "balloons" from the minimum
  * IO size to the largest possible.
  */
-async fn baloon_workload(guest: &Arc<Guest>) -> Result<()> {
+async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
@@ -318,7 +318,7 @@ async fn baloon_workload(guest: &Arc<Guest>) -> Result<()> {
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
-        "Baloon workload starting with  es: {}  bs:{}  ts:{}  tb:{}",
+        "Balloon workload starting with  es: {}  bs:{}  ts:{}  tb:{}",
         extent_size, block_size, total_size, total_blocks
     );
 
@@ -394,7 +394,7 @@ fn print_write_count(
 
 /*
  * Generate a random offset and length, and write to then read from
- * that offset/lenght.  Verify the data is what we expect.
+ * that offset/length.  Verify the data is what we expect.
  */
 async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
     /*
