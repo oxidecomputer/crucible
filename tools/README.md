@@ -66,4 +66,11 @@ dtrace: script 'tools/perfgw.d' matched 6 probes
         67108864 |@@@@@@@@@@@@@@@@@@@@@@@@@@               647
        134217728 |
 ```
+
+## test_up.sh
+A simple script that will start three downstairs, then run through some tests in
+client/src/main.  It's an easy way to quickly run some simple tests without
+having to spin up a bunch of things.  These tests are limited in their scope and
+should not be considered substantial.
+
 That's all for now!

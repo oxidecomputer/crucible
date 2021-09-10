@@ -602,9 +602,7 @@ mod test {
     }
 
     pub fn test_cleanup() {
-        if Path::new("/tmp/ds_test").exists() {
-            remove_dir_all("/tmp/ds_test").unwrap();
-        }
+        let _ = remove_dir_all("/tmp/ds_test");
     }
 
     #[test]
