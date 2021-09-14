@@ -1942,7 +1942,7 @@ impl Guest {
     }
 
     pub fn query_extent_size(&self) -> Block {
-        let data = Arc::new(Mutex::new(Block::new(0, 0)));
+        let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
         self.send(extent_query).block_wait();
         return *data.lock().unwrap();

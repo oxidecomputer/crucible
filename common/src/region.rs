@@ -23,8 +23,9 @@ pub struct Block {
 
 impl Block {
     pub fn new(value: u64, shift: u32) -> Block {
+        // are you sure you need blocks that small?
         // are you sure you need blocks that big?
-        assert!(shift <= 16);
+        assert!((9..16).contains(&shift));
 
         Block { value, shift }
     }
@@ -114,7 +115,7 @@ impl Default for RegionDefinition {
     fn default() -> RegionDefinition {
         RegionDefinition {
             block_size: 0,
-            extent_size: Block::new(0, 0),
+            extent_size: Block::new(0, 9),
             extent_count: 0,
         }
     }
