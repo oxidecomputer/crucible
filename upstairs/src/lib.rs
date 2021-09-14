@@ -2612,8 +2612,15 @@ impl Write for CruciblePseudoFile {
         let mut span =
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
+        /*
+         * Crucible's dependency system will properly resolve requests in the order they're sent
+         * but if the request is not block aligned and block sized we need to do read-modify-write
+         * (RMW) here. Use a reader-writer lock, and grab the write portion of the lock when doing
+         * RMW to cause all other operations (which only grab the read portion of the lock) to
+         * pause. Otherwise all operations can use the read portion of this lock and Crucible will
+         * sort it out.
+         */
         if !span.is_block_aligned_and_block_sized() {
-            // RMW here!
             let _guard = self.rmw_lock.write().unwrap();
 
             let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
@@ -2624,6 +2631,8 @@ impl Write for CruciblePseudoFile {
             let mut waiter = span.write_affected_blocks_to_guest(&self.guest);
             waiter.block_wait();
         } else {
+            let _guard = self.rmw_lock.read().unwrap();
+
             let offset = Block::new(
                 self.offset / self.block_size,
                 self.block_size.trailing_zeros(),
@@ -2640,6 +2649,8 @@ impl Write for CruciblePseudoFile {
     }
 
     fn flush(&mut self) -> IOResult<()> {
+        let _guard = self.rmw_lock.read().unwrap();
+
         let mut waiter = self.guest.flush();
         waiter.block_wait();
 
