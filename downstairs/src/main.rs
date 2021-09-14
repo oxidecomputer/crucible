@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crucible::*;
+use crucible_common::Block;
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
@@ -123,15 +124,15 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
      * Export an existing downstairs region to a file
      */
     let (block_size, extent_size, extent_count) = region.region_def();
-    let space_per_extent = block_size * extent_size;
+    let space_per_extent = extent_size.byte_value();
     assert!(block_size > 0);
-    assert!(extent_size > 0);
+    assert!(space_per_extent > 0);
     assert!(extent_count > 0);
     assert!(space_per_extent > 0);
-    let file_size = block_size * extent_size * extent_count as u64;
+    let file_size = space_per_extent * extent_count as u64;
 
     if count == 0 {
-        count = extent_size * extent_count as u64;
+        count = extent_size.value * extent_count as u64;
     }
 
     println!(
@@ -151,13 +152,13 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
 
     'eid_loop: for eid in 0..extent_count {
         let extent_offset = space_per_extent * eid as u64;
-        for block_offset in 0..extent_size {
+        for block_offset in 0..extent_size.value {
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
                 region
                     .region_read(
                         eid as u64,
-                        block_size * block_offset,
+                        Block::new_with_ddef(block_offset, &region.def()),
                         &mut data,
                     )
                     .unwrap();
@@ -199,7 +200,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      */
     let file_size = fs::metadata(&import_path)?.len();
     let (block_size, extent_size, _) = region.region_def();
-    let space_per_extent = block_size * extent_size;
+    let space_per_extent = extent_size.byte_value();
 
     let mut extents_needed = file_size / space_per_extent;
     if file_size % space_per_extent != 0 {
@@ -222,7 +223,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     buffer.resize(block_size as usize, 0);
 
     let mut fp = File::open(import_path)?;
-    let mut offset: u64 = 0;
+    let mut offset = Block::new_with_ddef(0, &region.def());
     let mut blocks_copied = 0;
     while let Ok(n) = fp.read(&mut buffer[..]) {
         if n == 0 {
@@ -238,19 +239,19 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          * Use the same function upsairs uses to decide where to put the
          * data based on the LBA offset.
          */
-        let nwo = extent_from_offset(rm, offset, block_size as usize).unwrap();
+        let nwo = extent_from_offset(rm, offset, 1).unwrap();
         assert_eq!(nwo.len(), 1);
-        let (eid, byte_offset, _) = nwo[0];
+        let (eid, block_offset, _) = nwo[0];
 
         if n != (block_size as usize) {
             if n != 0 {
                 let rest = &buffer[0..n];
-                region.region_write(eid, byte_offset, rest)?;
+                region.region_write(eid, block_offset, rest)?;
             }
             break;
         } else {
-            region.region_write(eid, byte_offset, &buffer)?;
-            offset += n as u64;
+            region.region_write(eid, block_offset, &buffer)?;
+            offset.value += 1;
         }
     }
 
@@ -283,8 +284,8 @@ async fn do_work(
         IOop::Read {
             dependencies: _dependencies,
             eid,
-            byte_offset,
-            len,
+            offset,
+            num_blocks,
         } => {
             /*
              * XXX Some thought will need to be given to where the read
@@ -292,10 +293,11 @@ async fn do_work(
              * Also, we (I) need to figure out how to read data into an
              * uninitialized buffer. Until then, we have this workaround.
              */
-            let sz = len as usize;
+            let (bs, _, _) = ds.region.region_def();
+            let sz = num_blocks as usize * bs as usize;
             let mut data = BytesMut::with_capacity(sz);
             data.resize(sz, 1);
-            ds.region.region_read(eid, byte_offset, &mut data)?;
+            ds.region.region_read(eid, offset, &mut data)?;
             /*
              * Any error from an IO should be intercepted here and passed
              * back to the upstairs.
@@ -309,10 +311,10 @@ async fn do_work(
         IOop::Write {
             dependencies: _dependencies,
             eid,
-            byte_offset,
+            offset,
             data,
         } => {
-            ds.region.region_write(eid, byte_offset, &data)?;
+            ds.region.region_write(eid, offset, &data)?;
             fw.send(Message::WriteAck(job.ds_id)).await?;
             ds.complete_work(job.ds_id, false);
             Ok(())
@@ -397,8 +399,8 @@ fn _show_work(ds: &Arc<Downstairs>) {
                 IOop::Read {
                     dependencies,
                     eid: _eid,
-                    byte_offset: _byte_offset,
-                    len: _len,
+                    offset: _offset,
+                    num_blocks: _num_blocks,
                 } => {
                     dsw_type = "Read ".to_string();
                     dep_list = dependencies.to_vec();
@@ -406,7 +408,7 @@ fn _show_work(ds: &Arc<Downstairs>) {
                 IOop::Write {
                     dependencies,
                     eid: _eid,
-                    byte_offset: _byte_offset,
+                    offset: _offset,
                     data: _data,
                 } => {
                     dsw_type = "Write".to_string();
@@ -449,14 +451,19 @@ async fn proc_frame(
         }
         Message::ExtentVersionsPlease => {
             let (bs, es, ec) = d.region.region_def();
-            fw.send(Message::ExtentVersions(bs, es, ec, d.region.versions()))
-                .await?;
+            fw.send(Message::ExtentVersions(
+                bs,
+                es.value,
+                ec,
+                d.region.versions(),
+            ))
+            .await?;
         }
-        Message::Write(ds_id, eid, dependencies, byte_offset, data) => {
+        Message::Write(ds_id, eid, dependencies, offset, data) => {
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
                 eid: *eid,
-                byte_offset: *byte_offset,
+                offset: *offset,
                 data: data.clone(),
             };
 
@@ -473,13 +480,13 @@ async fn proc_frame(
             d.add_work(*ds_id, new_flush);
             completed = do_work_loop(d, fw).await?;
         }
-        Message::ReadRequest(ds_id, dependencies, eid, byte_offset, len) => {
+        Message::ReadRequest(ds_id, dependencies, eid, offset, num_blocks) => {
             /* Add read work */
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
                 eid: *eid,
-                byte_offset: *byte_offset,
-                len: *len,
+                offset: *offset,
+                num_blocks: *num_blocks,
             };
 
             d.add_work(*ds_id, new_read);
@@ -667,7 +674,7 @@ impl Work {
                     IOop::Write {
                         dependencies,
                         eid: _eid,
-                        byte_offset: _byte_offset,
+                        offset: _offset,
                         data: _data,
                     } => dependencies,
                     IOop::Flush {
@@ -677,8 +684,8 @@ impl Work {
                     IOop::Read {
                         dependencies,
                         eid: _eid,
-                        byte_offset: _byte_offset,
-                        len: _len,
+                        offset: _offset,
+                        num_blocks: _num_blocks,
                     } => dependencies,
                 };
 
@@ -802,7 +809,10 @@ async fn main() -> Result<()> {
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
         region_options.set_block_size(opt.block_size);
-        region_options.set_extent_size(opt.extent_size);
+        region_options.set_extent_size(Block::new(
+            opt.extent_size,
+            opt.block_size.trailing_zeros(),
+        ));
 
         region = Region::create(&opt.data, region_options)?;
 

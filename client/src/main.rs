@@ -11,6 +11,7 @@ use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
+use crucible_common::Block;
 
 /*
  * The various tests this program supports.
@@ -318,7 +319,7 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
-        "Balloon workload starting with  es: {}  bs:{}  ts:{}  tb:{}",
+        "Balloon workload starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
         extent_size, block_size, total_size, total_blocks
     );
 
@@ -347,7 +348,8 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
             /*
              * Convert block_index to its byte value.
              */
-            let offset = (block_index as u64 * block_size) as u64;
+            let offset =
+                Block::new(block_index as u64, block_size.trailing_zeros());
 
             let mut waiter = guest.write(offset, data);
             waiter.block_wait();
@@ -380,13 +382,13 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
 fn print_write_count(
     write_count: Vec<u32>,
     total_blocks: usize,
-    extent_size: u64,
+    extent_size: Block,
 ) {
     println!(" Write IO count to each extent");
     println!("###############################");
     for (i, wc) in write_count.iter().enumerate().take(total_blocks) {
         print!("{:5} ", wc);
-        if (i + 1) % (extent_size as usize) == 0 {
+        if (i + 1) % (extent_size.value as usize) == 0 {
             println!();
         }
     }
@@ -407,7 +409,7 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
-        "Random workload starting with  es: {}  bs:{}  ts:{}  tb:{}",
+        "Random workload starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
         extent_size, block_size, total_size, total_blocks
     );
 
@@ -443,7 +445,8 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
         /*
          * Convert offset and length to their byte values.
          */
-        let offset = (block_index as u64 * block_size) as u64;
+        let offset =
+            Block::new(block_index as u64, block_size.trailing_zeros());
 
         /*
          * Update the write count for all blocks we plan to write to.
@@ -485,11 +488,11 @@ fn single_workload(guest: &Arc<Guest>) -> Result<()> {
     println!("Run single workload");
     let block_size = guest.query_block_size();
     let extent_size = guest.query_extent_size();
-    println!("bs: {}  es:{}", extent_size, block_size);
+    println!("bs: {:?}  es:{}", extent_size, block_size);
     /*
      * Pick the last block in the first extent
      */
-    let my_offset = (block_size * extent_size) - block_size;
+    let my_offset = block_size * (extent_size.value - 1);
     let my_length: usize = block_size as usize * 2;
 
     let mut vec: Vec<u8> = Vec::with_capacity(my_length);
@@ -504,7 +507,7 @@ fn single_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
-    let mut waiter = guest.write(my_offset, data);
+    let mut waiter = guest.write_to_byte_offset(my_offset, data);
     waiter.block_wait();
 
     println!("Sending a flush");
@@ -515,7 +518,7 @@ fn single_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = crucible::Buffer::from_vec(vec);
 
     println!("Sending a read spanning two extents");
-    waiter = guest.read(my_offset, data);
+    waiter = guest.read_from_byte_offset(my_offset, data);
     waiter.block_wait();
 
     Ok(())
@@ -551,7 +554,7 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len()
         );
-        let mut waiter = guest.write(my_offset, data);
+        let mut waiter = guest.write_to_byte_offset(my_offset, data);
         waiter.block_wait();
 
         /*
@@ -572,12 +575,12 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len(),
         );
-        waiter = guest.read(my_offset, data);
+        waiter = guest.read_from_byte_offset(my_offset, data);
         waiter.block_wait();
 
         my_offset += block_size;
         cur_block += 1;
-        if cur_block >= extent_size {
+        if cur_block >= extent_size.value {
             cur_extent += 1;
             cur_block = 0;
             println!("[{}][{}] send flush", cur_extent, cur_block);
@@ -631,7 +634,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter = guest.write(my_offset, data);
+                let waiter = guest.write_to_byte_offset(my_offset, data);
                 waiterlist.push(waiter);
             } else {
                 let vec: Vec<u8> = vec![0; block_size as usize];
@@ -644,7 +647,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter = guest.read(my_offset, data);
+                let waiter = guest.read_from_byte_offset(my_offset, data);
                 waiterlist.push(waiter);
             }
         }
@@ -678,7 +681,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         scope.wait_for("write 1").await;
 
         println!("send write 1");
-        guest.write(my_offset, data.freeze());
+        guest.write_to_byte_offset(my_offset, data.freeze());
 
         scope.wait_for("show work").await;
         guest.show_work();
@@ -690,7 +693,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
             println!("send a read");
             // scope.wait_for("send Read").await;
-            guest.read(read_offset, data);
+            guest.read_from_byte_offset(read_offset, data);
             read_offset += READ_SIZE as u64;
             // scope.wait_for("show work").await;
             guest.show_work();
@@ -705,7 +708,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
         // scope.wait_for("write 2").await;
         println!("send write 2");
-        guest.write(my_offset, data.freeze());
+        guest.write_to_byte_offset(my_offset, data.freeze());
         my_offset += 512;
         // scope.wait_for("show work").await;
         guest.show_work();

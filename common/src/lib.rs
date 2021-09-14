@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 mod region;
-pub use region::{RegionDefinition, RegionOptions};
+pub use region::{Block, RegionDefinition, RegionOptions};
 
 pub fn read_json_maybe<P, T>(file: P) -> Result<Option<T>>
 where
