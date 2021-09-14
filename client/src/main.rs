@@ -507,7 +507,7 @@ fn single_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
-    let mut waiter = guest.bwrite(my_offset, data);
+    let mut waiter = guest.write_to_byte_offset(my_offset, data);
     waiter.block_wait();
 
     println!("Sending a flush");
@@ -518,7 +518,7 @@ fn single_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = crucible::Buffer::from_vec(vec);
 
     println!("Sending a read spanning two extents");
-    waiter = guest.bread(my_offset, data);
+    waiter = guest.read_from_byte_offset(my_offset, data);
     waiter.block_wait();
 
     Ok(())
@@ -554,7 +554,7 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len()
         );
-        let mut waiter = guest.bwrite(my_offset, data);
+        let mut waiter = guest.write_to_byte_offset(my_offset, data);
         waiter.block_wait();
 
         /*
@@ -575,7 +575,7 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len(),
         );
-        waiter = guest.bread(my_offset, data);
+        waiter = guest.read_from_byte_offset(my_offset, data);
         waiter.block_wait();
 
         my_offset += block_size;
@@ -634,7 +634,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter = guest.bwrite(my_offset, data);
+                let waiter = guest.write_to_byte_offset(my_offset, data);
                 waiterlist.push(waiter);
             } else {
                 let vec: Vec<u8> = vec![0; block_size as usize];
@@ -647,7 +647,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter = guest.bread(my_offset, data);
+                let waiter = guest.read_from_byte_offset(my_offset, data);
                 waiterlist.push(waiter);
             }
         }
@@ -681,7 +681,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         scope.wait_for("write 1").await;
 
         println!("send write 1");
-        guest.bwrite(my_offset, data.freeze());
+        guest.write_to_byte_offset(my_offset, data.freeze());
 
         scope.wait_for("show work").await;
         guest.show_work();
@@ -693,7 +693,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
             println!("send a read");
             // scope.wait_for("send Read").await;
-            guest.bread(read_offset, data);
+            guest.read_from_byte_offset(read_offset, data);
             read_offset += READ_SIZE as u64;
             // scope.wait_for("show work").await;
             guest.show_work();
@@ -708,7 +708,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
         // scope.wait_for("write 2").await;
         println!("send write 2");
-        guest.bwrite(my_offset, data.freeze());
+        guest.write_to_byte_offset(my_offset, data.freeze());
         my_offset += 512;
         // scope.wait_for("show work").await;
         guest.show_work();

@@ -1906,18 +1906,27 @@ impl Guest {
     }
 
     /*
-     * `bread` and `bwrite` accept a byte offset, and data must be a multiple of block size.
+     * `read_from_byte_offset` and `write_to_byte_offset` accept a byte offset, and data must be a
+     * multiple of block size.
      *
      * note these functions assert that the byte offset is divisible by the block size and should
      * only be used in non-production code.
      */
-    pub fn bread(&self, offset: u64, data: Buffer) -> BlockReqWaiter {
+    pub fn read_from_byte_offset(
+        &self,
+        offset: u64,
+        data: Buffer,
+    ) -> BlockReqWaiter {
         let bs = self.query_block_size();
         assert!((offset % bs) == 0);
         self.read(Block::new(offset / bs, bs.trailing_zeros()), data)
     }
 
-    pub fn bwrite(&self, offset: u64, data: Bytes) -> BlockReqWaiter {
+    pub fn write_to_byte_offset(
+        &self,
+        offset: u64,
+        data: Bytes,
+    ) -> BlockReqWaiter {
         let bs = self.query_block_size();
         assert!((offset % bs) == 0);
         self.write(Block::new(offset / bs, bs.trailing_zeros()), data)
