@@ -2496,7 +2496,7 @@ impl IOSpan {
         }
     }
 
-    fn is_block_aligned_and_block_sized(&self) -> bool {
+    fn is_block_regular(&self) -> bool {
         let is_block_aligned = (self.offset % self.block_size) == 0;
         let is_block_sized = (self.sz % self.block_size) == 0;
 
@@ -2620,7 +2620,7 @@ impl Write for CruciblePseudoFile {
          * pause. Otherwise all operations can use the read portion of this lock and Crucible will
          * sort it out.
          */
-        if !span.is_block_aligned_and_block_sized() {
+        if !span.is_block_regular() {
             let _guard = self.rmw_lock.write().unwrap();
 
             let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
@@ -2755,32 +2755,32 @@ mod test {
     #[test]
     fn test_iospan() {
         let span = IOSpan::new(512, 1024, 512);
-        assert!(span.is_block_aligned_and_block_sized());
+        assert!(span.is_block_regular());
         assert_eq!(span.affected_block_count(), 2);
 
         let span = IOSpan::new(513, 1024, 512);
-        assert!(!span.is_block_aligned_and_block_sized());
+        assert!(!span.is_block_regular());
         assert_eq!(span.affected_block_count(), 3);
 
         let span = IOSpan::new(512, 500, 512);
-        assert!(!span.is_block_aligned_and_block_sized());
+        assert!(!span.is_block_regular());
         assert_eq!(span.affected_block_count(), 1);
 
         let span = IOSpan::new(512, 512, 4096);
-        assert!(!span.is_block_aligned_and_block_sized());
+        assert!(!span.is_block_regular());
         assert_eq!(span.affected_block_count(), 1);
 
         let span = IOSpan::new(500, 4096 * 10, 4096);
-        assert!(!span.is_block_aligned_and_block_sized());
+        assert!(!span.is_block_regular());
         assert_eq!(span.affected_block_count(), 10 + 1);
 
         let span = IOSpan::new(500, 4096 * 3 + (4096 - 500 + 1), 4096);
-        assert!(!span.is_block_aligned_and_block_sized());
+        assert!(!span.is_block_regular());
         assert_eq!(span.affected_block_count(), 3 + 2);
 
         // Some from hammer
         let span = IOSpan::new(137690, 1340, 512);
-        assert!(!span.is_block_aligned_and_block_sized());
+        assert!(!span.is_block_regular());
         assert_eq!(span.affected_block_count(), 4);
         assert_eq!(span.affected_block_numbers, vec![268, 269, 270, 271]);
     }
