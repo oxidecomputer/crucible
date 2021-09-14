@@ -2613,12 +2613,12 @@ impl Write for CruciblePseudoFile {
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
         /*
-         * Crucible's dependency system will properly resolve requests in the order they're sent
-         * but if the request is not block aligned and block sized we need to do read-modify-write
-         * (RMW) here. Use a reader-writer lock, and grab the write portion of the lock when doing
-         * RMW to cause all other operations (which only grab the read portion of the lock) to
-         * pause. Otherwise all operations can use the read portion of this lock and Crucible will
-         * sort it out.
+         * Crucible's dependency system will properly resolve requests in the order they are
+         * received but if the request is not block aligned and block sized we need to do
+         * read-modify-write (RMW) here. Use a reader-writer lock, and grab the write portion of
+         * the lock when doing RMW to cause all other operations (which only grab the read portion
+         * of the lock) to pause. Otherwise all operations can use the read portion of this lock
+         * and Crucible will sort it out.
          */
         if !span.is_block_regular() {
             let _guard = self.rmw_lock.write().unwrap();
