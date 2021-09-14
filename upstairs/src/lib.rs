@@ -2504,7 +2504,7 @@ impl IOSpan {
     }
 
     #[cfg(test)]
-    fn number_of_affected_blocks(&self) -> usize {
+    fn affected_block_count(&self) -> usize {
         self.affected_block_numbers.len()
     }
 
@@ -2745,39 +2745,39 @@ mod test {
     fn test_iospan() {
         let span = IOSpan::new(512, 1024, 512);
         assert!(span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 2);
+        assert_eq!(span.affected_block_count(), 2);
 
         let span = IOSpan::new(513, 1024, 512);
         assert!(!span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 3);
+        assert_eq!(span.affected_block_count(), 3);
 
         let span = IOSpan::new(512, 500, 512);
         assert!(!span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 1);
+        assert_eq!(span.affected_block_count(), 1);
 
         let span = IOSpan::new(512, 512, 4096);
         assert!(!span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 1);
+        assert_eq!(span.affected_block_count(), 1);
 
         let span = IOSpan::new(500, 4096 * 10, 4096);
         assert!(!span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 10 + 1);
+        assert_eq!(span.affected_block_count(), 10 + 1);
 
         let span = IOSpan::new(500, 4096 * 3 + (4096 - 500 + 1), 4096);
         assert!(!span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 3 + 2);
+        assert_eq!(span.affected_block_count(), 3 + 2);
 
         // Some from hammer
         let span = IOSpan::new(137690, 1340, 512);
         assert!(!span.is_block_aligned_and_block_sized());
-        assert_eq!(span.number_of_affected_blocks(), 4);
+        assert_eq!(span.affected_block_count(), 4);
         assert_eq!(span.affected_block_numbers, vec![268, 269, 270, 271]);
     }
 
     #[test]
     fn test_iospan_buffer_read_write() {
         let span = IOSpan::new(500, 64, 512);
-        assert_eq!(span.number_of_affected_blocks(), 2);
+        assert_eq!(span.affected_block_count(), 2);
         assert_eq!(span.affected_block_numbers, vec![0, 1]);
 
         span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]));
