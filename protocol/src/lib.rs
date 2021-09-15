@@ -51,13 +51,12 @@ impl Encoder<Message> for CrucibleEncoder {
         m: Message,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        let bytes = bincode::serialize(&m)?;
-
-        let len = bytes.len() + 4;
+        let serialized_len: usize = bincode::serialized_size(&m)? as usize;
+        let len = serialized_len + 4;
 
         dst.reserve(len);
         dst.put_u32_le(len as u32);
-        dst.extend_from_slice(&bytes);
+        bincode::serialize_into(dst.writer(), &m)?;
 
         Ok(())
     }
@@ -113,11 +112,7 @@ impl Decoder for CrucibleDecoder {
 
         src.advance(4);
 
-        // src may contain more frames, so truncate based on this frame's length
-        let message = bincode::deserialize(&src[0..(len - 4)]);
-
-        // deserializing does not consume from src, make sure to do so here
-        src.advance(len - 4);
+        let message = bincode::deserialize_from(src.reader());
 
         Ok(Some(message?))
     }
