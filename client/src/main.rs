@@ -20,6 +20,7 @@ arg_enum! {
     #[derive(Debug, StructOpt)]
     enum Workload {
         One,
+        Span,
         Big,
         Dep,
         Rand,
@@ -48,9 +49,7 @@ pub struct Opt {
     lossy: bool,
 
     /*
-     * quit after tests finish.
-     * By default, the client remains running and sends a flush
-     * request every so often to the downstairs.
+     * quit after all crucible work queues are empty.
      */
     #[structopt(short, long)]
     quit: bool,
@@ -122,7 +121,7 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
     println!("Wait for a show_work command to finish before sending IO");
     guest.show_work();
@@ -139,7 +138,11 @@ fn main() -> Result<()> {
     match opt.workload {
         Workload::One => {
             println!("One test");
-            single_workload(&guest)?;
+            runtime.block_on(rand_workload(&guest, 1))?;
+        }
+        Workload::Span => {
+            println!("Span test");
+            span_workload(&guest)?;
         }
         Workload::Big => {
             println!("Run big test");
@@ -163,7 +166,7 @@ fn main() -> Result<()> {
         }
         Workload::Rand => {
             println!("Run random test");
-            runtime.block_on(rand_workload(&guest))?;
+            runtime.block_on(rand_workload(&guest, 50))?;
         }
         Workload::Balloon => {
             println!("Run balloon test");
@@ -171,16 +174,15 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("Tests done");
-    if opt.quit {
-        return Ok(());
-    }
-
+    println!("Tests done.  All submitted work has been ackd");
     loop {
-        guest.show_work();
-        std::thread::sleep(std::time::Duration::from_secs(30));
-        println!("\n\n   Loop send flush");
-        guest.flush();
+        let wc = guest.show_work();
+        println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
+        if opt.quit && wc.up_count + wc.ds_count == 0 {
+            println!("All crucible jobs finished, exiting program");
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(15));
     }
 }
 
@@ -398,7 +400,7 @@ fn print_write_count(
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
+async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
@@ -409,8 +411,8 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
-        "Random workload starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
-        extent_size, block_size, total_size, total_blocks
+        "workload {} loop(s), starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
+        count, extent_size, block_size, total_size, total_blocks
     );
 
     /*
@@ -427,7 +429,7 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
     /*
      * TODO: Let the user select the number of loops
      */
-    for _ in 0..1000 {
+    for _ in 0..count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
          * entire region.
@@ -457,12 +459,17 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
 
         let vec = fill_vec(block_index, size, &write_count, block_size);
         let data = Bytes::from(vec);
+
+        if count < 10 {
+            // When count is small, print out the IO info
+            println!("IO at block {}, len:{}", offset.value, data.len());
+        }
         let mut waiter = guest.write(offset, data);
         waiter.block_wait();
 
         let mut waiter = guest.flush();
         waiter.block_wait();
-
+        /*
         let length: usize = size * block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
@@ -473,9 +480,12 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
         if !validate_vec(dl.clone(), block_index, &write_count, block_size) {
             bail!("Error at {}", block_index);
         }
+        */
     }
 
-    print_write_count(write_count, total_blocks, extent_size);
+    if count >= 10 {
+        print_write_count(write_count, total_blocks, extent_size);
+    }
     Ok(())
 }
 
@@ -484,8 +494,8 @@ async fn rand_workload(guest: &Arc<Guest>) -> Result<()> {
  * then will try to read the same.
  * TODO: Compare the buffer we wrote with the buffer we read.
  */
-fn single_workload(guest: &Arc<Guest>) -> Result<()> {
-    println!("Run single workload");
+fn span_workload(guest: &Arc<Guest>) -> Result<()> {
+    println!("Run span workload");
     let block_size = guest.query_block_size();
     let extent_size = guest.query_extent_size();
     println!("bs: {:?}  es:{}", extent_size, block_size);
@@ -652,6 +662,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
             }
         }
 
+        guest.show_work();
         println!("Loop:{} send a final flush and wait", my_count);
         let mut flush_waiter = guest.flush();
         flush_waiter.block_wait();
@@ -661,6 +672,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
             wa.block_wait();
         }
         println!("Loop:{} all waiters done", my_count);
+        guest.show_work();
     }
 
     println!("dep test done");
