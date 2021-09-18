@@ -266,7 +266,6 @@ async fn io_completed(
     data: Option<Bytes>,
     ds_done_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
-
     // Mark this ds_id for the client_id as completed.
     let gw_work_done = {
         let mut work = up.ds_work.lock().unwrap();
