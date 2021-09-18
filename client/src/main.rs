@@ -469,7 +469,7 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
 
         let mut waiter = guest.flush();
         waiter.block_wait();
-        /*
+
         let length: usize = size * block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
@@ -480,7 +480,6 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
         if !validate_vec(dl.clone(), block_index, &write_count, block_size) {
             bail!("Error at {}", block_index);
         }
-        */
     }
 
     if count >= 10 {

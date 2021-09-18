@@ -266,24 +266,13 @@ async fn io_completed(
     data: Option<Bytes>,
     ds_done_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
-    /*
-     * Having to put scope around the ds_work.lock call to avoid the
-     * compiler complaining (error[E0277]) about holding the lock while
-     * calling send (even if we drop) then creates a warning for the
-     * gw_work_done variable.
-     */
-    #[allow(unused_assignments)]
-    let mut gw_work_done = false;
-    /*
-     * Mark this ds_id for the client_id as completed.
-     * We can't call .send with the lock held, so we check to see
-     * if we do need to notify the up_ds_listen task that enough work
-     * is finished for a ds_id.  We also need to get sta
-     */
-    {
+
+    // Mark this ds_id for the client_id as completed.
+    let gw_work_done = {
         let mut work = up.ds_work.lock().unwrap();
-        gw_work_done = work.complete(ds_id, client_id, data)?;
-    }
+        work.complete(ds_id, client_id, data)?
+    };
+
     if gw_work_done {
         ds_done_tx.send(ds_id).await?
     }
@@ -408,7 +397,7 @@ async fn proc(
     lossy: bool,
 ) -> Result<()> {
     let (r, w) = sock.split();
-    let mut fr = FramedRead::with_capacity(r, CrucibleDecoder::new(), 9999);
+    let mut fr = FramedRead::new(r, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(w, CrucibleEncoder::new());
 
     /*
