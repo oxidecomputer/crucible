@@ -25,6 +25,7 @@ pub enum Message {
     Unknown(u32, BytesMut),
 }
 
+#[derive(Debug)]
 pub struct CrucibleEncoder {}
 
 impl CrucibleEncoder {

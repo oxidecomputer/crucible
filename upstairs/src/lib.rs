@@ -266,20 +266,12 @@ async fn io_completed(
     data: Option<Bytes>,
     ds_done_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
-    let mut gw_work_done = false;
-
-    /*
-     * We can't call .send with the lock held, so we check to see
-     * if we do need to notify the up_ds_listen task that all work
-     * is finished for a ds_id.
-     */
-    {
+    // Mark this ds_id for the client_id as completed.
+    let gw_work_done = {
         let mut work = up.ds_work.lock().unwrap();
-        let counts = work.complete(ds_id, client_id, data)?;
-        if counts.active == 0 {
-            gw_work_done = true;
-        }
-    }
+        work.complete(ds_id, client_id, data)?
+    };
+
     if gw_work_done {
         ds_done_tx.send(ds_id).await?
     }
@@ -304,6 +296,17 @@ async fn io_send(
     /*
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
+     *
+     * The length of this list (new work for a downstairs) can give us
+     * an idea of how that downstairs is doing.  If the number of jobs
+     * to be submitted is too big (for some value of big) then there is
+     * a problem.  All sorts of back pressure information can be
+     * gathered here.  As (for the moment) the same task does both
+     * transmit and receive, we can starve the receive side by spending
+     * all our time sending work.
+     *
+     * This XXX is for coming back here and making a better job of
+     * flow control.
      */
     let mut new_work = u.ds_work.lock().unwrap().new_work(client_id);
 
@@ -330,7 +333,6 @@ async fn io_send(
         }
 
         let job = u.ds_work.lock().unwrap().in_progress(*new_id, client_id);
-
         match job {
             IOop::Write {
                 dependencies,
@@ -676,10 +678,17 @@ pub struct Work {
     completed: AllocRingBuffer<u64>,
 }
 
+/*
+ * These counts describe the various states that a Downstairs IO can
+ * be in.
+ */
 #[derive(Debug, Default)]
 pub struct WorkCounts {
-    active: u64,
-    done: u64,
+    active: u64,    // New or in flight to downstairs.
+    ack_ready: u64, // Downstairs done, use this for the ACK
+    acked: u64,     // This IO was used for the ACK
+    error: u64,     // This IO had an error.
+    done: u64,      // This IO has completed (but not used for ACK)
 }
 
 impl Work {
@@ -721,19 +730,22 @@ impl Work {
     }
 
     /**
-     * Walk the active hashmap and Return a Vec of downstairs request IDs
-     * where all requests have been completed.
+     * Build an in order list of jobs that are ready to be acked.
      */
-    fn completed_work(&mut self) -> Vec<u64> {
-        let mut completed = Vec::new();
+    fn ackable_work(&mut self) -> Vec<u64> {
+        let mut ackable = Vec::new();
         let mut kvec = self.active.keys().cloned().collect::<Vec<u64>>();
         kvec.sort_unstable();
-        for k in kvec.iter() {
-            if self.state_count(*k).unwrap().active == 0 {
-                completed.push(*k)
+        for ds_id in kvec.iter() {
+            let ac = self.state_count(*ds_id).unwrap().ack_ready;
+            if ac == 1 {
+                ackable.push(*ds_id);
+            } else {
+                // Only one downstairs IO should be AckReady
+                assert_eq!(ac, 0);
             }
         }
-        completed
+        ackable
     }
 
     /**
@@ -757,7 +769,9 @@ impl Work {
         for state in job.state.values() {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
-                IOState::Done | IOState::Skipped | IOState::Error => {
+                IOState::AckReady => wc.ack_ready += 1,
+                IOState::Error => wc.error += 1,
+                IOState::Acked | IOState::Done | IOState::Skipped => {
                     wc.done += 1;
                 }
             }
@@ -767,53 +781,114 @@ impl Work {
 
     /**
      * Mark this downstairs request as complete for this client.  Returns
-     * counts clients for which this request is still active or has been
-     * completed already.
+     * true if this completion is enough that we should message the
+     * upstairs task that handles returning completions to the guest.
+     *
+     * This is where we decide the number of successful completions required
+     * before setting the AckReady state on a ds_id, which another upstairs
+     * task is looking for to then ACK back to the guest.
      */
     fn complete(
         &mut self,
         ds_id: u64,
         client_id: u8,
-        data: Option<Bytes>,
-    ) -> Result<WorkCounts> {
+        read_data: Option<Bytes>,
+    ) -> Result<bool> {
+        /*
+         * Assume we don't have enough completed jobs, and only change
+         * it if we have the exact amount required
+         */
+        let mut notify_guest = false;
+        /*
+         * Get the completed count now (and add one for ourselves),
+         * because the job self ref won't let us call stat_count once we are
+         * using that ref, and the number won't change while we are in
+         * this method (you did get the lock first, right??).
+         */
+        let wc = self.state_count(ds_id)?;
+        let jobs_completed = 1 + wc.done + wc.acked + wc.ack_ready;
+
         let job = self
             .active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
         let oldstate = job.state.insert(client_id, IOState::Done);
         assert_ne!(oldstate, Some(IOState::Done));
 
         /*
-         * If the data field has a buffer in it, then we attach that buffer
-         * (clone really) to the job.data field.  When a read completes it
-         * will have a buffer and we keep that buffer around so it can be
-         * transferred back to the guest when all IOs that made up that read
-         * have returned data.
+         * XXX Handle errors here.
+         * Any error needs to be passed to Nexus (probably)
+         * 2 errors for Write/Flush,  3 errors for Reads
+         * should get passed back to the guest.
          */
-        if let Some(data) = data {
-            if job.data.is_none() {
-                job.data = Some(data);
+        match &job.work {
+            IOop::Read {
+                dependencies: _dependencies,
+                eid: _eid,
+                offset: _offset,
+                num_blocks: _num_blocks,
+            } => {
+                assert!(read_data.is_some());
+                if jobs_completed == 1 {
+                    assert!(job.data.is_none());
+                    job.data = read_data;
+                    notify_guest = true;
+                    job.state.insert(client_id, IOState::AckReady);
+                }
             }
-        } // XXX else assert this is not a read
-
+            IOop::Write {
+                dependencies: _dependencies,
+                eid: _eid,
+                data: _data,
+                offset: _offset,
+            } => {
+                assert!(read_data.is_none());
+                if jobs_completed == 2 {
+                    notify_guest = true;
+                    job.state.insert(client_id, IOState::AckReady);
+                }
+            }
+            IOop::Flush {
+                dependencies: _dependencies,
+                flush_number: _flush_number,
+            } => {
+                assert!(read_data.is_none());
+                if jobs_completed == 2 {
+                    notify_guest = true;
+                    job.state.insert(client_id, IOState::AckReady);
+                }
+            }
+        }
         /*
-         * Return the state count for the I/O on this ds_id
+         * If all 3 jobs are done, we can check here to see if we can
+         * remove this job from the DS list.  If we have completed the ack
+         * to the guest, then there will be no more work on this job.
          */
-        self.state_count(ds_id)
+        self.retire_check(ds_id);
+
+        Ok(notify_guest)
     }
 
     /**
      * This request is now complete on all peers.  Remove it from the active set
      * and mark it in the completed ring buffer.
+     * Note we shall not retire a job until it has been ack'd back to the
+     * guest.  Just being ack ready is not enough.
      *
-     * If there is data in job.data, then we need to transfer that data to the
-     * upstairs guest job that started this.
      */
-    fn retire(&mut self, ds_id: u64) -> DownstairsIO {
-        assert!(!self.completed.contains(&ds_id));
-        let old = self.active.remove(&ds_id).unwrap();
-        self.completed.push(ds_id);
-        old
+    fn retire_check(&mut self, ds_id: u64) {
+        let wc = self.state_count(ds_id).unwrap();
+        // XXX Errors are not handled correctly here, So, this assertion
+        // means write more code.
+        assert_eq!(wc.error, 0);
+        if wc.done == 3 {
+            assert!(!self.completed.contains(&ds_id));
+            assert_eq!(wc.active, 0);
+            assert_eq!(wc.ack_ready, 0);
+            self.active.remove(&ds_id).unwrap();
+            self.completed.push(ds_id);
+        }
     }
 }
 
@@ -1316,22 +1391,28 @@ pub enum IOop {
  * The various states an IO can be in when it is on the work hashmap.
  * There is a state that is unique to each downstairs task we have and
  * they operate independent of each other.
- *
- * New:         A new IO request.
- * InProgress:  The request has been sent to this tasks downstairs.
- * Done:        The response came back from downstairs.
- * Skipped:     The IO request should be ignored.  This situation could be
- *              A read that only needs one downstairs to answer, or we are
- *              doing recovery and we only want a specific downstairs to
- *              do that work.
- * Error:       The IO returned some error.
  */
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOState {
+    // A new IO request.
     New,
+    // The request has been sent to this tasks downstairs.
     InProgress,
+    // This IO has been completed by the downstairs, and we should use the
+    // data in this IO as the source for a response back to the upstairs.
+    // Only one of the three downstairs IOs should be "AckReady".
+    AckReady,
+    // This IO was used to ACK back to the guest and we are done with it.
+    // We give it a special AckDone state to leave some breadcrumbs in case
+    // we want to know which IO was the ACK.
+    Acked,
+    // The successful response came back from downstairs.
     Done,
+    // XXX Unused.  The IO request should be ignored.  This situation could be
+    // A read that only needs one downstairs to answer, or we are doing
+    // recovery and we only want a specific downstairs to do that work.
     Skipped,
+    // The IO returned an error.
     Error,
 }
 
@@ -1343,6 +1424,12 @@ impl fmt::Display for IOState {
             }
             IOState::InProgress => {
                 write!(f, "Sent")
+            }
+            IOState::AckReady => {
+                write!(f, "AckR")
+            }
+            IOState::Acked => {
+                write!(f, "Ackd")
             }
             IOState::Done => {
                 write!(f, "Done")
@@ -1463,8 +1550,9 @@ enum BlockOp {
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<Block>> },
     QueryActive { data: Arc<Mutex<usize>> },
-    Commit,   // Send update to all tasks that there is work on the queue.
-    ShowWork, // Show the status of the internal work hashmap and done Vec.
+    Commit, // Send update to all tasks that there is work on the queue.
+    // Show internal work queue, return outstanding IO requests.
+    ShowWork { data: Arc<Mutex<WQCounts>> },
 }
 
 /*
@@ -1584,7 +1672,7 @@ impl GtoS {
  * This function just does the match on IOop type and updates the dtrace
  * probe for that operaion finishing.
  */
-fn crutrace_work_done(work: IOop, gw_id: u64) {
+fn crutrace_work_done(work: &IOop, gw_id: u64) {
     match work {
         IOop::Read {
             dependencies: _,
@@ -1645,8 +1733,8 @@ impl GuestWork {
 
     /**
      * Move a GtoS job from the active to completed.
-     * It is at this point we can notify the Guest their IO is done
-     * and any buffers provided should now have the data in them.
+     * At this point we should have already sent the guest a message
+     * saying their IO is done.
      */
     fn complete(&mut self, gw_id: u64) {
         let gtos_job = self.active.remove(&gw_id).unwrap();
@@ -1654,16 +1742,17 @@ impl GuestWork {
         self.completed.push(gw_id);
     }
 
-    /**
-     * When the required number of downstairs completions for a downstairs
+    /*
+     * When the required number of completions for a downstairs
      * ds_id have arrived, we call this method on the parent GuestWork
-     * that requested them and include the DownstairsIO struct.
+     * that requested them and include the Option<Bytes> from the IO.
      *
-     * If this operation was a read, then we attach the read buffer to the
-     * GtoS struct for later transfer, if it is not already present.
+     * If this operation was a read, then we attach the Bytes read to the
+     * GtoS struct for later transfer.
      *
      * A single GtoS job may have multiple downstairs jobs it created, so
-     * we may not be done yet.  When all the downstairs jobs finish, we
+     * we may not be done yet.  When the required number of completions have
+     * arrived from all the downstairs jobs we created, then we
      * can move forward with finishing up the guest work operation.
      * This may include moving/decrypting data buffers from completed reads.
      *
@@ -1672,25 +1761,19 @@ impl GuestWork {
      * will be handled if all the downstairs have returned error.
      */
     #[instrument]
-    fn ds_complete(&mut self, done: DownstairsIO) {
-        let gw_id = done.guest_id;
-        let ds_id = done.ds_id;
+    fn ds_complete(&mut self, gw_id: u64, ds_id: u64, data: Option<Bytes>) {
         /*
-         * A job that already finished and results were sent back to
-         * the guest could still have a valid ds_id, but no gw_id for
-         * it to report to.
+         * A gw_id that already finished and results were sent back to
+         * the guest could still have an outstanding ds_id.
          */
         if let Some(gtos_job) = self.active.get_mut(&gw_id) {
             /*
              * If the ds_id is on the submitted list, then we will take it off
-             * and Possibly add the read result buffer to the gtos job
+             * and, if it is a read, add the read result buffer to the gtos job
              * structure for later copying.
-             *
-             * If it's not, then verify our ds_id is already on the completed
-             * list, just to catch any problems.
              */
             if gtos_job.submitted.remove(&ds_id).is_some() {
-                if let Some(data) = done.data {
+                if let Some(data) = data {
                     /*
                      * The first read buffer will become the source for the
                      * final response back to the guest.  This buffer will be
@@ -1699,25 +1782,25 @@ impl GuestWork {
                      */
                     if gtos_job.downstairs_buffer.insert(ds_id, data).is_some()
                     {
-                        println!(
+                        /*
+                         * Only the first successful read should fill the
+                         * slot in the downstairs buffer for a ds_id.  If
+                         * more than one is trying to, then we have a problem.
+                         */
+                        panic!(
                             "gw_id:{} read buffer already present for {}",
                             gw_id, ds_id
                         );
-                        /*
-                         * This may panic at some future point when only one
-                         * read should be enough to satisfy the guest
-                         * reuquest, though it may depend on how we make the
-                         * different downstairs consistent.  XXX
-                         */
-                    } else {
                     }
-                } // XXX else can we assert we don't expect data?
-
+                }
                 gtos_job.completed.push(ds_id);
             } else {
-                // XXX Should this just panic?
                 println!("gw_id:{} ({}) already removed???", gw_id, ds_id);
                 assert!(gtos_job.completed.contains(&ds_id));
+                panic!(
+                    "{} Attempting to complete ds_id {} we already completed",
+                    gw_id, ds_id
+                );
             }
 
             /*
@@ -1731,15 +1814,12 @@ impl GuestWork {
                 }
                 gtos_job.notify();
                 self.complete(gw_id);
-                crutrace_work_done(done.work, gw_id);
             }
         } else {
             /*
-             * When we support a single successful read, or 2/3 writes
-             * or flushes starting the completion back to the guest, this
-             * will no longer be a panic, as that can be a valid state.
+             * XXX This is just so I can see if ever does happen.
              */
-            panic!(
+            println!(
                 "gw_id {} from removed job {} not on active list",
                 gw_id, ds_id
             );
@@ -1968,9 +2048,29 @@ impl Guest {
         self.send(BlockOp::Commit).block_wait();
     }
 
-    pub fn show_work(&self) {
-        self.send(BlockOp::ShowWork).block_wait();
+    /*
+     * Test call that displays the internal job queue on the upstairs, and
+     * returns the guest side and downstairs side job queue depths.
+     */
+    pub fn show_work(&self) -> WQCounts {
+        let wc = WQCounts {
+            up_count: 0,
+            ds_count: 0,
+        };
+        let data = Arc::new(Mutex::new(wc));
+        let sw = BlockOp::ShowWork { data: data.clone() };
+        self.send(sw).block_wait();
+        return *data.lock().unwrap();
     }
+}
+
+/*
+ * Work Queue Counts, for debug ShowWork IO type
+ */
+#[derive(Debug, Copy, Clone)]
+pub struct WQCounts {
+    pub up_count: usize,
+    pub ds_count: usize,
 }
 
 impl Default for Guest {
@@ -2027,23 +2127,34 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
          * process the set of things we know are done now, then the
          * ds_done_rx.recv() should trigger when we loop.
          */
-        let done_list = up.ds_work.lock().unwrap().completed_work();
-        // println!( "rcv:{} Done List: {:?}", ds_id, done_list);
+        let ack_list = up.ds_work.lock().unwrap().ackable_work();
 
-        for ds_id_done in done_list.iter() {
+        let mut gw = up.guest.guest_work.lock().unwrap();
+        for ds_id_done in ack_list.iter() {
             let mut work = up.ds_work.lock().unwrap();
 
-            /*
-             * TODO: retire means the downstairs is "consistent" with
-             * regards to this IO, so any internal info about this operation
-             * should now consider it as ack'd to the guest.
-             */
-            let done = work.retire(*ds_id_done);
+            let done = work.active.get_mut(ds_id_done).unwrap();
 
-            drop(work);
+            let gw_id = done.guest_id;
+            let ds_id = done.ds_id;
+            assert_eq!(*ds_id_done, ds_id);
 
-            let mut gw = up.guest.guest_work.lock().unwrap();
-            gw.ds_complete(done);
+            // Move this work to Acked
+            let mut ack_ready = false;
+            for cid in 0..3 {
+                if let Some(IOState::AckReady) = done.state.get(&cid) {
+                    done.state.insert(cid, IOState::Acked);
+                    ack_ready = true;
+                    break;
+                }
+            }
+            // Verify we did find an AckReady downstairs IO
+            assert!(ack_ready);
+            let data = done.data.take();
+            gw.ds_complete(gw_id, ds_id, data);
+            crutrace_work_done(&done.work, gw_id);
+
+            work.retire_check(ds_id);
         }
     }
     println!("up_ds_listen loop done");
@@ -2102,8 +2213,9 @@ fn process_new_io(
                 up.guest.guest_work.lock().unwrap().active_count();
             let _ = req.send.send(0);
         }
-        BlockOp::ShowWork => {
-            show_all_work(up);
+        BlockOp::ShowWork { data } => {
+            *data.lock().unwrap() = show_all_work(up);
+            let _ = req.send.send(0);
         }
         BlockOp::Commit => {
             dst.iter()
@@ -2380,7 +2492,7 @@ fn create_flush(
  * the clients.
  */
 #[allow(unused_variables)]
-fn show_all_work(up: &Arc<Upstairs>) {
+fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let work = up.ds_work.lock().unwrap();
     let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
     if kvec.is_empty() {
@@ -2426,7 +2538,12 @@ fn show_all_work(up: &Arc<Upstairs>) {
     let done = work.completed.to_vec();
     println!("Done tasks count: {:?}", done.len());
     drop(work);
-    show_guest_work(&up.guest);
+    let up_count = show_guest_work(&up.guest);
+
+    WQCounts {
+        up_count,
+        ds_count: kvec.len(),
+    }
 }
 
 /*
@@ -2438,7 +2555,7 @@ fn show_all_work(up: &Arc<Upstairs>) {
  * printing for each guest_work.  It will be much more dense, but require
  * holding both locks for the duration.
  */
-fn show_guest_work(guest: &Arc<Guest>) {
+fn show_guest_work(guest: &Arc<Guest>) -> usize {
     println!("Guest work:  Active and Completed Jobs:");
     let gw = guest.guest_work.lock().unwrap();
     let mut kvec: Vec<u64> = gw.active.keys().cloned().collect::<Vec<u64>>();
@@ -2452,6 +2569,7 @@ fn show_guest_work(guest: &Arc<Guest>) {
     }
     let done = gw.completed.to_vec();
     println!("GW_JOB completed count:{:?} ", done.len());
+    kvec.len()
 }
 
 /*

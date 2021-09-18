@@ -16,6 +16,7 @@ use crucible_protocol::*;
 use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
+use rand::prelude::*;
 use structopt::StructOpt;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
@@ -72,6 +73,16 @@ pub struct Opt {
 
     #[structopt(long, default_value = "15")]
     extent_count: u64,
+
+    /*
+     * Test option, makes the search for new work sleep and sometimes
+     * skip doing work.
+     * XXX Note that the flow control between upstairs downstairs is not
+     * yet implemented.  By turning on this option it's possible to grind
+     * the upstairs senders to a near halt.
+     */
+    #[structopt(long)]
+    lossy: bool,
 }
 
 /*
@@ -358,6 +369,10 @@ async fn do_work_loop(
      */
     new_work.sort_unstable();
     for new_id in new_work.iter() {
+        if ds.lossy && random() && random() {
+            // Skip a job that needs to be done.. sometimes
+            continue;
+        }
         /*
          * If this job is still new, take it and go to work.  The in_progress
          * method will only return a job if all dependencies are met.  Because
@@ -368,6 +383,10 @@ async fn do_work_loop(
         let job = ds.work.lock().unwrap().in_progress(*new_id);
         match job {
             Some(job) => {
+                if ds.lossy && random() && random() {
+                    // Add a little time to completion for this operation.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
                 do_work(ds, fw, job).await?;
                 completed += 1;
             }
@@ -514,6 +533,13 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
      * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
      */
     let mut deadline = deadline_secs(50);
+    /*
+     * If we have set "lossy", then we need to check every now and then that
+     * there were not skipped jobs that we need to go back and finish up.
+     * If lossy is not set, then this should only trigger once then never
+     * again.
+     */
+    let mut test_deadline = deadline_secs(5);
     let mut negotiated = false;
 
     /*
@@ -523,13 +549,32 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
      */
     let mut work = ds.work.lock().unwrap();
     if work.active.keys().len() > 0 {
-        bail!("Crucible Downstairs reconnect with work in progress");
+        println!(
+            "Crucible Downstairs reconnect, discarding {} jobs",
+            work.active.keys().len()
+        );
+        /*
+         * In the future, we may decide there is some way to continue working
+         * on outstanding jobs, or a way to merge.  But for now, we just
+         * throw out what we have and let the upstairs resend anything to
+         * us that it did not get an ACK for.
+         */
+        work.active = HashMap::new();
     }
     work.completed = Vec::with_capacity(32);
     work.last_flush = 0;
     drop(work);
     loop {
         tokio::select! {
+            _ = sleep_until(test_deadline) => {
+                // We need this to fire if we have lossy set because we may
+                // skip jobs and have work to do but nothing incoming to
+                // trigger a check for it.
+                if ds.lossy {
+                    do_work_loop(ds, &mut fw).await?;
+                    test_deadline = deadline_secs(5);
+                }
+            }
             _ = sleep_until(deadline) => {
                 if !negotiated {
                     bail!("did not negotiate a protocol");
@@ -572,9 +617,11 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
  * This includes the extents and their status as well as the
  * downstairs work queue.
  */
+#[derive(Debug)]
 struct Downstairs {
     region: Region,
     work: Mutex<Work>,
+    lossy: bool, // Test flag, enables pauses and skipped jobs
 }
 
 impl Downstairs {
@@ -855,6 +902,7 @@ async fn main() -> Result<()> {
     let d = Arc::new(Downstairs {
         region,
         work: Mutex::new(work),
+        lossy: opt.lossy,
     });
 
     // XXX Add a "find me the last flush number" function to region so
