@@ -19,12 +19,13 @@ use crucible_common::Block;
 arg_enum! {
     #[derive(Debug, StructOpt)]
     enum Workload {
-        One,
-        Span,
-        Big,
-        Dep,
-        Rand,
         Balloon,
+        Big,
+        Demo,
+        Dep,
+        One,
+        Rand,
+        Span,
     }
 }
 
@@ -136,17 +137,17 @@ fn main() -> Result<()> {
      * Call the function for the workload option passed from the command line.
      */
     match opt.workload {
-        Workload::One => {
-            println!("One test");
-            runtime.block_on(rand_workload(&guest, 1))?;
-        }
-        Workload::Span => {
-            println!("Span test");
-            span_workload(&guest)?;
+        Workload::Balloon => {
+            println!("Run balloon test");
+            runtime.block_on(balloon_workload(&guest))?;
         }
         Workload::Big => {
             println!("Run big test");
             big_workload(&guest)?;
+        }
+        Workload::Demo => {
+            println!("Run Demo test");
+            runtime.block_on(demo_workload(&guest, 10))?;
         }
         Workload::Dep => {
             println!("Run dep test");
@@ -164,13 +165,17 @@ fn main() -> Result<()> {
              */
             runtime.block_on(dep_workload(&guest))?;
         }
+        Workload::One => {
+            println!("One test");
+            runtime.block_on(rand_workload(&guest, 1))?;
+        }
         Workload::Rand => {
             println!("Run random test");
             runtime.block_on(rand_workload(&guest, 50))?;
         }
-        Workload::Balloon => {
-            println!("Run balloon test");
-            runtime.block_on(balloon_workload(&guest))?;
+        Workload::Span => {
+            println!("Span test");
+            span_workload(&guest)?;
         }
     }
 
@@ -488,6 +493,102 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
     Ok(())
 }
 
+/*
+ * Like the random test, but with IO not as large, and with frequent
+ * showing of the internal work queues.  Submit a bunch of random IOs,
+ * then watch them complete.
+ */
+async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
+    /*
+     * These query requests have the side effect of preventing the test from
+     * starting before the upstairs is ready.
+     */
+    let block_size = guest.query_block_size();
+    let extent_size = guest.query_extent_size();
+    let total_size = guest.query_total_size();
+    let total_blocks = (total_size / block_size) as usize;
+
+    println!(
+        "demo {} loop(s), starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
+        count, extent_size, block_size, total_size, total_blocks
+    );
+
+    // Create an array that tracks the number of writes to each block, so
+    // we can know what to expect for reads.
+    let mut write_count = vec![0_u32; total_blocks];
+
+    // TODO: Allow the user to specify a seed here.
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    let mut waiterlist = Vec::new();
+    // TODO: Let the user select the number of loops
+    for _ in 0..count {
+        let op = rng.gen_range(0..3);
+        if op == 0 {
+            // flush
+            let waiter = guest.flush();
+            waiterlist.push(waiter);
+        } else {
+            // Read or Write both need this
+            // Pick a random size (in blocks) for the IO, up to 10
+            let size = rng.gen_range(1..=10) as usize;
+
+            // Once we have our IO size, decide where the starting offset should
+            // be, which is the total possible size minus the randomly chosen
+            // IO size.
+            let block_max = total_blocks - size + 1;
+            let block_index = rng.gen_range(0..block_max) as usize;
+
+            // Convert offset and length to their byte values.
+            let offset =
+                Block::new(block_index as u64, block_size.trailing_zeros());
+
+            if op == 1 {
+                // Write
+                // Update the write count for all blocks we plan to write to.
+                for i in 0..size {
+                    write_count[block_index + i] += 1;
+                }
+
+                let vec = fill_vec(block_index, size, &write_count, block_size);
+                let data = Bytes::from(vec);
+
+                let waiter = guest.write(offset, data);
+                waiterlist.push(waiter);
+            } else {
+                // Read
+
+                let length: usize = size * block_size as usize;
+                let vec: Vec<u8> = vec![255; length];
+                let data = crucible::Buffer::from_vec(vec);
+                let waiter = guest.read(offset, data.clone());
+                waiterlist.push(waiter);
+            }
+        }
+    }
+    let mut wc = WQCounts {
+        up_count: 0,
+        ds_count: 0,
+    };
+    println!("loop over {} waiters", waiterlist.len());
+    for wa in waiterlist.iter_mut() {
+        wc = guest.show_work();
+        wa.block_wait();
+    }
+    /*
+     * Continue loping until all downstairs jobs finish also.
+     */
+    println!("All submitted jobs completed, waiting for downstairs");
+    while wc.up_count + wc.ds_count > 0 {
+        wc = guest.show_work();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    println!("All downstairs jobs completed.");
+
+    // TODO: Make a verify the whole volume function, to take the
+    // write_count array and then read it all and compare.
+    Ok(())
+}
 /*
  * This is a test workload that generates a single write spanning an extent
  * then will try to read the same.
