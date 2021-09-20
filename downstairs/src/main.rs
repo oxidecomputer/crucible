@@ -314,7 +314,7 @@ async fn do_work(
              * back to the upstairs.
              */
             let data = data.freeze();
-            fw.send(Message::ReadResponse(job.ds_id, data.clone()))
+            fw.send(Message::ReadResponse(job.ds_id, data.clone(), Ok(())))
                 .await?;
             ds.complete_work(job.ds_id, false);
             Ok(())
@@ -326,7 +326,7 @@ async fn do_work(
             data,
         } => {
             ds.region.region_write(eid, offset, &data)?;
-            fw.send(Message::WriteAck(job.ds_id)).await?;
+            fw.send(Message::WriteAck(job.ds_id, Ok(()))).await?;
             ds.complete_work(job.ds_id, false);
             Ok(())
         }
@@ -335,7 +335,7 @@ async fn do_work(
             flush_number,
         } => {
             ds.region.region_flush(flush_number)?;
-            fw.send(Message::FlushAck(job.ds_id)).await?;
+            fw.send(Message::FlushAck(job.ds_id, Ok(()))).await?;
             ds.complete_work(job.ds_id, true);
             Ok(())
         }

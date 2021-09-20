@@ -71,7 +71,7 @@ async fn proc_frame(
 ) -> Result<()> {
     match m {
         Message::Imok => Ok(()),
-        Message::WriteAck(ds_id) => Ok(io_completed(
+        Message::WriteAck(ds_id, _result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
@@ -79,7 +79,7 @@ async fn proc_frame(
             up_coms.ds_done_tx,
         )
         .await?),
-        Message::FlushAck(ds_id) => Ok(io_completed(
+        Message::FlushAck(ds_id, _result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
@@ -87,7 +87,7 @@ async fn proc_frame(
             up_coms.ds_done_tx,
         )
         .await?),
-        Message::ReadResponse(ds_id, data) => Ok(io_completed(
+        Message::ReadResponse(ds_id, data, _result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
