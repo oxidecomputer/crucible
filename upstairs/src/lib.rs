@@ -71,28 +71,31 @@ async fn proc_frame(
 ) -> Result<()> {
     match m {
         Message::Imok => Ok(()),
-        Message::WriteAck(ds_id, _result) => Ok(io_completed(
+        Message::WriteAck(ds_id, result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
             None,
             up_coms.ds_done_tx,
+            result.clone(),
         )
         .await?),
-        Message::FlushAck(ds_id, _result) => Ok(io_completed(
+        Message::FlushAck(ds_id, result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
             None,
             up_coms.ds_done_tx,
+            result.clone(),
         )
         .await?),
-        Message::ReadResponse(ds_id, data, _result) => Ok(io_completed(
+        Message::ReadResponse(ds_id, data, result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
             Some(data.clone()),
             up_coms.ds_done_tx,
+            result.clone(),
         )
         .await?),
         x => bail!("client {} unexpected frame {:?}", up_coms.client_id, x),
@@ -279,7 +282,7 @@ fn process_downstairs(
 
 /*
  * This function is called when the upstairs task is notified that
- * a downstairs operation has completed.  We add the read buffer to the
+ * a downstairs operation has completed. We add the read buffer to the
  * IOop struct for later processing if required.
  *
  */
@@ -290,11 +293,12 @@ async fn io_completed(
     client_id: u8,
     data: Option<Bytes>,
     ds_done_tx: mpsc::Sender<u64>,
+    result: Result<(), CrucibleError>,
 ) -> Result<()> {
     // Mark this ds_id for the client_id as completed.
     let gw_work_done = {
         let mut work = up.ds_work.lock().unwrap();
-        work.complete(ds_id, client_id, data)?
+        work.complete(ds_id, client_id, data, result)?
     };
 
     if gw_work_done {
@@ -716,6 +720,12 @@ pub struct WorkCounts {
     done: u64,      // This IO has completed (but not used for ACK)
 }
 
+impl WorkCounts {
+    fn completed_ok(&self) -> u64 {
+        self.ack_ready + self.acked + self.done
+    }
+}
+
 impl Work {
     /**
      * Assign a new downstairs ID.
@@ -795,7 +805,7 @@ impl Work {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
                 IOState::AckReady => wc.ack_ready += 1,
-                IOState::Error => wc.error += 1,
+                IOState::Error(_) => wc.error += 1,
                 IOState::Acked | IOState::Done | IOState::Skipped => {
                     wc.done += 1;
                 }
@@ -818,34 +828,48 @@ impl Work {
         ds_id: u64,
         client_id: u8,
         read_data: Option<Bytes>,
+        result: Result<(), CrucibleError>,
     ) -> Result<bool> {
         /*
          * Assume we don't have enough completed jobs, and only change
          * it if we have the exact amount required
          */
         let mut notify_guest = false;
+
         /*
-         * Get the completed count now (and add one for ourselves),
-         * because the job self ref won't let us call stat_count once we are
+         * Get the completed count now,
+         * because the job self ref won't let us call state_count once we are
          * using that ref, and the number won't change while we are in
          * this method (you did get the lock first, right??).
          */
         let wc = self.state_count(ds_id)?;
-        let jobs_completed = 1 + wc.done + wc.acked + wc.ack_ready;
+        let mut jobs_completed_ok = wc.completed_ok();
 
         let job = self
             .active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let oldstate = job.state.insert(client_id, IOState::Done);
-        assert_ne!(oldstate, Some(IOState::Done));
+        let newstate = if let Err(e) = result {
+            IOState::Error(e)
+        } else {
+            jobs_completed_ok += 1;
+            IOState::Done
+        };
+
+        let oldstate = job.state.insert(client_id, newstate);
+
+        if let Some(oldstate) = oldstate {
+            // we shouldn't be transitioning a state that was already transitioned
+            assert!(matches!(oldstate, IOState::New | IOState::InProgress));
+        } else {
+            panic!("no old state! that's bad!");
+        }
 
         /*
-         * XXX Handle errors here.
-         * Any error needs to be passed to Nexus (probably)
-         * 2 errors for Write/Flush,  3 errors for Reads
-         * should get passed back to the guest.
+         * Transition this job from Done to AckReady if enough have returned ok.
+         *
+         * XXX Any error needs to be passed to Nexus
          */
         match &job.work {
             IOop::Read {
@@ -855,7 +879,7 @@ impl Work {
                 num_blocks: _num_blocks,
             } => {
                 assert!(read_data.is_some());
-                if jobs_completed == 1 {
+                if jobs_completed_ok == 1 {
                     assert!(job.data.is_none());
                     job.data = read_data;
                     notify_guest = true;
@@ -869,7 +893,7 @@ impl Work {
                 offset: _offset,
             } => {
                 assert!(read_data.is_none());
-                if jobs_completed == 2 {
+                if jobs_completed_ok == 2 {
                     notify_guest = true;
                     job.state.insert(client_id, IOState::AckReady);
                 }
@@ -879,15 +903,16 @@ impl Work {
                 flush_number: _flush_number,
             } => {
                 assert!(read_data.is_none());
-                if jobs_completed == 2 {
+                if jobs_completed_ok == 2 {
                     notify_guest = true;
                     job.state.insert(client_id, IOState::AckReady);
                 }
             }
         }
+
         /*
          * If all 3 jobs are done, we can check here to see if we can
-         * remove this job from the DS list.  If we have completed the ack
+         * remove this job from the DS list. If we have completed the ack
          * to the guest, then there will be no more work on this job.
          */
         self.retire_check(ds_id);
@@ -896,17 +921,13 @@ impl Work {
     }
 
     /**
-     * This request is now complete on all peers.  Remove it from the active set
-     * and mark it in the completed ring buffer.
-     * Note we shall not retire a job until it has been ack'd back to the
-     * guest.  Just being ack ready is not enough.
-     *
+     * This request is now complete on all peers. Remove it from the active set and mark it in the
+     * completed ring buffer. Note we shall not retire a job until it has been ack'd back to the
+     * guest. Just being ack ready is not enough.
      */
     fn retire_check(&mut self, ds_id: u64) {
         let wc = self.state_count(ds_id).unwrap();
-        // XXX Errors are not handled correctly here, So, this assertion
-        // means write more code.
-        assert_eq!(wc.error, 0);
+
         if wc.done == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
@@ -1568,11 +1589,12 @@ pub enum IOState {
     // recovery and we only want a specific downstairs to do that work.
     Skipped,
     // The IO returned an error.
-    Error,
+    Error(CrucibleError),
 }
 
 impl fmt::Display for IOState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Make sure to right-align output on 4 characters
         match self {
             IOState::New => {
                 write!(f, " New")
@@ -1592,8 +1614,8 @@ impl fmt::Display for IOState {
             IOState::Skipped => {
                 write!(f, "Skip")
             }
-            IOState::Error => {
-                write!(f, " Err")
+            IOState::Error(e) => {
+                write!(f, " Err: {:?}", e)
             }
         }
     }
