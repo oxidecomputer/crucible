@@ -928,7 +928,7 @@ impl Work {
     fn retire_check(&mut self, ds_id: u64) {
         let wc = self.state_count(ds_id).unwrap();
 
-        if wc.done == 3 {
+        if (wc.error + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
             assert_eq!(wc.ack_ready, 0);
@@ -3011,6 +3011,7 @@ impl Seek for CruciblePseudoFile {
 #[cfg(test)]
 mod test {
     use super::*;
+    use ringbuffer::RingBuffer;
 
     #[test]
     fn test_extent_from_offset() {
@@ -3331,5 +3332,143 @@ mod test {
 
         context.decrypt_in_place(&mut block[..], 1);
         assert_ne!(block, orig_block);
+    }
+
+    #[test]
+    fn work_flush_ok() {
+        let mut work = Work {
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+
+        let state = work.active.get_mut(&next_id).unwrap().state.get(&1);
+        assert_eq!(*state.unwrap(), IOState::AckReady);
+        work.active
+            .get_mut(&next_id)
+            .unwrap()
+            .state
+            .insert(1, IOState::Acked);
+
+        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_flush_one_error_then_ok() {
+        let mut work = Work {
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+
+        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+
+        let state = work.active.get_mut(&next_id).unwrap().state.get(&2);
+        assert_eq!(*state.unwrap(), IOState::AckReady);
+        work.active
+            .get_mut(&next_id)
+            .unwrap()
+            .state
+            .insert(2, IOState::Acked);
+
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        work.retire_check(next_id);
+
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_flush_two_errors_equals_fail() {
+        let mut work = Work {
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+
+        // XXX should notify guest with error
+        assert_eq!(
+            work.complete(
+                next_id,
+                2,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+
+        assert_eq!(work.completed.len(), 1);
     }
 }
