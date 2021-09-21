@@ -35,6 +35,9 @@ pub struct Opt {
 
     #[structopt(short, long)]
     tracing_endpoint: Option<String>,
+
+    #[structopt(short, long)]
+    key: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -53,6 +56,7 @@ fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: false,
+        key: opt.key,
     };
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {
