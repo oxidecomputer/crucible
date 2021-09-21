@@ -92,7 +92,7 @@ mod tests {
                 key_bytes
             );
         } else {
-            panic!("bad news");
+            panic!("failed to decode base64 key");
         }
 
         let crucible_opts = crucible::CrucibleOpts {
@@ -104,7 +104,7 @@ mod tests {
         if let Some(key) = crucible_opts.key_bytes() {
             assert_eq!(key_bytes, key);
         } else {
-            panic!("bad news");
+            panic!("failed to decode bas64 key");
         }
     }
 }
