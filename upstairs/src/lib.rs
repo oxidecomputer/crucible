@@ -2460,7 +2460,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             // Verify we did find an AckReady downstairs IO
             assert!(work.ack(ds_id));
 
-            gw.ds_complete(gw_id, ds_id, data, work.result(_ds_id));
+            gw.ds_complete(gw_id, ds_id, data, work.result(ds_id));
 
             work.crutrace_gw_work_done(ds_id, gw_id);
 
