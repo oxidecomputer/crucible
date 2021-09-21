@@ -284,7 +284,6 @@ fn process_downstairs(
  * This function is called when the upstairs task is notified that
  * a downstairs operation has completed. We add the read buffer to the
  * IOop struct for later processing if required.
- *
  */
 #[instrument]
 async fn io_completed(
@@ -811,7 +810,116 @@ impl Work {
                 }
             }
         }
+
         Ok(wc)
+    }
+
+    fn ack(&mut self, ds_id: u64) -> bool {
+        /*
+         * Move AckReady to Acked.
+         *
+         * Returns false if no AckReady found.
+         */
+
+        let job = self
+            .active
+            .get_mut(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
+            .unwrap();
+
+        let mut ack_ready = false;
+        for cid in 0..3 {
+            if let Some(IOState::AckReady) = job.state.get(&cid) {
+                job.state.insert(cid, IOState::Acked);
+                ack_ready = true;
+                break;
+            }
+        }
+
+        ack_ready
+    }
+
+    fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
+        /*
+         * If enough downstairs returned an error, then return an error to the Guest
+         *
+         * Not ok:
+         * - 2+ errors for Write/Flush
+         * - 3+ errors for Reads
+         *
+         * TODO: this doesn't tell the Guest what the error(s) were?
+         */
+        let wc = self.state_count(ds_id).unwrap();
+
+        let job = self
+            .active
+            .get_mut(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+        let bad_job = match &job.work {
+            IOop::Read {
+                dependencies: _dependencies,
+                eid: _eid,
+                offset: _offset,
+                num_blocks: _num_blocks,
+            } => wc.error >= 3,
+            IOop::Write {
+                dependencies: _dependencies,
+                eid: _eid,
+                data: _data,
+                offset: _offset,
+            } => wc.error >= 2,
+            IOop::Flush {
+                dependencies: _dependencies,
+                flush_number: _flush_number,
+            } => wc.error >= 2,
+        };
+
+        if bad_job {
+            Err(CrucibleError::IoError(format!(
+                "{} out of 3 downstairs returned an error",
+                wc.error
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /*
+     * This function just does the match on IOop type and updates the dtrace
+     * probe for that operation finishing.
+     */
+    fn crutrace_gw_work_done(&self, ds_id: u64, gw_id: u64) {
+        let job = self
+            .active
+            .get(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
+            .unwrap();
+
+        match &job.work {
+            IOop::Read {
+                dependencies: _,
+                eid: _,
+                offset: _,
+                num_blocks: _,
+            } => {
+                crutrace_gw_read_end!(|| (gw_id));
+            }
+            IOop::Write {
+                dependencies: _,
+                eid: _,
+                offset: _,
+                data: _,
+            } => {
+                crutrace_gw_write_end!(|| (gw_id));
+            }
+            IOop::Flush {
+                dependencies: _,
+                flush_number: _,
+            } => {
+                crutrace_gw_flush_end!(|| (gw_id));
+            }
+        }
     }
 
     /**
@@ -1121,7 +1229,10 @@ impl Upstairs {
     }
 
     #[instrument]
-    pub fn submit_flush(&self, sender: std_mpsc::Sender<i32>) -> Result<()> {
+    pub fn submit_flush(
+        &self,
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> Result<(), CrucibleError> {
         /*
          * Lock first the guest_work struct where this new job will go,
          * then lock the ds_work struct.  Once we have both we can proceed
@@ -1176,6 +1287,7 @@ impl Upstairs {
         crutrace_gw_flush_start!(|| (gw_id));
 
         ds_work.enqueue(fl);
+
         Ok(())
     }
 
@@ -1189,8 +1301,8 @@ impl Upstairs {
         &self,
         offset: Block,
         data: Bytes,
-        sender: std_mpsc::Sender<i32>,
-    ) {
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> Result<(), CrucibleError> {
         /*
          * Get the next ID for the guest work struct we will make at the
          * end.  This ID is also put into the IO struct we create that
@@ -1282,6 +1394,8 @@ impl Upstairs {
         for wr in new_ds_work {
             ds_work.enqueue(wr);
         }
+
+        Ok(())
     }
 
     /*
@@ -1295,8 +1409,8 @@ impl Upstairs {
         &self,
         offset: Block,
         data: Buffer,
-        sender: std_mpsc::Sender<i32>,
-    ) {
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> Result<(), CrucibleError> {
         /*
          * Get the next ID for the guest work struct we will make at the
          * end.  This ID is also put into the IO struct we create that
@@ -1382,6 +1496,8 @@ impl Upstairs {
         for wr in new_ds_work {
             ds_work.enqueue(wr);
         }
+
+        Ok(())
     }
 
     /*
@@ -1773,7 +1889,7 @@ struct GtoS {
     /*
      * Notify the caller waiting on the job to finish.
      */
-    sender: std_mpsc::Sender<i32>,
+    sender: std_mpsc::Sender<Result<(), CrucibleError>>,
 
     /*
      * Optional encryption context - Some if the corresponding Upstairs is Some.
@@ -1788,7 +1904,7 @@ impl GtoS {
         guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, Bytes>,
         downstairs_buffer_sector_index: HashMap<u64, u128>,
-        sender: std_mpsc::Sender<i32>,
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
         encryption_context: Option<EncryptionContext>,
     ) -> GtoS {
         GtoS {
@@ -1854,44 +1970,13 @@ impl GtoS {
     /*
      * Notify corresponding BlockReqWaiter
      */
-    pub fn notify(&mut self) {
+    pub fn notify(&mut self, result: Result<(), CrucibleError>) {
         /*
-         * If the guest is no longer listening and this returns an error,
+         * XXX: If the guest is no longer listening and this returns an error,
          * do we care?  This could happen if the guest has given up
          * becuase an IO took too long, or other possible guest side reasons.
          */
-        if self.sender.send(0).is_ok() {}
-    }
-}
-
-/*
- * This function just does the match on IOop type and updates the dtrace
- * probe for that operaion finishing.
- */
-fn crutrace_work_done(work: &IOop, gw_id: u64) {
-    match work {
-        IOop::Read {
-            dependencies: _,
-            eid: _,
-            offset: _,
-            num_blocks: _,
-        } => {
-            crutrace_gw_read_end!(|| (gw_id));
-        }
-        IOop::Write {
-            dependencies: _,
-            eid: _,
-            offset: _,
-            data: _,
-        } => {
-            crutrace_gw_write_end!(|| (gw_id));
-        }
-        IOop::Flush {
-            dependencies: _,
-            flush_number: _,
-        } => {
-            crutrace_gw_flush_end!(|| (gw_id));
-        }
+        let _send_result = self.sender.send(result);
     }
 }
 
@@ -1957,7 +2042,13 @@ impl GuestWork {
      * will be handled if all the downstairs have returned error.
      */
     #[instrument]
-    fn ds_complete(&mut self, gw_id: u64, ds_id: u64, data: Option<Bytes>) {
+    fn ds_complete(
+        &mut self,
+        gw_id: u64,
+        ds_id: u64,
+        data: Option<Bytes>,
+        result: Result<(), CrucibleError>,
+    ) {
         /*
          * A gw_id that already finished and results were sent back to
          * the guest could still have an outstanding ds_id.
@@ -1972,7 +2063,7 @@ impl GuestWork {
                 if let Some(data) = data {
                     /*
                      * The first read buffer will become the source for the
-                     * final response back to the guest.  This buffer will be
+                     * final response back to the guest. This buffer will be
                      * combined with other buffers if the upstairs request
                      * required multiple jobs.
                      */
@@ -1980,7 +2071,7 @@ impl GuestWork {
                     {
                         /*
                          * Only the first successful read should fill the
-                         * slot in the downstairs buffer for a ds_id.  If
+                         * slot in the downstairs buffer for a ds_id. If
                          * more than one is trying to, then we have a problem.
                          */
                         panic!(
@@ -2005,10 +2096,11 @@ impl GuestWork {
              * they provided to us, and notify any waiters.
              */
             if gtos_job.submitted.is_empty() {
-                if gtos_job.guest_buffer.is_some() {
+                if result.is_ok() && gtos_job.guest_buffer.is_some() {
                     gtos_job.transfer();
                 }
-                gtos_job.notify();
+
+                gtos_job.notify(result);
                 self.complete(gw_id);
             }
         } else {
@@ -2029,13 +2121,16 @@ impl GuestWork {
 #[derive(Debug)]
 pub struct BlockReq {
     op: BlockOp,
-    send: std_mpsc::Sender<i32>,
+    send: std_mpsc::Sender<Result<(), CrucibleError>>,
 }
 
 impl BlockReq {
     // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code
     // return the std::sync::mpsc Sender to non-tokio task callers
-    fn new(op: BlockOp, send: std_mpsc::Sender<i32>) -> BlockReq {
+    fn new(
+        op: BlockOp,
+        send: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> BlockReq {
         Self { op, send }
     }
 }
@@ -2045,17 +2140,21 @@ impl BlockReq {
  * waiter that it can block on.
  */
 pub struct BlockReqWaiter {
-    recv: std_mpsc::Receiver<i32>,
+    recv: std_mpsc::Receiver<Result<(), CrucibleError>>,
 }
 
 impl BlockReqWaiter {
-    fn new(recv: std_mpsc::Receiver<i32>) -> BlockReqWaiter {
+    fn new(
+        recv: std_mpsc::Receiver<Result<(), CrucibleError>>,
+    ) -> BlockReqWaiter {
         Self { recv }
     }
 
-    pub fn block_wait(&mut self) {
-        // TODO: Instead of i32, errors should be bubbled up.
-        let _ = self.recv.recv();
+    pub fn block_wait(&mut self) -> Result<(), CrucibleError> {
+        match self.recv.recv() {
+            Ok(v) => v,
+            Err(_) => crucible_bail!(RecvDisconnected),
+        }
     }
 }
 
@@ -2156,45 +2255,62 @@ impl Guest {
         }
     }
 
-    // TODO: get status from waiter, bubble that up as a Result?
-
     /*
      * `read` and `write` accept a block offset, and data must be a multiple of block size.
      */
-    pub fn read(&self, offset: Block, data: Buffer) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        // XXX: return Err instead
-        assert!((data.len() % bs as usize) == 0);
-        assert!(offset.block_size_in_bytes() as u64 == bs);
+    pub fn read(
+        &self,
+        offset: Block,
+        data: Buffer,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
 
         let rio = BlockOp::Read { offset, data };
-        self.send(rio)
+        Ok(self.send(rio))
     }
 
-    pub fn write(&self, offset: Block, data: Bytes) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        // XXX: return Err instead
-        assert!((data.len() % bs as usize) == 0);
-        assert!(offset.block_size_in_bytes() as u64 == bs);
+    pub fn write(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
 
         let wio = BlockOp::Write { offset, data };
-        self.send(wio)
+        Ok(self.send(wio))
     }
 
     /*
      * `read_from_byte_offset` and `write_to_byte_offset` accept a byte offset, and data must be a
      * multiple of block size.
-     *
-     * note these functions assert that the byte offset is divisible by the block size and should
-     * only be used in non-production code.
      */
     pub fn read_from_byte_offset(
         &self,
         offset: u64,
         data: Buffer,
-    ) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        assert!((offset % bs) == 0);
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (offset % bs) != 0 {
+            crucible_bail!(OffsetUnaligned);
+        }
+
         self.read(Block::new(offset / bs, bs.trailing_zeros()), data)
     }
 
@@ -2202,9 +2318,13 @@ impl Guest {
         &self,
         offset: u64,
         data: Bytes,
-    ) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        assert!((offset % bs) == 0);
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (offset % bs) != 0 {
+            crucible_bail!(OffsetUnaligned);
+        }
+
         self.write(Block::new(offset / bs, bs.trailing_zeros()), data)
     }
 
@@ -2212,36 +2332,36 @@ impl Guest {
         self.send(BlockOp::Flush)
     }
 
-    pub fn query_block_size(&self) -> u64 {
+    pub fn query_block_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-        self.send(size_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(size_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_total_size(&self) -> u64 {
+    pub fn query_total_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-        self.send(size_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(size_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_extent_size(&self) -> Block {
+    pub fn query_extent_size(&self) -> Result<Block, CrucibleError> {
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
-        self.send(extent_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(extent_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_active(&self) -> usize {
+    pub fn query_active(&self) -> Result<usize, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let active_query = BlockOp::QueryActive { data: data.clone() };
-        self.send(active_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(active_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
     pub fn commit(&self) {
-        self.send(BlockOp::Commit).block_wait();
+        self.send(BlockOp::Commit).block_wait().unwrap();
     }
 
     /*
@@ -2255,7 +2375,7 @@ impl Guest {
         };
         let data = Arc::new(Mutex::new(wc));
         let sw = BlockOp::ShowWork { data: data.clone() };
-        self.send(sw).block_wait();
+        self.send(sw).block_wait().unwrap();
         return *data.lock().unwrap();
     }
 }
@@ -2309,7 +2429,7 @@ fn _send_work(t: &[Target], val: u64) {
 }
 
 /**
- * We listen on the ds_done channel to know when all the downstairs requests
+ * We listen on the ds_done channel to know when enough of the downstairs requests
  * for a downstairs work task have finished and it is time to complete
  * any buffer transfers (reads) and then notify the guest that their
  * work has been completed.
@@ -2335,20 +2455,14 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let ds_id = done.ds_id;
             assert_eq!(*ds_id_done, ds_id);
 
-            // Move this work to Acked
-            let mut ack_ready = false;
-            for cid in 0..3 {
-                if let Some(IOState::AckReady) = done.state.get(&cid) {
-                    done.state.insert(cid, IOState::Acked);
-                    ack_ready = true;
-                    break;
-                }
-            }
-            // Verify we did find an AckReady downstairs IO
-            assert!(ack_ready);
             let data = done.data.take();
-            gw.ds_complete(gw_id, ds_id, data);
-            crutrace_work_done(&done.work, gw_id);
+
+            // Verify we did find an AckReady downstairs IO
+            assert!(work.ack(ds_id));
+
+            gw.ds_complete(gw_id, ds_id, data, work.result(_ds_id));
+
+            work.crutrace_gw_work_done(ds_id, gw_id);
 
             work.retire_check(ds_id);
         }
@@ -2370,21 +2484,34 @@ fn process_new_io(
     req: BlockReq,
     lastcast: &mut u64,
 ) {
+    /*
+     * If any of the submit_* functions fail to send to the downstairs, they return an error.
+     * These are reported to the Guest.
+     */
     match req.op {
         BlockOp::Read { offset, data } => {
-            up.submit_read(offset, data, req.send);
+            if let Err(e) = up.submit_read(offset, data, req.send.clone()) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
             dst.iter()
                 .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
-            up.submit_write(offset, data, req.send);
+            if let Err(e) = up.submit_write(offset, data, req.send.clone()) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
             dst.iter()
                 .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
             *lastcast += 1;
         }
         BlockOp::Flush => {
-            up.submit_flush(req.send).unwrap();
+            if let Err(e) = up.submit_flush(req.send.clone()) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
             dst.iter()
                 .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
             *lastcast += 1;
@@ -2392,26 +2519,26 @@ fn process_new_io(
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryTotalSize { data } => {
             *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
             *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryActive { data } => {
             *data.lock().unwrap() =
                 up.guest.guest_work.lock().unwrap().active_count();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::ShowWork { data } => {
             *data.lock().unwrap() = show_all_work(up);
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::Commit => {
             dst.iter()
@@ -2827,7 +2954,7 @@ impl IOSpan {
     fn read_affected_blocks_from_guest(
         &mut self,
         guest: &Guest,
-    ) -> BlockReqWaiter {
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         guest.read(
             Block::new(
                 self.affected_block_numbers[0],
@@ -2838,7 +2965,10 @@ impl IOSpan {
     }
 
     #[instrument]
-    fn write_affected_blocks_to_guest(&self, guest: &Guest) -> BlockReqWaiter {
+    fn write_affected_blocks_to_guest(
+        &self,
+        guest: &Guest,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         let bytes = Bytes::from(self.buffer.as_vec().clone());
         guest.write(
             Block::new(
@@ -2880,16 +3010,16 @@ pub struct CruciblePseudoFile {
 }
 
 impl CruciblePseudoFile {
-    pub fn from_guest(guest: Arc<Guest>) -> Self {
-        let sz = guest.query_total_size() as u64;
-        let block_size = guest.query_block_size() as u64;
-        CruciblePseudoFile {
+    pub fn from_guest(guest: Arc<Guest>) -> Result<Self, CrucibleError> {
+        let sz = guest.query_total_size()? as u64;
+        let block_size = guest.query_block_size()? as u64;
+        Ok(CruciblePseudoFile {
             guest,
             offset: 0,
             sz,
             block_size,
             rmw_lock: RwLock::new(false),
-        }
+        })
     }
 
     pub fn sz(&self) -> u64 {
@@ -2903,73 +3033,20 @@ impl CruciblePseudoFile {
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        let _guard = self.rmw_lock.read().unwrap();
-
-        let mut span =
-            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
-
-        let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
-        waiter.block_wait();
-
-        span.read_from_blocks_into_buffer(buf);
-
-        // TODO: for block devices, we can't increment offset past the
-        // device size but we're supposed to be pretending to be a proper
-        // file here
-        self.offset += buf.len() as u64;
-
-        Ok(buf.len())
+        self._read(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
 
 impl Write for CruciblePseudoFile {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        let mut span =
-            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
-
-        /*
-         * Crucible's dependency system will properly resolve requests in the order they are
-         * received but if the request is not block aligned and block sized we need to do
-         * read-modify-write (RMW) here. Use a reader-writer lock, and grab the write portion of
-         * the lock when doing RMW to cause all other operations (which only grab the read portion
-         * of the lock) to pause. Otherwise all operations can use the read portion of this lock
-         * and Crucible will sort it out.
-         */
-        if !span.is_block_regular() {
-            let _guard = self.rmw_lock.write().unwrap();
-
-            let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
-            waiter.block_wait();
-
-            span.write_from_buffer_into_blocks(buf);
-
-            let mut waiter = span.write_affected_blocks_to_guest(&self.guest);
-            waiter.block_wait();
-        } else {
-            let _guard = self.rmw_lock.read().unwrap();
-
-            let offset = Block::new(
-                self.offset / self.block_size,
-                self.block_size.trailing_zeros(),
-            );
-            let bytes = BytesMut::from(buf);
-            let mut waiter = self.guest.write(offset, bytes.freeze());
-            waiter.block_wait();
-        }
-
-        // TODO: can't increment offset past the device size
-        self.offset += buf.len() as u64;
-
-        Ok(buf.len())
+        self._write(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     fn flush(&mut self) -> IOResult<()> {
-        let _guard = self.rmw_lock.read().unwrap();
-
-        let mut waiter = self.guest.flush();
-        waiter.block_wait();
-
-        Ok(())
+        self._flush()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
 
@@ -3005,6 +3082,78 @@ impl Seek for CruciblePseudoFile {
 
     fn stream_position(&mut self) -> IOResult<u64> {
         self.seek(SeekFrom::Current(0))
+    }
+}
+
+impl CruciblePseudoFile {
+    fn _read(&mut self, buf: &mut [u8]) -> Result<usize, CrucibleError> {
+        let _guard = self.rmw_lock.read().unwrap();
+
+        let mut span =
+            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
+
+        let mut waiter = span.read_affected_blocks_from_guest(&self.guest)?;
+        waiter.block_wait()?;
+
+        span.read_from_blocks_into_buffer(buf);
+
+        // TODO: for block devices, we can't increment offset past the
+        // device size but we're supposed to be pretending to be a proper
+        // file here
+        self.offset += buf.len() as u64;
+
+        Ok(buf.len())
+    }
+
+    fn _write(&mut self, buf: &[u8]) -> Result<usize, CrucibleError> {
+        let mut span =
+            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
+
+        /*
+         * Crucible's dependency system will properly resolve requests in the order they are
+         * received but if the request is not block aligned and block sized we need to do
+         * read-modify-write (RMW) here. Use a reader-writer lock, and grab the write portion of
+         * the lock when doing RMW to cause all other operations (which only grab the read portion
+         * of the lock) to pause. Otherwise all operations can use the read portion of this lock
+         * and Crucible will sort it out.
+         */
+        if !span.is_block_regular() {
+            let _guard = self.rmw_lock.write().unwrap();
+
+            let mut waiter =
+                span.read_affected_blocks_from_guest(&self.guest)?;
+            waiter.block_wait()?;
+
+            span.write_from_buffer_into_blocks(buf);
+
+            let mut waiter =
+                span.write_affected_blocks_to_guest(&self.guest)?;
+            waiter.block_wait()?;
+        } else {
+            let _guard = self.rmw_lock.read().unwrap();
+
+            let offset = Block::new(
+                self.offset / self.block_size,
+                self.block_size.trailing_zeros(),
+            );
+            let bytes = BytesMut::from(buf);
+            let mut waiter = self.guest.write(offset, bytes.freeze())?;
+            waiter.block_wait()?;
+        }
+
+        // TODO: can't increment offset past the device size
+        self.offset += buf.len() as u64;
+
+        Ok(buf.len())
+    }
+
+    fn _flush(&mut self) -> Result<(), CrucibleError> {
+        let _guard = self.rmw_lock.read().unwrap();
+
+        let mut waiter = self.guest.flush();
+        waiter.block_wait()?;
+
+        Ok(())
     }
 }
 
@@ -3644,5 +3793,10 @@ mod test {
         work.retire_check(next_id);
 
         assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn todo() {
+        // Verify we did find an AckReady downstairs IO
     }
 }

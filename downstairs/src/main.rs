@@ -308,15 +308,16 @@ async fn do_work(
             let sz = num_blocks as usize * bs as usize;
             let mut data = BytesMut::with_capacity(sz);
             data.resize(sz, 1);
-            ds.region.region_read(eid, offset, &mut data)?;
+
             /*
              * Any error from an IO should be intercepted here and passed
              * back to the upstairs.
              */
-            let data = data.freeze();
-            fw.send(Message::ReadResponse(job.ds_id, data.clone(), Ok(())))
+            let result = ds.region.region_read(eid, offset, &mut data);
+            fw.send(Message::ReadResponse(job.ds_id, data.freeze(), result))
                 .await?;
             ds.complete_work(job.ds_id, false);
+
             Ok(())
         }
         IOop::Write {
@@ -325,8 +326,8 @@ async fn do_work(
             offset,
             data,
         } => {
-            ds.region.region_write(eid, offset, &data)?;
-            fw.send(Message::WriteAck(job.ds_id, Ok(()))).await?;
+            let result = ds.region.region_write(eid, offset, &data);
+            fw.send(Message::WriteAck(job.ds_id, result)).await?;
             ds.complete_work(job.ds_id, false);
             Ok(())
         }
@@ -334,8 +335,8 @@ async fn do_work(
             dependencies: _dependencies,
             flush_number,
         } => {
-            ds.region.region_flush(flush_number)?;
-            fw.send(Message::FlushAck(job.ds_id, Ok(()))).await?;
+            let result = ds.region.region_flush(flush_number);
+            fw.send(Message::FlushAck(job.ds_id, result)).await?;
             ds.complete_work(job.ds_id, true);
             Ok(())
         }
@@ -613,7 +614,7 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
 }
 
 /*
- * Overall structure for things the downstaris is tracking.
+ * Overall structure for things the downstairs is tracking.
  * This includes the extents and their status as well as the
  * downstairs work queue.
  */

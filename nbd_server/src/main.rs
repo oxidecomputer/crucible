@@ -85,7 +85,7 @@ fn main() -> Result<()> {
     // NBD server
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
-    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest);
+    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
 
     // sent to NBD client during handshake through Export struct
     println!("NBD advertised size as {} bytes", cpf.sz());

@@ -99,11 +99,11 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    let bs = guest.query_block_size() as u64;
-    let sz = guest.query_total_size() as u64;
+    let bs = guest.query_block_size()? as u64;
+    let sz = guest.query_total_size()? as u64;
     println!("advertised size as {} bytes ({} byte blocks)", sz, bs);
 
-    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest);
+    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
 
     use rand::Rng;
     let mut rng = rand::thread_rng();
