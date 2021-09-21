@@ -919,35 +919,32 @@ impl Work {
 
 /// Implement XTS encryption
 /// See: https://en.wikipedia.org/wiki/Disk_encryption_theory#XEX-based_tweaked-codebook_mode_with_ciphertext_stealing_(XTS)
-pub struct UpstairsEncryptionContext {
+pub struct EncryptionContext {
     xts: Xts128<Aes128>,
     key: Vec<u8>,
     block_size: usize,
 }
 
-impl Debug for UpstairsEncryptionContext {
+impl Debug for EncryptionContext {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
-        f.debug_struct("UpstairsEncryptionContext")
+        f.debug_struct("EncryptionContext")
             .field("block_size", &self.block_size)
             .finish()
     }
 }
 
-impl Clone for UpstairsEncryptionContext {
+impl Clone for EncryptionContext {
     fn clone(&self) -> Self {
-        UpstairsEncryptionContext::new(self.key.clone(), self.block_size)
+        EncryptionContext::new(self.key.clone(), self.block_size)
     }
 
     fn clone_from(&mut self, source: &Self) {
-        *self = UpstairsEncryptionContext::new(
-            source.key.clone(),
-            source.block_size,
-        );
+        *self = EncryptionContext::new(source.key.clone(), source.block_size);
     }
 }
 
-impl UpstairsEncryptionContext {
-    pub fn new(key: Vec<u8>, block_size: usize) -> UpstairsEncryptionContext {
+impl EncryptionContext {
+    pub fn new(key: Vec<u8>, block_size: usize) -> EncryptionContext {
         assert!(key.len() == 32);
 
         let cipher_1 = Aes128::new(GenericArray::from_slice(&key[..16]));
@@ -955,7 +952,7 @@ impl UpstairsEncryptionContext {
 
         let xts = Xts128::<Aes128>::new(cipher_1, cipher_2);
 
-        UpstairsEncryptionContext {
+        EncryptionContext {
             xts,
             key,
             block_size,
@@ -1048,7 +1045,7 @@ pub struct Upstairs {
     /*
      * Optional encryption context - Some if a key was supplied in the CrucibleOpts
      */
-    encryption_context: Option<UpstairsEncryptionContext>,
+    encryption_context: Option<EncryptionContext>,
 }
 
 impl Upstairs {
@@ -1060,7 +1057,7 @@ impl Upstairs {
 
         // create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
-            UpstairsEncryptionContext::new(
+            EncryptionContext::new(
                 key,
                 /*
                  * XXX: It would be good to do BlockOp::QueryBlockSize here, but
@@ -1759,7 +1756,7 @@ struct GtoS {
     /*
      * Optional encryption context - Some if the corresponding Upstairs is Some.
      */
-    encryption_context: Option<UpstairsEncryptionContext>,
+    encryption_context: Option<EncryptionContext>,
 }
 
 impl GtoS {
@@ -1770,7 +1767,7 @@ impl GtoS {
         downstairs_buffer: HashMap<u64, Bytes>,
         downstairs_buffer_sector_index: HashMap<u64, u128>,
         sender: std_mpsc::Sender<i32>,
-        encryption_context: Option<UpstairsEncryptionContext>,
+        encryption_context: Option<EncryptionContext>,
     ) -> GtoS {
         GtoS {
             submitted,
@@ -3278,8 +3275,7 @@ mod test {
         let key_bytes =
             base64::decode("ClENKTXD2bCyXSHnKXY7GGnk+NvQKbwpatjWP2fJzk0=")
                 .unwrap();
-        let context =
-            UpstairsEncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
+        let context = EncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
 
         let mut block = [0u8; 512];
         thread_rng().fill(&mut block[..]);
@@ -3300,8 +3296,7 @@ mod test {
         let key_bytes =
             base64::decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
                 .unwrap();
-        let context =
-            UpstairsEncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
+        let context = EncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
 
         let mut block = [0u8; 512];
         thread_rng().fill(&mut block[..]);
