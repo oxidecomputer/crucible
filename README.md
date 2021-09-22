@@ -16,33 +16,34 @@ more code is written.
 To give it a burl, first build the workspace with `cargo build`.  Then run
 a set of Downstairs processes:
 
-To create and run a downstairs, use the `-c` flag.  If you have already
-created a downstairs region, you should not use the `-c` flag, it will only
-work on the first creation.
+To create a downstairs region, use the `create` subcommand.
+
+To run a downstairs agent that will listen for upstairs to connect to it,
+provide the `run` subcommand.
+
+Shown next is an example of creating three downstairs instances (run each in a
+different window) on the same machine.  Each should have a unique UUID, port,
+and directory where the region files will be.  Once each is created we will
+then `run` them.
 ```
-$ cargo run -q -p crucible-downstairs -- -c -p 3801 -d var/3801
-raw options: Opt { address: 0.0.0.0, port: 3801, data: "var/3801" }
-listening on 0.0.0.0:3801
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -p 3801 -d var/3801
+$ cargo run -q -p crucible-downstairs -- run -p 3801 -d var/3801
 ...
 ```
 
 ```
-$ cargo run -q -p crucible-downstairs -- -c -p 3802 -d var/3802
-raw options: Opt { address: 0.0.0.0, port: 3802, data: "var/3802" }
-listening on 0.0.0.0:3802
-...
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -p 3802 -d var/3802
+$ cargo run -q -p crucible-downstairs -- run -p 3802 -d var/3802
 ```
 
 ```
-$ cargo run -q -p crucible-downstairs -- -c -p 3803 -d var/3803
-raw options: Opt { address: 0.0.0.0, port: 3803, data: "var/3803" }
-listening on 0.0.0.0:3803
-...
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -p 3803 -d var/3803
+$ cargo run -q -p crucible-downstairs -- run -p 3803 -d var/3803
 ```
 
-Then, connect to them by using the crucible client program that will
-start the upstairs side of crucible for you, run a write/flush/read,
-then exit.
+Once all three are started, you can connect to them by using the crucible
+client program that will start the upstairs side of crucible for you, run
+a write/flush/read, then exit.
 
 ```
 $ cargo run -q -p crucible -- -t 127.0.0.1:3803 -t 127.0.0.1:3802 -t 127.0.0.1:3801
@@ -124,7 +125,8 @@ OK: connection(1): all done
 Optionally specify `--block-size` and/or `--extent-size` when creating downstairs regions:
 
 ```
-cargo run -q -p crucible-downstairs -- -c -p "380${1}" -d "disks/d${1}/" --block-size 4096 --extent-size 20
+cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d "disks/d${1}/" --block-size 4096 --extent-size 20
+cargo run -q -p crucible-downstairs -- run -p "380${1}" -d "disks/d${1}/"
 ```
 
 # Importing to and exporting from crucible downstairs.
@@ -134,13 +136,13 @@ cargo run -q -p crucible-downstairs -- -c -p "380${1}" -d "disks/d${1}/" --block
 To take a file and use it to create a crucible filesystem, you can do the following:, assuming your file to import is called: `alpine-standard-3.14.0-x86_64.iso` and you are creating a crucible region at the directory `var/itest`:
 
 ```
-cargo run -q -p crucible-downstairs -- -c -d var/itest -i alpine-standard-3.14.0-x86_64.iso
+cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/itest -i alpine-standard-3.14.0-x86_64.iso
 ```
 
 This will generate a new crucible region filesystem with initial metadata and then exit.  Here is an example of running that command:
 
 ```
-$ cargo run -q -p crucible-downstairs -- -c -d var/itest -i alpine-standard-3.14.0-x86_64.iso
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/itest -i alpine-standard-3.14.0-x86_64.iso
 Created new region file "var/itest/region.json"
 Import file_size: 143654912  Extent size:51200  Total extents:2806
 Importing "/Users/alan/Downloads/alpine-standard-3.14.0-x86_64.iso" to new region
@@ -154,10 +156,8 @@ depending on your needs, you may need to know the number of blocks that were cop
 
 To export the file we imported in the previous example:
 ```
-cargo run -q -p crucible-downstairs -- -d var/itest -e alan.iso --count 280576
+cargo run -q -p crucible-downstairs -- export -d var/itest -e alan.iso --count 280576
 ```
-
-That's all for now!
 
 # Tracing #
 
@@ -177,7 +177,7 @@ Run a Jaeger container in order to collect and visualize traces:
 
 Pass an option to crucible-downstairs to send traces to Jaeger:
 
-    $ cargo run -q -p crucible-downstairs -- -c -p 3803 -d var/3803 --trace-endpoint localhost:6831
+    $ cargo run -q -p crucible-downstairs -- run -p 3803 -d var/3803 --trace-endpoint localhost:6831
 
 Then, go to `http://localhost:16686` to see the Jaeger UI.
 

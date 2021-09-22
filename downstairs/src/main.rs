@@ -22,94 +22,74 @@ use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
-
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use uuid::Uuid;
 
 mod region;
 use region::Region;
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "disk-side storage component")]
-pub struct Opt {
-    #[structopt(short, long, default_value = "0.0.0.0")]
-    address: Ipv4Addr,
 
-    #[structopt(short, long, default_value = "9000")]
-    port: u16,
+enum Args {
+    Create {
+        #[structopt(long, default_value = "512")]
+        block_size: u64,
 
-    #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
-    data: PathBuf,
+        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        data: PathBuf,
 
-    #[structopt(short, long = "create")]
-    create: bool,
+        #[structopt(long, default_value = "100")]
+        extent_size: u64,
 
-    #[structopt(short, long, parse(from_os_str), name = "FILE")]
-    import_path: Option<PathBuf>,
+        #[structopt(long, default_value = "15")]
+        extent_count: u64,
 
-    #[structopt(short, long)]
-    trace_endpoint: Option<String>,
+        #[structopt(short, long, parse(from_os_str), name = "FILE")]
+        import_path: Option<PathBuf>,
 
-    #[structopt(short, long, parse(from_os_str), name = "OUT_FILE")]
-    export_path: Option<PathBuf>,
+        #[structopt(short, long, name = "UUID", parse(try_from_str))]
+        uuid: Uuid,
+    },
+    Export {
+        /*
+         * Number of blocks to export.
+         */
+        #[structopt(long, default_value = "0", name = "COUNT")]
+        count: u64,
 
-    #[structopt(short, long, default_value = "0", name = "SKIP")]
-    skip: u64,
+        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        data: PathBuf,
 
-    /*
-     * Number of blocks to export.
-     */
-    #[structopt(long, default_value = "0", name = "COUNT")]
-    count: u64,
+        #[structopt(short, long, parse(from_os_str), name = "OUT_FILE")]
+        export_path: PathBuf,
 
-    /*
-     * The next three opts apply during region creation
-     */
-    #[structopt(long, default_value = "512")]
-    block_size: u64,
+        #[structopt(short, long, default_value = "0", name = "SKIP")]
+        skip: u64,
+    },
+    Run {
+        #[structopt(short, long, default_value = "0.0.0.0")]
+        address: Ipv4Addr,
 
-    #[structopt(long, default_value = "100")]
-    extent_size: u64,
+        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        data: PathBuf,
 
-    #[structopt(long, default_value = "15")]
-    extent_count: u64,
+        /*
+         * Test option, makes the search for new work sleep and sometimes
+         * skip doing work.  XXX Note that the flow control between upstairs
+         * and downstairs is not yet implemented.  By turning on this option
+         * it's possible to deadlock.
+         */
+        #[structopt(long)]
+        lossy: bool,
 
-    /*
-     * Test option, makes the search for new work sleep and sometimes
-     * skip doing work.
-     * XXX Note that the flow control between upstairs downstairs is not
-     * yet implemented.  By turning on this option it's possible to grind
-     * the upstairs senders to a near halt.
-     */
-    #[structopt(long)]
-    lossy: bool,
-}
+        #[structopt(short, long, default_value = "9000")]
+        port: u16,
 
-/*
- * Parse the command line options and do some sanity checking
- */
-fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
-    /*
-     * Make sure we don't clobber an existing region, if we are creating
-     * a new one, then it should not exist.
-     * In addition, if we are just opening an existing region, then
-     * expect to find the files where the should exist and return error
-     * if they do not exist.
-     */
-    if opt.create {
-        if opt.data.is_dir() {
-            bail!("Directory {:?} already exists, Cannot create", opt.data);
-        }
-    } else if !opt.data.is_dir() {
-        bail!("--data {:?} must exist as a directory", opt.data);
-    }
-
-    if opt.import_path.is_some() && !opt.create {
-        bail!("Can't import without create option");
-    }
-
-    Ok(opt)
+        #[structopt(short, long)]
+        trace_endpoint: Option<String>,
+    },
 }
 
 fn deadline_secs(secs: u64) -> Instant {
@@ -454,9 +434,13 @@ fn _show_work(ds: &Arc<Downstairs>) {
 
 /*
  * A new IO request has been received.
- * Put the new work onto the work hashmap.
+ * If the message is a ping or negotiation message, send the correct response.
+ * If the message is an IO, then put the new IO the work hashmap.
  * Call do_work_loop() to see if we can perform any job on the work hashmap.
  * Keep looping the work hashmap until we no longer make progress.
+ * XXX Flow control work here: we should prioritize responses over new
+ * work, lest we back up the message channel indicating work done to be
+ * ack'd back..
  */
 async fn proc_frame(
     d: &Arc<Downstairs>,
@@ -467,6 +451,10 @@ async fn proc_frame(
     match m {
         Message::Ruok => {
             fw.send(Message::Imok).await?;
+        }
+        Message::RegionInfoPlease => {
+            let rd = d.region.def();
+            fw.send(Message::RegionInfo(rd)).await?;
         }
         Message::ExtentVersionsPlease => {
             let (bs, es, ec) = d.region.region_def();
@@ -821,122 +809,150 @@ impl fmt::Display for WorkState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let opt = opts()?;
+    let args = Args::from_args_safe()?;
 
     /*
-     * If any of our async tasks in our runtime panic, then we should
-     * exit the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
-    if let Some(endpoint) = opt.trace_endpoint {
-        let tracer = opentelemetry_jaeger::new_pipeline()
-            .with_agent_endpoint(endpoint) // usually port 6831
-            .with_service_name("downstairs")
-            .install_simple()
-            .expect("Error initializing Jaeger exporter");
-
-        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-
-        tracing_subscriber::registry()
-            .with(telemetry)
-            .try_init()
-            .expect("Error init tracing subscriber");
-    }
-
-    /*
-     * Open or create the region for which we will be responsible.
+     * Everyone needs a region
      */
     let mut region;
-    if opt.create {
-        let mut region_options: crucible_common::RegionOptions =
-            Default::default();
-        region_options.set_block_size(opt.block_size);
-        region_options.set_extent_size(Block::new(
-            opt.extent_size,
-            opt.block_size.trailing_zeros(),
-        ));
 
-        region = Region::create(&opt.data, region_options)?;
-
-        if let Some(ref import_path) = opt.import_path {
-            downstairs_import(&mut region, import_path).unwrap();
+    match args {
+        Args::Create {
+            block_size,
+            data,
+            extent_size,
+            extent_count,
+            import_path,
+            uuid,
+        } => {
             /*
-             * The region we just created should now have a flush so the
-             * new data and inital flush number is written to disk.
+             * Create the region options, then the region.
              */
-            region.region_flush(1)?;
-        } else {
-            region.extend(opt.extent_count as u32)?;
+            let mut region_options: crucible_common::RegionOptions =
+                Default::default();
+            region_options.set_block_size(block_size);
+            region_options.set_extent_size(Block::new(
+                extent_size,
+                block_size.trailing_zeros(),
+            ));
+            region_options.set_uuid(uuid);
+
+            region = Region::create(&data, region_options)?;
+
+            if let Some(ref ip) = import_path {
+                downstairs_import(&mut region, ip).unwrap();
+                /*
+                 * The region we just created should now have a flush so the
+                 * new data and inital flush number is written to disk.
+                 */
+                region.region_flush(1)?;
+            } else {
+                region.extend(extent_count as u32)?;
+            }
+
+            println!("UUID: {:?}", region.def().uuid());
+            println!(
+                "Blocks per extent:{} Total Extents: {}",
+                region.def().extent_size().value,
+                region.def().extent_count(),
+            );
+            Ok(())
         }
-    } else {
-        region = Region::open(&opt.data, Default::default())?;
-    }
+        Args::Export {
+            count,
+            data,
+            export_path,
+            skip,
+        } => {
+            region = Region::open(&data, Default::default())?;
 
-    if let Some(export_path) = opt.export_path {
-        downstairs_export(&mut region, export_path, opt.skip, opt.count)
-            .unwrap();
-        return Ok(());
-    }
-
-    /*
-     * If we imported, then stop now.  It's debatable if this is the typical
-     * use case.  If we decide it is not, then we can remove this.
-     * The check is after the export path so we can import then export in
-     * the same command if so desired.
-     */
-    if opt.create && opt.import_path.is_some() {
-        println!("Exiting after import");
-        return Ok(());
-    }
-
-    let work = Work {
-        active: HashMap::new(),
-        last_flush: 0,
-        completed: Vec::with_capacity(32),
-    };
-    let d = Arc::new(Downstairs {
-        region,
-        work: Mutex::new(work),
-        lossy: opt.lossy,
-    });
-
-    // XXX Add a "find me the last flush number" function to region so
-    // we can set the last_flush in Work.
-
-    /*
-     * Establish a listen server on the port.
-     */
-    let listen_on = SocketAddrV4::new(opt.address, opt.port);
-    let listener = TcpListener::bind(&listen_on).await?;
-
-    /*
-     * We now loop listening for a connection from the Upstairs.
-     * When we get one, we then call the proc() function to handle
-     * it and wait on that function to finish.  If it does, we loop
-     * and wait for another connection.
-     *
-     * XXX We may want to consider taking special action when an upstairs
-     * has gone away, like perhaps flushing all outstanding writes?
-     */
-    println!("listening on {}", listen_on);
-    let mut connections: u64 = 1;
-    loop {
-        let (sock, raddr) = listener.accept().await?;
-        println!(
-            "connection from {:?}  connections count:{}",
-            raddr, connections
-        );
-
-        if let Err(e) = proc(&d, sock).await {
-            println!("ERROR: connection({}): {:?}", connections, e);
-        } else {
-            println!("OK: connection({}): all done", connections);
+            downstairs_export(&mut region, export_path, skip, count).unwrap();
+            Ok(())
         }
-        connections += 1;
+        Args::Run {
+            address,
+            data,
+            lossy,
+            port,
+            trace_endpoint,
+        } => {
+            region = Region::open(&data, Default::default())?;
+
+            println!("UUID: {:?}", region.def().uuid());
+            println!(
+                "Blocks per extent:{} Total Extents: {}",
+                region.def().extent_size().value,
+                region.def().extent_count(),
+            );
+
+            let work = Work {
+                active: HashMap::new(),
+                last_flush: 0,
+                completed: Vec::with_capacity(32),
+            };
+            let d = Arc::new(Downstairs {
+                region,
+                work: Mutex::new(work),
+                lossy,
+            });
+
+            /*
+             * If any of our async tasks in our runtime panic, then we should
+             * exit the program right away.
+             */
+            let default_panic = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                default_panic(info);
+                std::process::exit(1);
+            }));
+
+            if let Some(endpoint) = trace_endpoint {
+                let tracer = opentelemetry_jaeger::new_pipeline()
+                    .with_agent_endpoint(endpoint) // usually port 6831
+                    .with_service_name("downstairs")
+                    .install_simple()
+                    .expect("Error initializing Jaeger exporter");
+
+                let telemetry =
+                    tracing_opentelemetry::layer().with_tracer(tracer);
+
+                tracing_subscriber::registry()
+                    .with(telemetry)
+                    .try_init()
+                    .expect("Error init tracing subscriber");
+            }
+
+            /*
+             * Establish a listen server on the port.
+             */
+            let listen_on = SocketAddrV4::new(address, port);
+            let listener = TcpListener::bind(&listen_on).await?;
+
+            /*
+             * We now loop listening for a connection from the Upstairs.
+             * When we get one, we then call the proc() function to handle
+             * it and wait on that function to finish.  If it does, we loop
+             * and wait for another connection.
+             *
+             * XXX We may want to consider taking special action when an upstairs
+             * has gone away, like perhaps flushing all outstanding writes?
+             */
+            println!("listening on {}", listen_on);
+            let mut connections: u64 = 1;
+            loop {
+                let (sock, raddr) = listener.accept().await?;
+                println!(
+                    "connection from {:?}  connections count:{}",
+                    raddr, connections
+                );
+
+                if let Err(e) = proc(&d, sock).await {
+                    println!("ERROR: connection({}): {:?}", connections, e);
+                } else {
+                    println!("OK: connection({}): all done", connections);
+                }
+                connections += 1;
+            }
+        }
     }
 }

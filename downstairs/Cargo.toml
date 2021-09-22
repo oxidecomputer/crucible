@@ -26,3 +26,5 @@ opentelemetry = "0.15.0"
 opentelemetry-jaeger = { version = "0.14.0" }
 tracing-subscriber = "0.2.19"
 tracing-opentelemetry = "0.14.0"
+uuid = { version = "0.8", features = [ "serde", "v4" ] }
+

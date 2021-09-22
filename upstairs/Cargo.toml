@@ -39,4 +39,5 @@ tokio-util = { version = "0.6", features = ["codec"]}
 toml = "0.5"
 tracing = "0.1.26"
 usdt = "0.1.13"
+uuid = { version = "0.8", features = [ "serde", "v4" ] }
 xts-mode = "0.4.0"

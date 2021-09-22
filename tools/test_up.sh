@@ -33,15 +33,19 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
+uuidprefix="12345678-1234-1234-1234-00000000"
 args=()
 downstairs=()
 for (( i = 0; i < 3; i++ )); do
     (( port = 3801 + i ))
     dir="${testdir}/$port"
+    uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-    echo ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10
+    echo ${cds} create -u "$uuid" -p "$port" -d "$dir" --extent-count 5 --extent-size 10
     set -o errexit
-    ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10 &
+    ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+    echo ${cds} run -p "$port" -d "$dir"
+    ${cds} run -p "$port" -d "$dir" &
     downstairs[$i]=$!
     set +o errexit
 done
