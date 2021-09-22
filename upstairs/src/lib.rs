@@ -712,16 +712,14 @@ pub struct Work {
  */
 #[derive(Debug, Default)]
 pub struct WorkCounts {
-    active: u64,    // New or in flight to downstairs.
-    ack_ready: u64, // Downstairs done, use this for the ACK
-    acked: u64,     // This IO was used for the ACK
-    error: u64,     // This IO had an error.
-    done: u64,      // This IO has completed (but not used for ACK)
+    active: u64, // New or in flight to downstairs.
+    error: u64,  // This IO had an error.
+    done: u64,   // This IO has completed (but not used for ACK)
 }
 
 impl WorkCounts {
     fn completed_ok(&self) -> u64 {
-        self.ack_ready + self.acked + self.done
+        self.done
     }
 }
 
@@ -768,15 +766,9 @@ impl Work {
      */
     fn ackable_work(&mut self) -> Vec<u64> {
         let mut ackable = Vec::new();
-        let mut kvec = self.active.keys().cloned().collect::<Vec<u64>>();
-        kvec.sort_unstable();
-        for ds_id in kvec.iter() {
-            let ac = self.state_count(*ds_id).unwrap().ack_ready;
-            if ac == 1 {
+        for (ds_id, job) in &self.active {
+            if job.ack_status == AckStatus::AckReady {
                 ackable.push(*ds_id);
-            } else {
-                // Only one downstairs IO should be AckReady
-                assert_eq!(ac, 0);
             }
         }
         ackable
@@ -803,9 +795,8 @@ impl Work {
         for state in job.state.values() {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
-                IOState::AckReady => wc.ack_ready += 1,
                 IOState::Error(_) => wc.error += 1,
-                IOState::Acked | IOState::Done | IOState::Skipped => {
+                IOState::Done | IOState::Skipped => {
                     wc.done += 1;
                 }
             }
@@ -814,11 +805,9 @@ impl Work {
         Ok(wc)
     }
 
-    fn ack(&mut self, ds_id: u64) -> bool {
+    fn ack(&mut self, ds_id: u64) {
         /*
          * Move AckReady to Acked.
-         *
-         * Returns false if no AckReady found.
          */
 
         let job = self
@@ -827,16 +816,11 @@ impl Work {
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
 
-        let mut ack_ready = false;
-        for cid in 0..3 {
-            if let Some(IOState::AckReady) = job.state.get(&cid) {
-                job.state.insert(cid, IOState::Acked);
-                ack_ready = true;
-                break;
-            }
+        if job.ack_status == AckStatus::AckReady {
+            job.ack_status = AckStatus::Acked;
+        } else {
+            panic!("already acked!");
         }
-
-        ack_ready
     }
 
     fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
@@ -994,7 +978,7 @@ impl Work {
                     assert!(job.data.is_none());
                     job.data = read_data;
                     notify_guest = true;
-                    job.state.insert(client_id, IOState::AckReady);
+                    job.ack_status = AckStatus::AckReady;
                 }
             }
             IOop::Write {
@@ -1006,7 +990,7 @@ impl Work {
                 assert!(read_data.is_none());
                 if jobs_completed_ok == 2 {
                     notify_guest = true;
-                    job.state.insert(client_id, IOState::AckReady);
+                    job.ack_status = AckStatus::AckReady;
                 }
             }
             IOop::Flush {
@@ -1016,7 +1000,7 @@ impl Work {
                 assert!(read_data.is_none());
                 if jobs_completed_ok == 2 {
                     notify_guest = true;
-                    job.state.insert(client_id, IOState::AckReady);
+                    job.ack_status = AckStatus::AckReady;
                 }
             }
         }
@@ -1024,9 +1008,12 @@ impl Work {
         /*
          * If all 3 jobs are done, we can check here to see if we can
          * remove this job from the DS list. If we have completed the ack
-         * to the guest, then there will be no more work on this job.
+         * to the guest, then there will be no more work on this job
+         * but messages may still be unprocessed.
          */
-        self.retire_check(ds_id);
+        if job.ack_status == AckStatus::Acked {
+            self.retire_check(ds_id);
+        }
 
         Ok(notify_guest)
     }
@@ -1042,7 +1029,6 @@ impl Work {
         if (wc.error + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
-            assert_eq!(wc.ack_ready, 0);
             self.active.remove(&ds_id).unwrap();
             self.completed.push(ds_id);
         }
@@ -1654,6 +1640,10 @@ struct DownstairsIO {
      */
     state: HashMap<u8, IOState>,
     /*
+     * Has this been acked to the guest yet?
+     */
+    ack_status: AckStatus,
+    /*
      * If the operation is a Read, this holds the resulting buffer
      */
     data: Option<Bytes>,
@@ -1693,14 +1683,6 @@ pub enum IOState {
     New,
     // The request has been sent to this tasks downstairs.
     InProgress,
-    // This IO has been completed by the downstairs, and we should use the
-    // data in this IO as the source for a response back to the upstairs.
-    // Only one of the three downstairs IOs should be "AckReady".
-    AckReady,
-    // This IO was used to ACK back to the guest and we are done with it.
-    // We give it a special AckDone state to leave some breadcrumbs in case
-    // we want to know which IO was the ACK.
-    Acked,
     // The successful response came back from downstairs.
     Done,
     // XXX Unused.  The IO request should be ignored.  This situation could be
@@ -1721,12 +1703,6 @@ impl fmt::Display for IOState {
             IOState::InProgress => {
                 write!(f, "Sent")
             }
-            IOState::AckReady => {
-                write!(f, "AckR")
-            }
-            IOState::Acked => {
-                write!(f, "Ackd")
-            }
             IOState::Done => {
                 write!(f, "Done")
             }
@@ -1738,6 +1714,13 @@ impl fmt::Display for IOState {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AckStatus {
+    NotAcked,
+    AckReady,
+    Acked,
 }
 
 /*
@@ -2434,6 +2417,9 @@ fn _send_work(t: &[Target], val: u64) {
  * work has been completed.
  */
 async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
+    /*
+     * Accept _any_ ds_done message, but work on the whole list of ackable work.
+     */
     while let Some(_ds_id) = ds_done_rx.recv().await {
         /*
          * XXX Do we need to hold the lock while we process all the
@@ -2456,8 +2442,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let data = done.data.take();
 
-            // Verify we did find an AckReady downstairs IO
-            assert!(work.ack(ds_id));
+            work.ack(ds_id);
 
             gw.ds_complete(gw_id, ds_id, data, work.result(ds_id));
 
@@ -2745,6 +2730,7 @@ fn create_write_eob(
         guest_id: gw_id,
         work: awrite,
         state,
+        ack_status: AckStatus::NotAcked,
         data: None,
     }
 }
@@ -2779,6 +2765,7 @@ fn create_read_eob(
         guest_id: gw_id,
         work: aread,
         state,
+        ack_status: AckStatus::NotAcked,
         data: None,
     }
 }
@@ -2806,6 +2793,7 @@ fn create_flush(
         guest_id,
         work: flush,
         state,
+        ack_status: AckStatus::NotAcked,
         data: None,
     }
 }
@@ -3512,13 +3500,9 @@ mod test {
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
-        let state = work.active.get_mut(&next_id).unwrap().state.get(&1);
-        assert_eq!(*state.unwrap(), IOState::AckReady);
-        work.active
-            .get_mut(&next_id)
-            .unwrap()
-            .state
-            .insert(1, IOState::Acked);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
 
         assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
@@ -3562,17 +3546,6 @@ mod test {
 
         assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
-
-        let state = work.active.get_mut(&next_id).unwrap().state.get(&2);
-        assert_eq!(*state.unwrap(), IOState::AckReady);
-        work.active
-            .get_mut(&next_id)
-            .unwrap()
-            .state
-            .insert(2, IOState::Acked);
-
-        assert_eq!(work.ackable_work().len(), 0);
-        assert_eq!(work.completed.len(), 0);
 
         work.retire_check(next_id);
 
@@ -3627,6 +3600,8 @@ mod test {
         );
         assert_eq!(work.ackable_work().len(), 0);
 
+        work.retire_check(next_id);
+
         assert_eq!(work.completed.len(), 1);
     }
 
@@ -3654,13 +3629,9 @@ mod test {
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
-        let state = work.active.get_mut(&next_id).unwrap().state.get(&0);
-        assert_eq!(*state.unwrap(), IOState::AckReady);
-        work.active
-            .get_mut(&next_id)
-            .unwrap()
-            .state
-            .insert(0, IOState::Acked);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
 
         let bytes = Some(Bytes::from(vec![]));
 
@@ -3714,13 +3685,9 @@ mod test {
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
-        let state = work.active.get_mut(&next_id).unwrap().state.get(&1);
-        assert_eq!(*state.unwrap(), IOState::AckReady);
-        work.active
-            .get_mut(&next_id)
-            .unwrap()
-            .state
-            .insert(1, IOState::Acked);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
 
         let bytes = Some(Bytes::from(vec![]));
 
@@ -3782,24 +3749,8 @@ mod test {
         assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
 
-        let state = work.active.get_mut(&next_id).unwrap().state.get(&2);
-        assert_eq!(*state.unwrap(), IOState::AckReady);
-        work.active
-            .get_mut(&next_id)
-            .unwrap()
-            .state
-            .insert(2, IOState::Acked);
-
-        assert_eq!(work.ackable_work().len(), 0);
-        assert_eq!(work.completed.len(), 0);
-
         work.retire_check(next_id);
 
         assert_eq!(work.completed.len(), 1);
-    }
-
-    #[test]
-    fn todo() {
-        // Verify we did find an AckReady downstairs IO
     }
 }
