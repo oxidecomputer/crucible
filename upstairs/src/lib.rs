@@ -2039,10 +2039,6 @@ impl GuestWork {
      * arrived from all the downstairs jobs we created, then we
      * can move forward with finishing up the guest work operation.
      * This may include moving/decrypting data buffers from completed reads.
-     *
-     * TODO: Error handling case needs to come through here in a way that
-     * won't break if enough of the IO completed to satisfy the upstairs, but
-     * will be handled if all the downstairs have returned error.
      */
     #[instrument]
     fn ds_complete(
