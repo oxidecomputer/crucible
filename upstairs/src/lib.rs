@@ -856,13 +856,16 @@ impl Work {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
+        /*
+         * XXX: this code assumes that 3 downstairs is the max that we'll ever support.
+         */
         let bad_job = match &job.work {
             IOop::Read {
                 dependencies: _dependencies,
                 eid: _eid,
                 offset: _offset,
                 num_blocks: _num_blocks,
-            } => wc.error >= 3,
+            } => wc.error == 3,
             IOop::Write {
                 dependencies: _dependencies,
                 eid: _eid,
