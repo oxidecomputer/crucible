@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crucible::*;
-use crucible_common::Block;
+use crucible_common::{Block, CrucibleError};
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
@@ -83,6 +83,9 @@ pub struct Opt {
      */
     #[structopt(long)]
     lossy: bool,
+
+    #[structopt(long)]
+    return_errors: bool,
 }
 
 /*
@@ -313,7 +316,11 @@ async fn do_work(
              * Any error from an IO should be intercepted here and passed
              * back to the upstairs.
              */
-            let result = ds.region.region_read(eid, offset, &mut data);
+            let result = if ds.return_errors && random() && random() {
+                Err(CrucibleError::GenericError("test error".to_string()))
+            } else {
+                ds.region.region_read(eid, offset, &mut data)
+            };
             fw.send(Message::ReadResponse(job.ds_id, data.freeze(), result))
                 .await?;
             ds.complete_work(job.ds_id, false);
@@ -326,7 +333,11 @@ async fn do_work(
             offset,
             data,
         } => {
-            let result = ds.region.region_write(eid, offset, &data);
+            let result = if ds.return_errors && random() && random() {
+                Err(CrucibleError::GenericError("test error".to_string()))
+            } else {
+                ds.region.region_write(eid, offset, &data)
+            };
             fw.send(Message::WriteAck(job.ds_id, result)).await?;
             ds.complete_work(job.ds_id, false);
             Ok(())
@@ -335,7 +346,11 @@ async fn do_work(
             dependencies: _dependencies,
             flush_number,
         } => {
-            let result = ds.region.region_flush(flush_number);
+            let result = if ds.return_errors && random() && random() {
+                Err(CrucibleError::GenericError("test error".to_string()))
+            } else {
+                ds.region.region_flush(flush_number)
+            };
             fw.send(Message::FlushAck(job.ds_id, result)).await?;
             ds.complete_work(job.ds_id, true);
             Ok(())
@@ -623,6 +638,7 @@ struct Downstairs {
     region: Region,
     work: Mutex<Work>,
     lossy: bool, // Test flag, enables pauses and skipped jobs
+    return_errors: bool, // Test flag
 }
 
 impl Downstairs {
@@ -904,6 +920,7 @@ async fn main() -> Result<()> {
         region,
         work: Mutex::new(work),
         lossy: opt.lossy,
+        return_errors: opt.return_errors,
     });
 
     // XXX Add a "find me the last flush number" function to region so
