@@ -790,19 +790,7 @@ impl Work {
             .active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
-
-        let mut wc: WorkCounts = Default::default();
-        for state in job.state.values() {
-            match state {
-                IOState::New | IOState::InProgress => wc.active += 1,
-                IOState::Error(_) => wc.error += 1,
-                IOState::Done | IOState::Skipped => {
-                    wc.done += 1;
-                }
-            }
-        }
-
-        Ok(wc)
+        Ok(job.state_count())
     }
 
     fn ack(&mut self, ds_id: u64) {
@@ -1013,6 +1001,13 @@ impl Work {
          */
         if job.ack_status == AckStatus::Acked {
             self.retire_check(ds_id);
+        } else {
+            // If we reach this then the job probably has errors and hasn't acked back yet.
+            let wc = job.state_count();
+            if (wc.error + wc.done) == 3 {
+                notify_guest = true;
+                job.ack_status = AckStatus::AckReady;
+            }
         }
 
         Ok(notify_guest)
@@ -1647,6 +1642,24 @@ struct DownstairsIO {
      * If the operation is a Read, this holds the resulting buffer
      */
     data: Option<Bytes>,
+}
+
+impl DownstairsIO {
+    fn state_count(&self) -> WorkCounts {
+        let mut wc: WorkCounts = Default::default();
+
+        for state in self.state.values() {
+            match state {
+                IOState::New | IOState::InProgress => wc.active += 1,
+                IOState::Error(_) => wc.error += 1,
+                IOState::Done | IOState::Skipped => {
+                    wc.done += 1;
+                }
+            }
+        }
+
+        wc
+    }
 }
 
 /*
@@ -3587,7 +3600,6 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        // XXX should notify guest with error
         assert_eq!(
             work.complete(
                 next_id,
@@ -3596,9 +3608,9 @@ mod test {
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
-            false
+            true
         );
-        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.ackable_work().len(), 1);
 
         work.retire_check(next_id);
 
@@ -3747,6 +3759,73 @@ mod test {
         let bytes = Some(Bytes::from(vec![]));
 
         assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+
+        work.retire_check(next_id);
+
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_read_three_bad() {
+        let mut work = Work {
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                2,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
 
         work.retire_check(next_id);
