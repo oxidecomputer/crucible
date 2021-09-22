@@ -933,7 +933,7 @@ impl Work {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let newstate = if let Err(e) = result {
+        let newstate = if let Err(e) = result.clone() {
             IOState::Error(e)
         } else {
             jobs_completed_ok += 1;
@@ -954,41 +954,43 @@ impl Work {
          *
          * XXX Any error needs to be passed to Nexus
          */
-        match &job.work {
-            IOop::Read {
-                dependencies: _dependencies,
-                eid: _eid,
-                offset: _offset,
-                num_blocks: _num_blocks,
-            } => {
-                assert!(read_data.is_some());
-                if jobs_completed_ok == 1 {
-                    assert!(job.data.is_none());
-                    job.data = read_data;
-                    notify_guest = true;
-                    job.ack_status = AckStatus::AckReady;
+        if let Ok(_) = result {
+            match &job.work {
+                IOop::Read {
+                    dependencies: _dependencies,
+                    eid: _eid,
+                    offset: _offset,
+                    num_blocks: _num_blocks,
+                } => {
+                    assert!(read_data.is_some());
+                    if jobs_completed_ok == 1 {
+                        assert!(job.data.is_none());
+                        job.data = read_data;
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                    }
                 }
-            }
-            IOop::Write {
-                dependencies: _dependencies,
-                eid: _eid,
-                data: _data,
-                offset: _offset,
-            } => {
-                assert!(read_data.is_none());
-                if jobs_completed_ok == 2 {
-                    notify_guest = true;
-                    job.ack_status = AckStatus::AckReady;
+                IOop::Write {
+                    dependencies: _dependencies,
+                    eid: _eid,
+                    data: _data,
+                    offset: _offset,
+                } => {
+                    assert!(read_data.is_none());
+                    if jobs_completed_ok == 2 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                    }
                 }
-            }
-            IOop::Flush {
-                dependencies: _dependencies,
-                flush_number: _flush_number,
-            } => {
-                assert!(read_data.is_none());
-                if jobs_completed_ok == 2 {
-                    notify_guest = true;
-                    job.ack_status = AckStatus::AckReady;
+                IOop::Flush {
+                    dependencies: _dependencies,
+                    flush_number: _flush_number,
+                } => {
+                    assert!(read_data.is_none());
+                    if jobs_completed_ok == 2 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                    }
                 }
             }
         }
@@ -3831,5 +3833,70 @@ mod test {
         work.retire_check(next_id);
 
         assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_assert_no_transfer_of_bad_read() {
+        let mut work = Work {
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![1]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![2]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                2,
+                bytes,
+                Ok(()),
+            )
+            .unwrap(),
+            true
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(work.active.get(&next_id).unwrap().data, Some(Bytes::from(vec![3])));
     }
 }
