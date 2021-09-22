@@ -969,7 +969,7 @@ impl Work {
 
         if let Some(oldstate) = oldstate {
             // we shouldn't be transitioning a state that was already transitioned
-            assert!(matches!(oldstate, IOState::New | IOState::InProgress));
+            assert_eq!(oldstate, IOState::InProgress);
         } else {
             panic!("no old state! that's bad!");
         }
