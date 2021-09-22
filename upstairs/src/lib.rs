@@ -3024,6 +3024,10 @@ impl CruciblePseudoFile {
     pub fn sz(&self) -> u64 {
         self.sz
     }
+
+    pub fn show_work(&self) -> WQCounts {
+        self.guest.show_work()
+    }
 }
 
 /*
