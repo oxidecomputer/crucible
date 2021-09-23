@@ -1017,13 +1017,26 @@ impl Work {
                 }
             }
         } else if matches!(newstate, IOState::Error(_)) {
-            // Mark this downstairs as bad
+            // Mark this downstairs as bad if this was a write or flush
             // XXX: reconcilation, retries?
-            let errors: u64 = match self.downstairs_errors.get(&client_id) {
-                Some(v) => *v,
-                None => 0,
-            };
-            self.downstairs_errors.insert(client_id, errors + 1);
+            if matches!(
+                job.work,
+                IOop::Write {
+                    dependencies: _,
+                    eid: _,
+                    data: _,
+                    offset: _
+                } | IOop::Flush {
+                    dependencies: _,
+                    flush_number: _
+                }
+            ) {
+                let errors: u64 = match self.downstairs_errors.get(&client_id) {
+                    Some(v) => *v,
+                    None => 0,
+                };
+                self.downstairs_errors.insert(client_id, errors + 1);
+            }
         }
 
         /*
@@ -3940,7 +3953,7 @@ mod test {
     }
 
     #[test]
-    fn work_assert_ok_transfer_of_read_after_downstairs_error() {
+    fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
         let mut work = Work {
             downstairs_errors: HashMap::new(),
             active: HashMap::new(),
@@ -3949,6 +3962,90 @@ mod test {
         };
 
         let next_id = work.next_id();
+
+        // send a write, and clients 0 and 1 will return errors
+
+        let op = create_write_eob(
+            next_id,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_some());
+        assert!(work.in_progress(next_id, 1).is_some());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        assert_eq!(work.complete(next_id, 2, None, Ok(()),).unwrap(), true);
+
+        assert!(work.downstairs_errors.get(&0).is_some());
+        assert!(work.downstairs_errors.get(&1).is_some());
+        assert!(work.downstairs_errors.get(&2).is_none());
+
+        // another read. make sure only client 2 returns data. the others should be skipped.
+
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_none());
+        assert!(work.in_progress(next_id, 1).is_none());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
+    }
+
+    #[test]
+    fn work_assert_reads_do_not_cause_failure_state_transition() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        // send a read, and clients 0 and 1 will return errors
 
         let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
 
@@ -3998,29 +4095,60 @@ mod test {
             Some(Bytes::from(vec![3]))
         );
 
-        assert!(work.downstairs_errors.get(&0).is_some());
-        assert!(work.downstairs_errors.get(&1).is_some());
+        assert!(work.downstairs_errors.get(&0).is_none());
+        assert!(work.downstairs_errors.get(&1).is_none());
         assert!(work.downstairs_errors.get(&2).is_none());
 
-        // another read. make sure only client 2 returns data. the others should be skipped.
+        // send another read, and expect all to return something (reads shouldn't cause a Failed
+        // transition)
 
         let next_id = work.next_id();
         let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
 
         work.enqueue(op);
 
-        assert!(work.in_progress(next_id, 0).is_none());
-        assert!(work.in_progress(next_id, 1).is_none());
+        assert!(work.in_progress(next_id, 0).is_some());
+        assert!(work.in_progress(next_id, 1).is_some());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let bytes = Some(Bytes::from(vec![3]));
+        let bytes = Some(Bytes::from(vec![4]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false,
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![5]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false,
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![6]));
 
         assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(Bytes::from(vec![3]))
+            Some(Bytes::from(vec![6]))
         );
     }
 }
