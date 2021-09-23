@@ -4002,8 +4002,7 @@ mod test {
         assert!(work.downstairs_errors.get(&1).is_some());
         assert!(work.downstairs_errors.get(&2).is_none());
 
-        // another read. make sure:
-        // - even if previously bad downstairs reutrn ok this time, the results are not used
+        // another read. make sure only client 2 returns data. the others should be skipped.
 
         let next_id = work.next_id();
         let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
