@@ -1701,12 +1701,8 @@ impl DownstairsIO {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
                 IOState::Error(_) => wc.error += 1,
-                IOState::Skipped => {
-                    wc.skipped += 1;
-                }
-                IOState::Done => {
-                    wc.done += 1;
-                }
+                IOState::Skipped => wc.skipped += 1,
+                IOState::Done => wc.done += 1,
             }
         }
 
