@@ -360,8 +360,17 @@ async fn io_send(
             continue;
         }
 
+        /*
+         * If in_progress returns None, it means that this client should be skipped. That means
+         * that it has return an error somewhere and should be set as failed.
+         */
         let job = u.ds_work.lock().unwrap().in_progress(*new_id, client_id);
-        match job {
+        if job.is_none() {
+            u.ds_transition(client_id, DsState::Failed);
+            continue;
+        }
+
+        match job.unwrap() {
             IOop::Write {
                 dependencies,
                 eid,
@@ -701,6 +710,7 @@ async fn looper(
  */
 #[derive(Debug)]
 pub struct Work {
+    downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
     completed: AllocRingBuffer<u64>,
@@ -712,9 +722,10 @@ pub struct Work {
  */
 #[derive(Debug, Default)]
 pub struct WorkCounts {
-    active: u64, // New or in flight to downstairs.
-    error: u64,  // This IO had an error.
-    done: u64,   // This IO has completed (but not used for ACK)
+    active: u64,  // New or in flight to downstairs.
+    error: u64,   // This IO had an error.
+    skipped: u64, // Skipped
+    done: u64,    // This IO has completed (but not used for ACK)
 }
 
 impl WorkCounts {
@@ -734,14 +745,26 @@ impl Work {
     }
 
     /**
-     * Mark this request as in progress for this client, and return a copy
-     * of the details of the request.
+     * Mark this request as in progress for this client, and return a copy of the details of the
+     * request. If the downstairs client has experienced errors in the past, return None and mark
+     * this as Skipped.
      */
-    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> IOop {
+    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.active.get_mut(&ds_id).unwrap();
-        let oldstate = job.state.insert(client_id, IOState::InProgress);
+
+        let newstate = match &self.downstairs_errors.get(&client_id) {
+            Some(_) => IOState::Skipped,
+            None => IOState::InProgress,
+        };
+
+        let oldstate = job.state.insert(client_id, newstate.clone());
         assert_eq!(oldstate, Some(IOState::New));
-        job.work.clone()
+
+        match newstate {
+            IOState::Skipped => None,
+            IOState::InProgress => Some(job.work.clone()),
+            _ => panic!("bad state in in_progress!"),
+        }
     }
 
     /**
@@ -933,14 +956,14 @@ impl Work {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let newstate = if let Err(e) = result.clone() {
+        let newstate = if let Err(e) = result {
             IOState::Error(e)
         } else {
             jobs_completed_ok += 1;
             IOState::Done
         };
 
-        let oldstate = job.state.insert(client_id, newstate);
+        let oldstate = job.state.insert(client_id, newstate.clone());
 
         if let Some(oldstate) = oldstate {
             // we shouldn't be transitioning a state that was already transitioned
@@ -954,7 +977,7 @@ impl Work {
          *
          * XXX Any error needs to be passed to Nexus
          */
-        if let Ok(_) = result {
+        if newstate == IOState::Done {
             match &job.work {
                 IOop::Read {
                     dependencies: _dependencies,
@@ -993,6 +1016,14 @@ impl Work {
                     }
                 }
             }
+        } else if matches!(newstate, IOState::Error(_)) {
+            // Mark this downstairs as bad
+            // XXX: reconcilation, retries?
+            let errors: u64 = match self.downstairs_errors.get(&client_id) {
+                Some(v) => *v,
+                None => 0,
+            };
+            self.downstairs_errors.insert(client_id, errors + 1);
         }
 
         /*
@@ -1006,7 +1037,7 @@ impl Work {
         } else {
             // If we reach this then the job probably has errors and hasn't acked back yet.
             let wc = job.state_count();
-            if (wc.error + wc.done) == 3 {
+            if (wc.error + wc.skipped + wc.done) == 3 {
                 notify_guest = true;
                 job.ack_status = AckStatus::AckReady;
             }
@@ -1023,7 +1054,7 @@ impl Work {
     fn retire_check(&mut self, ds_id: u64) {
         let wc = self.state_count(ds_id).unwrap();
 
-        if (wc.error + wc.done) == 3 {
+        if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
             self.active.remove(&ds_id).unwrap();
@@ -1190,6 +1221,7 @@ impl Upstairs {
             guest,
             ds_state: Mutex::new(ds_state),
             ds_work: Mutex::new(Work {
+                downstairs_errors: HashMap::new(),
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2048),
                 next_id: 1000,
@@ -1491,11 +1523,13 @@ impl Upstairs {
      */
     fn ds_transition(&self, client_id: u8, new_state: DsState) {
         let mut state = self.ds_state.lock().unwrap();
-        println!(
-            "Transition [{}] from {:?} to {:?}",
-            client_id, state[client_id as usize], new_state,
-        );
-        state[client_id as usize] = new_state;
+        if state[client_id as usize] != new_state {
+            println!(
+                "Transition [{}] from {:?} to {:?}",
+                client_id, state[client_id as usize], new_state,
+            );
+            state[client_id as usize] = new_state;
+        }
     }
 
     fn ds_state_show(&self) {
@@ -1602,7 +1636,7 @@ enum DsState {
      * rate, or it is not able to keep up., or it is having some
      * error such that we can no longer use it.
      */
-    _Failed,
+    Failed,
     /*
      * This downstairs is being migrated to a new location
      */
@@ -1654,7 +1688,10 @@ impl DownstairsIO {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
                 IOState::Error(_) => wc.error += 1,
-                IOState::Done | IOState::Skipped => {
+                IOState::Skipped => {
+                    wc.skipped += 1;
+                }
+                IOState::Done => {
                     wc.done += 1;
                 }
             }
@@ -1700,9 +1737,8 @@ pub enum IOState {
     InProgress,
     // The successful response came back from downstairs.
     Done,
-    // XXX Unused.  The IO request should be ignored.  This situation could be
-    // A read that only needs one downstairs to answer, or we are doing
-    // recovery and we only want a specific downstairs to do that work.
+    // The IO request should be ignored. Ex: we could be doing recovery and we only want a specific
+    // downstairs to do that work.
     Skipped,
     // The IO returned an error.
     Error(CrucibleError),
@@ -3299,6 +3335,7 @@ mod test {
             guest: Arc::new(Guest::new()),
             ds_state: Mutex::new(vec![DsState::New; 3]),
             ds_work: Mutex::new(Work {
+                downstairs_errors: HashMap::new(),
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2),
                 next_id: 1000,
@@ -3492,6 +3529,7 @@ mod test {
     #[test]
     fn work_flush_three_ok() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3527,6 +3565,7 @@ mod test {
     #[test]
     fn work_flush_one_error_then_ok() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3570,6 +3609,7 @@ mod test {
     #[test]
     fn work_flush_two_errors_equals_fail() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3622,6 +3662,7 @@ mod test {
     #[test]
     fn work_read_one_ok() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3663,6 +3704,7 @@ mod test {
     #[test]
     fn work_read_one_bad_two_ok() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3713,6 +3755,7 @@ mod test {
     #[test]
     fn work_read_two_bad_one_ok() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3771,6 +3814,7 @@ mod test {
     #[test]
     fn work_read_three_bad() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3838,6 +3882,7 @@ mod test {
     #[test]
     fn work_assert_no_transfer_of_bad_read() {
         let mut work = Work {
+            downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2),
             next_id: 1000,
@@ -3885,18 +3930,98 @@ mod test {
 
         let bytes = Some(Bytes::from(vec![3]));
 
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
+    }
+
+    #[test]
+    fn work_assert_ok_transfer_of_read_after_downstairs_error() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_some());
+        assert!(work.in_progress(next_id, 1).is_some());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        let bytes = Some(Bytes::from(vec![1]));
+
         assert_eq!(
             work.complete(
                 next_id,
-                2,
+                0,
                 bytes,
-                Ok(()),
+                Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
-            true
+            false
         );
 
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![2]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
         assert!(work.active.get(&next_id).unwrap().data.is_some());
-        assert_eq!(work.active.get(&next_id).unwrap().data, Some(Bytes::from(vec![3])));
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
+
+        assert!(work.downstairs_errors.get(&0).is_some());
+        assert!(work.downstairs_errors.get(&1).is_some());
+        assert!(work.downstairs_errors.get(&2).is_none());
+
+        // another read. make sure:
+        // - even if previously bad downstairs reutrn ok this time, the results are not used
+
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_none());
+        assert!(work.in_progress(next_id, 1).is_none());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
     }
 }

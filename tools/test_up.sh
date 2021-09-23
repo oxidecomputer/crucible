@@ -39,9 +39,19 @@ for (( i = 0; i < 3; i++ )); do
     (( port = 3801 + i ))
     dir="${testdir}/$port"
     args+=( -t "127.0.0.1:$port" )
-    echo ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10
+    if [[ $i -eq 0 ]];
+    then
+        echo ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10 --return-errors
+    else
+        echo ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10
+    fi
     set -o errexit
-    ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10 &
+    if [[ $i -eq 0 ]];
+    then
+        ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10 --return-errors &
+    else
+        ${cds} -c -p "$port" -d "$dir" --extent-count 5 --extent-size 10 &
+    fi;
     downstairs[$i]=$!
     set +o errexit
 done
@@ -61,6 +71,9 @@ for tt in ${test_list}; do
         echo "Completed test: $tt"
     fi
 done
+
+echo "Running hammer"
+./hammer.sh
 
 echo "Tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do
