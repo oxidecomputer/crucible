@@ -317,6 +317,7 @@ async fn do_work(
              * back to the upstairs.
              */
             let result = if ds.return_errors && random() && random() {
+                println!("returning error on read!");
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else {
                 ds.region.region_read(eid, offset, &mut data)
@@ -334,6 +335,7 @@ async fn do_work(
             data,
         } => {
             let result = if ds.return_errors && random() && random() {
+                println!("returning error on write!");
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else {
                 ds.region.region_write(eid, offset, &data)
@@ -347,6 +349,7 @@ async fn do_work(
             flush_number,
         } => {
             let result = if ds.return_errors && random() && random() {
+                println!("returning error on flush!");
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else {
                 ds.region.region_flush(flush_number)
@@ -637,7 +640,7 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
 struct Downstairs {
     region: Region,
     work: Mutex<Work>,
-    lossy: bool, // Test flag, enables pauses and skipped jobs
+    lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
 }
 
