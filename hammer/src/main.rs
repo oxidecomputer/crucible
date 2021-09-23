@@ -33,7 +33,7 @@ pub struct Opt {
     #[structopt(short, long)]
     verify_isolation: bool,
 
-    #[structopt(short, long)]
+    #[structopt(long)]
     tracing_endpoint: Option<String>,
 
     #[structopt(short, long)]
