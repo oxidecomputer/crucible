@@ -1341,7 +1341,6 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut ds_work = self.ds_work.lock().unwrap();
-        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1353,8 +1352,13 @@ impl Upstairs {
             *ddef,
             offset,
             data.len() as u64 / ddef.block_size(),
-        )
-        .unwrap();
+        )?;
+
+        /*
+         * Grab this ID after extent_from_offset: in case of Err we don't want to create a gap in
+         * the IDs.
+         */
+        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -1449,7 +1453,6 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut ds_work = self.ds_work.lock().unwrap();
-        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1461,8 +1464,13 @@ impl Upstairs {
             *ddef,
             offset,
             data.len() as u64 / ddef.block_size(),
-        )
-        .unwrap();
+        )?;
+
+        /*
+         * Grab this ID after extent_from_offset: in case of Err we don't want to create a gap in
+         * the IDs.
+         */
+        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
