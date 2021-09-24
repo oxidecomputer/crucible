@@ -27,28 +27,23 @@ pub struct Inner {
 }
 
 impl Inner {
-    fn flush_number(&self) -> u64 {
-        // XXX lots of unwraps here
-
+    fn flush_number(&self) -> Result<u64> {
         let mut stmt = self
             .metadb
-            .prepare("SELECT value FROM metadata where name='flush_number'")
-            .unwrap();
-        let flush_number_iter = stmt.query_map([], |row| row.get(0)).unwrap();
+            .prepare("SELECT value FROM metadata where name='flush_number'")?;
+        let flush_number_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut flush_number_values: Vec<u64> = vec![];
         for flush_number_value in flush_number_iter {
-            flush_number_values.push(flush_number_value.unwrap());
+            flush_number_values.push(flush_number_value?);
         }
 
         assert!(flush_number_values.len() == 1);
 
-        flush_number_values[0]
+        Ok(flush_number_values[0])
     }
 
-    fn set_new_flush_number(&self, new_flush: u64) {
-        // XXX lots of unwraps here
-
+    fn set_new_flush_number(&self, new_flush: u64) -> Result<()> {
         /*
          * When we write out the new flush number, the dirty bit in the file
          * should be set back to false.
@@ -57,35 +52,34 @@ impl Inner {
             .metadb
             .prepare(
                 "UPDATE metadata SET value=?1 WHERE name='flush_number'; UPDATE metadata SET dirty=0",
-            )
-            .unwrap();
+            )?;
 
-        stmt.execute(params![new_flush]).unwrap();
+        let _rows_affected = stmt.execute(params![new_flush])?;
+
+        Ok(())
     }
 
-    fn dirty(&self) -> bool {
-        // XXX lots of unwraps here
-
+    fn dirty(&self) -> Result<bool> {
         let mut stmt = self
             .metadb
-            .prepare("SELECT value FROM metadata where name='dirty'")
-            .unwrap();
-        let dirty_iter = stmt.query_map([], |row| row.get(0)).unwrap();
+            .prepare("SELECT value FROM metadata where name='dirty'")?;
+        let dirty_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut dirty_values: Vec<bool> = vec![];
         for dirty_value in dirty_iter {
-            dirty_values.push(dirty_value.unwrap());
+            dirty_values.push(dirty_value?);
         }
 
         assert!(dirty_values.len() == 1);
 
-        dirty_values[0]
+        Ok(dirty_values[0])
     }
 
-    fn set_dirty(&self) {
-        self.metadb
-            .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])
-            .unwrap();
+    fn set_dirty(&self) -> Result<()> {
+        let _rows_affected = self
+            .metadb
+            .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])?;
+        Ok(())
     }
 }
 
@@ -351,9 +345,9 @@ impl Extent {
 
         self.check_input(offset, data)?;
 
-        if !inner.dirty() {
+        if !inner.dirty()? {
             // XXX: intent to dirty? or just write, and don't check?
-            inner.set_dirty();
+            inner.set_dirty()?;
         }
 
         let byte_offset = offset.value * self.block_size;
@@ -369,7 +363,7 @@ impl Extent {
     pub fn flush_block(&self, new_flush: u64) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
-        if !inner.dirty() {
+        if !inner.dirty()? {
             /*
              * If we have made no writes to this extent since the last flush,
              * we do not need to update the extent on disk
@@ -396,7 +390,7 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        inner.set_new_flush_number(new_flush);
+        inner.set_new_flush_number(new_flush)?;
 
         Ok(())
     }
@@ -541,12 +535,12 @@ impl Region {
         self.def
     }
 
-    pub fn versions(&self) -> Vec<u64> {
+    pub fn versions(&self) -> Result<Vec<u64>> {
         let mut ver = self
             .extents
             .iter()
             .map(|e| e.inner().flush_number())
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         if ver.len() > 12 {
             ver = ver[0..12].to_vec();
@@ -556,7 +550,7 @@ impl Region {
         self.extents
             .iter()
             .map(|e| e.inner().flush_number())
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>>>()
     }
 
     #[instrument]
