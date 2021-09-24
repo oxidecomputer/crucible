@@ -1812,11 +1812,10 @@ impl IOStateCount {
         println!("   States    | ds:0 | ds:1 | ds:2 | Total| ");
         self.show(IOState::New);
         self.show(IOState::InProgress);
-        self.show(IOState::AckReady);
-        self.show(IOState::Acked);
         self.show(IOState::Done);
         self.show(IOState::Skipped);
-        self.show(IOState::Error);
+        let e = CrucibleError::GenericError("x".to_string());
+        self.show(IOState::Error(e));
     }
 
     fn show(&mut self, state: IOState) {
@@ -1830,14 +1829,6 @@ impl IOStateCount {
                 state_stat = self.in_progress;
                 print!("    Sent     | ");
             }
-            IOState::AckReady => {
-                state_stat = self.ack_ready;
-                print!("    AckReady | ");
-            }
-            IOState::Acked => {
-                state_stat = self.acked;
-                print!("    Acked    | ");
-            }
             IOState::Done => {
                 state_stat = self.done;
                 print!("    Done     | ");
@@ -1846,7 +1837,7 @@ impl IOStateCount {
                 state_stat = self.skipped;
                 print!("    Skipped  | ");
             }
-            IOState::Error => {
+            IOState::Error(_) => {
                 state_stat = self.error;
                 print!("    Error    | ");
             }
@@ -1869,29 +1860,41 @@ impl IOStateCount {
             IOState::InProgress => {
                 self.in_progress[cid] += 1;
             }
-            IOState::AckReady => {
-                self.ack_ready[cid] += 1;
-            }
-            IOState::Acked => {
-                self.acked[cid] += 1;
-            }
             IOState::Done => {
                 self.done[cid] += 1;
             }
             IOState::Skipped => {
                 self.skipped[cid] += 1;
             }
-            IOState::Error => {
+            IOState::Error(_) => {
                 self.error[cid] += 1;
             }
         }
     }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AckStatus {
     NotAcked,
     AckReady,
     Acked,
+}
+
+impl fmt::Display for AckStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Make sure to right-align output on 8 characters
+        match self {
+            AckStatus::NotAcked => {
+                write!(f, "NotAcked")
+            }
+            AckStatus::AckReady => {
+                write!(f, "AckReady")
+            }
+            AckStatus::Acked => {
+                write!(f, "   Acked")
+            }
+        }
+    }
 }
 
 /*
@@ -2993,7 +2996,8 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     } else {
         println!(
-            "gw_id | dsid | Type  | ExtID|bl_off|bl_len| ds:0 | ds:1 | ds:2 |"
+            "gw_id |     ACK  | dsid | Type  | ExtID|bl_off|bl_len\
+            | ds:0 | ds:1 | ds:2 |"
         );
         println!(
             "----------------------------------------------------------------"
@@ -3035,9 +3039,11 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     job_type = "Flush".to_string();
                 }
             };
+            //let state = work.active.get_mut(&next_id).unwrap().ack_status;
+            let state = job.ack_status;
             print!(
-                " {:4} | {:4} | {} | {:4} | {:4} | {:4} | ",
-                job.guest_id, id, job_type, io_eid, io_offset, io_len
+                " {:4} | {:8} | {:4} | {} | {:4} | {:4} | {:4} | ",
+                job.guest_id, state, id, job_type, io_eid, io_offset, io_len
             );
             for cid in 0..3 {
                 let state = job.state.get(&cid);

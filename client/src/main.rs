@@ -507,9 +507,9 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = guest.query_block_size();
-    let extent_size = guest.query_extent_size();
-    let total_size = guest.query_total_size();
+    let block_size = guest.query_block_size()?;
+    let extent_size = guest.query_extent_size()?;
+    let total_size = guest.query_total_size()?;
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
@@ -557,7 +557,7 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
                 let vec = fill_vec(block_index, size, &write_count, block_size);
                 let data = Bytes::from(vec);
 
-                let waiter = guest.write(offset, data);
+                let waiter = guest.write(offset, data)?;
                 waiterlist.push(waiter);
             } else {
                 // Read
@@ -565,7 +565,7 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
                 let length: usize = size * block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
-                let waiter = guest.read(offset, data.clone());
+                let waiter = guest.read(offset, data.clone())?;
                 waiterlist.push(waiter);
             }
         }
@@ -577,7 +577,7 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
     println!("loop over {} waiters", waiterlist.len());
     for wa in waiterlist.iter_mut() {
         wc = guest.show_work();
-        wa.block_wait();
+        wa.block_wait()?;
     }
     /*
      * Continue loping until all downstairs jobs finish also.
