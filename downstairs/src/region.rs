@@ -32,7 +32,7 @@ impl Inner {
 
         let mut stmt = self
             .metadb
-            .prepare("SELECT flush_number FROM metadata")
+            .prepare("SELECT value FROM metadata where name='flush_number'")
             .unwrap();
         let flush_number_iter = stmt.query_map([], |row| row.get(0)).unwrap();
 
@@ -56,7 +56,7 @@ impl Inner {
         let mut stmt = self
             .metadb
             .prepare(
-                "UPDATE metadata SET flush_number=?1, dirty=false WHERE id=0",
+                "UPDATE metadata SET value=?1 WHERE name='flush_number'; UPDATE metadata SET dirty=0",
             )
             .unwrap();
 
@@ -66,8 +66,10 @@ impl Inner {
     fn dirty(&self) -> bool {
         // XXX lots of unwraps here
 
-        let mut stmt =
-            self.metadb.prepare("SELECT dirty FROM metadata").unwrap();
+        let mut stmt = self
+            .metadb
+            .prepare("SELECT value FROM metadata where name='dirty'")
+            .unwrap();
         let dirty_iter = stmt.query_map([], |row| row.get(0)).unwrap();
 
         let mut dirty_values: Vec<bool> = vec![];
@@ -82,7 +84,7 @@ impl Inner {
 
     fn set_dirty(&self) {
         self.metadb
-            .execute("UPDATE metadata SET dirty=true WHERE id=0", [])
+            .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])
             .unwrap();
     }
 }
@@ -248,22 +250,23 @@ impl Extent {
          */
         metadb.execute(
             "CREATE TABLE metadata (
-                id           INTEGER PRIMARY KEY,
-                ext_version  INTEGER,
-                gen          INTEGER,
-                flush_number INTEGER,
-                dirty        BOOLEAN
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
             )",
             [],
         )?;
 
         let meta = ExtentMeta::default();
+
+        //metadb.execute("INSERT INTO metadata (name, value) VALUES (?1, ?2)", params!["ext_version", meta.ext_version])?;
+        //metadb.execute("INSERT INTO metadata (name, value) VALUES (?1, ?2)", params!["gen", meta.gen])?;
         metadb.execute(
-            "INSERT INTO metadata
-            (id, ext_version, gen, flush_number, dirty)
-            VALUES
-            (0, ?1, ?2, ?3, ?4)",
-            params![meta.ext_version, meta.gen, meta.flush_number, meta.dirty],
+            "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+            params!["flush_number", meta.flush_number],
+        )?;
+        metadb.execute(
+            "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+            params!["dirty", meta.dirty],
         )?;
 
         /*
