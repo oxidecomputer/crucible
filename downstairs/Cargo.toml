@@ -15,7 +15,7 @@ crucible-protocol = { path = "../protocol" }
 futures = "0.3"
 futures-core = "0.3"
 rand = "0.8.4"
-ringbuffer = "0.7"
+ringbuffer = "0.8"
 serde = { version = "1", features = ["derive"] }
 structopt = "0.3"
 tokio = { version = "1.7.1", features = ["full"] }
