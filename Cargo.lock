@@ -305,6 +305,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "structopt",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml",

@@ -597,8 +597,8 @@ mod test {
     use super::extent_path;
     use super::*;
     use bytes::BufMut;
-    use std::fs::remove_dir_all;
     use std::path::PathBuf;
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     fn p(s: &str) -> PathBuf {
@@ -631,10 +631,6 @@ mod test {
         TEST_UUID_STR.parse().unwrap()
     }
 
-    pub fn test_cleanup() {
-        let _ = remove_dir_all("/tmp/ds_test");
-    }
-
     fn new_region_options() -> crucible_common::RegionOptions {
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
@@ -648,33 +644,30 @@ mod test {
 
     #[test]
     fn new_region() -> Result<()> {
-        test_cleanup();
-
-        let data = p("/tmp/ds_test/1");
-        let _ = Region::create(&data, new_region_options());
-        remove_dir_all("/tmp/ds_test/1").unwrap();
+        let dir = tempdir()?;
+        let _ = Region::create(&dir, new_region_options());
         Ok(())
     }
+
     #[test]
     fn new_existing_region() -> Result<()> {
-        test_cleanup();
-
-        let data = p("/tmp/ds_test/2");
-        let _ = Region::create(&data, new_region_options());
-        let _ = Region::open(&data, new_region_options());
-        remove_dir_all("/tmp/ds_test/2").unwrap();
+        let dir = tempdir()?;
+        let _ = Region::create(&dir, new_region_options());
+        let _ = Region::open(&dir, new_region_options());
         Ok(())
     }
+
     #[test]
     #[should_panic]
     fn bad_import_region() -> () {
-        test_cleanup();
-
-        let data = p("/tmp/ds_test/3");
-        let _ = Region::open(&data, new_region_options());
-        remove_dir_all("/tmp/ds_test/3").unwrap();
+        let _ = Region::open(
+            &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
+            new_region_options(),
+        )
+        .unwrap();
         ()
     }
+
     #[test]
     fn extent_io_valid() {
         let ext = new_extent();
