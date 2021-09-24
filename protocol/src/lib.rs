@@ -6,7 +6,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRM_LEN: usize = 1024 * 1024;
 
-use crucible_common::{Block, RegionDefinition};
+use crucible_common::{Block, CrucibleError, RegionDefinition};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -19,11 +19,11 @@ pub enum Message {
     ExtentVersionsPlease,
     ExtentVersions(u64, u64, u32, Vec<u64>),
     Write(u64, u64, Vec<u64>, Block, bytes::Bytes),
-    WriteAck(u64),
+    WriteAck(u64, Result<(), CrucibleError>),
     Flush(u64, Vec<u64>, u64),
-    FlushAck(u64),
+    FlushAck(u64, Result<(), CrucibleError>),
     ReadRequest(u64, Vec<u64>, u64, Block, u64),
-    ReadResponse(u64, bytes::Bytes),
+    ReadResponse(u64, bytes::Bytes, Result<(), CrucibleError>),
     Unknown(u32, BytesMut),
 }
 

@@ -33,7 +33,7 @@ pub struct Opt {
     #[structopt(short, long)]
     verify_isolation: bool,
 
-    #[structopt(short, long)]
+    #[structopt(long)]
     tracing_endpoint: Option<String>,
 
     #[structopt(short, long)]
@@ -99,11 +99,11 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    let bs = guest.query_block_size() as u64;
-    let sz = guest.query_total_size() as u64;
+    let bs = guest.query_block_size()? as u64;
+    let sz = guest.query_total_size()? as u64;
     println!("advertised size as {} bytes ({} byte blocks)", sz, bs);
 
-    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest);
+    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
 
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
         }
     }
 
-    for _ in 0..5000 {
+    for _ in 0..25000 {
         let mut offset: u64 = rng.gen::<u64>() % sz;
         let mut bsz: usize = rng.gen::<usize>() % 4096;
 
@@ -190,6 +190,14 @@ fn main() -> Result<()> {
             // Once done, zero out the write
             cpf.seek(SeekFrom::Start(offset))?;
             cpf.write_all(&vec![0; bsz])?;
+        }
+    }
+
+    loop {
+        let wc = cpf.show_work();
+        println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
+        if wc.up_count + wc.ds_count == 0 {
+            break;
         }
     }
 

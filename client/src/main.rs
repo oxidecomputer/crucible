@@ -19,12 +19,13 @@ use crucible_common::Block;
 arg_enum! {
     #[derive(Debug, StructOpt)]
     enum Workload {
-        One,
-        Span,
-        Big,
-        Dep,
-        Rand,
         Balloon,
+        Big,
+        Demo,
+        Dep,
+        One,
+        Rand,
+        Span,
     }
 }
 
@@ -140,17 +141,17 @@ fn main() -> Result<()> {
      * Call the function for the workload option passed from the command line.
      */
     match opt.workload {
-        Workload::One => {
-            println!("One test");
-            runtime.block_on(rand_workload(&guest, 1))?;
-        }
-        Workload::Span => {
-            println!("Span test");
-            span_workload(&guest)?;
+        Workload::Balloon => {
+            println!("Run balloon test");
+            runtime.block_on(balloon_workload(&guest))?;
         }
         Workload::Big => {
             println!("Run big test");
             big_workload(&guest)?;
+        }
+        Workload::Demo => {
+            println!("Run Demo test");
+            runtime.block_on(demo_workload(&guest, 10))?;
         }
         Workload::Dep => {
             println!("Run dep test");
@@ -168,13 +169,17 @@ fn main() -> Result<()> {
              */
             runtime.block_on(dep_workload(&guest))?;
         }
+        Workload::One => {
+            println!("One test");
+            runtime.block_on(rand_workload(&guest, 1))?;
+        }
         Workload::Rand => {
             println!("Run random test");
             runtime.block_on(rand_workload(&guest, 50))?;
         }
-        Workload::Balloon => {
-            println!("Run balloon test");
-            runtime.block_on(balloon_workload(&guest))?;
+        Workload::Span => {
+            println!("Span test");
+            span_workload(&guest)?;
         }
     }
 
@@ -319,9 +324,9 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = guest.query_block_size();
-    let extent_size = guest.query_extent_size();
-    let total_size = guest.query_total_size();
+    let block_size = guest.query_block_size()?;
+    let extent_size = guest.query_extent_size()?;
+    let total_size = guest.query_total_size()?;
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
@@ -357,17 +362,17 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
             let offset =
                 Block::new(block_index as u64, block_size.trailing_zeros());
 
-            let mut waiter = guest.write(offset, data);
-            waiter.block_wait();
+            let mut waiter = guest.write(offset, data)?;
+            waiter.block_wait()?;
 
             let mut waiter = guest.flush();
-            waiter.block_wait();
+            waiter.block_wait()?;
 
             let length: usize = size * block_size as usize;
             let vec: Vec<u8> = vec![255; length];
             let data = crucible::Buffer::from_vec(vec);
-            let mut waiter = guest.read(offset, data.clone());
-            waiter.block_wait();
+            let mut waiter = guest.read(offset, data.clone())?;
+            waiter.block_wait()?;
 
             let dl = data.as_vec().to_vec();
             if !validate_vec(dl.clone(), block_index, &write_count, block_size)
@@ -409,9 +414,9 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = guest.query_block_size();
-    let extent_size = guest.query_extent_size();
-    let total_size = guest.query_total_size();
+    let block_size = guest.query_block_size()?;
+    let extent_size = guest.query_extent_size()?;
+    let total_size = guest.query_total_size()?;
     let total_blocks = (total_size / block_size) as usize;
 
     println!(
@@ -468,17 +473,17 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
             // When count is small, print out the IO info
             println!("IO at block {}, len:{}", offset.value, data.len());
         }
-        let mut waiter = guest.write(offset, data);
-        waiter.block_wait();
+        let mut waiter = guest.write(offset, data)?;
+        waiter.block_wait()?;
 
         let mut waiter = guest.flush();
-        waiter.block_wait();
+        waiter.block_wait()?;
 
         let length: usize = size * block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
-        let mut waiter = guest.read(offset, data.clone());
-        waiter.block_wait();
+        let mut waiter = guest.read(offset, data.clone())?;
+        waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
         if !validate_vec(dl.clone(), block_index, &write_count, block_size) {
@@ -493,15 +498,111 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
 }
 
 /*
+ * Like the random test, but with IO not as large, and with frequent
+ * showing of the internal work queues.  Submit a bunch of random IOs,
+ * then watch them complete.
+ */
+async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
+    /*
+     * These query requests have the side effect of preventing the test from
+     * starting before the upstairs is ready.
+     */
+    let block_size = guest.query_block_size()?;
+    let extent_size = guest.query_extent_size()?;
+    let total_size = guest.query_total_size()?;
+    let total_blocks = (total_size / block_size) as usize;
+
+    println!(
+        "demo {} loop(s), starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
+        count, extent_size, block_size, total_size, total_blocks
+    );
+
+    // Create an array that tracks the number of writes to each block, so
+    // we can know what to expect for reads.
+    let mut write_count = vec![0_u32; total_blocks];
+
+    // TODO: Allow the user to specify a seed here.
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    let mut waiterlist = Vec::new();
+    // TODO: Let the user select the number of loops
+    for _ in 0..count {
+        let op = rng.gen_range(0..3);
+        if op == 0 {
+            // flush
+            let waiter = guest.flush();
+            waiterlist.push(waiter);
+        } else {
+            // Read or Write both need this
+            // Pick a random size (in blocks) for the IO, up to 10
+            let size = rng.gen_range(1..=10) as usize;
+
+            // Once we have our IO size, decide where the starting offset should
+            // be, which is the total possible size minus the randomly chosen
+            // IO size.
+            let block_max = total_blocks - size + 1;
+            let block_index = rng.gen_range(0..block_max) as usize;
+
+            // Convert offset and length to their byte values.
+            let offset =
+                Block::new(block_index as u64, block_size.trailing_zeros());
+
+            if op == 1 {
+                // Write
+                // Update the write count for all blocks we plan to write to.
+                for i in 0..size {
+                    write_count[block_index + i] += 1;
+                }
+
+                let vec = fill_vec(block_index, size, &write_count, block_size);
+                let data = Bytes::from(vec);
+
+                let waiter = guest.write(offset, data)?;
+                waiterlist.push(waiter);
+            } else {
+                // Read
+
+                let length: usize = size * block_size as usize;
+                let vec: Vec<u8> = vec![255; length];
+                let data = crucible::Buffer::from_vec(vec);
+                let waiter = guest.read(offset, data.clone())?;
+                waiterlist.push(waiter);
+            }
+        }
+    }
+    let mut wc = WQCounts {
+        up_count: 0,
+        ds_count: 0,
+    };
+    println!("loop over {} waiters", waiterlist.len());
+    for wa in waiterlist.iter_mut() {
+        wc = guest.show_work();
+        wa.block_wait()?;
+    }
+    /*
+     * Continue loping until all downstairs jobs finish also.
+     */
+    println!("All submitted jobs completed, waiting for downstairs");
+    while wc.up_count + wc.ds_count > 0 {
+        wc = guest.show_work();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    println!("All downstairs jobs completed.");
+
+    // TODO: Make a verify the whole volume function, to take the
+    // write_count array and then read it all and compare.
+    Ok(())
+}
+/*
  * This is a test workload that generates a single write spanning an extent
  * then will try to read the same.
  * TODO: Compare the buffer we wrote with the buffer we read.
  */
 fn span_workload(guest: &Arc<Guest>) -> Result<()> {
     println!("Run span workload");
-    let block_size = guest.query_block_size();
-    let extent_size = guest.query_extent_size();
-    println!("bs: {:?}  es:{}", extent_size, block_size);
+    let block_size = guest.query_block_size()?;
+    let extent_size = guest.query_extent_size()?;
+    println!("bs: {:?}  es: {}", extent_size, block_size);
     /*
      * Pick the last block in the first extent
      */
@@ -520,19 +621,19 @@ fn span_workload(guest: &Arc<Guest>) -> Result<()> {
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
-    let mut waiter = guest.write_to_byte_offset(my_offset, data);
-    waiter.block_wait();
+    let mut waiter = guest.write_to_byte_offset(my_offset, data)?;
+    waiter.block_wait()?;
 
     println!("Sending a flush");
     let mut waiter = guest.flush();
-    waiter.block_wait();
+    waiter.block_wait()?;
 
     let vec: Vec<u8> = vec![99; my_length];
     let data = crucible::Buffer::from_vec(vec);
 
     println!("Sending a read spanning two extents");
-    waiter = guest.read_from_byte_offset(my_offset, data);
-    waiter.block_wait();
+    waiter = guest.read_from_byte_offset(my_offset, data)?;
+    waiter.block_wait()?;
 
     Ok(())
 }
@@ -542,9 +643,9 @@ fn span_workload(guest: &Arc<Guest>) -> Result<()> {
  * We wait for each op to finish, so this is all sequential.
  */
 fn big_workload(guest: &Arc<Guest>) -> Result<()> {
-    let block_size = guest.query_block_size();
-    let total_size = guest.query_total_size();
-    let extent_size = guest.query_extent_size();
+    let block_size = guest.query_block_size()?;
+    let total_size = guest.query_total_size()?;
+    let extent_size = guest.query_extent_size()?;
 
     let mut my_offset: u64 = 0;
     let mut cur_block = 0;
@@ -567,8 +668,8 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len()
         );
-        let mut waiter = guest.write_to_byte_offset(my_offset, data);
-        waiter.block_wait();
+        let mut waiter = guest.write_to_byte_offset(my_offset, data)?;
+        waiter.block_wait()?;
 
         /*
          * Pre-populate the read buffer with a known pattern so we can
@@ -588,8 +689,9 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             my_offset,
             data.len(),
         );
-        waiter = guest.read_from_byte_offset(my_offset, data);
-        waiter.block_wait();
+
+        waiter = guest.read_from_byte_offset(my_offset, data)?;
+        waiter.block_wait()?;
 
         my_offset += block_size;
         cur_block += 1;
@@ -598,7 +700,7 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
             cur_block = 0;
             println!("[{}][{}] send flush", cur_extent, cur_block);
             waiter = guest.flush();
-            waiter.block_wait();
+            waiter.block_wait()?;
         }
     }
     println!("All IOs sent");
@@ -616,8 +718,8 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
  * eventually resolve.
  */
 async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
-    let block_size = guest.query_block_size();
-    let total_size = guest.query_total_size();
+    let block_size = guest.query_block_size()?;
+    let total_size = guest.query_total_size()?;
     let final_offset = total_size - block_size;
 
     let mut my_offset: u64 = 0;
@@ -647,7 +749,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter = guest.write_to_byte_offset(my_offset, data);
+                let waiter = guest.write_to_byte_offset(my_offset, data)?;
                 waiterlist.push(waiter);
             } else {
                 let vec: Vec<u8> = vec![0; block_size as usize];
@@ -660,7 +762,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter = guest.read_from_byte_offset(my_offset, data);
+                let waiter = guest.read_from_byte_offset(my_offset, data)?;
                 waiterlist.push(waiter);
             }
         }
@@ -668,11 +770,11 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
         guest.show_work();
         println!("Loop:{} send a final flush and wait", my_count);
         let mut flush_waiter = guest.flush();
-        flush_waiter.block_wait();
+        flush_waiter.block_wait()?;
 
         println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
         for wa in waiterlist.iter_mut() {
-            wa.block_wait();
+            wa.block_wait()?;
         }
         println!("Loop:{} all waiters done", my_count);
         guest.show_work();
@@ -696,7 +798,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         scope.wait_for("write 1").await;
 
         println!("send write 1");
-        guest.write_to_byte_offset(my_offset, data.freeze());
+        guest.write_to_byte_offset(my_offset, data.freeze())?;
 
         scope.wait_for("show work").await;
         guest.show_work();
@@ -708,7 +810,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
             println!("send a read");
             // scope.wait_for("send Read").await;
-            guest.read_from_byte_offset(read_offset, data);
+            guest.read_from_byte_offset(read_offset, data)?;
             read_offset += READ_SIZE as u64;
             // scope.wait_for("show work").await;
             guest.show_work();
@@ -723,7 +825,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
         // scope.wait_for("write 2").await;
         println!("send write 2");
-        guest.write_to_byte_offset(my_offset, data.freeze());
+        guest.write_to_byte_offset(my_offset, data.freeze())?;
         my_offset += 512;
         // scope.wait_for("show work").await;
         guest.show_work();

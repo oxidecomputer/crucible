@@ -3,9 +3,9 @@ members = [
 	"client",
 	"common",
 	"downstairs",
+	"hammer",
+	"nbd_server",
 	"protocol",
 	"scope",
 	"upstairs",
-	"nbd_server",
-	"hammer",
 ]
