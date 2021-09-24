@@ -12,6 +12,61 @@ use tempfile::NamedTempFile;
 mod region;
 pub use region::{Block, RegionDefinition, RegionOptions};
 
+#[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum CrucibleError {
+    #[error("Error: {0}")]
+    GenericError(String),
+
+    #[error("IO Error: {0}")]
+    IoError(String),
+
+    #[error("data store disconnected")]
+    Disconnect,
+
+    #[error("Error grabbing data lock")]
+    DataLockError,
+
+    #[error("Error grabbing reader-writer {0} lock")]
+    RwLockError(String),
+
+    #[error("BlockReqWaiter recv channel disconnected")]
+    RecvDisconnected,
+
+    #[error("Offset not block aligned")]
+    OffsetUnaligned,
+
+    #[error("Data length not block size multiple")]
+    DataLenUnaligned,
+
+    #[error("Block size mismatch")]
+    BlockSizeMismatch,
+
+    #[error("Invalid number of blocks: {0}")]
+    InvalidNumberOfBlocks(String),
+
+    #[error("Offset past end of extent")]
+    OffsetInvalid,
+}
+
+impl From<std::io::Error> for CrucibleError {
+    fn from(e: std::io::Error) -> Self {
+        CrucibleError::IoError(format!("{:?}", e))
+    }
+}
+
+impl From<anyhow::Error> for CrucibleError {
+    fn from(e: anyhow::Error) -> Self {
+        CrucibleError::GenericError(format!("{:?}", e))
+    }
+}
+
+#[macro_export]
+macro_rules! crucible_bail {
+    ($i:ident) => { return Err(CrucibleError::$i) };
+    ($i:ident, $str:expr) => { return Err(CrucibleError::$i($str.to_string())) };
+    ($i:ident, $fmt:expr, $($arg:tt)*) => { return Err(CrucibleError::$i(format!($fmt, $($arg)*))) };
+}
+
 pub fn read_json_maybe<P, T>(file: P) -> Result<Option<T>>
 where
     P: AsRef<Path>,

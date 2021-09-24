@@ -17,6 +17,9 @@ use crucible::*;
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddrV4>,
+
+    #[structopt(short, long)]
+    key: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -29,6 +32,7 @@ pub fn opts() -> Result<Opt> {
 
     Ok(opt)
 }
+
 impl Opt {
     /*
      * Use:
@@ -70,6 +74,39 @@ mod tests {
             SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801)
         );
     }
+
+    #[test]
+    fn test_key() {
+        let key_bytes =
+            base64::decode("9YGqFSwBHCX/IbjstbI1WuUPKOfwrwNAJSFzUN2w4iU=")
+                .unwrap();
+
+        let opt = Opt::from_string(
+            "-- -t 192.168.1.1:3801 -k 9YGqFSwBHCX/IbjstbI1WuUPKOfwrwNAJSFzUN2w4iU=".to_string(),
+        )
+        .unwrap();
+
+        if let Some(key) = &opt.key {
+            assert_eq!(
+                base64::decode(key).expect("base64 decode failed"),
+                key_bytes
+            );
+        } else {
+            panic!("failed to decode base64 key");
+        }
+
+        let crucible_opts = crucible::CrucibleOpts {
+            target: opt.target,
+            lossy: false,
+            key: opt.key,
+        };
+
+        if let Some(key) = crucible_opts.key_bytes() {
+            assert_eq!(key_bytes, key);
+        } else {
+            panic!("failed to decode bas64 key");
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -77,6 +114,7 @@ fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: false,
+        key: opt.key,
     };
 
     let runtime = Builder::new_multi_thread()
@@ -119,17 +157,21 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     }
 
     println!("send a write");
-    guest.write_to_byte_offset(my_offset, data.freeze());
+    guest
+        .write_to_byte_offset(my_offset, data.freeze())?
+        .block_wait()?;
 
     println!("send a flush");
-    guest.flush();
+    guest.flush().block_wait()?;
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;
     let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
 
     println!("send a read");
-    guest.read_from_byte_offset(read_offset, data);
+    guest
+        .read_from_byte_offset(read_offset, data)?
+        .block_wait()?;
 
     Ok(())
 }

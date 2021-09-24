@@ -35,6 +35,9 @@ fn handle_nbd_client(
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddrV4>,
+
+    #[structopt(short, long)]
+    key: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -53,6 +56,7 @@ fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: false,
+        key: opt.key,
     };
 
     /*
@@ -81,7 +85,7 @@ fn main() -> Result<()> {
     // NBD server
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
-    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest);
+    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
 
     // sent to NBD client during handshake through Export struct
     println!("NBD advertised size as {} bytes", cpf.sz());
