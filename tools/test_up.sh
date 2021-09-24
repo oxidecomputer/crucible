@@ -62,6 +62,9 @@ for tt in ${test_list}; do
     fi
 done
 
+echo "Running hammer"
+./hammer.sh
+
 echo "Tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do
     kill $pid >/dev/null 2>&1

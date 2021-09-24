@@ -71,28 +71,31 @@ async fn proc_frame(
 ) -> Result<()> {
     match m {
         Message::Imok => Ok(()),
-        Message::WriteAck(ds_id) => Ok(io_completed(
+        Message::WriteAck(ds_id, result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
             None,
             up_coms.ds_done_tx,
+            result.clone(),
         )
         .await?),
-        Message::FlushAck(ds_id) => Ok(io_completed(
+        Message::FlushAck(ds_id, result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
             None,
             up_coms.ds_done_tx,
+            result.clone(),
         )
         .await?),
-        Message::ReadResponse(ds_id, data) => Ok(io_completed(
+        Message::ReadResponse(ds_id, data, result) => Ok(io_completed(
             u,
             *ds_id,
             up_coms.client_id,
             Some(data.clone()),
             up_coms.ds_done_tx,
+            result.clone(),
         )
         .await?),
         x => bail!("client {} unexpected frame {:?}", up_coms.client_id, x),
@@ -279,9 +282,8 @@ fn process_downstairs(
 
 /*
  * This function is called when the upstairs task is notified that
- * a downstairs operation has completed.  We add the read buffer to the
+ * a downstairs operation has completed. We add the read buffer to the
  * IOop struct for later processing if required.
- *
  */
 #[instrument]
 async fn io_completed(
@@ -290,11 +292,12 @@ async fn io_completed(
     client_id: u8,
     data: Option<Bytes>,
     ds_done_tx: mpsc::Sender<u64>,
+    result: Result<(), CrucibleError>,
 ) -> Result<()> {
     // Mark this ds_id for the client_id as completed.
     let gw_work_done = {
         let mut work = up.ds_work.lock().unwrap();
-        work.complete(ds_id, client_id, data)?
+        work.complete(ds_id, client_id, data, result)?
     };
 
     if gw_work_done {
@@ -357,8 +360,17 @@ async fn io_send(
             continue;
         }
 
+        /*
+         * If in_progress returns None, it means that this client should be skipped. That means
+         * that it has return an error somewhere and should be set as failed.
+         */
         let job = u.ds_work.lock().unwrap().in_progress(*new_id, client_id);
-        match job {
+        if job.is_none() {
+            u.ds_transition(client_id, DsState::Failed);
+            continue;
+        }
+
+        match job.unwrap() {
             IOop::Write {
                 dependencies,
                 eid,
@@ -698,6 +710,7 @@ async fn looper(
  */
 #[derive(Debug)]
 pub struct Work {
+    downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
     completed: AllocRingBuffer<u64>,
@@ -709,11 +722,16 @@ pub struct Work {
  */
 #[derive(Debug, Default)]
 pub struct WorkCounts {
-    active: u64,    // New or in flight to downstairs.
-    ack_ready: u64, // Downstairs done, use this for the ACK
-    acked: u64,     // This IO was used for the ACK
-    error: u64,     // This IO had an error.
-    done: u64,      // This IO has completed (but not used for ACK)
+    active: u64,  // New or in flight to downstairs.
+    error: u64,   // This IO had an error.
+    skipped: u64, // Skipped
+    done: u64,    // This IO has completed (but not used for ACK)
+}
+
+impl WorkCounts {
+    fn completed_ok(&self) -> u64 {
+        self.done
+    }
 }
 
 impl Work {
@@ -727,14 +745,26 @@ impl Work {
     }
 
     /**
-     * Mark this request as in progress for this client, and return a copy
-     * of the details of the request.
+     * Mark this request as in progress for this client, and return a copy of the details of the
+     * request. If the downstairs client has experienced errors in the past, return None and mark
+     * this as Skipped.
      */
-    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> IOop {
+    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.active.get_mut(&ds_id).unwrap();
-        let oldstate = job.state.insert(client_id, IOState::InProgress);
+
+        let newstate = match &self.downstairs_errors.get(&client_id) {
+            Some(_) => IOState::Skipped,
+            None => IOState::InProgress,
+        };
+
+        let oldstate = job.state.insert(client_id, newstate.clone());
         assert_eq!(oldstate, Some(IOState::New));
-        job.work.clone()
+
+        match newstate {
+            IOState::Skipped => None,
+            IOState::InProgress => Some(job.work.clone()),
+            _ => panic!("bad state in in_progress!"),
+        }
     }
 
     /**
@@ -759,15 +789,9 @@ impl Work {
      */
     fn ackable_work(&mut self) -> Vec<u64> {
         let mut ackable = Vec::new();
-        let mut kvec = self.active.keys().cloned().collect::<Vec<u64>>();
-        kvec.sort_unstable();
-        for ds_id in kvec.iter() {
-            let ac = self.state_count(*ds_id).unwrap().ack_ready;
-            if ac == 1 {
+        for (ds_id, job) in &self.active {
+            if job.ack_status == AckStatus::AckReady {
                 ackable.push(*ds_id);
-            } else {
-                // Only one downstairs IO should be AckReady
-                assert_eq!(ac, 0);
             }
         }
         ackable
@@ -789,19 +813,111 @@ impl Work {
             .active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        Ok(job.state_count())
+    }
 
-        let mut wc: WorkCounts = Default::default();
-        for state in job.state.values() {
-            match state {
-                IOState::New | IOState::InProgress => wc.active += 1,
-                IOState::AckReady => wc.ack_ready += 1,
-                IOState::Error => wc.error += 1,
-                IOState::Acked | IOState::Done | IOState::Skipped => {
-                    wc.done += 1;
-                }
+    fn ack(&mut self, ds_id: u64) {
+        /*
+         * Move AckReady to Acked.
+         */
+
+        let job = self
+            .active
+            .get_mut(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
+            .unwrap();
+
+        if job.ack_status == AckStatus::AckReady {
+            job.ack_status = AckStatus::Acked;
+        } else {
+            panic!("already acked!");
+        }
+    }
+
+    fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
+        /*
+         * If enough downstairs returned an error, then return an error to the Guest
+         *
+         * Not ok:
+         * - 2+ errors for Write/Flush
+         * - 3+ errors for Reads
+         *
+         * TODO: this doesn't tell the Guest what the error(s) were?
+         */
+        let wc = self.state_count(ds_id).unwrap();
+
+        let job = self
+            .active
+            .get_mut(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+        /*
+         * XXX: this code assumes that 3 downstairs is the max that we'll ever support.
+         */
+        let bad_job = match &job.work {
+            IOop::Read {
+                dependencies: _dependencies,
+                eid: _eid,
+                offset: _offset,
+                num_blocks: _num_blocks,
+            } => wc.error == 3,
+            IOop::Write {
+                dependencies: _dependencies,
+                eid: _eid,
+                data: _data,
+                offset: _offset,
+            } => wc.error >= 2,
+            IOop::Flush {
+                dependencies: _dependencies,
+                flush_number: _flush_number,
+            } => wc.error >= 2,
+        };
+
+        if bad_job {
+            Err(CrucibleError::IoError(format!(
+                "{} out of 3 downstairs returned an error",
+                wc.error
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /*
+     * This function just does the match on IOop type and updates the dtrace
+     * probe for that operation finishing.
+     */
+    fn crutrace_gw_work_done(&self, ds_id: u64, gw_id: u64) {
+        let job = self
+            .active
+            .get(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
+            .unwrap();
+
+        match &job.work {
+            IOop::Read {
+                dependencies: _,
+                eid: _,
+                offset: _,
+                num_blocks: _,
+            } => {
+                crutrace_gw_read_end!(|| (gw_id));
+            }
+            IOop::Write {
+                dependencies: _,
+                eid: _,
+                offset: _,
+                data: _,
+            } => {
+                crutrace_gw_write_end!(|| (gw_id));
+            }
+            IOop::Flush {
+                dependencies: _,
+                flush_number: _,
+            } => {
+                crutrace_gw_flush_end!(|| (gw_id));
             }
         }
-        Ok(wc)
     }
 
     /**
@@ -818,99 +934,142 @@ impl Work {
         ds_id: u64,
         client_id: u8,
         read_data: Option<Bytes>,
+        result: Result<(), CrucibleError>,
     ) -> Result<bool> {
         /*
          * Assume we don't have enough completed jobs, and only change
          * it if we have the exact amount required
          */
         let mut notify_guest = false;
+
         /*
-         * Get the completed count now (and add one for ourselves),
-         * because the job self ref won't let us call stat_count once we are
+         * Get the completed count now,
+         * because the job self ref won't let us call state_count once we are
          * using that ref, and the number won't change while we are in
          * this method (you did get the lock first, right??).
          */
         let wc = self.state_count(ds_id)?;
-        let jobs_completed = 1 + wc.done + wc.acked + wc.ack_ready;
+        let mut jobs_completed_ok = wc.completed_ok();
 
         let job = self
             .active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let oldstate = job.state.insert(client_id, IOState::Done);
-        assert_ne!(oldstate, Some(IOState::Done));
+        let newstate = if let Err(e) = result {
+            IOState::Error(e)
+        } else {
+            jobs_completed_ok += 1;
+            IOState::Done
+        };
+
+        let oldstate = job.state.insert(client_id, newstate.clone());
+
+        if let Some(oldstate) = oldstate {
+            // we shouldn't be transitioning a state that was already transitioned
+            assert_eq!(oldstate, IOState::InProgress);
+        } else {
+            panic!("no old state! that's bad!");
+        }
 
         /*
-         * XXX Handle errors here.
-         * Any error needs to be passed to Nexus (probably)
-         * 2 errors for Write/Flush,  3 errors for Reads
-         * should get passed back to the guest.
+         * Transition this job from Done to AckReady if enough have returned ok.
+         *
+         * XXX Any error needs to be passed to Nexus
          */
-        match &job.work {
-            IOop::Read {
-                dependencies: _dependencies,
-                eid: _eid,
-                offset: _offset,
-                num_blocks: _num_blocks,
-            } => {
-                assert!(read_data.is_some());
-                if jobs_completed == 1 {
-                    assert!(job.data.is_none());
-                    job.data = read_data;
-                    notify_guest = true;
-                    job.state.insert(client_id, IOState::AckReady);
+        if newstate == IOState::Done {
+            match &job.work {
+                IOop::Read {
+                    dependencies: _dependencies,
+                    eid: _eid,
+                    offset: _offset,
+                    num_blocks: _num_blocks,
+                } => {
+                    assert!(read_data.is_some());
+                    if jobs_completed_ok == 1 {
+                        assert!(job.data.is_none());
+                        job.data = read_data;
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                    }
+                }
+                IOop::Write {
+                    dependencies: _dependencies,
+                    eid: _eid,
+                    data: _data,
+                    offset: _offset,
+                } => {
+                    assert!(read_data.is_none());
+                    if jobs_completed_ok == 2 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                    }
+                }
+                IOop::Flush {
+                    dependencies: _dependencies,
+                    flush_number: _flush_number,
+                } => {
+                    assert!(read_data.is_none());
+                    if jobs_completed_ok == 2 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                    }
                 }
             }
-            IOop::Write {
-                dependencies: _dependencies,
-                eid: _eid,
-                data: _data,
-                offset: _offset,
-            } => {
-                assert!(read_data.is_none());
-                if jobs_completed == 2 {
-                    notify_guest = true;
-                    job.state.insert(client_id, IOState::AckReady);
+        } else if matches!(newstate, IOState::Error(_)) {
+            // Mark this downstairs as bad if this was a write or flush
+            // XXX: reconcilation, retries?
+            if matches!(
+                job.work,
+                IOop::Write {
+                    dependencies: _,
+                    eid: _,
+                    data: _,
+                    offset: _
+                } | IOop::Flush {
+                    dependencies: _,
+                    flush_number: _
                 }
-            }
-            IOop::Flush {
-                dependencies: _dependencies,
-                flush_number: _flush_number,
-            } => {
-                assert!(read_data.is_none());
-                if jobs_completed == 2 {
-                    notify_guest = true;
-                    job.state.insert(client_id, IOState::AckReady);
-                }
+            ) {
+                let errors: u64 = match self.downstairs_errors.get(&client_id) {
+                    Some(v) => *v,
+                    None => 0,
+                };
+                self.downstairs_errors.insert(client_id, errors + 1);
             }
         }
+
         /*
          * If all 3 jobs are done, we can check here to see if we can
-         * remove this job from the DS list.  If we have completed the ack
-         * to the guest, then there will be no more work on this job.
+         * remove this job from the DS list. If we have completed the ack
+         * to the guest, then there will be no more work on this job
+         * but messages may still be unprocessed.
          */
-        self.retire_check(ds_id);
+        if job.ack_status == AckStatus::Acked {
+            self.retire_check(ds_id);
+        } else {
+            // If we reach this then the job probably has errors and hasn't acked back yet.
+            let wc = job.state_count();
+            if (wc.error + wc.skipped + wc.done) == 3 {
+                notify_guest = true;
+                job.ack_status = AckStatus::AckReady;
+            }
+        }
 
         Ok(notify_guest)
     }
 
     /**
-     * This request is now complete on all peers.  Remove it from the active set
-     * and mark it in the completed ring buffer.
-     * Note we shall not retire a job until it has been ack'd back to the
-     * guest.  Just being ack ready is not enough.
-     *
+     * This request is now complete on all peers. Remove it from the active set and mark it in the
+     * completed ring buffer. Note we shall not retire a job until it has been ack'd back to the
+     * guest. Just being ack ready is not enough.
      */
     fn retire_check(&mut self, ds_id: u64) {
         let wc = self.state_count(ds_id).unwrap();
-        // XXX Errors are not handled correctly here, So, this assertion
-        // means write more code.
-        assert_eq!(wc.error, 0);
-        if wc.done == 3 {
+
+        if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
-            assert_eq!(wc.ack_ready, 0);
             self.active.remove(&ds_id).unwrap();
             self.completed.push(ds_id);
         }
@@ -1075,6 +1234,7 @@ impl Upstairs {
             guest,
             ds_state: Mutex::new(ds_state),
             ds_work: Mutex::new(Work {
+                downstairs_errors: HashMap::new(),
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2048),
                 next_id: 1000,
@@ -1100,7 +1260,10 @@ impl Upstairs {
     }
 
     #[instrument]
-    pub fn submit_flush(&self, sender: std_mpsc::Sender<i32>) -> Result<()> {
+    pub fn submit_flush(
+        &self,
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> Result<(), CrucibleError> {
         /*
          * Lock first the guest_work struct where this new job will go,
          * then lock the ds_work struct.  Once we have both we can proceed
@@ -1155,6 +1318,7 @@ impl Upstairs {
         crutrace_gw_flush_start!(|| (gw_id));
 
         ds_work.enqueue(fl);
+
         Ok(())
     }
 
@@ -1168,8 +1332,8 @@ impl Upstairs {
         &self,
         offset: Block,
         data: Bytes,
-        sender: std_mpsc::Sender<i32>,
-    ) {
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> Result<(), CrucibleError> {
         /*
          * Get the next ID for the guest work struct we will make at the
          * end.  This ID is also put into the IO struct we create that
@@ -1177,7 +1341,6 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut ds_work = self.ds_work.lock().unwrap();
-        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1189,8 +1352,13 @@ impl Upstairs {
             *ddef,
             offset,
             data.len() as u64 / ddef.block_size(),
-        )
-        .unwrap();
+        )?;
+
+        /*
+         * Grab this ID after extent_from_offset: in case of Err we don't want to create a gap in
+         * the IDs.
+         */
+        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -1261,6 +1429,8 @@ impl Upstairs {
         for wr in new_ds_work {
             ds_work.enqueue(wr);
         }
+
+        Ok(())
     }
 
     /*
@@ -1274,8 +1444,8 @@ impl Upstairs {
         &self,
         offset: Block,
         data: Buffer,
-        sender: std_mpsc::Sender<i32>,
-    ) {
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> Result<(), CrucibleError> {
         /*
          * Get the next ID for the guest work struct we will make at the
          * end.  This ID is also put into the IO struct we create that
@@ -1283,7 +1453,6 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut ds_work = self.ds_work.lock().unwrap();
-        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1295,8 +1464,13 @@ impl Upstairs {
             *ddef,
             offset,
             data.len() as u64 / ddef.block_size(),
-        )
-        .unwrap();
+        )?;
+
+        /*
+         * Grab this ID after extent_from_offset: in case of Err we don't want to create a gap in
+         * the IDs.
+         */
+        let gw_id: u64 = gw.next_gw_id();
 
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
@@ -1361,6 +1535,8 @@ impl Upstairs {
         for wr in new_ds_work {
             ds_work.enqueue(wr);
         }
+
+        Ok(())
     }
 
     /*
@@ -1368,11 +1544,13 @@ impl Upstairs {
      */
     fn ds_transition(&self, client_id: u8, new_state: DsState) {
         let mut state = self.ds_state.lock().unwrap();
-        println!(
-            "Transition [{}] from {:?} to {:?}",
-            client_id, state[client_id as usize], new_state,
-        );
-        state[client_id as usize] = new_state;
+        if state[client_id as usize] != new_state {
+            println!(
+                "Transition [{}] from {:?} to {:?}",
+                client_id, state[client_id as usize], new_state,
+            );
+            state[client_id as usize] = new_state;
+        }
     }
 
     fn ds_state_show(&self) {
@@ -1479,7 +1657,7 @@ enum DsState {
      * rate, or it is not able to keep up., or it is having some
      * error such that we can no longer use it.
      */
-    _Failed,
+    Failed,
     /*
      * This downstairs is being migrated to a new location
      */
@@ -1514,9 +1692,30 @@ struct DownstairsIO {
      */
     state: HashMap<u8, IOState>,
     /*
+     * Has this been acked to the guest yet?
+     */
+    ack_status: AckStatus,
+    /*
      * If the operation is a Read, this holds the resulting buffer
      */
     data: Option<Bytes>,
+}
+
+impl DownstairsIO {
+    fn state_count(&self) -> WorkCounts {
+        let mut wc: WorkCounts = Default::default();
+
+        for state in self.state.values() {
+            match state {
+                IOState::New | IOState::InProgress => wc.active += 1,
+                IOState::Error(_) => wc.error += 1,
+                IOState::Skipped => wc.skipped += 1,
+                IOState::Done => wc.done += 1,
+            }
+        }
+
+        wc
+    }
 }
 
 /*
@@ -1553,26 +1752,18 @@ pub enum IOState {
     New,
     // The request has been sent to this tasks downstairs.
     InProgress,
-    // This IO has been completed by the downstairs, and we should use the
-    // data in this IO as the source for a response back to the upstairs.
-    // Only one of the three downstairs IOs should be "AckReady".
-    AckReady,
-    // This IO was used to ACK back to the guest and we are done with it.
-    // We give it a special AckDone state to leave some breadcrumbs in case
-    // we want to know which IO was the ACK.
-    Acked,
     // The successful response came back from downstairs.
     Done,
-    // XXX Unused.  The IO request should be ignored.  This situation could be
-    // A read that only needs one downstairs to answer, or we are doing
-    // recovery and we only want a specific downstairs to do that work.
+    // The IO request should be ignored. Ex: we could be doing recovery and we only want a specific
+    // downstairs to do that work.
     Skipped,
     // The IO returned an error.
-    Error,
+    Error(CrucibleError),
 }
 
 impl fmt::Display for IOState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Make sure to right-align output on 4 characters
         match self {
             IOState::New => {
                 write!(f, " New")
@@ -1580,23 +1771,24 @@ impl fmt::Display for IOState {
             IOState::InProgress => {
                 write!(f, "Sent")
             }
-            IOState::AckReady => {
-                write!(f, "AckR")
-            }
-            IOState::Acked => {
-                write!(f, "Ackd")
-            }
             IOState::Done => {
                 write!(f, "Done")
             }
             IOState::Skipped => {
                 write!(f, "Skip")
             }
-            IOState::Error => {
-                write!(f, " Err")
+            IOState::Error(e) => {
+                write!(f, " Err: {:?}", e)
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AckStatus {
+    NotAcked,
+    AckReady,
+    Acked,
 }
 
 /*
@@ -1751,7 +1943,7 @@ struct GtoS {
     /*
      * Notify the caller waiting on the job to finish.
      */
-    sender: std_mpsc::Sender<i32>,
+    sender: std_mpsc::Sender<Result<(), CrucibleError>>,
 
     /*
      * Optional encryption context - Some if the corresponding Upstairs is Some.
@@ -1766,7 +1958,7 @@ impl GtoS {
         guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, Bytes>,
         downstairs_buffer_sector_index: HashMap<u64, u128>,
-        sender: std_mpsc::Sender<i32>,
+        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
         encryption_context: Option<EncryptionContext>,
     ) -> GtoS {
         GtoS {
@@ -1832,44 +2024,13 @@ impl GtoS {
     /*
      * Notify corresponding BlockReqWaiter
      */
-    pub fn notify(&mut self) {
+    pub fn notify(&mut self, result: Result<(), CrucibleError>) {
         /*
-         * If the guest is no longer listening and this returns an error,
+         * XXX: If the guest is no longer listening and this returns an error,
          * do we care?  This could happen if the guest has given up
          * becuase an IO took too long, or other possible guest side reasons.
          */
-        if self.sender.send(0).is_ok() {}
-    }
-}
-
-/*
- * This function just does the match on IOop type and updates the dtrace
- * probe for that operaion finishing.
- */
-fn crutrace_work_done(work: &IOop, gw_id: u64) {
-    match work {
-        IOop::Read {
-            dependencies: _,
-            eid: _,
-            offset: _,
-            num_blocks: _,
-        } => {
-            crutrace_gw_read_end!(|| (gw_id));
-        }
-        IOop::Write {
-            dependencies: _,
-            eid: _,
-            offset: _,
-            data: _,
-        } => {
-            crutrace_gw_write_end!(|| (gw_id));
-        }
-        IOop::Flush {
-            dependencies: _,
-            flush_number: _,
-        } => {
-            crutrace_gw_flush_end!(|| (gw_id));
-        }
+        let _send_result = self.sender.send(result);
     }
 }
 
@@ -1929,13 +2090,15 @@ impl GuestWork {
      * arrived from all the downstairs jobs we created, then we
      * can move forward with finishing up the guest work operation.
      * This may include moving/decrypting data buffers from completed reads.
-     *
-     * TODO: Error handling case needs to come through here in a way that
-     * won't break if enough of the IO completed to satisfy the upstairs, but
-     * will be handled if all the downstairs have returned error.
      */
     #[instrument]
-    fn ds_complete(&mut self, gw_id: u64, ds_id: u64, data: Option<Bytes>) {
+    fn ds_complete(
+        &mut self,
+        gw_id: u64,
+        ds_id: u64,
+        data: Option<Bytes>,
+        result: Result<(), CrucibleError>,
+    ) {
         /*
          * A gw_id that already finished and results were sent back to
          * the guest could still have an outstanding ds_id.
@@ -1950,7 +2113,7 @@ impl GuestWork {
                 if let Some(data) = data {
                     /*
                      * The first read buffer will become the source for the
-                     * final response back to the guest.  This buffer will be
+                     * final response back to the guest. This buffer will be
                      * combined with other buffers if the upstairs request
                      * required multiple jobs.
                      */
@@ -1958,7 +2121,7 @@ impl GuestWork {
                     {
                         /*
                          * Only the first successful read should fill the
-                         * slot in the downstairs buffer for a ds_id.  If
+                         * slot in the downstairs buffer for a ds_id. If
                          * more than one is trying to, then we have a problem.
                          */
                         panic!(
@@ -1983,10 +2146,11 @@ impl GuestWork {
              * they provided to us, and notify any waiters.
              */
             if gtos_job.submitted.is_empty() {
-                if gtos_job.guest_buffer.is_some() {
+                if result.is_ok() && gtos_job.guest_buffer.is_some() {
                     gtos_job.transfer();
                 }
-                gtos_job.notify();
+
+                gtos_job.notify(result);
                 self.complete(gw_id);
             }
         } else {
@@ -2007,13 +2171,16 @@ impl GuestWork {
 #[derive(Debug)]
 pub struct BlockReq {
     op: BlockOp,
-    send: std_mpsc::Sender<i32>,
+    send: std_mpsc::Sender<Result<(), CrucibleError>>,
 }
 
 impl BlockReq {
     // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code
     // return the std::sync::mpsc Sender to non-tokio task callers
-    fn new(op: BlockOp, send: std_mpsc::Sender<i32>) -> BlockReq {
+    fn new(
+        op: BlockOp,
+        send: std_mpsc::Sender<Result<(), CrucibleError>>,
+    ) -> BlockReq {
         Self { op, send }
     }
 }
@@ -2023,17 +2190,21 @@ impl BlockReq {
  * waiter that it can block on.
  */
 pub struct BlockReqWaiter {
-    recv: std_mpsc::Receiver<i32>,
+    recv: std_mpsc::Receiver<Result<(), CrucibleError>>,
 }
 
 impl BlockReqWaiter {
-    fn new(recv: std_mpsc::Receiver<i32>) -> BlockReqWaiter {
+    fn new(
+        recv: std_mpsc::Receiver<Result<(), CrucibleError>>,
+    ) -> BlockReqWaiter {
         Self { recv }
     }
 
-    pub fn block_wait(&mut self) {
-        // TODO: Instead of i32, errors should be bubbled up.
-        let _ = self.recv.recv();
+    pub fn block_wait(&mut self) -> Result<(), CrucibleError> {
+        match self.recv.recv() {
+            Ok(v) => v,
+            Err(_) => crucible_bail!(RecvDisconnected),
+        }
     }
 }
 
@@ -2134,45 +2305,62 @@ impl Guest {
         }
     }
 
-    // TODO: get status from waiter, bubble that up as a Result?
-
     /*
      * `read` and `write` accept a block offset, and data must be a multiple of block size.
      */
-    pub fn read(&self, offset: Block, data: Buffer) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        // XXX: return Err instead
-        assert!((data.len() % bs as usize) == 0);
-        assert!(offset.block_size_in_bytes() as u64 == bs);
+    pub fn read(
+        &self,
+        offset: Block,
+        data: Buffer,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
 
         let rio = BlockOp::Read { offset, data };
-        self.send(rio)
+        Ok(self.send(rio))
     }
 
-    pub fn write(&self, offset: Block, data: Bytes) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        // XXX: return Err instead
-        assert!((data.len() % bs as usize) == 0);
-        assert!(offset.block_size_in_bytes() as u64 == bs);
+    pub fn write(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
 
         let wio = BlockOp::Write { offset, data };
-        self.send(wio)
+        Ok(self.send(wio))
     }
 
     /*
      * `read_from_byte_offset` and `write_to_byte_offset` accept a byte offset, and data must be a
      * multiple of block size.
-     *
-     * note these functions assert that the byte offset is divisible by the block size and should
-     * only be used in non-production code.
      */
     pub fn read_from_byte_offset(
         &self,
         offset: u64,
         data: Buffer,
-    ) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        assert!((offset % bs) == 0);
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (offset % bs) != 0 {
+            crucible_bail!(OffsetUnaligned);
+        }
+
         self.read(Block::new(offset / bs, bs.trailing_zeros()), data)
     }
 
@@ -2180,9 +2368,13 @@ impl Guest {
         &self,
         offset: u64,
         data: Bytes,
-    ) -> BlockReqWaiter {
-        let bs = self.query_block_size();
-        assert!((offset % bs) == 0);
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (offset % bs) != 0 {
+            crucible_bail!(OffsetUnaligned);
+        }
+
         self.write(Block::new(offset / bs, bs.trailing_zeros()), data)
     }
 
@@ -2190,36 +2382,36 @@ impl Guest {
         self.send(BlockOp::Flush)
     }
 
-    pub fn query_block_size(&self) -> u64 {
+    pub fn query_block_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-        self.send(size_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(size_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_total_size(&self) -> u64 {
+    pub fn query_total_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-        self.send(size_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(size_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_extent_size(&self) -> Block {
+    pub fn query_extent_size(&self) -> Result<Block, CrucibleError> {
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
-        self.send(extent_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(extent_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_active(&self) -> usize {
+    pub fn query_active(&self) -> Result<usize, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let active_query = BlockOp::QueryActive { data: data.clone() };
-        self.send(active_query).block_wait();
-        return *data.lock().unwrap();
+        self.send(active_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
     pub fn commit(&self) {
-        self.send(BlockOp::Commit).block_wait();
+        self.send(BlockOp::Commit).block_wait().unwrap();
     }
 
     /*
@@ -2233,7 +2425,7 @@ impl Guest {
         };
         let data = Arc::new(Mutex::new(wc));
         let sw = BlockOp::ShowWork { data: data.clone() };
-        self.send(sw).block_wait();
+        self.send(sw).block_wait().unwrap();
         return *data.lock().unwrap();
     }
 }
@@ -2287,12 +2479,15 @@ fn _send_work(t: &[Target], val: u64) {
 }
 
 /**
- * We listen on the ds_done channel to know when all the downstairs requests
+ * We listen on the ds_done channel to know when enough of the downstairs requests
  * for a downstairs work task have finished and it is time to complete
  * any buffer transfers (reads) and then notify the guest that their
  * work has been completed.
  */
 async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
+    /*
+     * Accept _any_ ds_done message, but work on the whole list of ackable work.
+     */
     while let Some(_ds_id) = ds_done_rx.recv().await {
         /*
          * XXX Do we need to hold the lock while we process all the
@@ -2313,20 +2508,13 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let ds_id = done.ds_id;
             assert_eq!(*ds_id_done, ds_id);
 
-            // Move this work to Acked
-            let mut ack_ready = false;
-            for cid in 0..3 {
-                if let Some(IOState::AckReady) = done.state.get(&cid) {
-                    done.state.insert(cid, IOState::Acked);
-                    ack_ready = true;
-                    break;
-                }
-            }
-            // Verify we did find an AckReady downstairs IO
-            assert!(ack_ready);
             let data = done.data.take();
-            gw.ds_complete(gw_id, ds_id, data);
-            crutrace_work_done(&done.work, gw_id);
+
+            work.ack(ds_id);
+
+            gw.ds_complete(gw_id, ds_id, data, work.result(ds_id));
+
+            work.crutrace_gw_work_done(ds_id, gw_id);
 
             work.retire_check(ds_id);
         }
@@ -2348,21 +2536,34 @@ fn process_new_io(
     req: BlockReq,
     lastcast: &mut u64,
 ) {
+    /*
+     * If any of the submit_* functions fail to send to the downstairs, they return an error.
+     * These are reported to the Guest.
+     */
     match req.op {
         BlockOp::Read { offset, data } => {
-            up.submit_read(offset, data, req.send);
+            if let Err(e) = up.submit_read(offset, data, req.send.clone()) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
             dst.iter()
                 .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
-            up.submit_write(offset, data, req.send);
+            if let Err(e) = up.submit_write(offset, data, req.send.clone()) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
             dst.iter()
                 .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
             *lastcast += 1;
         }
         BlockOp::Flush => {
-            up.submit_flush(req.send).unwrap();
+            if let Err(e) = up.submit_flush(req.send.clone()) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
             dst.iter()
                 .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
             *lastcast += 1;
@@ -2370,26 +2571,26 @@ fn process_new_io(
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryTotalSize { data } => {
             *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
             *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryActive { data } => {
             *data.lock().unwrap() =
                 up.guest.guest_work.lock().unwrap().active_count();
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::ShowWork { data } => {
             *data.lock().unwrap() = show_all_work(up);
-            let _ = req.send.send(0);
+            let _ = req.send.send(Ok(()));
         }
         BlockOp::Commit => {
             dst.iter()
@@ -2597,6 +2798,7 @@ fn create_write_eob(
         guest_id: gw_id,
         work: awrite,
         state,
+        ack_status: AckStatus::NotAcked,
         data: None,
     }
 }
@@ -2631,6 +2833,7 @@ fn create_read_eob(
         guest_id: gw_id,
         work: aread,
         state,
+        ack_status: AckStatus::NotAcked,
         data: None,
     }
 }
@@ -2658,6 +2861,7 @@ fn create_flush(
         guest_id,
         work: flush,
         state,
+        ack_status: AckStatus::NotAcked,
         data: None,
     }
 }
@@ -2805,7 +3009,7 @@ impl IOSpan {
     fn read_affected_blocks_from_guest(
         &mut self,
         guest: &Guest,
-    ) -> BlockReqWaiter {
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         guest.read(
             Block::new(
                 self.affected_block_numbers[0],
@@ -2816,7 +3020,10 @@ impl IOSpan {
     }
 
     #[instrument]
-    fn write_affected_blocks_to_guest(&self, guest: &Guest) -> BlockReqWaiter {
+    fn write_affected_blocks_to_guest(
+        &self,
+        guest: &Guest,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         let bytes = Bytes::from(self.buffer.as_vec().clone());
         guest.write(
             Block::new(
@@ -2858,20 +3065,24 @@ pub struct CruciblePseudoFile {
 }
 
 impl CruciblePseudoFile {
-    pub fn from_guest(guest: Arc<Guest>) -> Self {
-        let sz = guest.query_total_size() as u64;
-        let block_size = guest.query_block_size() as u64;
-        CruciblePseudoFile {
+    pub fn from_guest(guest: Arc<Guest>) -> Result<Self, CrucibleError> {
+        let sz = guest.query_total_size()? as u64;
+        let block_size = guest.query_block_size()? as u64;
+        Ok(CruciblePseudoFile {
             guest,
             offset: 0,
             sz,
             block_size,
             rmw_lock: RwLock::new(false),
-        }
+        })
     }
 
     pub fn sz(&self) -> u64 {
         self.sz
+    }
+
+    pub fn show_work(&self) -> WQCounts {
+        self.guest.show_work()
     }
 }
 
@@ -2881,73 +3092,20 @@ impl CruciblePseudoFile {
  */
 impl Read for CruciblePseudoFile {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
-        let _guard = self.rmw_lock.read().unwrap();
-
-        let mut span =
-            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
-
-        let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
-        waiter.block_wait();
-
-        span.read_from_blocks_into_buffer(buf);
-
-        // TODO: for block devices, we can't increment offset past the
-        // device size but we're supposed to be pretending to be a proper
-        // file here
-        self.offset += buf.len() as u64;
-
-        Ok(buf.len())
+        self._read(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
 
 impl Write for CruciblePseudoFile {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
-        let mut span =
-            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
-
-        /*
-         * Crucible's dependency system will properly resolve requests in the order they are
-         * received but if the request is not block aligned and block sized we need to do
-         * read-modify-write (RMW) here. Use a reader-writer lock, and grab the write portion of
-         * the lock when doing RMW to cause all other operations (which only grab the read portion
-         * of the lock) to pause. Otherwise all operations can use the read portion of this lock
-         * and Crucible will sort it out.
-         */
-        if !span.is_block_regular() {
-            let _guard = self.rmw_lock.write().unwrap();
-
-            let mut waiter = span.read_affected_blocks_from_guest(&self.guest);
-            waiter.block_wait();
-
-            span.write_from_buffer_into_blocks(buf);
-
-            let mut waiter = span.write_affected_blocks_to_guest(&self.guest);
-            waiter.block_wait();
-        } else {
-            let _guard = self.rmw_lock.read().unwrap();
-
-            let offset = Block::new(
-                self.offset / self.block_size,
-                self.block_size.trailing_zeros(),
-            );
-            let bytes = BytesMut::from(buf);
-            let mut waiter = self.guest.write(offset, bytes.freeze());
-            waiter.block_wait();
-        }
-
-        // TODO: can't increment offset past the device size
-        self.offset += buf.len() as u64;
-
-        Ok(buf.len())
+        self._write(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     fn flush(&mut self) -> IOResult<()> {
-        let _guard = self.rmw_lock.read().unwrap();
-
-        let mut waiter = self.guest.flush();
-        waiter.block_wait();
-
-        Ok(())
+        self._flush()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
 
@@ -2986,9 +3144,82 @@ impl Seek for CruciblePseudoFile {
     }
 }
 
+impl CruciblePseudoFile {
+    fn _read(&mut self, buf: &mut [u8]) -> Result<usize, CrucibleError> {
+        let _guard = self.rmw_lock.read().unwrap();
+
+        let mut span =
+            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
+
+        let mut waiter = span.read_affected_blocks_from_guest(&self.guest)?;
+        waiter.block_wait()?;
+
+        span.read_from_blocks_into_buffer(buf);
+
+        // TODO: for block devices, we can't increment offset past the
+        // device size but we're supposed to be pretending to be a proper
+        // file here
+        self.offset += buf.len() as u64;
+
+        Ok(buf.len())
+    }
+
+    fn _write(&mut self, buf: &[u8]) -> Result<usize, CrucibleError> {
+        let mut span =
+            IOSpan::new(self.offset, buf.len() as u64, self.block_size);
+
+        /*
+         * Crucible's dependency system will properly resolve requests in the order they are
+         * received but if the request is not block aligned and block sized we need to do
+         * read-modify-write (RMW) here. Use a reader-writer lock, and grab the write portion of
+         * the lock when doing RMW to cause all other operations (which only grab the read portion
+         * of the lock) to pause. Otherwise all operations can use the read portion of this lock
+         * and Crucible will sort it out.
+         */
+        if !span.is_block_regular() {
+            let _guard = self.rmw_lock.write().unwrap();
+
+            let mut waiter =
+                span.read_affected_blocks_from_guest(&self.guest)?;
+            waiter.block_wait()?;
+
+            span.write_from_buffer_into_blocks(buf);
+
+            let mut waiter =
+                span.write_affected_blocks_to_guest(&self.guest)?;
+            waiter.block_wait()?;
+        } else {
+            let _guard = self.rmw_lock.read().unwrap();
+
+            let offset = Block::new(
+                self.offset / self.block_size,
+                self.block_size.trailing_zeros(),
+            );
+            let bytes = BytesMut::from(buf);
+            let mut waiter = self.guest.write(offset, bytes.freeze())?;
+            waiter.block_wait()?;
+        }
+
+        // TODO: can't increment offset past the device size
+        self.offset += buf.len() as u64;
+
+        Ok(buf.len())
+    }
+
+    fn _flush(&mut self) -> Result<(), CrucibleError> {
+        let _guard = self.rmw_lock.read().unwrap();
+
+        let mut waiter = self.guest.flush();
+        waiter.block_wait()?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use ringbuffer::RingBuffer;
 
     #[test]
     fn test_extent_from_offset() {
@@ -3121,6 +3352,7 @@ mod test {
             guest: Arc::new(Guest::new()),
             ds_state: Mutex::new(vec![DsState::New; 3]),
             ds_work: Mutex::new(Work {
+                downstairs_errors: HashMap::new(),
                 active: HashMap::new(),
                 completed: AllocRingBuffer::with_capacity(2),
                 next_id: 1000,
@@ -3309,5 +3541,618 @@ mod test {
 
         context.decrypt_in_place(&mut block[..], 1);
         assert_ne!(block, orig_block);
+    }
+
+    #[test]
+    fn work_flush_three_ok() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+        assert_eq!(work.completed.len(), 0);
+
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
+
+        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_flush_one_error_then_ok() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+
+        work.retire_check(next_id);
+
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_flush_two_errors_equals_fail() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                2,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            true
+        );
+        assert_eq!(work.ackable_work().len(), 1);
+
+        work.retire_check(next_id);
+
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_read_one_ok() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+        assert_eq!(work.completed.len(), 0);
+
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_read_one_bad_two_ok() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+        assert_eq!(work.completed.len(), 0);
+
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_read_two_bad_one_ok() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+
+        work.retire_check(next_id);
+
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_read_three_bad() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let bytes = Some(Bytes::from(vec![]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                2,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            true
+        );
+        assert_eq!(work.ackable_work().len(), 1);
+
+        work.retire_check(next_id);
+
+        assert_eq!(work.completed.len(), 1);
+    }
+
+    #[test]
+    fn work_assert_no_transfer_of_bad_read() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        let bytes = Some(Bytes::from(vec![1]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![2]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
+    }
+
+    #[test]
+    fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        // send a write, and clients 0 and 1 will return errors
+
+        let op = create_write_eob(
+            next_id,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_some());
+        assert!(work.in_progress(next_id, 1).is_some());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                None,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        assert_eq!(work.complete(next_id, 2, None, Ok(()),).unwrap(), true);
+
+        assert!(work.downstairs_errors.get(&0).is_some());
+        assert!(work.downstairs_errors.get(&1).is_some());
+        assert!(work.downstairs_errors.get(&2).is_none());
+
+        // another read. make sure only client 2 returns data. the others should be skipped.
+
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_none());
+        assert!(work.in_progress(next_id, 1).is_none());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
+    }
+
+    #[test]
+    fn work_assert_reads_do_not_cause_failure_state_transition() {
+        let mut work = Work {
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2),
+            next_id: 1000,
+        };
+
+        let next_id = work.next_id();
+
+        // send a read, and clients 0 and 1 will return errors
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_some());
+        assert!(work.in_progress(next_id, 1).is_some());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        let bytes = Some(Bytes::from(vec![1]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![2]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![3]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![3]))
+        );
+
+        assert!(work.downstairs_errors.get(&0).is_none());
+        assert!(work.downstairs_errors.get(&1).is_none());
+        assert!(work.downstairs_errors.get(&2).is_none());
+
+        // send another read, and expect all to return something (reads shouldn't cause a Failed
+        // transition)
+
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        assert!(work.in_progress(next_id, 0).is_some());
+        assert!(work.in_progress(next_id, 1).is_some());
+        assert!(work.in_progress(next_id, 2).is_some());
+
+        let bytes = Some(Bytes::from(vec![4]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                0,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false,
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![5]));
+
+        assert_eq!(
+            work.complete(
+                next_id,
+                1,
+                bytes,
+                Err(CrucibleError::GenericError(format!("bad")))
+            )
+            .unwrap(),
+            false,
+        );
+
+        assert!(work.active.get(&next_id).unwrap().data.is_none());
+
+        let bytes = Some(Bytes::from(vec![6]));
+
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+
+        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        assert_eq!(
+            work.active.get(&next_id).unwrap().data,
+            Some(Bytes::from(vec![6]))
+        );
     }
 }

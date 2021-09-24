@@ -220,7 +220,11 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn read(&self, offset: Block, data: &mut BytesMut) -> Result<()> {
+    pub fn read(
+        &self,
+        offset: Block,
+        data: &mut BytesMut,
+    ) -> Result<(), CrucibleError> {
         self.check_input(offset, data)?;
 
         /*
@@ -248,36 +252,39 @@ impl Extent {
      * Note that the checks here do take into account that the first block
      * is the metadata block.
      */
-    fn check_input(&self, offset: Block, data: &[u8]) -> Result<()> {
+    fn check_input(
+        &self,
+        offset: Block,
+        data: &[u8],
+    ) -> Result<(), CrucibleError> {
         if (data.len() % self.block_size as usize) != 0 {
-            bail!("data length not divisible by self block size!");
+            crucible_bail!(DataLenUnaligned);
         }
 
         if offset.block_size_in_bytes() != self.block_size as u32 {
-            bail!("offset block size != self block size!");
+            crucible_bail!(BlockSizeMismatch);
         }
+
         if offset.shift != self.extent_size.shift {
-            bail!("offset shift != extent shift!");
+            crucible_bail!(BlockSizeMismatch);
         }
 
         let total_size = self.block_size * self.extent_size.value;
         let byte_offset = offset.value * self.block_size;
 
         if (byte_offset + data.len() as u64) > total_size {
-            bail!(
-                "byte offset {} + data.len() {} is past end of extent {:?} ({})",
-                byte_offset,
-                data.len(),
-                self.extent_size,
-                total_size,
-            );
+            crucible_bail!(OffsetInvalid);
         }
 
         Ok(())
     }
 
     #[instrument]
-    pub fn write(&self, offset: Block, data: &[u8]) -> Result<()> {
+    pub fn write(
+        &self,
+        offset: Block,
+        data: &[u8],
+    ) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
         self.check_input(offset, data)?;
@@ -293,7 +300,12 @@ impl Extent {
                 /*
                  * XXX Retry?  Mark extent as broken?
                  */
-                bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
+                crucible_bail!(
+                    IoError,
+                    "extent {}: fsync 2 failure: {:?}",
+                    self.number,
+                    e
+                );
             }
 
             inner.meta.dirty = true;
@@ -312,7 +324,7 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn flush_block(&self, new_flush: u64) -> Result<()> {
+    pub fn flush_block(&self, new_flush: u64) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
         if !inner.meta.dirty {
@@ -332,7 +344,12 @@ impl Extent {
             /*
              * XXX Retry?  Mark extent as broken?
              */
-            bail!("extent {}: fsync 1 failure: {:?}", self.number, e);
+            crucible_bail!(
+                IoError,
+                "extent {}: fsync 1 failure: {:?}",
+                self.number,
+                e
+            );
         }
 
         inner.file.seek(SeekFrom::Start(0))?;
@@ -363,7 +380,12 @@ impl Extent {
             /*
              * XXX Retry?  Mark extent as broken?
              */
-            bail!("extent {}: fsync 2 failure: {:?}", self.number, e);
+            crucible_bail!(
+                IoError,
+                "extent {}: fsync 2 failure: {:?}",
+                self.number,
+                e
+            );
         }
 
         inner.meta = new_meta;
@@ -543,7 +565,7 @@ impl Region {
         eid: u64,
         offset: Block,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         let extent = &self.extents[eid as usize];
         extent.write(offset, data)?;
         Ok(())
@@ -555,7 +577,7 @@ impl Region {
         eid: u64,
         offset: Block,
         data: &mut BytesMut,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         let extent = &self.extents[eid as usize];
         extent.read(offset, data)?;
         Ok(())
@@ -566,7 +588,7 @@ impl Region {
      * what an extent should use if a flush is required.
      */
     #[instrument]
-    pub fn region_flush(&self, flush_number: u64) -> Result<()> {
+    pub fn region_flush(&self, flush_number: u64) -> Result<(), CrucibleError> {
         // XXX How to we convert between usize and u32 correctly?
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
