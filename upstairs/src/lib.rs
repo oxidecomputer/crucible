@@ -1442,7 +1442,7 @@ impl Upstairs {
                 );
             } else {
                 println!(
-                    "Returning clientL{} UUID:{} matches",
+                    "Returning client:{} UUID:{} matches",
                     client_id, uuid
                 );
             }
