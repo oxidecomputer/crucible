@@ -345,10 +345,7 @@ impl Extent {
 
         self.check_input(offset, data)?;
 
-        if !inner.dirty()? {
-            // XXX: intent to dirty? or just write, and don't check?
-            inner.set_dirty()?;
-        }
+        inner.set_dirty()?;
 
         let byte_offset = offset.value * self.block_size;
 
