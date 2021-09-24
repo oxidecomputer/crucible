@@ -63,7 +63,14 @@ for tt in ${test_list}; do
 done
 
 echo "Running hammer"
-./hammer.sh
+if ! time cargo run -p crucible-hammer -- \
+    -t 127.0.0.1:3801 \
+    -t 127.0.0.1:3802 \
+    -t 127.0.0.1:3803 \
+    --key "$(openssl rand -base64 32)"; then
+	echo "Failed hammer test"
+    res=1
+fi
 
 echo "Tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do

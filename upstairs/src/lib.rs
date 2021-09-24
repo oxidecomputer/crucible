@@ -1784,11 +1784,117 @@ impl fmt::Display for IOState {
     }
 }
 
+#[derive(Debug)]
+struct IOStateCount {
+    new: [u32; 3],
+    in_progress: [u32; 3],
+    ack_ready: [u32; 3],
+    acked: [u32; 3],
+    done: [u32; 3],
+    skipped: [u32; 3],
+    error: [u32; 3],
+}
+
+impl IOStateCount {
+    fn new() -> IOStateCount {
+        IOStateCount {
+            new: [0; 3],
+            in_progress: [0; 3],
+            ack_ready: [0; 3],
+            acked: [0; 3],
+            done: [0; 3],
+            skipped: [0; 3],
+            error: [0; 3],
+        }
+    }
+
+    fn show_all(&mut self) {
+        println!("   States    | ds:0 | ds:1 | ds:2 | Total| ");
+        self.show(IOState::New);
+        self.show(IOState::InProgress);
+        self.show(IOState::Done);
+        self.show(IOState::Skipped);
+        let e = CrucibleError::GenericError("x".to_string());
+        self.show(IOState::Error(e));
+    }
+
+    fn show(&mut self, state: IOState) {
+        let state_stat;
+        match state {
+            IOState::New => {
+                state_stat = self.new;
+                print!("    New      | ");
+            }
+            IOState::InProgress => {
+                state_stat = self.in_progress;
+                print!("    Sent     | ");
+            }
+            IOState::Done => {
+                state_stat = self.done;
+                print!("    Done     | ");
+            }
+            IOState::Skipped => {
+                state_stat = self.skipped;
+                print!("    Skipped  | ");
+            }
+            IOState::Error(_) => {
+                state_stat = self.error;
+                print!("    Error    | ");
+            }
+        }
+        let mut sum = 0;
+        for ds_stat in state_stat {
+            print!("{:4} | ", ds_stat);
+            sum += ds_stat;
+        }
+        println!("{:4} |", sum);
+    }
+
+    pub fn incr(&mut self, state: &IOState, cid: u8) {
+        assert!(cid < 3);
+        let cid = cid as usize;
+        match state {
+            IOState::New => {
+                self.new[cid] += 1;
+            }
+            IOState::InProgress => {
+                self.in_progress[cid] += 1;
+            }
+            IOState::Done => {
+                self.done[cid] += 1;
+            }
+            IOState::Skipped => {
+                self.skipped[cid] += 1;
+            }
+            IOState::Error(_) => {
+                self.error[cid] += 1;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AckStatus {
     NotAcked,
     AckReady,
     Acked,
+}
+
+impl fmt::Display for AckStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Make sure to right-align output on 8 characters
+        match self {
+            AckStatus::NotAcked => {
+                write!(f, "NotAcked")
+            }
+            AckStatus::AckReady => {
+                write!(f, "AckReady")
+            }
+            AckStatus::Acked => {
+                write!(f, "   Acked")
+            }
+        }
+    }
 }
 
 /*
@@ -2870,54 +2976,118 @@ fn create_flush(
  * Debug function to display the work hashmap with status for all three of
  * the clients.
  */
-#[allow(unused_variables)]
 fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
+    let mut iosc: IOStateCount = IOStateCount::new();
+    let up_count = up.guest.guest_work.lock().unwrap().active.len();
+
     let work = up.ds_work.lock().unwrap();
     let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    println!(
+        "----------------------------------------------------------------"
+    );
+    println!(
+        "     Crucible work queues:  Upstairs:{}  downstairs:{}",
+        up_count,
+        kvec.len()
+    );
     if kvec.is_empty() {
-        println!("# Crucible Downstairs work queue -> Empty #");
+        if up_count != 0 {
+            show_guest_work(&up.guest);
+        }
     } else {
-        println!("# Crucible Downstairs work queue #");
+        println!(
+            "gw_id |     ACK  | dsid | Type  | ExtID|bl_off|bl_len\
+            | ds:0 | ds:1 | ds:2 |"
+        );
+        println!(
+            "----------------------------------------------------------------"
+        );
         kvec.sort_unstable();
         for id in kvec.iter() {
+            let mut io_eid = 0;
+            let mut io_offset = 0;
+            let mut io_len = 0;
+            let job_type;
             let job = work.active.get(id).unwrap();
-            let job_type = match &job.work {
+            match &job.work {
                 IOop::Read {
-                    dependencies,
+                    dependencies: _dependencies,
                     eid,
                     offset,
                     num_blocks,
-                } => "Read ".to_string(),
+                } => {
+                    job_type = "Read ".to_string();
+                    io_eid = *eid;
+                    io_offset = offset.value;
+                    io_len = *num_blocks as usize;
+                }
                 IOop::Write {
-                    dependencies,
+                    dependencies: _dependencies,
                     eid,
                     offset,
                     data,
-                } => "Write".to_string(),
+                } => {
+                    job_type = "Write".to_string();
+                    io_eid = *eid;
+                    io_offset = offset.value;
+                    io_len = data.len() / (1 << offset.shift);
+                }
                 IOop::Flush {
-                    dependencies,
-                    flush_number,
-                } => "Flush".to_string(),
+                    dependencies: _dependencies,
+                    flush_number: _flush_number,
+                } => {
+                    job_type = "Flush".to_string();
+                }
             };
-            print!("JOB:[{:04}] {} ", id, job_type);
+            //let state = work.active.get_mut(&next_id).unwrap().ack_status;
+            let state = job.ack_status;
+            print!(
+                " {:4} | {:8} | {:4} | {} | {:4} | {:4} | {:4} | ",
+                job.guest_id, state, id, job_type, io_eid, io_offset, io_len
+            );
             for cid in 0..3 {
                 let state = job.state.get(&cid);
                 match state {
                     Some(state) => {
-                        print!("[{}] state: {}  ", cid, state);
+                        print!("{} | ", state);
+                        iosc.incr(state, cid);
                     }
-                    x => {
-                        print!("[{}] unknown state:{:#?}", cid, x);
+                    _x => {
+                        print!("???? | ");
                     }
                 }
             }
             println!();
         }
+        println!();
+        iosc.show_all();
     }
+
     let done = work.completed.to_vec();
-    println!("Done tasks count: {:?}", done.len());
+    let mut count = 0;
+    print!("Downstairs last five completed:");
+    for j in done.iter().rev() {
+        count += 1;
+        print!(" {:4}", j);
+        if count > 5 {
+            break;
+        }
+    }
+    println!();
     drop(work);
-    let up_count = show_guest_work(&up.guest);
+
+    let up_done = up.guest.guest_work.lock().unwrap().completed.to_vec();
+    print!("Upstairs last five completed:  ");
+    let mut count = 0;
+    for j in up_done.iter().rev() {
+        count += 1;
+        print!(" {:4}", j);
+        if count > 5 {
+            break;
+        }
+    }
+    println!();
+    drop(up_done);
 
     WQCounts {
         up_count,
