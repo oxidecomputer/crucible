@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /*
  * Where the unit is blocks, not bytes, make sure to reflect that in the types used.
@@ -66,6 +67,11 @@ pub struct RegionDefinition {
      * How many whole extents comprise this region?
      */
     extent_count: u32,
+
+    /**
+     * UUID for this region
+     */
+    uuid: Uuid,
 }
 
 impl RegionDefinition {
@@ -75,6 +81,7 @@ impl RegionDefinition {
             block_size: opts.block_size,
             extent_size: opts.extent_size,
             extent_count: 0,
+            uuid: opts.uuid,
         })
     }
 
@@ -105,6 +112,14 @@ impl RegionDefinition {
     pub fn total_size(&self) -> u64 {
         self.block_size * self.extent_size.value * (self.extent_count as u64)
     }
+
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        self.uuid = uuid;
+    }
 }
 
 /**
@@ -117,6 +132,7 @@ impl Default for RegionDefinition {
             block_size: 0,
             extent_size: Block::new(0, 9),
             extent_count: 0,
+            uuid: Uuid::nil(),
         }
     }
 }
@@ -132,6 +148,11 @@ pub struct RegionOptions {
      * How many blocks should appear in each extent?
      */
     extent_size: Block,
+
+    /**
+     * UUID for this region
+     */
+    uuid: Uuid,
 }
 
 impl RegionOptions {
@@ -172,6 +193,10 @@ impl RegionOptions {
     pub fn set_extent_size(&mut self, es: Block) {
         self.extent_size = es;
     }
+
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        self.uuid = uuid;
+    }
 }
 
 impl Default for RegionOptions {
@@ -180,6 +205,7 @@ impl Default for RegionOptions {
         RegionOptions {
             block_size: 512,
             extent_size: Block::new(100, 9),
+            uuid: Uuid::nil(),
         }
     }
 }

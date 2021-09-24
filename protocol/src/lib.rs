@@ -6,7 +6,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRM_LEN: usize = 1024 * 1024;
 
-use crucible_common::{Block, CrucibleError};
+use crucible_common::{Block, CrucibleError, RegionDefinition};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -14,6 +14,8 @@ pub enum Message {
     YesItsMe(u32),
     Ruok,
     Imok,
+    RegionInfoPlease,
+    RegionInfo(RegionDefinition),
     ExtentVersionsPlease,
     ExtentVersions(u64, u64, u32, Vec<u64>),
     Write(u64, u64, Vec<u64>, Block, bytes::Bytes),

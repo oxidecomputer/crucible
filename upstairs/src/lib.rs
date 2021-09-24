@@ -25,6 +25,7 @@ use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{instrument, span, Level};
 use usdt::register_probes;
+use uuid::Uuid;
 
 use aes::cipher::generic_array::GenericArray;
 use aes::{Aes128, NewBlockCipher};
@@ -533,10 +534,18 @@ async fn proc(
                         deadline = deadline_secs(50);
 
                         /*
+                         * Get region info.
+                         */
+                        fw.send(Message::RegionInfoPlease).await?;
+                    }
+                    Some(Message::RegionInfo(region_def)) => {
+
+                        up.add_downstairs(up_coms.client_id, region_def)?;
+                        /*
                          * Ask for the current version of all extents.
                          */
                         fw.send(Message::ExtentVersionsPlease).await?;
-                    }
+                    },
                     Some(Message::ExtentVersions(bs, es, ec, versions)) => {
                         if !negotiated {
                             bail!("expected YesItsMe first");
@@ -1170,6 +1179,11 @@ pub struct Upstairs {
     ds_state: Mutex<Vec<DsState>>,
 
     /*
+     * UUID for each downstairs, index by client ID
+     */
+    ds_uuid: Mutex<HashMap<u8, Uuid>>,
+
+    /*
      * This Work struct keeps track of IO operations going between upstairs
      * and downstairs.  New work for downstairs is generated inside the
      * upstairs on behalf of IO requests coming from the guest.
@@ -1233,6 +1247,7 @@ impl Upstairs {
         Arc::new(Upstairs {
             guest,
             ds_state: Mutex::new(ds_state),
+            ds_uuid: Mutex::new(HashMap::new()),
             ds_work: Mutex::new(Work {
                 downstairs_errors: HashMap::new(),
                 active: HashMap::new(),
@@ -1581,6 +1596,46 @@ impl Upstairs {
                 }
             }
         });
+    }
+
+    /*
+     * Check the region information for a downstairs and decide if we should
+     * allow this downstairs to be added.
+     * TODO: Still a bunch to do here around reconnecting.
+     */
+    fn add_downstairs(
+        &self,
+        client_id: u8,
+        rdef: RegionDefinition,
+    ) -> Result<()> {
+        println!("[{}] Got region def {:?}", client_id, rdef);
+
+        let mut uuid_hm = self.ds_uuid.lock().unwrap();
+        if let Some(uuid) = uuid_hm.get(&client_id) {
+            if *uuid != rdef.uuid() {
+                panic!(
+                    "New client:{} uuid:{}  does not match existing {}",
+                    client_id,
+                    rdef.uuid(),
+                    uuid
+                );
+            } else {
+                println!(
+                    "Returning client:{} UUID:{} matches",
+                    client_id, uuid
+                );
+            }
+        } else {
+            uuid_hm.insert(client_id, rdef.uuid());
+        }
+
+        println!("UUIDS: {:?}", uuid_hm);
+
+        // TODO: move the logic for the block size, extent size, and extent
+        // count to this location.  Determine here if this downstairs
+        // matches what we expect.
+        //
+        Ok(())
     }
 }
 
@@ -3521,6 +3576,7 @@ mod test {
         Arc::new(Upstairs {
             guest: Arc::new(Guest::new()),
             ds_state: Mutex::new(vec![DsState::New; 3]),
+            ds_uuid: Mutex::new(HashMap::new()),
             ds_work: Mutex::new(Work {
                 downstairs_errors: HashMap::new(),
                 active: HashMap::new(),

@@ -602,11 +602,10 @@ impl Region {
 mod test {
     use super::extent_path;
     use super::*;
-    use crate::Opt;
     use bytes::BufMut;
     use std::fs::remove_dir_all;
     use std::path::PathBuf;
-    use structopt::StructOpt;
+    use uuid::Uuid;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -630,32 +629,43 @@ mod test {
         }
     }
 
-    pub fn opt_from_string(args: String) -> Result<Opt> {
-        let opt: Opt = Opt::from_iter(args.split(' '));
-        Ok(opt)
+    static TEST_UUID_STR: &str = "12345678-1111-2222-3333-123456789999";
+
+    fn test_uuid() -> Uuid {
+        TEST_UUID_STR.parse().unwrap()
     }
 
     pub fn test_cleanup() {
         let _ = remove_dir_all("/tmp/ds_test");
     }
 
+    fn new_region_options() -> crucible_common::RegionOptions {
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        let block_size = 512;
+        region_options.set_block_size(block_size);
+        region_options
+            .set_extent_size(Block::new(10, block_size.trailing_zeros()));
+        region_options.set_uuid(test_uuid());
+        region_options
+    }
+
     #[test]
     fn new_region() -> Result<()> {
         test_cleanup();
-        let my_arg = "-- -c -p 3801 -d /tmp/ds_test/1".to_string();
-        let opt = opt_from_string(my_arg).unwrap();
-        //let opt = Opt::from_string(my_arg).unwrap();
-        let _ = Region::create(&opt.data, Default::default()).unwrap();
+
+        let data = p("/tmp/ds_test/1");
+        let _ = Region::create(&data, new_region_options());
         remove_dir_all("/tmp/ds_test/1").unwrap();
         Ok(())
     }
     #[test]
     fn new_existing_region() -> Result<()> {
         test_cleanup();
-        let my_arg = "-- -c -p 3801 -d /tmp/ds_test/2".to_string();
-        let opt = opt_from_string(my_arg).unwrap();
-        let _ = Region::create(&opt.data, Default::default()).unwrap();
-        let _ = Region::open(&opt.data, Default::default());
+
+        let data = p("/tmp/ds_test/2");
+        let _ = Region::create(&data, new_region_options());
+        let _ = Region::open(&data, new_region_options());
         remove_dir_all("/tmp/ds_test/2").unwrap();
         Ok(())
     }
@@ -663,13 +673,12 @@ mod test {
     #[should_panic]
     fn bad_import_region() -> () {
         test_cleanup();
-        let my_arg = "-- -c -p 3801 -d /tmp/ds_test/3".to_string();
-        let opt = opt_from_string(my_arg).unwrap();
-        let _ = Region::open(&opt.data, Default::default()).unwrap();
+
+        let data = p("/tmp/ds_test/3");
+        let _ = Region::open(&data, new_region_options());
         remove_dir_all("/tmp/ds_test/3").unwrap();
         ()
     }
-
     #[test]
     fn extent_io_valid() {
         let ext = new_extent();
