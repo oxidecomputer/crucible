@@ -151,7 +151,12 @@ fn main() -> Result<()> {
         }
         Workload::Demo => {
             println!("Run Demo test");
-            runtime.block_on(demo_workload(&guest, 10))?;
+            /*
+             * The count provided here should be greater than the flow
+             * control limit if we wish to test flow control.  Also, set
+             * lossy on a downstairs otherwise it will probably keep up.
+             */
+            runtime.block_on(demo_workload(&guest, 200))?;
         }
         Workload::Dep => {
             println!("Run dep test");
@@ -576,7 +581,6 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
     };
     println!("loop over {} waiters", waiterlist.len());
     for wa in waiterlist.iter_mut() {
-        wc = guest.show_work();
         wa.block_wait()?;
     }
     /*
@@ -585,7 +589,7 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
     println!("All submitted jobs completed, waiting for downstairs");
     while wc.up_count + wc.ds_count > 0 {
         wc = guest.show_work();
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(5));
     }
     println!("All downstairs jobs completed.");
 

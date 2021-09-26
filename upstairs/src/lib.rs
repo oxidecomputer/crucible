@@ -65,7 +65,7 @@ pub fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
-async fn proc_frame(
+async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
     up_coms: UpComs,
@@ -99,7 +99,14 @@ async fn proc_frame(
             result.clone(),
         )
         .await?),
-        x => bail!("client {} unexpected frame {:?}", up_coms.client_id, x),
+        /*
+         * For this case, we will (TODO) want to log an error to someone, but
+         * I don't think there is anything else we can do.
+         */
+        x => {
+            println!("{} unexpected frame {:?}, IGNORED", up_coms.client_id, x);
+            Ok(())
+        }
     }
 }
 
@@ -186,16 +193,8 @@ pub fn extent_from_offset(
 fn process_downstairs(
     target: &SocketAddrV4,
     u: &Arc<Upstairs>,
-    bs: u64,
-    es: u64,
-    ec: u32,
     versions: Vec<u64>,
 ) -> Result<()> {
-    println!(
-        "{} Evaluate new downstairs : bs:{} es:{} ec:{}",
-        target, bs, es, ec
-    );
-
     if versions.len() > 12 {
         println!("{} versions[0..12]: {:?}", target, versions[0..12].to_vec());
     } else {
@@ -208,6 +207,7 @@ fn process_downstairs(
          * This is the first version list we have, so
          * we will make it the original and compare
          * whatever comes next.
+         * XXX This is not the final way to do it, but works for now.
          */
         fi.flush_numbers = versions;
         fi.next_flush = *fi.flush_numbers.iter().max().unwrap() + 1;
@@ -247,37 +247,6 @@ fn process_downstairs(
         }
     }
 
-    /*
-     * XXX Here we have another workaround.  We don't know
-     * the region info until after we connect to each
-     * downstairs, but we share the ARC Upstairs before we
-     * know what to expect.  For now I'm using zero as an
-     * indication that we don't yet know the valid values
-     * and non-zero meaning we have at least one downstairs
-     * to compare with.  We might want to consider breaking
-     * out the static config info into something different
-     * that is updated on initial downstairs setup from the
-     * structures we use for work submission.
-     *
-     * 0 should never be a valid block size
-     */
-    let mut ddef = u.ddef.lock().unwrap();
-    if ddef.block_size() == 0 {
-        ddef.set_block_size(bs);
-        ddef.set_extent_size(Block::new(es, bs.trailing_zeros()));
-        ddef.set_extent_count(ec);
-        println!("Global using: bs:{} es:{} ec:{}", bs, es, ec);
-    }
-
-    if ddef.block_size() != bs
-        || ddef.extent_size().value != es
-        || ddef.extent_size().block_size_in_bytes() != bs as u32
-        || ddef.extent_count() != ec
-    {
-        // XXX Figure out if we can hande this error.  Possibly not.
-        panic!("New downstairs region info mismatch");
-    }
-
     Ok(())
 }
 
@@ -314,6 +283,11 @@ async fn io_completed(
  * to be serviced.  The worker task will walk the hashmap and build a list
  * of new work that it needs to do.  It will then iterate through those
  * work items and send them over the wire to this tasks waiting downstairs.
+ *
+ * V1 flow control, if we have more than X (where X = 100 for now, as we
+ * don't know the best value yet, XXX) jobs submitted that we don't have
+ * ACKs for, then stop sending more work and let the receive side catch up.
+ * We return true if we have more work to do, false if we are all caught up.
  */
 #[instrument(skip(fw))]
 async fn io_send(
@@ -321,7 +295,7 @@ async fn io_send(
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
     client_id: u8,
     lossy: bool,
-) -> Result<()> {
+) -> Result<bool> {
     /*
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
@@ -352,7 +326,12 @@ async fn io_send(
      */
     new_work.sort_unstable();
 
+    let mut active_count = u.ds_work.lock().unwrap().submitted_work(client_id);
     for new_id in new_work.iter() {
+        if active_count >= 100 {
+            // Flow control inacted, stop sending work
+            return Ok(true);
+        }
         /*
          * Walk the list of work to do, update its status as in progress
          * and send the details to our downstairs.
@@ -371,6 +350,7 @@ async fn io_send(
             continue;
         }
 
+        active_count += 1;
         match job.unwrap() {
             IOop::Write {
                 dependencies,
@@ -415,22 +395,19 @@ async fn io_send(
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /*
  * Once we have a connection to a downstairs, this task takes over and
- * handles both the initial negotiation and then watches the input for
- * changes, indicating that new work in on the work hashmap.  We will
- * walk the hashmap on the input signal and get any new work for this
- * specific downstairs and mark that job as in progress.
+ * handles the initial negotiation.
  */
 async fn proc(
     target: &SocketAddrV4,
     up: &Arc<Upstairs>,
     mut sock: TcpStream,
     connected: &mut bool,
-    mut up_coms: UpComs,
+    up_coms: UpComs,
     lossy: bool,
 ) -> Result<()> {
     let (r, w) = sock.split();
@@ -448,89 +425,47 @@ async fn proc(
      * TODO: 50 is too long, but what is the correct value?
      */
     let mut deadline = deadline_secs(50);
-    let mut negotiated = false;
 
     /*
-     * To keep things alive, initiate a ping any time we have been idle for a
-     * second.
+     * Used to track where we are in the current negotiation.
      */
-    let mut pingat = deadline_secs(10);
-    let mut needping = false;
+    let mut negotiated = 0;
 
-    loop {
-        /*
-         * XXX Just a thought here, could we send so much input that the
-         * select would always have ds_work_rx.changed() and starve out the
-         * fr.next() select?  Does this select ever work that way?
-         */
+    /*
+     * Either we get all the way through the negotiation, or we hit the
+     * timeout and retry.
+     * XXX There are many ways we can handle this, but as we figure out
+     * how the upstairs is notified that a DS is new or moving, or other
+     * things, this way will work.  We will revisit when we have more info.
+     */
+    while !(*connected) {
         tokio::select! {
             _ = sleep_until(deadline) => {
-                if !negotiated {
-                    up.ds_transition(up_coms.client_id, DsState::Disconnected);
-                    bail!("did not negotiate a protocol");
-                }
-                /*
-                 * XXX What should happen here?  At the moment we just
-                 * ignore it..
-                 */
-                println!("Deadline ignored");
-            }
-            _ = sleep_until(pingat), if needping => {
-                fw.send(Message::Ruok).await?;
-                needping = false;
-                if lossy {
-                    /*
-                     * When lossy is set, we don't always send work to a
-                     * downstairs when we should.  This means we need to,
-                     * every now and then, signal the downstairs task to
-                     * check and see if we skipped some work earlier.
-                     */
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
-                }
-            }
-            _ = up_coms.ds_work_rx.changed() => {
-                /*
-                 * A change here indicates the work hashmap has changed
-                 * and we should go look for new work to do.  It is possible
-                 * that there is no new work but we won't know until we
-                 * check.
-                 */
-                /*
-                 * Debug XXX
-                let iv = *ds_work_rx.borrow();
-                println!("[{}] Input changed with {}", up_coms.client_id, iv);
-                 */
-                io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                up.ds_transition(up_coms.client_id, DsState::Disconnected);
+                bail!("did not negotiate a protocol");
             }
             f = fr.next() => {
-                /*
-                 * Negotiate protocol before we get into specifics.
-                 */
                 match f.transpose()? {
                     None => {
                         return Ok(())
                     }
                     Some(Message::YesItsMe(version)) => {
-                        if negotiated {
-                            bail!("negotiated already!");
+                        if negotiated != 0 {
+                            bail!("Got version already!");
                         }
                         /*
                          * XXX Valid version to compare with should come
-                         * from main task
+                         * from main task.  In the future we will also have
+                         * to handle a version mismatch.
                          */
                         if version != 1 {
-                            up.ds_transition(up_coms.client_id, DsState::BadVersion);
+                            up.ds_transition(
+                                up_coms.client_id,
+                                DsState::BadVersion
+                            );
                             bail!("expected version 1, got {}", version);
                         }
-                        /*
-                         * XXX BadRegion check will come when the upstairs
-                         * starts with the expected region size and we can
-                         * validate it.
-                         *
-                         * Until then, we just jump to waiting for quorum.
-                         */
-                        negotiated = true;
-                        needping = true;
+                        negotiated = 1;
                         deadline = deadline_secs(50);
 
                         /*
@@ -539,29 +474,38 @@ async fn proc(
                         fw.send(Message::RegionInfoPlease).await?;
                     }
                     Some(Message::RegionInfo(region_def)) => {
-
+                        if negotiated != 1 {
+                            bail!("Received RegionInfo out of order!");
+                        }
                         up.add_downstairs(up_coms.client_id, region_def)?;
+                        negotiated = 2;
+                        deadline = deadline_secs(50);
+
                         /*
                          * Ask for the current version of all extents.
                          */
                         fw.send(Message::ExtentVersionsPlease).await?;
                     },
-                    Some(Message::ExtentVersions(bs, es, ec, versions)) => {
-                        if !negotiated {
-                            bail!("expected YesItsMe first");
+                    Some(Message::ExtentVersions(versions)) => {
+                        if negotiated != 2 {
+                            bail!("Received ExtentVersions out of order!");
                         }
 
                         /*
-                         * We should be able to verify the bs, es, and ec
-                         * based on what the upstairs knows already.
+                         * XXX This logic may move to a different location
+                         * when we actually get the code written to handle
+                         * mismatch between downstairs extent versions.
                          * For comparing the region data, we need to collect
                          * version and dirty bit info from all three
                          * downstairs, and make the decision on which data is
                          * correct once we have everything.
                          */
-                        process_downstairs(target, up, bs, es, ec, versions)?;
+                        process_downstairs(target, up, versions)?;
 
-                        up.ds_transition(up_coms.client_id, DsState::WaitQuorum);
+                        up.ds_transition(
+                            up_coms.client_id,
+                            DsState::WaitQuorum
+                        );
                         up.ds_state_show();
 
                         /*
@@ -575,19 +519,134 @@ async fn proc(
                         .unwrap();
                     }
                     Some(m) => {
-                        if !negotiated {
-                            bail!("expected YesItsMe first");
-                        }
+                        bail!("Unexpected command received {:?}", m);
+                    }
+                }
+            }
+        }
+    }
+    println!("[{}] Client completed negotiation", up_coms.client_id);
+    cmd_loop(up, fr, fw, up_coms, lossy).await
+}
+
+/*
+ * Once we have negotiated a connection to a downstairs, this task takes
+ * over and watches the input for changes, indicating that new work in on
+ * the work hashmap.  We will walk the hashmap on the input signal and get
+ * any new work for this specific downstairs and mark that job as in progress.
+ *
+ * V1 flow control: To enable flow control we have a few things.
+ * 1. The boolean flow_control variable, that indicates we are in a
+ * flow control situation and should check for work to do even if new work
+ * has not shown up.
+ * 2. A resume timeout that is reset each time we try to do more work but
+ * find the sending queue is "full" for some value of full we define in
+ * the io_work function.
+ * 3. Biased setting for the select loop.  We start with looking for work
+ * ACK messages before putting more new work on the list, which will
+ * enable any downstairs to continue to send completed ACKs.
+ */
+async fn cmd_loop(
+    up: &Arc<Upstairs>,
+    mut fr: FramedRead<
+        tokio::net::tcp::ReadHalf<'_>,
+        crucible_protocol::CrucibleDecoder,
+    >,
+    mut fw: FramedWrite<
+        tokio::net::tcp::WriteHalf<'_>,
+        crucible_protocol::CrucibleEncoder,
+    >,
+    mut up_coms: UpComs,
+    lossy: bool,
+) -> Result<()> {
+    println!("[{}] Starts cmd_loop", up_coms.client_id);
+
+    /*
+     * Don't wait more than 50 seconds to hear from the other side.
+     * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
+     * TODO: 50 is too long, but what is the correct value?
+     */
+    let mut deadline = deadline_secs(5);
+
+    /*
+     * To keep things alive, initiate a ping any time we have been idle for a
+     * second.
+     */
+    let mut pingat = deadline_secs(10);
+    let mut needping = false;
+
+    let mut flow_control = false;
+    let mut resume = deadline_secs(5);
+    loop {
+        tokio::select! {
+            /*
+             * We set biased so the loop will always start with looking for
+             * an ACK from downstairs to avoid a backup.
+             */
+            biased;
+            f = fr.next() => {
+                match f.transpose()? {
+                    None => {
+                        return Ok(())
+                    },
+                    Some(m) => {
                         /*
                          * TODO: Add a check here to make sure we are
                          * connected and in the proper state before we
                          * accept any commands.
                          */
-                        proc_frame(up, &m, up_coms.clone()).await?;
+                        process_message(up, &m, up_coms.clone()).await?;
                         deadline = deadline_secs(50);
                         pingat = deadline_secs(10);
                         needping = true;
                     }
+                }
+            }
+            _ = up_coms.ds_work_rx.changed() => {
+                /*
+                 * A change here indicates the work hashmap has changed
+                 * and we should go look for new work to do.  It is possible
+                 * that there is no new work but we won't know until we
+                 * check.
+                 */
+                let more = io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                if more {
+                    resume = deadline_secs(1);
+                    if !flow_control {
+                        println!("[{}] flow control start ", up_coms.client_id);
+                        flow_control = true;
+                    }
+                }
+            }
+            _ = sleep_until(resume), if flow_control => {
+                let more = io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                if more {
+                    resume = deadline_secs(1);
+                    flow_control = true;
+                } else {
+                    flow_control = false;
+                    println!("[{}] flow control end ", up_coms.client_id);
+                }
+            }
+            _ = sleep_until(deadline) => {
+                /*
+                 * XXX What should happen here?  At the moment we just
+                 * ignore it..
+                 */
+                println!("[{}] proc 2 Deadline ignored", up_coms.client_id);
+                deadline = deadline_secs(50);
+            }
+            _ = sleep_until(pingat), if needping => {
+                fw.send(Message::Ruok).await?;
+                needping = false;
+                if lossy {
+                    /*
+                     * When lossy is set, we don't always send work to a
+                     * downstairs when we should.  This means we need to,
+                     * every now and then, signal the downstairs task to
+                     * check and see if we skipped some work earlier.
+                     */
+                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
                 }
             }
         }
@@ -794,7 +853,19 @@ impl Work {
     }
 
     /**
-     * Build an in order list of jobs that are ready to be acked.
+     * Return a count of downstairs request IDs of work we have sent
+     * for this client, but don't yet have a reponse.
+     */
+    fn submitted_work(&self, client_id: u8) -> usize {
+        self.active
+            .values()
+            .filter(|job| {
+                Some(&IOState::InProgress) == job.state.get(&client_id)
+            })
+            .count()
+    }
+    /**
+     * Build a list of jobs that are ready to be acked.
      */
     fn ackable_work(&mut self) -> Vec<u64> {
         let mut ackable = Vec::new();
@@ -1606,17 +1677,23 @@ impl Upstairs {
     fn add_downstairs(
         &self,
         client_id: u8,
-        rdef: RegionDefinition,
+        client_ddef: RegionDefinition,
     ) -> Result<()> {
-        println!("[{}] Got region def {:?}", client_id, rdef);
+        println!("[{}] Got region def {:?}", client_id, client_ddef);
 
+        /*
+         * XXX Eventually we will be provided UUIDs when the upstairs
+         * starts, so we can compare those with what we get here.
+         *
+         * For now, we take whatever connects to us first.
+         */
         let mut uuid_hm = self.ds_uuid.lock().unwrap();
         if let Some(uuid) = uuid_hm.get(&client_id) {
-            if *uuid != rdef.uuid() {
+            if *uuid != client_ddef.uuid() {
                 panic!(
                     "New client:{} uuid:{}  does not match existing {}",
                     client_id,
-                    rdef.uuid(),
+                    client_ddef.uuid(),
                     uuid
                 );
             } else {
@@ -1626,15 +1703,41 @@ impl Upstairs {
                 );
             }
         } else {
-            uuid_hm.insert(client_id, rdef.uuid());
+            uuid_hm.insert(client_id, client_ddef.uuid());
         }
 
         println!("UUIDS: {:?}", uuid_hm);
 
-        // TODO: move the logic for the block size, extent size, and extent
-        // count to this location.  Determine here if this downstairs
-        // matches what we expect.
-        //
+        /*
+         * XXX Until we are passed expected region info at start, we
+         * can only compare the three downstairs to each other and move
+         * forward if all three are the same.
+         *
+         * For now I'm using zero as an indication that we don't yet know
+         * the valid values and non-zero meaning we have at least one
+         * downstairs to compare with.
+         *
+         * 0 should never be a valid block size, so this hack will let us
+         * move forward until we get the expected region info at startup.
+         */
+        let mut ddef = self.ddef.lock().unwrap();
+        if ddef.block_size() == 0 {
+            ddef.set_block_size(client_ddef.block_size());
+            ddef.set_extent_size(client_ddef.extent_size());
+            ddef.set_extent_count(client_ddef.extent_count());
+            println!("Setting expected region info to: {:?}", client_ddef);
+        }
+
+        if ddef.block_size() != client_ddef.block_size()
+            || ddef.extent_size().value != client_ddef.extent_size().value
+            || ddef.extent_size().block_size_in_bytes()
+                != client_ddef.extent_size().block_size_in_bytes()
+            || ddef.extent_count() != client_ddef.extent_count()
+        {
+            // XXX Figure out if we can hande this error.  Possibly not.
+            panic!("New downstairs region info mismatch");
+        }
+
         Ok(())
     }
 }
@@ -1864,7 +1967,7 @@ impl IOStateCount {
     }
 
     fn show_all(&mut self) {
-        println!("   States    | ds:0 | ds:1 | ds:2 | Total| ");
+        println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
         self.show(IOState::New);
         self.show(IOState::InProgress);
         self.show(IOState::Done);
@@ -1878,31 +1981,31 @@ impl IOStateCount {
         match state {
             IOState::New => {
                 state_stat = self.new;
-                print!("    New      | ");
+                print!("    New        ");
             }
             IOState::InProgress => {
                 state_stat = self.in_progress;
-                print!("    Sent     | ");
+                print!("    Sent       ");
             }
             IOState::Done => {
                 state_stat = self.done;
-                print!("    Done     | ");
+                print!("    Done       ");
             }
             IOState::Skipped => {
                 state_stat = self.skipped;
-                print!("    Skipped  | ");
+                print!("    Skipped    ");
             }
             IOState::Error(_) => {
                 state_stat = self.error;
-                print!("    Error    | ");
+                print!("    Error      ");
             }
         }
         let mut sum = 0;
         for ds_stat in state_stat {
-            print!("{:4} | ", ds_stat);
+            print!("{:4}   ", ds_stat);
             sum += ds_stat;
         }
-        println!("{:4} |", sum);
+        println!("{:4}", sum);
     }
 
     pub fn incr(&mut self, state: &IOState, cid: u8) {
@@ -2797,6 +2900,15 @@ async fn up_listen(
         }
 
         println!("All expected targets are online, Now accepting IO requests");
+        /*
+         * XXX The real check to transition from WaitQuorum to Active can
+         * happen now, as all three are connected and ready.  Right now this
+         * happens in process_downstaris() and in the wrong way.
+         */
+
+        /*
+         * Consider how the DsState::Failed is handled here, if necessary
+         */
         up.ds_transition_all(DsState::Active);
         up.ds_state_show();
 
@@ -3051,11 +3163,8 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     } else {
         println!(
-            "gw_id |     ACK  | dsid | Type  | ExtID|bl_off|bl_len\
-            | ds:0 | ds:1 | ds:2 |"
-        );
-        println!(
-            "----------------------------------------------------------------"
+            "GW_ID      ACK   DSID   TYPE   ExtID BL_OFF BL_LEN \
+            DS:0 DS:1 DS:2"
         );
         kvec.sort_unstable();
         for id in kvec.iter() {
@@ -3094,27 +3203,26 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     job_type = "Flush".to_string();
                 }
             };
-            //let state = work.active.get_mut(&next_id).unwrap().ack_status;
             let state = job.ack_status;
             print!(
-                " {:4} | {:8} | {:4} | {} | {:4} | {:4} | {:4} | ",
+                " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
                 job.guest_id, state, id, job_type, io_eid, io_offset, io_len
             );
+
             for cid in 0..3 {
                 let state = job.state.get(&cid);
                 match state {
                     Some(state) => {
-                        print!("{} | ", state);
+                        print!("{} ", state);
                         iosc.incr(state, cid);
                     }
                     _x => {
-                        print!("???? | ");
+                        print!("???? ");
                     }
                 }
             }
             println!();
         }
-        println!();
         iosc.show_all();
     }
 

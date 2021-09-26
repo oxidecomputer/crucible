@@ -475,14 +475,8 @@ async fn proc_frame(
             fw.send(Message::RegionInfo(rd)).await?;
         }
         Message::ExtentVersionsPlease => {
-            let (bs, es, ec) = d.region.region_def();
-            fw.send(Message::ExtentVersions(
-                bs,
-                es.value,
-                ec,
-                d.region.versions(),
-            ))
-            .await?;
+            fw.send(Message::ExtentVersions(d.region.versions()))
+                .await?;
         }
         Message::Write(ds_id, eid, dependencies, offset, data) => {
             let new_write = IOop::Write {

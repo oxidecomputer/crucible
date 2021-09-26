@@ -17,7 +17,7 @@ pub enum Message {
     RegionInfoPlease,
     RegionInfo(RegionDefinition),
     ExtentVersionsPlease,
-    ExtentVersions(u64, u64, u32, Vec<u64>),
+    ExtentVersions(Vec<u64>),
     Write(u64, u64, Vec<u64>, Block, bytes::Bytes),
     WriteAck(u64, Result<(), CrucibleError>),
     Flush(u64, Vec<u64>, u64),
@@ -177,15 +177,14 @@ mod tests {
 
     #[test]
     fn rt_ev_0() -> Result<()> {
-        let input = Message::ExtentVersions(2, 4, 6, vec![]);
+        let input = Message::ExtentVersions(vec![]);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
 
     #[test]
     fn rt_ev_7() -> Result<()> {
-        let input =
-            Message::ExtentVersions(2, 4, 6, vec![1, 2, 3, 4, u64::MAX, 1, 0]);
+        let input = Message::ExtentVersions(vec![1, 2, 3, 4, u64::MAX, 1, 0]);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

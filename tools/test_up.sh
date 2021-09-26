@@ -68,8 +68,9 @@ done
 
 echo "Running hammer"
 if ! time cargo run -p crucible-hammer -- \
-    "${args[@]}" \
-    --key "$(openssl rand -base64 32)"; then
+  "${args[@]}" \
+  --key "$(openssl rand -base64 32)"; then
+
 	echo "Failed hammer test"
     res=1
 fi
