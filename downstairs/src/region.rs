@@ -3,14 +3,13 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
-use serde::{Deserialize, Serialize};
-
 use crucible_common::*;
-
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 #[derive(Debug)]
@@ -24,13 +23,65 @@ pub struct Extent {
 #[derive(Debug)]
 pub struct Inner {
     file: File,
-    meta: ExtentMeta,
+    metadb: Connection,
 }
 
-/*
- * Warning, changing this struct will change what is written to and expected
- * from the physical storage device.
- */
+impl Inner {
+    fn flush_number(&self) -> Result<u64> {
+        let mut stmt = self
+            .metadb
+            .prepare("SELECT value FROM metadata where name='flush_number'")?;
+        let flush_number_iter = stmt.query_map([], |row| row.get(0))?;
+
+        let mut flush_number_values: Vec<u64> = vec![];
+        for flush_number_value in flush_number_iter {
+            flush_number_values.push(flush_number_value?);
+        }
+
+        assert!(flush_number_values.len() == 1);
+
+        Ok(flush_number_values[0])
+    }
+
+    fn set_flush_number(&self, new_flush: u64) -> Result<()> {
+        /*
+         * When we write out the new flush number, the dirty bit should be set back to false.
+         */
+        let mut stmt = self
+            .metadb
+            .prepare(
+                "UPDATE metadata SET value=?1 WHERE name='flush_number'; UPDATE metadata SET dirty=0",
+            )?;
+
+        let _rows_affected = stmt.execute(params![new_flush])?;
+
+        Ok(())
+    }
+
+    fn dirty(&self) -> Result<bool> {
+        let mut stmt = self
+            .metadb
+            .prepare("SELECT value FROM metadata where name='dirty'")?;
+        let dirty_iter = stmt.query_map([], |row| row.get(0))?;
+
+        let mut dirty_values: Vec<bool> = vec![];
+        for dirty_value in dirty_iter {
+            dirty_values.push(dirty_value?);
+        }
+
+        assert!(dirty_values.len() == 1);
+
+        Ok(dirty_values[0])
+    }
+
+    fn set_dirty(&self) -> Result<()> {
+        let _rows_affected = self
+            .metadb
+            .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExtentMeta {
     /**
@@ -100,57 +151,46 @@ impl Extent {
          * Store extent data in files within a directory hierarchy so that there
          * are not too many files in any level of that hierarchy.
          */
-        let path = extent_path(dir, number);
+        let mut path = extent_path(dir, number);
 
-        /*
-         * Leave a block at the beginning of the file as a place to scribble
-         * metadata.
-         */
-        let bcount = def.extent_size().value.checked_add(1).unwrap();
+        let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
 
         /*
          * Open the extent file and verify the size is as we expect.
          */
-        let mut file =
-            match OpenOptions::new().read(true).write(true).open(&path) {
-                Err(e) => {
-                    bail!("Error: e {} No extent file found for {:?}", e, path);
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Err(e) => {
+                bail!("Error: e {} No extent file found for {:?}", e, path);
+            }
+            Ok(f) => {
+                let cur_size = f.metadata().unwrap().len();
+                if size != cur_size {
+                    bail!(
+                        "File size {:?} does not match expected {:?}",
+                        size,
+                        cur_size
+                    );
                 }
-                Ok(f) => {
-                    let cur_size = f.metadata().unwrap().len();
-                    if size != cur_size {
-                        bail!(
-                            "File size {:?} does not match expected {:?}",
-                            size,
-                            cur_size
-                        );
-                    }
-                    f
-                }
-            };
+                f
+            }
+        };
 
         /*
-         * Read in the metadata from the beginning of the extent file.
+         * Open a connection to the metadata db
          */
-        let size = bincode::serialized_size(&ExtentMeta::default()).unwrap();
-        let mut encoded: Vec<u8> = vec![0; size as usize];
-        file.read_exact(&mut encoded)?;
-        let buf: ExtentMeta = bincode::deserialize(&encoded[..]).unwrap();
+        path.set_extension("db");
+        let metadb = Connection::open(&path)?;
+        assert!(metadb.is_autocommit());
+        metadb.pragma_update(None, "journal_mode", &"WAL")?;
+
+        // XXX: schema updates?
 
         Ok(Extent {
             number,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Mutex::new(Inner {
-                file,
-                meta: ExtentMeta {
-                    ext_version: buf.ext_version,
-                    gen: buf.gen,
-                    flush_number: buf.flush_number,
-                    dirty: false,
-                },
-            }),
+            inner: Mutex::new(Inner { file, metadb }),
         })
     }
 
@@ -168,7 +208,7 @@ impl Extent {
          * Store extent data in files within a directory hierarchy so that there
          * are not too many files in any level of that hierarchy.
          */
-        let path = extent_path(dir, number);
+        let mut path = extent_path(dir, number);
 
         /*
          * Verify there are not existing extent files.
@@ -177,16 +217,10 @@ impl Extent {
             bail!("Extent file already exists {:?}", path);
         }
 
-        /*
-         * Leave a block at the beginning of the file as a place to scribble
-         * metadata.
-         */
-        let bcount = def.extent_size().value.checked_add(1).unwrap();
+        let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
 
         mkdir_for_file(&path)?;
-        /*
-         */
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -197,12 +231,36 @@ impl Extent {
         file.seek(SeekFrom::Start(0))?;
 
         /*
-         * Write out the new inner.meta structure for this new extent.
+         * Create the metadata db
          */
+        path.set_extension("db");
+        let metadb = Connection::open(&path)?;
+        assert!(metadb.is_autocommit());
+        metadb.pragma_update(None, "journal_mode", &"WAL")?;
+
+        /*
+         * Create tables and insert base data
+         */
+        metadb.execute(
+            "CREATE TABLE metadata (
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
         let meta = ExtentMeta::default();
-        let encoded: Vec<u8> = bincode::serialize(&meta).unwrap();
-        file.write_all(&encoded)?;
-        file.flush()?;
+
+        //metadb.execute("INSERT INTO metadata (name, value) VALUES (?1, ?2)", params!["ext_version", meta.ext_version])?;
+        //metadb.execute("INSERT INTO metadata (name, value) VALUES (?1, ?2)", params!["gen", meta.gen])?;
+        metadb.execute(
+            "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+            params!["flush_number", meta.flush_number],
+        )?;
+        metadb.execute(
+            "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+            params!["dirty", meta.dirty],
+        )?;
 
         /*
          * Complete the construction of our new extent
@@ -211,12 +269,12 @@ impl Extent {
             number,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Mutex::new(Inner { file, meta }),
+            inner: Mutex::new(Inner { file, metadb }),
         })
     }
 
-    fn flush_number(&self) -> u64 {
-        self.inner.lock().unwrap().meta.flush_number
+    fn inner(&self) -> MutexGuard<Inner> {
+        self.inner.lock().unwrap()
     }
 
     #[instrument]
@@ -227,10 +285,7 @@ impl Extent {
     ) -> Result<(), CrucibleError> {
         self.check_input(offset, data)?;
 
-        /*
-         * Skip metadata block
-         */
-        let byte_offset = (offset.value + 1) * self.block_size;
+        let byte_offset = offset.value * self.block_size;
 
         let mut inner = self.inner.lock().unwrap();
         inner.file.seek(SeekFrom::Start(byte_offset))?;
@@ -289,32 +344,9 @@ impl Extent {
 
         self.check_input(offset, data)?;
 
-        if !inner.meta.dirty {
-            inner.file.seek(SeekFrom::Start(0))?;
-            let encoded: Vec<u8> = bincode::serialize(&inner.meta).unwrap();
-            inner.file.write_all(&encoded)?;
-            inner.file.flush()?;
+        inner.set_dirty()?;
 
-            if unsafe { fsync(inner.file.as_raw_fd()) } == -1 {
-                let e = std::io::Error::last_os_error();
-                /*
-                 * XXX Retry?  Mark extent as broken?
-                 */
-                crucible_bail!(
-                    IoError,
-                    "extent {}: fsync 2 failure: {:?}",
-                    self.number,
-                    e
-                );
-            }
-
-            inner.meta.dirty = true;
-        }
-
-        /*
-         * Skip metadata block
-         */
-        let byte_offset = (offset.value + 1) * self.block_size;
+        let byte_offset = offset.value * self.block_size;
 
         inner.file.seek(SeekFrom::Start(byte_offset))?;
         inner.file.write_all(data)?;
@@ -327,7 +359,7 @@ impl Extent {
     pub fn flush_block(&self, new_flush: u64) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
-        if !inner.meta.dirty {
+        if !inner.dirty()? {
             /*
              * If we have made no writes to this extent since the last flush,
              * we do not need to update the extent on disk
@@ -354,41 +386,7 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        /*
-         * When we write out the new flush number, the dirty bit in the file
-         * should be set back to false
-         * We create a new ExtentMeta structure and write that out first,
-         * before we update our internal structure.  This gives us a
-         * chance to recover if the write or fsync fail.
-         */
-        let new_meta = ExtentMeta {
-            ext_version: inner.meta.ext_version,
-            gen: inner.meta.gen,
-            flush_number: new_flush,
-            dirty: false,
-        };
-
-        let encoded: Vec<u8> = bincode::serialize(&new_meta).unwrap();
-        inner.file.write_all(&encoded)?;
-        inner.file.flush()?;
-
-        /*
-         * Fsync the metadata update
-         */
-        if unsafe { fsync(inner.file.as_raw_fd()) } == -1 {
-            let e = std::io::Error::last_os_error();
-            /*
-             * XXX Retry?  Mark extent as broken?
-             */
-            crucible_bail!(
-                IoError,
-                "extent {}: fsync 2 failure: {:?}",
-                self.number,
-                e
-            );
-        }
-
-        inner.meta = new_meta;
+        inner.set_flush_number(new_flush)?;
 
         Ok(())
     }
@@ -426,14 +424,6 @@ impl Region {
         mkdir_for_file(&cp)?;
 
         let def = RegionDefinition::from_options(&options).unwrap();
-        if bincode::serialized_size(&ExtentMeta::default()).unwrap()
-            > def.block_size()
-        {
-            bail!(
-                "Extent metadata will not fit in block size {}",
-                def.block_size()
-            );
-        }
         write_json(&cp, &def, false)?;
         println!("Created new region file {:?}", cp);
 
@@ -541,12 +531,12 @@ impl Region {
         self.def
     }
 
-    pub fn versions(&self) -> Vec<u64> {
+    pub fn versions(&self) -> Result<Vec<u64>> {
         let mut ver = self
             .extents
             .iter()
-            .map(|e| e.flush_number())
-            .collect::<Vec<_>>();
+            .map(|e| e.inner().flush_number())
+            .collect::<Result<Vec<_>>>()?;
 
         if ver.len() > 12 {
             ver = ver[0..12].to_vec();
@@ -555,8 +545,8 @@ impl Region {
 
         self.extents
             .iter()
-            .map(|e| e.flush_number())
-            .collect::<Vec<_>>()
+            .map(|e| e.inner().flush_number())
+            .collect::<Result<Vec<_>>>()
     }
 
     #[instrument]
@@ -603,8 +593,8 @@ mod test {
     use super::extent_path;
     use super::*;
     use bytes::BufMut;
-    use std::fs::remove_dir_all;
     use std::path::PathBuf;
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     fn p(s: &str) -> PathBuf {
@@ -613,9 +603,11 @@ mod test {
 
     fn new_extent() -> Extent {
         let ff = File::open("/dev/null").unwrap();
-        let em = ExtentMeta::default();
 
-        let inn = Inner { file: ff, meta: em };
+        let inn = Inner {
+            file: ff,
+            metadb: Connection::open_in_memory().unwrap(),
+        };
 
         /*
          * Note: All the tests expect 512 and 100, so if you change
@@ -635,10 +627,6 @@ mod test {
         TEST_UUID_STR.parse().unwrap()
     }
 
-    pub fn test_cleanup() {
-        let _ = remove_dir_all("/tmp/ds_test");
-    }
-
     fn new_region_options() -> crucible_common::RegionOptions {
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
@@ -652,33 +640,30 @@ mod test {
 
     #[test]
     fn new_region() -> Result<()> {
-        test_cleanup();
-
-        let data = p("/tmp/ds_test/1");
-        let _ = Region::create(&data, new_region_options());
-        remove_dir_all("/tmp/ds_test/1").unwrap();
+        let dir = tempdir()?;
+        let _ = Region::create(&dir, new_region_options());
         Ok(())
     }
+
     #[test]
     fn new_existing_region() -> Result<()> {
-        test_cleanup();
-
-        let data = p("/tmp/ds_test/2");
-        let _ = Region::create(&data, new_region_options());
-        let _ = Region::open(&data, new_region_options());
-        remove_dir_all("/tmp/ds_test/2").unwrap();
+        let dir = tempdir()?;
+        let _ = Region::create(&dir, new_region_options());
+        let _ = Region::open(&dir, new_region_options());
         Ok(())
     }
+
     #[test]
     #[should_panic]
     fn bad_import_region() -> () {
-        test_cleanup();
-
-        let data = p("/tmp/ds_test/3");
-        let _ = Region::open(&data, new_region_options());
-        remove_dir_all("/tmp/ds_test/3").unwrap();
+        let _ = Region::open(
+            &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
+            new_region_options(),
+        )
+        .unwrap();
         ()
     }
+
     #[test]
     fn extent_io_valid() {
         let ext = new_extent();

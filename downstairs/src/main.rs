@@ -480,7 +480,7 @@ async fn proc_frame(
                 bs,
                 es.value,
                 ec,
-                d.region.versions(),
+                d.region.versions()?,
             ))
             .await?;
         }
