@@ -43,10 +43,9 @@ impl Inner {
         Ok(flush_number_values[0])
     }
 
-    fn set_new_flush_number(&self, new_flush: u64) -> Result<()> {
+    fn set_flush_number(&self, new_flush: u64) -> Result<()> {
         /*
-         * When we write out the new flush number, the dirty bit in the file
-         * should be set back to false.
+         * When we write out the new flush number, the dirty bit should be set back to false.
          */
         let mut stmt = self
             .metadb
@@ -387,7 +386,7 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        inner.set_new_flush_number(new_flush)?;
+        inner.set_flush_number(new_flush)?;
 
         Ok(())
     }
