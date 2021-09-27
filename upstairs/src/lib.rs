@@ -7,7 +7,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddrV4;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::Duration;
 
 use crucible_common::*;
@@ -341,12 +341,10 @@ async fn io_send(
         }
 
         /*
-         * If in_progress returns None, it means that this client should be skipped. That means
-         * that it has return an error somewhere and should be set as failed.
+         * If in_progress returns None, it means that this client should be skipped.
          */
         let job = u.ds_work.lock().unwrap().in_progress(*new_id, client_id);
         if job.is_none() {
-            u.ds_transition(client_id, DsState::Failed);
             continue;
         }
 
@@ -778,6 +776,7 @@ async fn looper(
  */
 #[derive(Debug)]
 pub struct Work {
+    up: Weak<Upstairs>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
@@ -799,6 +798,18 @@ pub struct WorkCounts {
 impl WorkCounts {
     fn completed_ok(&self) -> u64 {
         self.done
+    }
+}
+
+impl Default for Work {
+    fn default() -> Self {
+        Self {
+            up: Weak::new(),
+            downstairs_errors: HashMap::new(),
+            active: HashMap::new(),
+            completed: AllocRingBuffer::with_capacity(2048),
+            next_id: 1000,
+        }
     }
 }
 
@@ -1116,6 +1127,13 @@ impl Work {
                     None => 0,
                 };
                 self.downstairs_errors.insert(client_id, errors + 1);
+
+                if let Some(up) = self.up.upgrade() {
+                    up.ds_transition(client_id, DsState::Failed);
+                } else {
+                    // XXX send somewhere
+                    panic!("error upgrading!");
+                }
             }
         }
 
@@ -1293,10 +1311,28 @@ pub struct Upstairs {
 }
 
 impl Upstairs {
-    pub fn new(opt: &CrucibleOpts, guest: Arc<Guest>) -> Arc<Upstairs> {
+    pub fn default() -> Arc<Self> {
+        let opts = CrucibleOpts {
+            target: vec![],
+            lossy: false,
+            key: None,
+        };
+        Self::new(
+            &opts,
+            RegionDefinition::default(),
+            Arc::new(Guest::default()),
+        )
+    }
+
+    pub fn new(
+        opt: &CrucibleOpts,
+        def: RegionDefinition,
+        guest: Arc<Guest>,
+    ) -> Arc<Upstairs> {
         /*
          * XXX Make sure we have three and only three downstairs
          */
+        #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
         // create an encryption context if a key is supplied.
@@ -1314,21 +1350,19 @@ impl Upstairs {
             )
         });
 
-        let ds_state = vec![DsState::New; 3];
-        Arc::new(Upstairs {
+        let up = Arc::new(Upstairs {
             guest,
-            ds_state: Mutex::new(ds_state),
+            ds_state: Mutex::new(vec![DsState::New; 3]),
             ds_uuid: Mutex::new(HashMap::new()),
-            ds_work: Mutex::new(Work {
-                downstairs_errors: HashMap::new(),
-                active: HashMap::new(),
-                completed: AllocRingBuffer::with_capacity(2048),
-                next_id: 1000,
-            }),
+            ds_work: Mutex::new(Work::default()),
             flush_info: Mutex::new(FlushInfo::new()),
-            ddef: Mutex::new(RegionDefinition::default()),
+            ddef: Mutex::new(def),
             encryption_context,
-        })
+        });
+
+        up.ds_work.lock().unwrap().up = Arc::downgrade(&up);
+
+        up
     }
 
     /*
@@ -2966,7 +3000,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, guest);
+    let up = Upstairs::new(&opt, RegionDefinition::default(), guest);
 
     /*
      * Use this channel to receive updates on target status from each task
@@ -3677,20 +3711,13 @@ mod test {
         def.set_extent_size(Block::new_512(100));
         def.set_extent_count(10);
 
-        Arc::new(Upstairs {
-            guest: Arc::new(Guest::new()),
-            ds_state: Mutex::new(vec![DsState::New; 3]),
-            ds_uuid: Mutex::new(HashMap::new()),
-            ds_work: Mutex::new(Work {
-                downstairs_errors: HashMap::new(),
-                active: HashMap::new(),
-                completed: AllocRingBuffer::with_capacity(2),
-                next_id: 1000,
-            }),
-            flush_info: Mutex::new(FlushInfo::new()),
-            ddef: Mutex::new(def),
-            encryption_context: None,
-        })
+        let opts = CrucibleOpts {
+            target: vec![],
+            lossy: false,
+            key: None,
+        };
+
+        Upstairs::new(&opts, def, Arc::new(Guest::new()))
     }
 
     /*
@@ -3875,12 +3902,8 @@ mod test {
 
     #[test]
     fn work_flush_three_ok() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -3911,12 +3934,8 @@ mod test {
 
     #[test]
     fn work_flush_one_error_then_ok() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -3955,12 +3974,8 @@ mod test {
 
     #[test]
     fn work_flush_two_errors_equals_fail() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4008,12 +4023,8 @@ mod test {
 
     #[test]
     fn work_read_one_ok() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4050,12 +4061,8 @@ mod test {
 
     #[test]
     fn work_read_one_bad_two_ok() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4101,12 +4108,8 @@ mod test {
 
     #[test]
     fn work_read_two_bad_one_ok() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4160,12 +4163,8 @@ mod test {
 
     #[test]
     fn work_read_three_bad() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4228,12 +4227,8 @@ mod test {
 
     #[test]
     fn work_assert_no_transfer_of_bad_read() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4288,12 +4283,8 @@ mod test {
 
     #[test]
     fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4370,12 +4361,8 @@ mod test {
 
     #[test]
     fn work_assert_reads_do_not_cause_failure_state_transition() {
-        let mut work = Work {
-            downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
-            completed: AllocRingBuffer::with_capacity(2),
-            next_id: 1000,
-        };
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.ds_work.lock().unwrap();
 
         let next_id = work.next_id();
 
