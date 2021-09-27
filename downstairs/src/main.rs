@@ -475,7 +475,7 @@ async fn proc_frame(
             fw.send(Message::RegionInfo(rd)).await?;
         }
         Message::ExtentVersionsPlease => {
-            fw.send(Message::ExtentVersions(d.region.versions()))
+            fw.send(Message::ExtentVersions(d.region.versions()?))
                 .await?;
         }
         Message::Write(ds_id, eid, dependencies, offset, data) => {

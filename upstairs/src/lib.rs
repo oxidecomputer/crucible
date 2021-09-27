@@ -1946,8 +1946,6 @@ impl fmt::Display for IOState {
 struct IOStateCount {
     new: [u32; 3],
     in_progress: [u32; 3],
-    ack_ready: [u32; 3],
-    acked: [u32; 3],
     done: [u32; 3],
     skipped: [u32; 3],
     error: [u32; 3],
@@ -1958,8 +1956,6 @@ impl IOStateCount {
         IOStateCount {
             new: [0; 3],
             in_progress: [0; 3],
-            ack_ready: [0; 3],
-            acked: [0; 3],
             done: [0; 3],
             skipped: [0; 3],
             error: [0; 3],
