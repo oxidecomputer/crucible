@@ -7,7 +7,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddrV4;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use crucible_common::*;
@@ -770,7 +770,6 @@ async fn looper(
  */
 #[derive(Debug)]
 pub struct Work {
-    up: Weak<Upstairs>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
@@ -798,7 +797,6 @@ impl WorkCounts {
 impl Default for Work {
     fn default() -> Self {
         Self {
-            up: Weak::new(),
             downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
@@ -1337,7 +1335,7 @@ impl Upstairs {
             )
         });
 
-        let up = Arc::new(Upstairs {
+        Arc::new(Upstairs {
             guest,
             ds_state: Mutex::new(vec![DsState::New; 3]),
             ds_uuid: Mutex::new(HashMap::new()),
@@ -1345,11 +1343,7 @@ impl Upstairs {
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
-        });
-
-        up.ds_work.lock().unwrap().up = Arc::downgrade(&up);
-
-        up
+        })
     }
 
     /*
