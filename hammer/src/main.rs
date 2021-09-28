@@ -88,35 +88,64 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
-    /*
-     * The structure we use to send work from outside crucible into the
-     * Upstairs main task.
-     * We create this here instead of inside up_main() so we can use
-     * the methods provided by guest to interact with Crucible.
-     */
-    let guest = Arc::new(Guest::new());
+    // Create 5 CruciblePseudoFiles to test activation handoff.
+    let mut cpfs: Vec<crucible::CruciblePseudoFile> = Vec::with_capacity(5);
 
-    runtime.spawn(up_main(crucible_opts, guest.clone()));
-    println!("Crucible runtime is spawned");
+    for _ in 0..5 {
+        /*
+         * The structure we use to send work from outside crucible into the
+         * Upstairs main task.
+         * We create this here instead of inside up_main() so we can use
+         * the methods provided by guest to interact with Crucible.
+         */
+        let guest = Arc::new(Guest::new());
 
-    let bs = guest.query_block_size()? as u64;
-    let sz = guest.query_total_size()? as u64;
-    println!("advertised size as {} bytes ({} byte blocks)", sz, bs);
+        runtime.spawn(up_main(crucible_opts.clone(), guest.clone()));
+        println!("Crucible runtime is spawned");
 
-    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
+        cpfs.push(crucible::CruciblePseudoFile::from_guest(guest)?);
+    }
 
     use rand::Rng;
     let mut rng = rand::thread_rng();
 
+    let rounds = 25000;
+    let handoff_amount = 25000 / 5;
+    let mut cpf_idx = 0;
+
+    println!("Handing off to CPF {}", cpf_idx);
+    cpfs[cpf_idx].activate()?;
+
     if opt.verify_isolation {
         println!("clearing...");
+
+        let cpf = &mut cpfs[0];
         cpf.seek(SeekFrom::Start(0))?;
+
+        let bs = cpf.block_size();
+        let sz = cpf.sz();
+
         for _ in 0..(sz / bs) {
             cpf.write_all(&vec![0; bs as usize])?;
         }
     }
 
-    for _ in 0..25000 {
+    for idx in 0..rounds {
+        let cpf = if idx / handoff_amount != cpf_idx {
+            cpf_idx = idx / handoff_amount;
+            assert!(cpf_idx != 0);
+
+            println!("Handing off to CPF {}", cpf_idx);
+
+            let cpf = &mut cpfs[cpf_idx];
+            cpf.activate()?;
+            cpf
+        } else {
+            &mut cpfs[cpf_idx]
+        };
+
+        let sz = cpf.sz();
+
         let mut offset: u64 = rng.gen::<u64>() % sz;
         let mut bsz: usize = rng.gen::<usize>() % 4096;
 
@@ -194,7 +223,8 @@ fn main() -> Result<()> {
     }
 
     loop {
-        let wc = cpf.show_work();
+        let cpf = &mut cpfs[4];
+        let wc = cpf.show_work()?;
         println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
         if wc.up_count + wc.ds_count == 0 {
             break;

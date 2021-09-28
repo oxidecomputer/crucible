@@ -46,6 +46,9 @@ pub enum CrucibleError {
 
     #[error("Offset past end of extent")]
     OffsetInvalid,
+
+    #[error("Upstairs is not active!")]
+    UpstairsInactive,
 }
 
 impl From<std::io::Error> for CrucibleError {

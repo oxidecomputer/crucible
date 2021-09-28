@@ -574,7 +574,7 @@ impl Region {
     }
 
     /*
-     * Send a flush to all extents.  The provided flush number is
+     * Send a flush to all extents. The provided flush number is
      * what an extent should use if a flush is required.
      */
     #[instrument]

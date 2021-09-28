@@ -134,6 +134,8 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("runtime is spawned");
 
+    guest.activate()?;
+
     /*
      * The rest of this is just test code
      */
@@ -162,7 +164,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
         .block_wait()?;
 
     println!("send a flush");
-    guest.flush().block_wait()?;
+    guest.flush()?.block_wait()?;
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;

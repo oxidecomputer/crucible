@@ -214,10 +214,12 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
+    guest.activate()?;
+
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     println!("Wait for a show_work command to finish before sending IO");
-    guest.show_work();
+    guest.show_work()?;
     /*
      * Create the interactive input scope that will generate and send
      * work to the Crucible thread that listens to work from outside
@@ -296,7 +298,7 @@ fn main() -> Result<()> {
 
     println!("Tests done.  All submitted work has been ACK'd");
     loop {
-        let wc = guest.show_work();
+        let wc = guest.show_work()?;
         println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
         if opt.quit && wc.up_count + wc.ds_count == 0 {
             println!("All crucible jobs finished, exiting program");
@@ -487,7 +489,7 @@ async fn balloon_workload(
             let mut waiter = guest.write(offset, data)?;
             waiter.block_wait()?;
 
-            let mut waiter = guest.flush();
+            let mut waiter = guest.flush()?;
             waiter.block_wait()?;
 
             let length: usize = size * ri.block_size as usize;
@@ -583,7 +585,7 @@ async fn rand_workload(
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
 
-        let mut waiter = guest.flush();
+        let mut waiter = guest.flush()?;
         waiter.block_wait()?;
 
         let length: usize = size * ri.block_size as usize;
@@ -636,7 +638,7 @@ async fn demo_workload(
         let op = rng.gen_range(0..3);
         if op == 0 {
             // flush
-            let waiter = guest.flush();
+            let waiter = guest.flush()?;
             waiterlist.push(waiter);
         } else {
             // Read or Write both need this
@@ -690,7 +692,7 @@ async fn demo_workload(
      */
     println!("All submitted jobs completed, waiting for downstairs");
     while wc.up_count + wc.ds_count > 0 {
-        wc = guest.show_work();
+        wc = guest.show_work()?;
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
     println!("All downstairs jobs completed.");
@@ -726,7 +728,7 @@ fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     println!("Sending a flush");
-    let mut waiter = guest.flush();
+    let mut waiter = guest.flush()?;
     waiter.block_wait()?;
 
     let length: usize = 2 * ri.block_size as usize;
@@ -766,7 +768,7 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
 
-        let mut waiter = guest.flush();
+        let mut waiter = guest.flush()?;
         waiter.block_wait()?;
 
         let length: usize = ri.block_size as usize;
@@ -787,7 +789,7 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     }
 
     println!("All IOs sent");
-    guest.show_work();
+    guest.show_work()?;
 
     Ok(())
 }
@@ -850,9 +852,9 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
             }
         }
 
-        guest.show_work();
+        guest.show_work()?;
         println!("Loop:{} send a final flush and wait", my_count);
-        let mut flush_waiter = guest.flush();
+        let mut flush_waiter = guest.flush()?;
         flush_waiter.block_wait()?;
 
         println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
@@ -860,7 +862,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
             wa.block_wait()?;
         }
         println!("Loop:{} all waiters done", my_count);
-        guest.show_work();
+        guest.show_work()?;
     }
 
     println!("dep test done");
@@ -884,7 +886,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         guest.write_to_byte_offset(my_offset, data.freeze())?;
 
         scope.wait_for("show work").await;
-        guest.show_work();
+        guest.show_work()?;
 
         let mut read_offset = 512 * 99;
         const READ_SIZE: usize = 4096;
@@ -896,12 +898,12 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
             guest.read_from_byte_offset(read_offset, data)?;
             read_offset += READ_SIZE as u64;
             // scope.wait_for("show work").await;
-            guest.show_work();
+            guest.show_work()?;
         }
 
         // scope.wait_for("Flush step").await;
         println!("send flush");
-        guest.flush();
+        guest.flush()?;
 
         let mut data = BytesMut::with_capacity(512);
         data.put(&[0xbb; 512][..]);
@@ -911,7 +913,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
         guest.write_to_byte_offset(my_offset, data.freeze())?;
         my_offset += 512;
         // scope.wait_for("show work").await;
-        guest.show_work();
+        guest.show_work()?;
         //scope.wait_for("at the bottom").await;
     }
 }
