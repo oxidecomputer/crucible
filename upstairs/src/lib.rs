@@ -264,13 +264,7 @@ async fn io_completed(
     ds_done_tx: mpsc::Sender<u64>,
     result: Result<(), CrucibleError>,
 ) -> Result<()> {
-    // Mark this ds_id for the client_id as completed.
-    let gw_work_done = {
-        let mut work = up.ds_work.lock().unwrap();
-        work.complete(ds_id, client_id, data, result)?
-    };
-
-    if gw_work_done {
+    if up.complete(ds_id, client_id, data, result)? {
         ds_done_tx.send(ds_id).await?
     }
 
@@ -1127,13 +1121,6 @@ impl Work {
                     None => 0,
                 };
                 self.downstairs_errors.insert(client_id, errors + 1);
-
-                if let Some(up) = self.up.upgrade() {
-                    up.ds_transition(client_id, DsState::Failed);
-                } else {
-                    // XXX send somewhere
-                    panic!("error upgrading!");
-                }
             }
         }
 
@@ -1773,6 +1760,51 @@ impl Upstairs {
         }
 
         Ok(())
+    }
+
+    /*
+     * Complete a downstairs operation.
+     *
+     * Returns true if the guest should be notified.
+     */
+    fn complete(
+        &self,
+        ds_id: u64,
+        client_id: u8,
+        data: Option<Bytes>,
+        result: Result<(), CrucibleError>,
+    ) -> Result<bool> {
+        let mut work = self.ds_work.lock().unwrap();
+
+        // Mark this ds_id for the client_id as completed.
+        let notify_guest =
+            work.complete(ds_id, client_id, data, result.clone())?;
+
+        // Mark this downstairs as bad if this was a write or flush
+        if result.is_err() {
+            let job = work
+                .active
+                .get_mut(&ds_id)
+                .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+            // XXX: reconcilation, retries?
+            if matches!(
+                job.work,
+                IOop::Write {
+                    dependencies: _,
+                    eid: _,
+                    data: _,
+                    offset: _
+                } | IOop::Flush {
+                    dependencies: _,
+                    flush_number: _
+                }
+            ) {
+                self.ds_transition(client_id, DsState::Failed);
+            }
+        }
+
+        Ok(notify_guest)
     }
 }
 
