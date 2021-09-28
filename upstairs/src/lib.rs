@@ -305,7 +305,7 @@ async fn io_send(
      * This XXX is for coming back here and making a better job of
      * flow control.
      */
-    let mut new_work = u.ds_work.lock().unwrap().new_work(client_id);
+    let mut new_work = u.downstairs.lock().unwrap().new_work(client_id);
 
     /*
      * Now we have a list of all the job IDs that are new for our client id.
@@ -320,7 +320,8 @@ async fn io_send(
      */
     new_work.sort_unstable();
 
-    let mut active_count = u.ds_work.lock().unwrap().submitted_work(client_id);
+    let mut active_count =
+        u.downstairs.lock().unwrap().submitted_work(client_id);
     for new_id in new_work.iter() {
         if active_count >= 100 {
             // Flow control inacted, stop sending work
@@ -337,7 +338,7 @@ async fn io_send(
         /*
          * If in_progress returns None, it means that this client should be skipped.
          */
-        let job = u.ds_work.lock().unwrap().in_progress(*new_id, client_id);
+        let job = u.downstairs.lock().unwrap().in_progress(*new_id, client_id);
         if job.is_none() {
             continue;
         }
@@ -766,10 +767,22 @@ async fn looper(
 }
 
 /*
- * The structure that tracks downstairs work in progress
+ * The structure that tracks information about the three downstairs
+ * connections as well as the work that each is doing.
  */
 #[derive(Debug)]
-pub struct Work {
+pub struct Downstairs {
+    /*
+     * UUID for each downstairs, index by client ID
+     */
+    ds_uuid: HashMap<u8, Uuid>,
+    /*
+     * The state of a downstairs connection, based on client ID
+     * Ready here indicates it can receive IO.
+     * TODO: When growing to more than one region, should this become
+     * a 2d Vec? index for region, then index for the DS?
+     */
+    ds_state: Vec<DsState>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
@@ -794,18 +807,20 @@ impl WorkCounts {
     }
 }
 
-impl Default for Work {
+impl Default for Downstairs {
     fn default() -> Self {
         Self {
             downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
             next_id: 1000,
+            ds_uuid: HashMap::new(),
+            ds_state: vec![DsState::New; 3],
         }
     }
 }
 
-impl Work {
+impl Downstairs {
     /**
      * Assign a new downstairs ID.
      */
@@ -1245,24 +1260,12 @@ pub struct Upstairs {
     guest: Arc<Guest>,
 
     /*
-     * The state of a downstairs connection, based on client ID
-     * Ready here indicates it can receive IO.
-     * TODO: When growing to more than one region, should this become
-     * a 2d Vec? index for region, then index for the DS?
+     * This Downstairs struct keeps track of information about each
+     * downstairs as well as tracking IO operations going between
+     * upstairs and downstairs.  New work for downstairs is generated
+     * inside the upstairs on behalf of IO requests coming from the guest.
      */
-    ds_state: Mutex<Vec<DsState>>,
-
-    /*
-     * UUID for each downstairs, index by client ID
-     */
-    ds_uuid: Mutex<HashMap<u8, Uuid>>,
-
-    /*
-     * This Work struct keeps track of IO operations going between upstairs
-     * and downstairs.  New work for downstairs is generated inside the
-     * upstairs on behalf of IO requests coming from the guest.
-     */
-    ds_work: Mutex<Work>,
+    downstairs: Mutex<Downstairs>,
 
     /*
      * The flush info Vec is only used when first connecting or re-connecting
@@ -1337,9 +1340,7 @@ impl Upstairs {
 
         Arc::new(Upstairs {
             guest,
-            ds_state: Mutex::new(vec![DsState::New; 3]),
-            ds_uuid: Mutex::new(HashMap::new()),
-            ds_work: Mutex::new(Work::default()),
+            downstairs: Mutex::new(Downstairs::default()),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
@@ -1352,7 +1353,7 @@ impl Upstairs {
      * with a higher flush_number to be possible, as that can introduce
      * dependency deadlock.
      * To also avoid any problems, this method should be called only
-     * during the submit_flush method so we know the ds_work and
+     * during the submit_flush method so we know the downstairs and
      * guest_work locks are both held.
      */
     fn next_flush_id(&self) -> u64 {
@@ -1367,11 +1368,11 @@ impl Upstairs {
     ) -> Result<(), CrucibleError> {
         /*
          * Lock first the guest_work struct where this new job will go,
-         * then lock the ds_work struct.  Once we have both we can proceed
+         * then lock the downstairs struct.  Once we have both we can proceed
          * to build our flush command.
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
-        let mut ds_work = self.ds_work.lock().unwrap();
+        let mut downstairs = self.downstairs.lock().unwrap();
 
         /*
          * Get the next ID for our new guest work job.  Note that the flush
@@ -1379,7 +1380,7 @@ impl Upstairs {
          * should be flushed at the next flush ID.
          */
         let gw_id: u64 = gw.next_gw_id();
-        let next_id = ds_work.next_id();
+        let next_id = downstairs.next_id();
         let next_flush = self.next_flush_id();
 
         /*
@@ -1390,7 +1391,7 @@ impl Upstairs {
          * 1. Ignore everything that was before and including the last flush.
          * 2. Ignore reads.
          */
-        let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
+        let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
         /*
          * TODO: Walk the list of guest work structs and build the same list
@@ -1418,7 +1419,7 @@ impl Upstairs {
         gw.active.insert(gw_id, new_gtos);
         crutrace_gw_flush_start!(|| (gw_id));
 
-        ds_work.enqueue(fl);
+        downstairs.enqueue(fl);
 
         Ok(())
     }
@@ -1441,7 +1442,7 @@ impl Upstairs {
          * handles the operation(s) on the storage side.
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
-        let mut ds_work = self.ds_work.lock().unwrap();
+        let mut downstairs = self.downstairs.lock().unwrap();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1473,12 +1474,12 @@ impl Upstairs {
         let mut next_id: u64;
         let mut cur_offset: usize = 0;
 
-        let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
+        let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
         /* Lock here, through both jobs submitted */
         for (eid, bo, num_blocks) in nwo {
             {
-                next_id = ds_work.next_id();
+                next_id = downstairs.next_id();
             }
 
             let byte_len: usize =
@@ -1528,7 +1529,7 @@ impl Upstairs {
         crutrace_gw_write_start!(|| (gw_id));
 
         for wr in new_ds_work {
-            ds_work.enqueue(wr);
+            downstairs.enqueue(wr);
         }
 
         Ok(())
@@ -1553,7 +1554,7 @@ impl Upstairs {
          * handles the operation(s) on the storage side.
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
-        let mut ds_work = self.ds_work.lock().unwrap();
+        let mut downstairs = self.downstairs.lock().unwrap();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1586,11 +1587,11 @@ impl Upstairs {
          * Now create a downstairs work job for each (eid, bo, len) returned
          * from extent_from_offset
          */
-        let mut dep = ds_work.active.keys().cloned().collect::<Vec<u64>>();
+        let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
         for (eid, bo, num_blocks) in nwo {
             {
-                next_id = ds_work.next_id();
+                next_id = downstairs.next_id();
             }
 
             /*
@@ -1634,7 +1635,7 @@ impl Upstairs {
         crutrace_gw_read_start!(|| (gw_id));
 
         for wr in new_ds_work {
-            ds_work.enqueue(wr);
+            downstairs.enqueue(wr);
         }
 
         Ok(())
@@ -1644,19 +1645,19 @@ impl Upstairs {
      * Move a single downstairs to this new state.
      */
     fn ds_transition(&self, client_id: u8, new_state: DsState) {
-        let mut state = self.ds_state.lock().unwrap();
-        if state[client_id as usize] != new_state {
+        let mut ds = self.downstairs.lock().unwrap();
+        if ds.ds_state[client_id as usize] != new_state {
             println!(
                 "Transition [{}] from {:?} to {:?}",
-                client_id, state[client_id as usize], new_state,
+                client_id, ds.ds_state[client_id as usize], new_state,
             );
-            state[client_id as usize] = new_state;
+            ds.ds_state[client_id as usize] = new_state;
         }
     }
 
     fn ds_state_show(&self) {
-        let state = self.ds_state.lock().unwrap();
-        for (index, dst) in state.iter().enumerate() {
+        let ds = self.downstairs.lock().unwrap();
+        for (index, dst) in ds.ds_state.iter().enumerate() {
             println!("[{}] State {:?}", index, dst);
         }
     }
@@ -1665,9 +1666,9 @@ impl Upstairs {
      * Move all downstairs to this new state.
      */
     fn ds_transition_all(&self, new_state: DsState) {
-        let mut state = self.ds_state.lock().unwrap();
+        let mut ds = self.downstairs.lock().unwrap();
 
-        state.iter_mut().for_each(|ds_state| {
+        ds.ds_state.iter_mut().for_each(|ds_state| {
             println!("Transition from {:?} to {:?}", *ds_state, new_state,);
             match new_state {
                 DsState::Active => {
@@ -1702,8 +1703,8 @@ impl Upstairs {
          *
          * For now, we take whatever connects to us first.
          */
-        let mut uuid_hm = self.ds_uuid.lock().unwrap();
-        if let Some(uuid) = uuid_hm.get(&client_id) {
+        let mut ds = self.downstairs.lock().unwrap();
+        if let Some(uuid) = ds.ds_uuid.get(&client_id) {
             if *uuid != client_ddef.uuid() {
                 panic!(
                     "New client:{} uuid:{}  does not match existing {}",
@@ -1718,10 +1719,10 @@ impl Upstairs {
                 );
             }
         } else {
-            uuid_hm.insert(client_id, client_ddef.uuid());
+            ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
 
-        println!("UUIDS: {:?}", uuid_hm);
+        println!("UUIDS: {:?}", client_ddef.uuid());
 
         /*
          * XXX Until we are passed expected region info at start, we
@@ -1768,7 +1769,7 @@ impl Upstairs {
         data: Option<Bytes>,
         result: Result<(), CrucibleError>,
     ) -> Result<bool> {
-        let mut work = self.ds_work.lock().unwrap();
+        let mut work = self.downstairs.lock().unwrap();
 
         // Mark this ds_id for the client_id as completed.
         let notify_guest =
@@ -2816,11 +2817,11 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
          * process the set of things we know are done now, then the
          * ds_done_rx.recv() should trigger when we loop.
          */
-        let ack_list = up.ds_work.lock().unwrap().ackable_work();
+        let ack_list = up.downstairs.lock().unwrap().ackable_work();
 
         let mut gw = up.guest.guest_work.lock().unwrap();
         for ds_id_done in ack_list.iter() {
-            let mut work = up.ds_work.lock().unwrap();
+            let mut work = up.downstairs.lock().unwrap();
 
             let done = work.active.get_mut(ds_id_done).unwrap();
 
@@ -3203,7 +3204,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let mut iosc: IOStateCount = IOStateCount::new();
     let up_count = up.guest.guest_work.lock().unwrap().active.len();
 
-    let work = up.ds_work.lock().unwrap();
+    let work = up.downstairs.lock().unwrap();
     let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
@@ -3929,7 +3930,7 @@ mod test {
     #[test]
     fn work_flush_three_ok() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -3961,7 +3962,7 @@ mod test {
     #[test]
     fn work_flush_one_error_then_ok() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4001,7 +4002,7 @@ mod test {
     #[test]
     fn work_flush_two_errors_equals_fail() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4050,7 +4051,7 @@ mod test {
     #[test]
     fn work_read_one_ok() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4088,7 +4089,7 @@ mod test {
     #[test]
     fn work_read_one_bad_two_ok() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4135,7 +4136,7 @@ mod test {
     #[test]
     fn work_read_two_bad_one_ok() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4190,7 +4191,7 @@ mod test {
     #[test]
     fn work_read_three_bad() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4254,7 +4255,7 @@ mod test {
     #[test]
     fn work_assert_no_transfer_of_bad_read() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4310,7 +4311,7 @@ mod test {
     #[test]
     fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
@@ -4388,7 +4389,7 @@ mod test {
     #[test]
     fn work_assert_reads_do_not_cause_failure_state_transition() {
         let upstairs = Upstairs::default();
-        let mut work = upstairs.ds_work.lock().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
 
