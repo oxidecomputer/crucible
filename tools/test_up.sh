@@ -75,6 +75,28 @@ if ! time cargo run -p crucible-hammer -- \
     res=1
 fi
 
+echo ""
+echo "Running verify test: $tt"
+vfile="${testdir}/verify"
+echo cargo run -p crucible-client -- -q -w rand --verify-out "$vfile" "${args[@]}"
+if ! cargo run -p crucible-client -- -q -w rand --verify-out "$vfile" "${args[@]}"; then
+    res=1
+    echo ""
+    echo "Failed crucible-client rand verify test"
+    echo ""
+else
+    echo cargo run -p crucible-client -- -q -w rand --verify-in "$vfile" "${args[@]}"
+    if ! cargo run -p crucible-client -- -q -w rand --verify-in "$vfile" "${args[@]}"; then
+        res=1
+        echo ""
+        echo "Failed crucible-client rand verify part 2 test"
+        echo ""
+    else
+        echo "Verify test passed"
+    fi
+fi
+
+
 echo "Tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do
     kill $pid >/dev/null 2>&1
