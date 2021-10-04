@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use std::net::SocketAddrV4;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -11,13 +12,13 @@ use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
-use crucible_common::Block;
+use crucible_common::*;
 
 /*
  * The various tests this program supports.
  */
 arg_enum! {
-    #[derive(Debug, StructOpt)]
+    #[derive(Debug, PartialEq,  StructOpt)]
     enum Workload {
         Balloon,
         Big,
@@ -26,6 +27,7 @@ arg_enum! {
         One,
         Rand,
         Span,
+        Verify,
     }
 }
 
@@ -57,6 +59,20 @@ pub struct Opt {
 
     #[structopt(short, long)]
     key: Option<String>,
+
+    /*
+     * For tests that support it, load the expected write count from
+     * the provided file.
+     */
+    #[structopt(long, parse(from_os_str), name = "INFILE")]
+    verify_in: Option<PathBuf>,
+
+    /*
+     * For tests that support it, save the write count into the
+     * provided file.
+     */
+    #[structopt(long, parse(from_os_str), name = "FILE")]
+    verify_out: Option<PathBuf>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -68,6 +84,84 @@ pub fn opts() -> Result<Opt> {
     }
 
     Ok(opt)
+}
+
+fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
+    let out = file.as_ref().to_path_buf();
+    out
+}
+
+/*
+ * All the tests need this basic info about the region.
+ * Not all tests make use of the write_count yet, but perhaps someday..
+ */
+#[derive(Debug)]
+struct RegionInfo {
+    block_size: u64,
+    extent_size: Block,
+    total_size: u64,
+    total_blocks: usize,
+    write_count: Vec<u32>,
+}
+
+/*
+ * All the tests need this basic set of information about the region.
+ * We also load and verify the write count if an input file is provided.
+ */
+fn get_region_info(
+    guest: &Arc<Guest>,
+    vi: Option<PathBuf>,
+) -> Result<RegionInfo> {
+    /*
+     * These query requests have the side effect of preventing the test from
+     * starting before the upstairs is ready.
+     */
+    let block_size = guest.query_block_size()?;
+    let extent_size = guest.query_extent_size()?;
+    let total_size = guest.query_total_size()?;
+    let total_blocks = (total_size / block_size) as usize;
+
+    println!(
+        "Region has: es:{:?}  bs:{}  ts:{}  tb:{}",
+        extent_size, block_size, total_size, total_blocks
+    );
+
+    /*
+     * Create an array that tracks the number of writes to each block, so
+     * we can know what to expect for reads.
+     */
+    let write_count = vec![0_u32; total_blocks];
+
+    let mut ri = RegionInfo {
+        block_size,
+        extent_size,
+        total_size,
+        total_blocks,
+        write_count,
+    };
+    /*
+     * If requested, fill the write count from a provided file.
+     */
+    if let Some(ref vi) = vi {
+        let cp = history_file(vi);
+        ri.write_count = match read_json(&cp) {
+            Ok(write_count) => write_count,
+            Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
+        };
+        println!("Load write count information from file {:?}", cp);
+        if ri.write_count.len() != total_blocks {
+            bail!(
+                "Verify file {:?} blocks:{} does not match regions:{}",
+                cp,
+                ri.write_count.len(),
+                total_blocks
+            );
+        }
+        if let Err(e) = verify_volume(guest, &mut ri) {
+            bail!("Initial volume verify failed: {:?}", e)
+        }
+    }
+    Ok(ri)
 }
 
 /**
@@ -87,15 +181,9 @@ fn main() -> Result<()> {
 
     let opt = opts()?;
 
-    /*
-     * If any of our async tasks in our runtime panic, then we should
-     * exit the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
+    if opt.workload == Workload::Verify && opt.verify_in.is_none() {
+        bail!("Verify requires verify_in file");
+    }
 
     let crucible_opts = CrucibleOpts {
         target: opt.target,
@@ -138,16 +226,25 @@ fn main() -> Result<()> {
      */
 
     /*
+     * Build the region info struct that all the tests will use.
+     * This includes importing and verifying from a write log, if requested.
+     */
+    let mut region_info = match get_region_info(&guest, opt.verify_in) {
+        Ok(region_info) => region_info,
+        Err(e) => bail!("failed to get region info: {:?}", e),
+    };
+
+    /*
      * Call the function for the workload option passed from the command line.
      */
     match opt.workload {
         Workload::Balloon => {
             println!("Run balloon test");
-            runtime.block_on(balloon_workload(&guest))?;
+            runtime.block_on(balloon_workload(&guest, &mut region_info))?;
         }
         Workload::Big => {
             println!("Run big test");
-            big_workload(&guest)?;
+            big_workload(&guest, &mut region_info)?;
         }
         Workload::Demo => {
             println!("Run Demo test");
@@ -156,7 +253,7 @@ fn main() -> Result<()> {
              * control limit if we wish to test flow control.  Also, set
              * lossy on a downstairs otherwise it will probably keep up.
              */
-            runtime.block_on(demo_workload(&guest, 200))?;
+            runtime.block_on(demo_workload(&guest, 400, &mut region_info))?;
         }
         Workload::Dep => {
             println!("Run dep test");
@@ -172,23 +269,32 @@ fn main() -> Result<()> {
                 .unwrap();
             println!("dep runtime started");
              */
-            runtime.block_on(dep_workload(&guest))?;
+            runtime.block_on(dep_workload(&guest, &mut region_info))?;
         }
         Workload::One => {
             println!("One test");
-            runtime.block_on(rand_workload(&guest, 1))?;
+            runtime.block_on(rand_workload(&guest, 1, &mut region_info))?;
         }
         Workload::Rand => {
             println!("Run random test");
-            runtime.block_on(rand_workload(&guest, 50))?;
+            runtime.block_on(rand_workload(&guest, 50, &mut region_info))?;
         }
         Workload::Span => {
             println!("Span test");
-            span_workload(&guest)?;
+            span_workload(&guest, &mut region_info)?;
+        }
+        Workload::Verify => {
+            println!("Verify test completed at import");
         }
     }
 
-    println!("Tests done.  All submitted work has been ackd");
+    if let Some(ref vo) = opt.verify_out {
+        let cp = history_file(vo);
+        write_json(&cp, &region_info.write_count, true)?;
+        println!("Wrote out file {:?}", cp);
+    }
+
+    println!("Tests done.  All submitted work has been ACK'd");
     loop {
         let wc = guest.show_work();
         println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
@@ -196,10 +302,37 @@ fn main() -> Result<()> {
             println!("All crucible jobs finished, exiting program");
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_secs(15));
+        std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }
 
+/*
+ * Read/Verify every possible block, one block at a time.
+ */
+fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    assert_eq!(ri.write_count.len(), ri.total_blocks);
+
+    println!("Read and Verify all blocks (0..{})", ri.total_blocks);
+    for block_index in 0..ri.total_blocks {
+        let vec: Vec<u8> = vec![255; ri.block_size as usize];
+        let data = crucible::Buffer::from_vec(vec);
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+        let mut waiter = guest.read(offset, data.clone())?;
+        waiter.block_wait()?;
+
+        let dl = data.as_vec().to_vec();
+        if !validate_vec(
+            dl.clone(),
+            block_index,
+            &ri.write_count,
+            ri.block_size,
+        ) {
+            bail!("Error at {}", block_index);
+        }
+    }
+    Ok(())
+}
 /*
  * Given the write count vec and the index, pick the seed value we use when
  * writing or expect when reading block.
@@ -236,11 +369,11 @@ fn fill_vec(block_index: usize, blocks: usize, wc: &[u32], bs: u64) -> Vec<u8> {
         /*
          * The start of each block contains that blocks index mod 255
          */
-        let seed = get_seed(block_offset, wc);
+        vec.push((block_offset % 255) as u8);
         /*
          * Fill the rest of the buffer with the new write count
          */
-        vec.push((block_offset % 255) as u8);
+        let seed = get_seed(block_offset, wc);
         for _ in 1..bs {
             vec.push(seed);
         }
@@ -324,48 +457,32 @@ fn validate_vec(
  * I named it balloon because each loop on a block "balloons" from the minimum
  * IO size to the largest possible.
  */
-async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
-    /*
-     * These query requests have the side effect of preventing the test from
-     * starting before the upstairs is ready.
-     */
-    let block_size = guest.query_block_size()?;
-    let extent_size = guest.query_extent_size()?;
-    let total_size = guest.query_total_size()?;
-    let total_blocks = (total_size / block_size) as usize;
-
-    println!(
-        "Balloon workload starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
-        extent_size, block_size, total_size, total_blocks
-    );
-
-    /*
-     * Create an array that tracks the number of writes to each block, so
-     * we can know what to expect for reads.
-     */
-    let mut write_count = vec![0_u32; total_blocks];
-
-    for block_index in 0..total_blocks {
+async fn balloon_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+) -> Result<()> {
+    for block_index in 0..ri.total_blocks {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
          * have, given our starting block and the total number of blocks
          * We always have at least one block, and possibly more.
          */
-        for size in 1..=(total_blocks - block_index) {
+        for size in 1..=(ri.total_blocks - block_index) {
             /*
              * Update the write count for all blocks we plan to write to.
              */
             for i in 0..size {
-                write_count[block_index + i] += 1;
+                ri.write_count[block_index + i] += 1;
             }
 
-            let vec = fill_vec(block_index, size, &write_count, block_size);
+            let vec =
+                fill_vec(block_index, size, &ri.write_count, ri.block_size);
             let data = Bytes::from(vec);
             /*
              * Convert block_index to its byte value.
              */
             let offset =
-                Block::new(block_index as u64, block_size.trailing_zeros());
+                Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
             let mut waiter = guest.write(offset, data)?;
             waiter.block_wait()?;
@@ -373,21 +490,26 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
             let mut waiter = guest.flush();
             waiter.block_wait()?;
 
-            let length: usize = size * block_size as usize;
+            let length: usize = size * ri.block_size as usize;
             let vec: Vec<u8> = vec![255; length];
             let data = crucible::Buffer::from_vec(vec);
             let mut waiter = guest.read(offset, data.clone())?;
             waiter.block_wait()?;
 
             let dl = data.as_vec().to_vec();
-            if !validate_vec(dl.clone(), block_index, &write_count, block_size)
-            {
+            if !validate_vec(
+                dl.clone(),
+                block_index,
+                &ri.write_count,
+                ri.block_size,
+            ) {
                 bail!("Error at {}", block_index);
             }
         }
     }
 
-    print_write_count(write_count, total_blocks, extent_size);
+    verify_volume(guest, ri)?;
+    print_write_count(ri);
     Ok(())
 }
 
@@ -395,16 +517,12 @@ async fn balloon_workload(guest: &Arc<Guest>) -> Result<()> {
  * Print out the contents of the write count vector where each line
  * is an extent and each column is a block.
  */
-fn print_write_count(
-    write_count: Vec<u32>,
-    total_blocks: usize,
-    extent_size: Block,
-) {
+fn print_write_count(ri: &mut RegionInfo) {
     println!(" Write IO count to each extent");
     println!("###############################");
-    for (i, wc) in write_count.iter().enumerate().take(total_blocks) {
+    for (i, wc) in ri.write_count.iter().enumerate().take(ri.total_blocks) {
         print!("{:5} ", wc);
-        if (i + 1) % (extent_size.value as usize) == 0 {
+        if (i + 1) % (ri.extent_size.value as usize) == 0 {
             println!();
         }
     }
@@ -414,27 +532,11 @@ fn print_write_count(
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
-    /*
-     * These query requests have the side effect of preventing the test from
-     * starting before the upstairs is ready.
-     */
-    let block_size = guest.query_block_size()?;
-    let extent_size = guest.query_extent_size()?;
-    let total_size = guest.query_total_size()?;
-    let total_blocks = (total_size / block_size) as usize;
-
-    println!(
-        "workload {} loop(s), starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
-        count, extent_size, block_size, total_size, total_blocks
-    );
-
-    /*
-     * Create an array that tracks the number of writes to each block, so
-     * we can know what to expect for reads.
-     */
-    let mut write_count = vec![0_u32; total_blocks];
-
+async fn rand_workload(
+    guest: &Arc<Guest>,
+    count: u32,
+    ri: &mut RegionInfo,
+) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -448,30 +550,30 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
          * Pick a random size (in blocks) for the IO, up to the size of the
          * entire region.
          */
-        let size = rng.gen_range(1..=total_blocks) as usize;
+        let size = rng.gen_range(1..=ri.total_blocks) as usize;
 
         /*
          * Once we have our IO size, decide where the starting offset should
          * be, which is the total possible size minus the randomly chosen
          * IO size.
          */
-        let block_max = total_blocks - size + 1;
+        let block_max = ri.total_blocks - size + 1;
         let block_index = rng.gen_range(0..block_max) as usize;
 
         /*
          * Convert offset and length to their byte values.
          */
         let offset =
-            Block::new(block_index as u64, block_size.trailing_zeros());
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
         /*
          * Update the write count for all blocks we plan to write to.
          */
         for i in 0..size {
-            write_count[block_index + i] += 1;
+            ri.write_count[block_index + i] += 1;
         }
 
-        let vec = fill_vec(block_index, size, &write_count, block_size);
+        let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
         let data = Bytes::from(vec);
 
         if count < 10 {
@@ -484,21 +586,31 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
         let mut waiter = guest.flush();
         waiter.block_wait()?;
 
-        let length: usize = size * block_size as usize;
+        let length: usize = size * ri.block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
         let mut waiter = guest.read(offset, data.clone())?;
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl.clone(), block_index, &write_count, block_size) {
+        if !validate_vec(
+            dl.clone(),
+            block_index,
+            &ri.write_count,
+            ri.block_size,
+        ) {
             bail!("Error at {}", block_index);
         }
     }
 
-    if count >= 10 {
-        print_write_count(write_count, total_blocks, extent_size);
+    if let Err(e) = verify_volume(guest, ri) {
+        bail!("Final volume verify failed: {:?}", e)
     }
+
+    if count >= 10 {
+        print_write_count(ri);
+    }
+
     Ok(())
 }
 
@@ -507,24 +619,13 @@ async fn rand_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
  * showing of the internal work queues.  Submit a bunch of random IOs,
  * then watch them complete.
  */
-async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
-    /*
-     * These query requests have the side effect of preventing the test from
-     * starting before the upstairs is ready.
-     */
-    let block_size = guest.query_block_size()?;
-    let extent_size = guest.query_extent_size()?;
-    let total_size = guest.query_total_size()?;
-    let total_blocks = (total_size / block_size) as usize;
-
-    println!(
-        "demo {} loop(s), starting with  es: {:?}  bs:{}  ts:{}  tb:{}",
-        count, extent_size, block_size, total_size, total_blocks
-    );
-
-    // Create an array that tracks the number of writes to each block, so
-    // we can know what to expect for reads.
-    let mut write_count = vec![0_u32; total_blocks];
+async fn demo_workload(
+    guest: &Arc<Guest>,
+    count: u32,
+    ri: &mut RegionInfo,
+) -> Result<()> {
+    println!("Pause for 10 seconds, then start testing");
+    std::thread::sleep(std::time::Duration::from_secs(10));
 
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -545,21 +646,22 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = total_blocks - size + 1;
+            let block_max = ri.total_blocks - size + 1;
             let block_index = rng.gen_range(0..block_max) as usize;
 
             // Convert offset and length to their byte values.
             let offset =
-                Block::new(block_index as u64, block_size.trailing_zeros());
+                Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
             if op == 1 {
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    write_count[block_index + i] += 1;
+                    ri.write_count[block_index + i] += 1;
                 }
 
-                let vec = fill_vec(block_index, size, &write_count, block_size);
+                let vec =
+                    fill_vec(block_index, size, &ri.write_count, ri.block_size);
                 let data = Bytes::from(vec);
 
                 let waiter = guest.write(offset, data)?;
@@ -567,7 +669,7 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
             } else {
                 // Read
 
-                let length: usize = size * block_size as usize;
+                let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 let waiter = guest.read(offset, data.clone())?;
@@ -592,53 +694,53 @@ async fn demo_workload(guest: &Arc<Guest>, count: u32) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
     println!("All downstairs jobs completed.");
+    if let Err(e) = verify_volume(guest, ri) {
+        bail!("Final volume verify failed: {:?}", e)
+    }
 
-    // TODO: Make a verify the whole volume function, to take the
-    // write_count array and then read it all and compare.
     Ok(())
 }
+
 /*
  * This is a test workload that generates a single write spanning an extent
  * then will try to read the same.
- * TODO: Compare the buffer we wrote with the buffer we read.
  */
-fn span_workload(guest: &Arc<Guest>) -> Result<()> {
-    println!("Run span workload");
-    let block_size = guest.query_block_size()?;
-    let extent_size = guest.query_extent_size()?;
-    println!("bs: {:?}  es: {}", extent_size, block_size);
+fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Pick the last block in the first extent
      */
-    let my_offset = block_size * (extent_size.value - 1);
-    let my_length: usize = block_size as usize * 2;
+    let block_index = (ri.extent_size.value - 1) as usize;
 
-    let mut vec: Vec<u8> = Vec::with_capacity(my_length);
-    for seed in 7..9 {
-        /*
-         * Fill with a unique value for each block
-         */
-        for _ in 0..block_size {
-            vec.push(seed);
-        }
-    }
+    /*
+     * Update the counter for the blocks we are about to write.
+     */
+    ri.write_count[block_index] += 1;
+    ri.write_count[block_index + 1] += 1;
+
+    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    let vec = fill_vec(block_index, 2, &ri.write_count, ri.block_size);
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
-    let mut waiter = guest.write_to_byte_offset(my_offset, data)?;
+    let mut waiter = guest.write(offset, data)?;
     waiter.block_wait()?;
 
     println!("Sending a flush");
     let mut waiter = guest.flush();
     waiter.block_wait()?;
 
-    let vec: Vec<u8> = vec![99; my_length];
+    let length: usize = 2 * ri.block_size as usize;
+    let vec: Vec<u8> = vec![99; length];
     let data = crucible::Buffer::from_vec(vec);
 
     println!("Sending a read spanning two extents");
-    waiter = guest.read_from_byte_offset(my_offset, data)?;
+    waiter = guest.read(offset, data.clone())?;
     waiter.block_wait()?;
 
+    let dl = data.as_vec().to_vec();
+    if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+        bail!("Span read verify failed");
+    }
     Ok(())
 }
 
@@ -646,69 +748,45 @@ fn span_workload(guest: &Arc<Guest>) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-fn big_workload(guest: &Arc<Guest>) -> Result<()> {
-    let block_size = guest.query_block_size()?;
-    let total_size = guest.query_total_size()?;
-    let extent_size = guest.query_extent_size()?;
-
-    let mut my_offset: u64 = 0;
-    let mut cur_block = 0;
-    let mut cur_extent = 0;
-    while my_offset < total_size {
+fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    for block_index in 0..ri.total_blocks {
         /*
-         * Generate a write buffer with a locally unique value.
+         * Update the write count for all blocks we plan to write to.
          */
-        let seed = (my_offset % 255) as u8;
-        let mut vec: Vec<u8> = Vec::with_capacity(block_size as usize);
-        for _ in 0..block_size {
-            vec.push(seed);
-        }
+        ri.write_count[block_index] += 1;
+
+        let vec = fill_vec(block_index, 1, &ri.write_count, ri.block_size);
         let data = Bytes::from(vec);
-
-        println!(
-            "[{}][{}] send write  offset:{}  len:{}",
-            cur_extent,
-            cur_block,
-            my_offset,
-            data.len()
-        );
-        let mut waiter = guest.write_to_byte_offset(my_offset, data)?;
-        waiter.block_wait()?;
-
         /*
-         * Pre-populate the read buffer with a known pattern so we can
-         * detect if is is not what we expect
+         * Convert block_index to its byte value.
          */
-        let mut vec: Vec<u8> = Vec::with_capacity(block_size as usize);
-        for i in 0..block_size {
-            let seed = (i % 255) as u8;
-            vec.push(seed);
-        }
-        let data = crucible::Buffer::from_vec(vec);
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-        println!(
-            "[{}][{}] send read   offset:{}  len:{}",
-            cur_extent,
-            cur_block,
-            my_offset,
-            data.len(),
-        );
-
-        waiter = guest.read_from_byte_offset(my_offset, data)?;
+        let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
 
-        my_offset += block_size;
-        cur_block += 1;
-        if cur_block >= extent_size.value {
-            cur_extent += 1;
-            cur_block = 0;
-            println!("[{}][{}] send flush", cur_extent, cur_block);
-            waiter = guest.flush();
-            waiter.block_wait()?;
+        let mut waiter = guest.flush();
+        waiter.block_wait()?;
+
+        let length: usize = ri.block_size as usize;
+        let vec: Vec<u8> = vec![255; length];
+        let data = crucible::Buffer::from_vec(vec);
+        let mut waiter = guest.read(offset, data.clone())?;
+        waiter.block_wait()?;
+
+        let dl = data.as_vec().to_vec();
+        if !validate_vec(
+            dl.clone(),
+            block_index,
+            &ri.write_count,
+            ri.block_size,
+        ) {
+            bail!("Verify error at block:{}", block_index);
         }
     }
+
     println!("All IOs sent");
-    std::thread::sleep(std::time::Duration::from_secs(5));
     guest.show_work();
 
     Ok(())
@@ -720,11 +798,11 @@ fn big_workload(guest: &Arc<Guest>) -> Result<()> {
  * Use this test and pass the --lossy flag and upstairs will at random skip
  * sending jobs to the downstairs, creating dependencys that it will
  * eventually resolve.
+ *
+ * TODO: Make this test use the global write count.
  */
-async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
-    let block_size = guest.query_block_size()?;
-    let total_size = guest.query_total_size()?;
-    let final_offset = total_size - block_size;
+async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    let final_offset = ri.total_size - ri.block_size;
 
     let mut my_offset: u64 = 0;
     for my_count in 1..15 {
@@ -734,14 +812,15 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
          * Generate some number of operations
          */
         for ioc in 0..20 {
-            my_offset = (my_offset + block_size) % final_offset;
+            my_offset = (my_offset + ri.block_size) % final_offset;
             if random() {
                 /*
                  * Generate a write buffer with a locally unique value.
                  */
-                let mut vec: Vec<u8> = Vec::with_capacity(block_size as usize);
+                let mut vec: Vec<u8> =
+                    Vec::with_capacity(ri.block_size as usize);
                 let seed = ((my_offset % 254) + 1) as u8;
-                for _ in 0..block_size {
+                for _ in 0..ri.block_size {
                     vec.push(seed);
                 }
                 let data = Bytes::from(vec);
@@ -756,7 +835,7 @@ async fn dep_workload(guest: &Arc<Guest>) -> Result<()> {
                 let waiter = guest.write_to_byte_offset(my_offset, data)?;
                 waiterlist.push(waiter);
             } else {
-                let vec: Vec<u8> = vec![0; block_size as usize];
+                let vec: Vec<u8> = vec![0; ri.block_size as usize];
                 let data = crucible::Buffer::from_vec(vec);
 
                 println!(
