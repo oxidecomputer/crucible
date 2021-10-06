@@ -314,7 +314,7 @@ async fn do_work(
                 result,
             ))
             .await?;
-            ds.complete_work(job.upstairs_uuid, job.ds_id, false);
+            ds.complete_work(job.ds_id, false);
 
             Ok(())
         }
@@ -337,7 +337,7 @@ async fn do_work(
 
             fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
                 .await?;
-            ds.complete_work(job.upstairs_uuid, job.ds_id, false);
+            ds.complete_work(job.ds_id, false);
             Ok(())
         }
         IOop::Flush {
@@ -357,7 +357,7 @@ async fn do_work(
 
             fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
                 .await?;
-            ds.complete_work(job.upstairs_uuid, job.ds_id, true);
+            ds.complete_work(job.ds_id, true);
             Ok(())
         }
     }
@@ -384,7 +384,7 @@ async fn do_work_loop(
      */
     let mut new_work = {
         let ds = ads.lock().await;
-        ds.new_work(upstairs_uuid)
+        ds.new_work()
     };
 
     /*
@@ -412,7 +412,7 @@ async fn do_work_loop(
          */
         let job = {
             let ds = ads.lock().await;
-            ds.in_progress(upstairs_uuid, *new_id)
+            ds.in_progress(*new_id)
         };
         match job {
             Some(job) => {
@@ -443,59 +443,57 @@ async fn do_work_loop(
  * Debug function to dump the work list.
  */
 fn _show_work(ds: &Arc<Downstairs>) {
+    println!("Active Upstairs UUID: {:?}", ds.active_upstairs);
     let work = ds.work.lock().unwrap();
-    for (uuid, upstairs_work) in work.iter() {
-        println!("--------------------------------------");
-        println!("Upstairs UUID: {:?}", uuid);
 
-        let mut kvec: Vec<u64> =
-            upstairs_work.active.keys().cloned().collect::<Vec<u64>>();
-        if kvec.is_empty() {
-            println!("Crucible Downstairs work queue:  Empty");
-        } else {
-            println!("Crucible Downstairs work queue:");
-            kvec.sort_unstable();
-            for id in kvec.iter() {
-                let dsw = upstairs_work.active.get(id).unwrap();
-                let dsw_type;
-                let dep_list;
-                match &dsw.work {
-                    IOop::Read {
-                        dependencies,
-                        eid: _eid,
-                        offset: _offset,
-                        num_blocks: _num_blocks,
-                    } => {
-                        dsw_type = "Read ".to_string();
-                        dep_list = dependencies.to_vec();
-                    }
-                    IOop::Write {
-                        dependencies,
-                        eid: _eid,
-                        offset: _offset,
-                        data: _data,
-                    } => {
-                        dsw_type = "Write".to_string();
-                        dep_list = dependencies.to_vec();
-                    }
-                    IOop::Flush {
-                        dependencies,
-                        flush_number: _flush_number,
-                    } => {
-                        dsw_type = "Flush".to_string();
-                        dep_list = dependencies.to_vec();
-                    }
-                };
-                println!(
-                    "DSW:[{:04}] {} {:?} deps:{:?}",
-                    id, dsw_type, dsw.state, dep_list,
-                );
-            }
+    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+
+    if kvec.is_empty() {
+        println!("Crucible Downstairs work queue:  Empty");
+    } else {
+        println!("Crucible Downstairs work queue:");
+        kvec.sort_unstable();
+        for id in kvec.iter() {
+            let dsw = work.active.get(id).unwrap();
+            let dsw_type;
+            let dep_list;
+            match &dsw.work {
+                IOop::Read {
+                    dependencies,
+                    eid: _eid,
+                    offset: _offset,
+                    num_blocks: _num_blocks,
+                } => {
+                    dsw_type = "Read ".to_string();
+                    dep_list = dependencies.to_vec();
+                }
+                IOop::Write {
+                    dependencies,
+                    eid: _eid,
+                    offset: _offset,
+                    data: _data,
+                } => {
+                    dsw_type = "Write".to_string();
+                    dep_list = dependencies.to_vec();
+                }
+                IOop::Flush {
+                    dependencies,
+                    flush_number: _flush_number,
+                } => {
+                    dsw_type = "Flush".to_string();
+                    dep_list = dependencies.to_vec();
+                }
+            };
+            println!(
+                "DSW:[{:04}] {} {:?} deps:{:?}",
+                id, dsw_type, dsw.state, dep_list,
+            );
         }
-        println!("Done tasks {:?}", upstairs_work.completed);
-        println!("last_flush: {:?}", upstairs_work.last_flush);
-        println!("--------------------------------------");
     }
+
+    println!("Done tasks {:?}", work.completed);
+    println!("last_flush: {:?}", work.last_flush);
+    println!("--------------------------------------");
 }
 
 /*
@@ -689,7 +687,7 @@ async fn proc(
 #[derive(Debug)]
 struct Downstairs {
     region: Region,
-    work: std::sync::Mutex<HashMap<Uuid, Work>>,
+    work: std::sync::Mutex<Work>,
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
     active_upstairs: Option<Uuid>,
@@ -699,18 +697,16 @@ impl Downstairs {
     fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
         Downstairs {
             region,
-            work: std::sync::Mutex::new(HashMap::new()),
+            work: std::sync::Mutex::new(Work::default()),
             lossy,
             return_errors,
             active_upstairs: None,
         }
     }
 
-    fn new_work(&self, upstairs_uuid: Uuid) -> Vec<u64> {
-        let mut work = self.work.lock().unwrap();
-        let upstairs_work =
-            work.entry(upstairs_uuid).or_insert_with(Work::default);
-        upstairs_work.new_work()
+    fn new_work(&self) -> Vec<u64> {
+        let work = self.work.lock().unwrap();
+        work.new_work()
     }
 
     fn add_work(&self, upstairs_uuid: Uuid, ds_id: u64, work: IOop) {
@@ -720,36 +716,29 @@ impl Downstairs {
             work,
             state: WorkState::New,
         };
+
         let mut work = self.work.lock().unwrap();
-        let upstairs_work =
-            work.entry(upstairs_uuid).or_insert_with(Work::default);
-        upstairs_work.active.insert(ds_id, dsw);
+        work.active.insert(ds_id, dsw);
     }
 
-    fn in_progress(
-        &self,
-        upstairs_uuid: Uuid,
-        ds_id: u64,
-    ) -> Option<DownstairsWork> {
+    fn in_progress(&self, ds_id: u64) -> Option<DownstairsWork> {
         let mut work = self.work.lock().unwrap();
-        let upstairs_work = work.get_mut(&upstairs_uuid).unwrap();
-        upstairs_work.in_progress(ds_id)
+        work.in_progress(ds_id)
     }
 
     /*
      * Remove a job from the active list and put it on the completed list.
      * This should only be done after the upstairs has been notified.
      */
-    fn complete_work(&self, upstairs_uuid: Uuid, ds_id: u64, is_flush: bool) {
+    fn complete_work(&self, ds_id: u64, is_flush: bool) {
         let mut work = self.work.lock().unwrap();
-        let upstairs_work = work.get_mut(&upstairs_uuid).unwrap();
-        let job = upstairs_work.active.remove(&ds_id).unwrap();
+        let job = work.active.remove(&ds_id).unwrap();
         assert_eq!(job.state, WorkState::InProgress);
         if is_flush {
-            upstairs_work.last_flush = ds_id;
-            upstairs_work.completed = Vec::with_capacity(32);
+            work.last_flush = ds_id;
+            work.completed = Vec::with_capacity(32);
         } else {
-            upstairs_work.completed.push(ds_id);
+            work.completed.push(ds_id);
         }
     }
 
