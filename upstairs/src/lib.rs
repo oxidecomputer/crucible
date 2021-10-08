@@ -701,7 +701,7 @@ struct UpComs {
      */
     ds_done_tx: mpsc::Sender<u64>,
     /**
-     * Notified when it's time to go active.
+     * This channel is used to notify the proc task that it's time to this downstairs.
      */
     ds_active_rx: watch::Receiver<bool>,
 }
