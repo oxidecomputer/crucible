@@ -75,7 +75,10 @@ async fn process_message(
     match m {
         Message::Imok => Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
-            assert_eq!(u.uuid, *uuid);
+            if u.uuid != *uuid {
+                return Err(CrucibleError::UuidMismatch.into());
+            }
+
             Ok(io_completed(
                 u,
                 *ds_id,
@@ -87,7 +90,10 @@ async fn process_message(
             .await?)
         }
         Message::FlushAck(uuid, ds_id, result) => {
-            assert_eq!(u.uuid, *uuid);
+            if u.uuid != *uuid {
+                return Err(CrucibleError::UuidMismatch.into());
+            }
+
             Ok(io_completed(
                 u,
                 *ds_id,
@@ -99,7 +105,10 @@ async fn process_message(
             .await?)
         }
         Message::ReadResponse(uuid, ds_id, data, result) => {
-            assert_eq!(u.uuid, *uuid);
+            if u.uuid != *uuid {
+                return Err(CrucibleError::UuidMismatch.into());
+            }
+
             Ok(io_completed(
                 u,
                 *ds_id,
@@ -493,7 +502,9 @@ async fn proc(
                         }
                     }
                     Some(Message::YouAreNowActive(uuid)) => {
-                        assert_eq!(uuid, up.uuid);
+                        if up.uuid != uuid {
+                            return Err(CrucibleError::UuidMismatch.into());
+                        }
 
                         if negotiated != 1 {
                             bail!("Received YouAreNowActive out of order!");
