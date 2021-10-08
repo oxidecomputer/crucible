@@ -46,6 +46,12 @@ pub enum CrucibleError {
 
     #[error("Offset past end of extent")]
     OffsetInvalid,
+
+    #[error("Upstairs is not active!")]
+    UpstairsInactive,
+
+    #[error("Saw a UUID that wasn't ours!")]
+    UuidMismatch,
 }
 
 impl From<std::io::Error> for CrucibleError {

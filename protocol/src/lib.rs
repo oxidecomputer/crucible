@@ -3,6 +3,7 @@ use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
+use uuid::Uuid;
 
 const MAX_FRM_LEN: usize = 1024 * 1024;
 
@@ -10,20 +11,37 @@ use crucible_common::{Block, CrucibleError, RegionDefinition};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
-    HereIAm(u32),
+    HereIAm(u32, Uuid),
     YesItsMe(u32),
+
+    /*
+     * Forcefully tell this downstairs to promote us (an Upstairs) to active.
+     *
+     * Kick out the old Upstairs.
+     */
+    PromoteToActive(Uuid),
+    YouAreNowActive(Uuid),
+
+    /*
+     * If downstairs sees a UUID that doesn't match what was negotiated, it will send
+     * this message.
+     */
+    UuidMismatch(Uuid),
+
     Ruok,
     Imok,
+
     RegionInfoPlease,
     RegionInfo(RegionDefinition),
     ExtentVersionsPlease,
     ExtentVersions(Vec<u64>),
-    Write(u64, u64, Vec<u64>, Block, bytes::Bytes),
-    WriteAck(u64, Result<(), CrucibleError>),
-    Flush(u64, Vec<u64>, u64),
-    FlushAck(u64, Result<(), CrucibleError>),
-    ReadRequest(u64, Vec<u64>, u64, Block, u64),
-    ReadResponse(u64, bytes::Bytes, Result<(), CrucibleError>),
+
+    Write(Uuid, u64, u64, Vec<u64>, Block, bytes::Bytes),
+    WriteAck(Uuid, u64, Result<(), CrucibleError>),
+    Flush(Uuid, u64, Vec<u64>, u64),
+    FlushAck(Uuid, u64, Result<(), CrucibleError>),
+    ReadRequest(Uuid, u64, Vec<u64>, u64, Block, u64),
+    ReadResponse(Uuid, u64, bytes::Bytes, Result<(), CrucibleError>),
     Unknown(u32, BytesMut),
 }
 
@@ -142,7 +160,7 @@ mod tests {
 
     #[test]
     fn rt_here_i_am() -> Result<()> {
-        let input = Message::HereIAm(2);
+        let input = Message::HereIAm(2, Uuid::new_v4());
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

@@ -82,6 +82,8 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
+    guest.activate()?;
+
     // NBD server
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();

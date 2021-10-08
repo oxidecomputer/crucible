@@ -364,6 +364,7 @@ dependencies = [
  "crucible-common",
  "serde",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

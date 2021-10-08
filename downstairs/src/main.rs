@@ -1,4 +1,5 @@
 // Copyright 2021 Oxide Computer Company
+use futures::lock::Mutex;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -6,7 +7,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crucible::*;
@@ -267,7 +268,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
  * We assume the job was taken correctly off the active hashmap.
  */
 async fn do_work(
-    ds: &Arc<Downstairs>,
+    ds: &mut Arc<Mutex<Downstairs>>,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
     job: DownstairsWork,
 ) -> Result<()> {
@@ -280,6 +281,8 @@ async fn do_work(
             offset,
             num_blocks,
         } => {
+            let ds = ds.lock().await;
+
             /*
              * XXX Some thought will need to be given to where the read
              * data buffer is created, both on this side and the remote.
@@ -298,11 +301,19 @@ async fn do_work(
             let result = if ds.return_errors && random() && random() {
                 println!("returning error on read!");
                 Err(CrucibleError::GenericError("test error".to_string()))
+            } else if !ds.is_active(job.upstairs_uuid) {
+                Err(CrucibleError::UpstairsInactive)
             } else {
                 ds.region.region_read(eid, offset, &mut data)
             };
-            fw.send(Message::ReadResponse(job.ds_id, data.freeze(), result))
-                .await?;
+
+            fw.send(Message::ReadResponse(
+                job.upstairs_uuid,
+                job.ds_id,
+                data.freeze(),
+                result,
+            ))
+            .await?;
             ds.complete_work(job.ds_id, false);
 
             Ok(())
@@ -313,13 +324,19 @@ async fn do_work(
             offset,
             data,
         } => {
+            let ds = ds.lock().await;
+
             let result = if ds.return_errors && random() && random() {
                 println!("returning error on write!");
                 Err(CrucibleError::GenericError("test error".to_string()))
+            } else if !ds.is_active(job.upstairs_uuid) {
+                Err(CrucibleError::UpstairsInactive)
             } else {
                 ds.region.region_write(eid, offset, &data)
             };
-            fw.send(Message::WriteAck(job.ds_id, result)).await?;
+
+            fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
+                .await?;
             ds.complete_work(job.ds_id, false);
             Ok(())
         }
@@ -327,13 +344,19 @@ async fn do_work(
             dependencies: _dependencies,
             flush_number,
         } => {
+            let ds = ds.lock().await;
+
             let result = if ds.return_errors && random() && random() {
                 println!("returning error on flush!");
                 Err(CrucibleError::GenericError("test error".to_string()))
+            } else if !ds.is_active(job.upstairs_uuid) {
+                Err(CrucibleError::UpstairsInactive)
             } else {
                 ds.region.region_flush(flush_number)
             };
-            fw.send(Message::FlushAck(job.ds_id, result)).await?;
+
+            fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
+                .await?;
             ds.complete_work(job.ds_id, true);
             Ok(())
         }
@@ -349,15 +372,19 @@ async fn do_work(
  * that.
  */
 async fn do_work_loop(
-    ds: &Arc<Downstairs>,
+    ads: &mut Arc<Mutex<Downstairs>>,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
 ) -> Result<usize> {
     let mut completed = 0;
+
     /*
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
      */
-    let mut new_work = ds.work.lock().unwrap().new_work();
+    let mut new_work = {
+        let ds = ads.lock().await;
+        ds.new_work()
+    };
 
     /*
      * We don't have to do jobs in order, but the dependencies are, at
@@ -366,10 +393,14 @@ async fn do_work_loop(
      * if we take the lowest job id first.
      */
     new_work.sort_unstable();
+
     for new_id in new_work.iter() {
-        if ds.lossy && random() && random() {
-            // Skip a job that needs to be done.. sometimes
-            continue;
+        {
+            let ds = ads.lock().await;
+            if ds.lossy && random() && random() {
+                // Skip a job that needs to be done.. sometimes
+                continue;
+            }
         }
         /*
          * If this job is still new, take it and go to work.  The in_progress
@@ -378,14 +409,23 @@ async fn do_work_loop(
          * possible to have things change, so we need to verify that the job
          * is still in a new or dep wait state.
          */
-        let job = ds.work.lock().unwrap().in_progress(*new_id);
+        let job = {
+            let ds = ads.lock().await;
+            ds.in_progress(*new_id)
+        };
         match job {
             Some(job) => {
-                if ds.lossy && random() && random() {
-                    // Add a little time to completion for this operation.
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                {
+                    let lossy = {
+                        let ds = ads.lock().await;
+                        ds.lossy
+                    };
+                    if lossy && random() && random() {
+                        // Add a little time to completion for this operation.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                 }
-                do_work(ds, fw, job).await?;
+                do_work(ads, fw, job).await?;
                 completed += 1;
             }
             None => {
@@ -393,6 +433,7 @@ async fn do_work_loop(
             }
         }
     }
+
     Ok(completed)
 }
 
@@ -400,9 +441,11 @@ async fn do_work_loop(
  * Debug function to dump the work list.
  */
 fn _show_work(ds: &Arc<Downstairs>) {
+    println!("Active Upstairs UUID: {:?}", ds.active_upstairs);
     let work = ds.work.lock().unwrap();
+
     let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
-    println!("--------------------------------------");
+
     if kvec.is_empty() {
         println!("Crucible Downstairs work queue:  Empty");
     } else {
@@ -445,6 +488,7 @@ fn _show_work(ds: &Arc<Downstairs>) {
             );
         }
     }
+
     println!("Done tasks {:?}", work.completed);
     println!("last_flush: {:?}", work.last_flush);
     println!("--------------------------------------");
@@ -461,24 +505,37 @@ fn _show_work(ds: &Arc<Downstairs>) {
  * ack'd back..
  */
 async fn proc_frame(
-    d: &Arc<Downstairs>,
+    upstairs_uuid: Uuid,
+    ad: &mut Arc<Mutex<Downstairs>>,
     m: &Message,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
 ) -> Result<()> {
     let mut completed = 0;
+
     match m {
         Message::Ruok => {
             fw.send(Message::Imok).await?;
         }
         Message::RegionInfoPlease => {
-            let rd = d.region.def();
+            let rd = {
+                let d = ad.lock().await;
+                d.region.def()
+            };
             fw.send(Message::RegionInfo(rd)).await?;
         }
         Message::ExtentVersionsPlease => {
-            fw.send(Message::ExtentVersions(d.region.versions()?))
-                .await?;
+            let versions = {
+                let d = ad.lock().await;
+                d.region.versions()?
+            };
+            fw.send(Message::ExtentVersions(versions)).await?;
         }
-        Message::Write(ds_id, eid, dependencies, offset, data) => {
+        Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
+            if upstairs_uuid != *uuid {
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
                 eid: *eid,
@@ -486,21 +543,42 @@ async fn proc_frame(
                 data: data.clone(),
             };
 
-            d.add_work(*ds_id, new_write);
-            completed = do_work_loop(d, fw).await?;
+            {
+                let d = ad.lock().await;
+                d.add_work(*uuid, *ds_id, new_write);
+            }
+            completed = do_work_loop(ad, fw).await?;
         }
-        Message::Flush(ds_id, dependencies, flush_number) => {
-            /* Add flush work */
+        Message::Flush(uuid, ds_id, dependencies, flush_number) => {
+            if upstairs_uuid != *uuid {
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
             let new_flush = IOop::Flush {
                 dependencies: dependencies.to_vec(),
                 flush_number: *flush_number,
             };
 
-            d.add_work(*ds_id, new_flush);
-            completed = do_work_loop(d, fw).await?;
+            {
+                let d = ad.lock().await;
+                d.add_work(*uuid, *ds_id, new_flush);
+            }
+            completed = do_work_loop(ad, fw).await?;
         }
-        Message::ReadRequest(ds_id, dependencies, eid, offset, num_blocks) => {
-            /* Add read work */
+        Message::ReadRequest(
+            uuid,
+            ds_id,
+            dependencies,
+            eid,
+            offset,
+            num_blocks,
+        ) => {
+            if upstairs_uuid != *uuid {
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
                 eid: *eid,
@@ -508,8 +586,11 @@ async fn proc_frame(
                 num_blocks: *num_blocks,
             };
 
-            d.add_work(*ds_id, new_read);
-            completed = do_work_loop(d, fw).await?;
+            {
+                let d = ad.lock().await;
+                d.add_work(*uuid, *ds_id, new_read);
+            }
+            completed = do_work_loop(ad, fw).await?;
         }
         x => bail!("unexpected frame {:?}", x),
     }
@@ -518,64 +599,45 @@ async fn proc_frame(
         /*
          * While we are making progress, keep calling the do_work_loop()
          */
-        completed = do_work_loop(d, fw).await?;
+        completed = do_work_loop(ad, fw).await?;
     }
+
     Ok(())
 }
 
-async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
+async fn proc(
+    ads: &mut Arc<Mutex<Downstairs>>,
+    mut sock: TcpStream,
+) -> Result<()> {
     let (read, write) = sock.split();
     let mut fr = FramedRead::new(read, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-    /*
-     * Don't wait more than 5 seconds to hear from the other side.
-     * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
-     */
-    let mut deadline = deadline_secs(50);
-    /*
-     * If we have set "lossy", then we need to check every now and then that
-     * there were not skipped jobs that we need to go back and finish up.
-     * If lossy is not set, then this should only trigger once then never
-     * again.
-     */
-    let mut test_deadline = deadline_secs(5);
     let mut negotiated = false;
+    let mut upstairs_uuid = None;
 
-    /*
-     * Clear out the last flush and completed information, as
-     * that will not be valid any longer.
-     * TODO: Really work through this error case
-     */
-    let mut work = ds.work.lock().unwrap();
-    if work.active.keys().len() > 0 {
-        println!(
-            "Crucible Downstairs reconnect, discarding {} jobs",
-            work.active.keys().len()
-        );
-        /*
-         * In the future, we may decide there is some way to continue working
-         * on outstanding jobs, or a way to merge.  But for now, we just
-         * throw out what we have and let the upstairs resend anything to
-         * us that it did not get an ACK for.
-         */
-        work.active = HashMap::new();
-    }
-    work.completed = Vec::with_capacity(32);
-    work.last_flush = 0;
-    drop(work);
     loop {
         tokio::select! {
-            _ = sleep_until(test_deadline) => {
-                // We need this to fire if we have lossy set because we may
-                // skip jobs and have work to do but nothing incoming to
-                // trigger a check for it.
-                if ds.lossy {
-                    do_work_loop(ds, &mut fw).await?;
-                    test_deadline = deadline_secs(5);
+            /*
+             * If we have set "lossy", then we need to check every now and then that
+             * there were not skipped jobs that we need to go back and finish up.
+             * If lossy is not set, then this should only trigger once then never
+             * again.
+             */
+            _ = sleep_until(deadline_secs(5)) => {
+                let lossy = {
+                    let ds = ads.lock().await;
+                    ds.lossy
+                };
+                if lossy {
+                    do_work_loop(ads, &mut fw).await?;
                 }
             }
-            _ = sleep_until(deadline) => {
+            /*
+             * Don't wait more than 50 seconds to hear from the other side.
+             * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
+             */
+            _ = sleep_until(deadline_secs(50)) => {
                 if !negotiated {
                     bail!("did not negotiate a protocol");
                 } else {
@@ -587,8 +649,11 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                  * Negotiate protocol before we get into specifics.
                  */
                 match new_read.transpose()? {
-                    None => return Ok(()),
-                    Some(Message::HereIAm(version)) => {
+                    None => {
+                        println!("upstairs {:?} disconnected", upstairs_uuid.unwrap());
+                        return Ok(());
+                    }
+                    Some(Message::HereIAm(version, uuid)) => {
                         if negotiated {
                             bail!("negotiated already!");
                         }
@@ -596,15 +661,29 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
                             bail!("expected version 1, got {}", version);
                         }
                         negotiated = true;
+                        upstairs_uuid = Some(uuid);
+                        println!("upstairs {:?} connected", upstairs_uuid.unwrap());
                         fw.send(Message::YesItsMe(1)).await?;
+                    }
+                    Some(Message::PromoteToActive(uuid)) => {
+                        // Only allowed to promote or demote self
+                        if upstairs_uuid.unwrap() != uuid {
+                            fw.send(Message::UuidMismatch(upstairs_uuid.unwrap())).await?;
+                        } else {
+                            {
+                                let mut ds = ads.lock().await;
+                                ds.promote_to_active(uuid)
+                            }
+
+                            fw.send(Message::YouAreNowActive(uuid)).await?;
+                        }
                     }
                     Some(msg) => {
                         if !negotiated {
                             bail!("expected HereIAm first");
                         }
 
-                        proc_frame(ds, &msg, &mut fw).await?;
-                        deadline = deadline_secs(50);
+                        proc_frame(upstairs_uuid.unwrap(), ads, &msg, &mut fw).await?;
                     }
                 }
             }
@@ -620,20 +699,43 @@ async fn proc(ds: &Arc<Downstairs>, mut sock: TcpStream) -> Result<()> {
 #[derive(Debug)]
 struct Downstairs {
     region: Region,
-    work: Mutex<Work>,
+    work: std::sync::Mutex<Work>,
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
+    active_upstairs: Option<Uuid>,
 }
 
 impl Downstairs {
-    fn add_work(&self, ds_id: u64, work: IOop) {
+    fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
+        Downstairs {
+            region,
+            work: std::sync::Mutex::new(Work::default()),
+            lossy,
+            return_errors,
+            active_upstairs: None,
+        }
+    }
+
+    fn new_work(&self) -> Vec<u64> {
+        let work = self.work.lock().unwrap();
+        work.new_work()
+    }
+
+    fn add_work(&self, upstairs_uuid: Uuid, ds_id: u64, work: IOop) {
         let dsw = DownstairsWork {
+            upstairs_uuid,
             ds_id,
             work,
             state: WorkState::New,
         };
+
         let mut work = self.work.lock().unwrap();
         work.active.insert(ds_id, dsw);
+    }
+
+    fn in_progress(&self, ds_id: u64) -> Option<DownstairsWork> {
+        let mut work = self.work.lock().unwrap();
+        work.in_progress(ds_id)
     }
 
     /*
@@ -642,8 +744,8 @@ impl Downstairs {
      */
     fn complete_work(&self, ds_id: u64, is_flush: bool) {
         let mut work = self.work.lock().unwrap();
-        let done = work.active.remove(&ds_id).unwrap();
-        assert_eq!(done.state, WorkState::InProgress);
+        let job = work.active.remove(&ds_id).unwrap();
+        assert_eq!(job.state, WorkState::InProgress);
         if is_flush {
             work.last_flush = ds_id;
             work.completed = Vec::with_capacity(32);
@@ -651,14 +753,52 @@ impl Downstairs {
             work.completed.push(ds_id);
         }
     }
+
+    fn promote_to_active(&mut self, uuid: Uuid) {
+        let mut work = self.work.lock().unwrap();
+
+        println!("{:?} is now active", uuid);
+        self.active_upstairs = Some(uuid);
+
+        // Note: can differentiate between new upstairs connecting vs same upstairs reconnecting
+        // here.
+
+        /*
+         * Clear out the last flush and completed information, as
+         * that will not be valid any longer.
+         * TODO: Really work through this error case
+         */
+        if work.active.keys().len() > 0 {
+            println!(
+                "Crucible Downstairs promoting {} to active, discarding {} jobs",
+                uuid, work.active.keys().len()
+            );
+
+            /*
+             * In the future, we may decide there is some way to continue working
+             * on outstanding jobs, or a way to merge. But for now, we just
+             * throw out what we have and let the upstairs resend anything to
+             * us that it did not get an ACK for.
+             */
+            work.active = HashMap::new();
+        }
+
+        work.completed = Vec::with_capacity(32);
+        work.last_flush = 0;
+    }
+
+    fn is_active(&self, uuid: Uuid) -> bool {
+        self.active_upstairs.unwrap() == uuid
+    }
 }
 
 /*
  * The structure that tracks downstairs work in progress
  */
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Work {
     active: HashMap<u64, DownstairsWork>,
+
     /*
      * We have to keep track of all IOs that have been issued since
      * our last flush, as that is how we make sure dependencies are respected.
@@ -671,6 +811,7 @@ pub struct Work {
 
 #[derive(Debug, Clone)]
 struct DownstairsWork {
+    upstairs_uuid: Uuid,
     ds_id: u64,
     work: IOop,
     state: WorkState,
@@ -899,17 +1040,11 @@ async fn main() -> Result<()> {
                 region.def().extent_count(),
             );
 
-            let work = Work {
-                active: HashMap::new(),
-                last_flush: 0,
-                completed: Vec::with_capacity(32),
-            };
-            let d = Arc::new(Downstairs {
+            let d = Arc::new(Mutex::new(Downstairs::new(
                 region,
-                work: Mutex::new(work),
                 lossy,
                 return_errors,
-            });
+            )));
 
             /*
              * If any of our async tasks in our runtime panic, then we should
@@ -953,20 +1088,20 @@ async fn main() -> Result<()> {
              * has gone away, like perhaps flushing all outstanding writes?
              */
             println!("listening on {}", listen_on);
-            let mut connections: u64 = 1;
             loop {
                 let (sock, raddr) = listener.accept().await?;
-                println!(
-                    "connection from {:?}  connections count:{}",
-                    raddr, connections
-                );
 
-                if let Err(e) = proc(&d, sock).await {
-                    println!("ERROR: connection({}): {:?}", connections, e);
-                } else {
-                    println!("OK: connection({}): all done", connections);
-                }
-                connections += 1;
+                println!("connection from {:?}", raddr);
+
+                let mut dd = d.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = proc(&mut dd, sock).await {
+                        println!("ERROR: connection({}): {:?}", raddr, e);
+                    } else {
+                        println!("OK: connection({}): all done", raddr);
+                    }
+                });
             }
         }
     }
