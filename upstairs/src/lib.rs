@@ -424,17 +424,13 @@ async fn proc(
     /*
      * As the "client", we must begin the negotiation.
      */
+    up.ds_transition(up_coms.client_id, DsState::BeginNegotiation);
     fw.send(Message::HereIAm(1, up.uuid)).await?;
 
     /*
-     * Used to track where we are in the current negotiation.
-     */
-    let mut negotiated = 0;
-    let mut needping = false;
-
-    /*
      * Either we get all the way through the negotiation, or we hit the
-     * timeout and retry.
+     * timeout and exit to retry.
+     *
      * XXX There are many ways we can handle this, but as we figure out
      * how the upstairs is notified that a DS is new or moving, or other
      * things, this way will work.  We will revisit when we have more info.
@@ -448,31 +444,31 @@ async fn proc(
              */
             _ = sleep_until(deadline_secs(50)) => {
                 up.ds_transition(up_coms.client_id, DsState::Disconnected);
-                bail!("did not negotiate a protocol");
+                bail!("timed out during negotiation");
             }
-            _ = sleep_until(deadline_secs(5)), if needping => {
+            _ = sleep_until(deadline_secs(5)) => {
                 fw.send(Message::Ruok).await?;
             }
-            _ = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
+            _ = up_coms.ds_active_rx.changed(), if up.ds_state(up_coms.client_id) == DsState::CompatVersion => {
                 /*
-                 * Promote self to active when message arrives.
+                 * Promote self to active when message arrives from the Guest.
                  */
-                needping = false;
                 fw.send(Message::PromoteToActive(up.uuid)).await?;
             }
             f = fr.next() => {
                 match f.transpose()? {
                     None => {
+                        // hung up
                         return Ok(())
                     }
                     Some(Message::YesItsMe(version)) => {
-                        if negotiated != 0 {
-                            bail!("Got version already!");
+                        if up.ds_state(up_coms.client_id) != DsState::BeginNegotiation {
+                            bail!("received YesItsMe in state {:?}", up.ds_state(up_coms.client_id));
                         }
 
                         /*
                          * XXX Valid version to compare with should come
-                         * from main task.  In the future we will also have
+                         * from main task. In the future we will also have
                          * to handle a version mismatch.
                          */
                         if version != 1 {
@@ -481,19 +477,28 @@ async fn proc(
                                 DsState::BadVersion
                             );
                             bail!("expected version 1, got {}", version);
+                        } else {
+                            up.ds_transition(
+                                up_coms.client_id,
+                                DsState::CompatVersion
+                            );
                         }
-
-                        negotiated = 1;
-
-                        // May be some time between promotion to active, so ping until then
-                        needping = true;
                     }
                     Some(Message::Imok) => {
-                        println!("{} client {} is waiting for promotion to active.", up.uuid, up_coms.client_id);
+                        if up.ds_state(up_coms.client_id) == DsState::CompatVersion {
+                            println!("{} client {} is waiting for promotion to active, received ping response.",
+                                up.uuid, up_coms.client_id
+                            );
+                        }
                     }
                     Some(Message::YouAreNowActive(uuid)) => {
                         assert_eq!(uuid, up.uuid);
-                        up.set_active();
+
+                        if up.ds_state(up_coms.client_id) != DsState::CompatVersion {
+                            bail!("received YouAreNowActive in state {:?}", up.ds_state(up_coms.client_id));
+                        }
+
+                        up.ds_transition(up_coms.client_id, DsState::Activated);
 
                         /*
                          * Get region info.
@@ -501,12 +506,11 @@ async fn proc(
                         fw.send(Message::RegionInfoPlease).await?;
                     }
                     Some(Message::RegionInfo(region_def)) => {
-                        if negotiated != 1 {
-                            bail!("Received RegionInfo out of order!");
+                        if up.ds_state(up_coms.client_id) != DsState::Activated {
+                            bail!("received RegionInfo in state {:?}", up.ds_state(up_coms.client_id));
                         }
 
                         up.add_downstairs(up_coms.client_id, region_def)?;
-                        negotiated = 2;
 
                         /*
                          * Ask for the current version of all extents.
@@ -514,8 +518,8 @@ async fn proc(
                         fw.send(Message::ExtentVersionsPlease).await?;
                     },
                     Some(Message::ExtentVersions(versions)) => {
-                        if negotiated != 2 {
-                            bail!("Received ExtentVersions out of order!");
+                        if up.ds_state(up_coms.client_id) != DsState::Activated {
+                            bail!("received ExtentVersions in state {:?}", up.ds_state(up_coms.client_id));
                         }
 
                         /*
@@ -546,7 +550,7 @@ async fn proc(
                         .unwrap();
                     }
                     Some(m) => {
-                        bail!("Unexpected command received {:?}", m);
+                        bail!("unexpected command {:?} received in state {:?}", m, up.ds_state(up_coms.client_id));
                     }
                 }
             }
@@ -1388,7 +1392,7 @@ impl Upstairs {
 
         Arc::new(Upstairs {
             active: Mutex::new(false),
-            uuid: Uuid::new_v4(), // XXX get from Nexus
+            uuid: Uuid::new_v4(), // XXX get from Nexus?
             guest,
             downstairs: Mutex::new(Downstairs::default()),
             flush_info: Mutex::new(FlushInfo::new()),
@@ -1731,6 +1735,23 @@ impl Upstairs {
         }
     }
 
+    fn ds_state(&self, client_id: u8) -> DsState {
+        let ds = self.downstairs.lock().unwrap();
+        ds.ds_state[client_id as usize]
+    }
+
+    fn all_ds_state_match(&self, state: DsState) -> bool {
+        let ds = self.downstairs.lock().unwrap();
+
+        for (_, dst) in ds.ds_state.iter().enumerate() {
+            if *dst != state {
+                return false;
+            }
+        }
+
+        true
+    }
+
     fn ds_state_show(&self) {
         let ds = self.downstairs.lock().unwrap();
         for (index, dst) in ds.ds_state.iter().enumerate() {
@@ -1930,11 +1951,23 @@ enum DsState {
      */
     New,
     /*
+     * Begin negotiation
+     */
+    BeginNegotiation,
+    /*
      * Incompatable software version reported.
      */
     BadVersion,
     /*
-     * Waiting for the minimum number of downstairs to be present.
+     * Compatible software version reported, waiting for activation.
+     */
+    CompatVersion,
+    /*
+     * Activated, grabbing information.
+     */
+    Activated,
+    /*
+     * Done grabbing information, waiting for the minimum number of downstairs to be present.
      */
     WaitQuorum,
     /*
@@ -3175,7 +3208,7 @@ async fn up_listen(
                     if matches!(req.op, BlockOp::GoActive | BlockOp::QueryUpstairsActive { data: _ }) {
                         process_new_io(up, &dst, req, &mut lastcast).await;
                     } else {
-                        println!("Ignoring {:?}, not all downstairs are connected", req.op);
+                        println!("{} ignoring {:?}, not all downstairs are connected", up.uuid, req.op);
                     }
                 }
             }
@@ -3191,8 +3224,15 @@ async fn up_listen(
         /*
          * Consider how the DsState::Failed is handled here, if necessary
          */
+        if !up.all_ds_state_match(DsState::WaitQuorum) {
+            up.ds_state_show();
+            panic!("{} about to set all to active but not all state is WaitQuorum!!", up.uuid);
+        }
+
         up.ds_transition_all(DsState::Active);
         up.ds_state_show();
+
+        up.set_active();
 
         /*
          * We have three connections, so we can now start listening for
