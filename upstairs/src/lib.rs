@@ -2887,6 +2887,7 @@ impl Guest {
         let mut waiter = self.send(BlockOp::GoActive);
         waiter.block_wait()?;
 
+        // XXX is this the right number of retries? the right delay between retries?
         for _ in 0..10 {
             if self.query_is_active()? {
                 println!(
