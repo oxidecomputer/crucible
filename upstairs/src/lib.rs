@@ -3329,7 +3329,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Use this channel to indicate in the upstairs that all downstairs
      * operations for a specific request have completed.
      */
-    let (ds_done_tx, ds_done_rx) = mpsc::channel(100);
+    let (ds_done_tx, ds_done_rx) = mpsc::channel(100); // XXX 100?
 
     /*
      * spawn a task to listen for ds completed work which will then
