@@ -1781,7 +1781,7 @@ impl Upstairs {
                     assert_eq!(*ds_state, DsState::WaitQuorum);
                     *ds_state = new_state;
                 }
-                DsState::NoLongerActive => {
+                DsState::Deactivated => {
                     *ds_state = new_state;
                 }
                 _ => {
@@ -1893,7 +1893,7 @@ impl Upstairs {
                     "Saw CrucibleError::UpstairsInactive on client {}!",
                     client_id
                 );
-                self.ds_transition(client_id, DsState::NoLongerActive);
+                self.ds_transition(client_id, DsState::Deactivated);
                 self.set_inactive();
             }
             // After work.complete, it's possible that the job is gone due to a retire check
@@ -2021,7 +2021,7 @@ enum DsState {
     /*
      * Another Upstairs has connected and is now active
      */
-    NoLongerActive,
+    Deactivated,
 }
 
 /*
