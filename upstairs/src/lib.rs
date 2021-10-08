@@ -12,11 +12,11 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
-use crucible_common::*;
+pub use crucible_common::*;
 use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
-use bytes::{Bytes, BytesMut};
+pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
@@ -2346,6 +2346,7 @@ enum BlockOp {
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
     QueryUpstairsActive { data: Arc<Mutex<bool>> },
+    QueryUpstairsUuid { data: Arc<Mutex<Uuid>> },
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<Block>> },
     QueryWorkQueue { data: Arc<Mutex<usize>> },
@@ -2772,6 +2773,19 @@ impl Guest {
         Ok(())
     }
 
+    pub fn byte_offset_to_block(
+        &self,
+        offset: u64,
+    ) -> Result<Block, CrucibleError> {
+        let bs = self.query_block_size()?;
+
+        if (offset % bs) != 0 {
+            crucible_bail!(OffsetUnaligned);
+        }
+
+        Ok(Block::new(offset / bs, bs.trailing_zeros()))
+    }
+
     /*
      * `read` and `write` accept a block offset, and data must be a multiple of block size.
      */
@@ -2834,13 +2848,7 @@ impl Guest {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        let bs = self.query_block_size()?;
-
-        if (offset % bs) != 0 {
-            crucible_bail!(OffsetUnaligned);
-        }
-
-        self.read(Block::new(offset / bs, bs.trailing_zeros()), data)
+        self.read(self.byte_offset_to_block(offset)?, data)
     }
 
     pub fn write_to_byte_offset(
@@ -2852,13 +2860,7 @@ impl Guest {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        let bs = self.query_block_size()?;
-
-        if (offset % bs) != 0 {
-            crucible_bail!(OffsetUnaligned);
-        }
-
-        self.write(Block::new(offset / bs, bs.trailing_zeros()), data)
+        self.write(self.byte_offset_to_block(offset)?, data)
     }
 
     pub fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
@@ -2929,6 +2931,13 @@ impl Guest {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
         self.send(size_query).block_wait()?;
+        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
+    }
+
+    pub fn query_upstairs_uuid(&self) -> Result<Uuid, CrucibleError> {
+        let data = Arc::new(Mutex::new(Uuid::default()));
+        let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
+        self.send(uuid_query).block_wait()?;
         return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
@@ -3143,6 +3152,10 @@ async fn process_new_io(
             *data.lock().unwrap() = up.is_active();
             let _ = req.send.send(Ok(()));
         }
+        BlockOp::QueryUpstairsUuid { data } => {
+            *data.lock().unwrap() = up.uuid;
+            let _ = req.send.send(Ok(()));
+        }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
@@ -3211,8 +3224,12 @@ async fn up_listen(
                     }
                 }
                 req = up.guest.recv() => {
-                    // Wait for the activate related message
-                    if matches!(req.op, BlockOp::GoActive | BlockOp::QueryUpstairsActive { data: _ }) {
+                    // Wait for the pre-activate related messages
+                    if matches!(req.op,
+                        BlockOp::GoActive |
+                        BlockOp::QueryUpstairsActive { data: _ } |
+                        BlockOp::QueryUpstairsUuid { data: _ }
+                    ) {
                         process_new_io(up, &dst, req, &mut lastcast).await;
                     } else {
                         println!("{} ignoring {:?}, not all downstairs are connected", up.uuid, req.op);
@@ -3225,7 +3242,7 @@ async fn up_listen(
         /*
          * XXX The real check to transition from WaitQuorum to Active can
          * happen now, as all three are connected and ready.  Right now this
-         * happens in process_downstaris() and in the wrong way.
+         * happens in process_downstairs() and in the wrong way.
          */
 
         /*
@@ -3801,8 +3818,7 @@ impl Read for CruciblePseudoFile {
             ));
         }
 
-        self._read(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self._read(buf).map_err(|e| e.into())
     }
 }
 
@@ -3815,8 +3831,7 @@ impl Write for CruciblePseudoFile {
             ));
         }
 
-        self._write(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self._write(buf).map_err(|e| e.into())
     }
 
     fn flush(&mut self) -> IOResult<()> {
@@ -3827,8 +3842,7 @@ impl Write for CruciblePseudoFile {
             ));
         }
 
-        self._flush()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self._flush().map_err(|e| e.into())
     }
 }
 
