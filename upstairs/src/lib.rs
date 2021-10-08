@@ -2351,7 +2351,7 @@ enum BlockOp {
     QueryUpstairsActive { data: Arc<Mutex<bool>> },
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<Block>> },
-    QueryActive { data: Arc<Mutex<usize>> },
+    QueryWorkQueue { data: Arc<Mutex<usize>> },
     Commit, // Send update to all tasks that there is work on the queue.
     // Show internal work queue, return outstanding IO requests.
     ShowWork { data: Arc<Mutex<WQCounts>> },
@@ -2946,14 +2946,14 @@ impl Guest {
         return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_active(&self) -> Result<usize, CrucibleError> {
+    pub fn query_work_queue(&self) -> Result<usize, CrucibleError> {
         if !self.is_active() {
             return Err(CrucibleError::UpstairsInactive);
         }
 
         let data = Arc::new(Mutex::new(0));
-        let active_query = BlockOp::QueryActive { data: data.clone() };
-        self.send(active_query).block_wait()?;
+        let work_queue_query = BlockOp::QueryWorkQueue { data: data.clone() };
+        self.send(work_queue_query).block_wait()?;
         return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
@@ -3152,7 +3152,7 @@ async fn process_new_io(
             *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
             let _ = req.send.send(Ok(()));
         }
-        BlockOp::QueryActive { data } => {
+        BlockOp::QueryWorkQueue { data } => {
             *data.lock().unwrap() =
                 up.guest.guest_work.lock().unwrap().active_count();
             let _ = req.send.send(Ok(()));
