@@ -498,28 +498,55 @@ async fn proc(
                             bail!("received YouAreNowActive in state {:?}", up.ds_state(up_coms.client_id));
                         }
 
-                        up.ds_transition(up_coms.client_id, DsState::Activated);
-
                         /*
                          * Get region info.
                          */
+                        up.ds_transition(up_coms.client_id, DsState::Activated(0));
                         fw.send(Message::RegionInfoPlease).await?;
                     }
                     Some(Message::RegionInfo(region_def)) => {
-                        if up.ds_state(up_coms.client_id) != DsState::Activated {
+                        if !matches!(up.ds_state(up_coms.client_id), DsState::Activated(_)) {
                             bail!("received RegionInfo in state {:?}", up.ds_state(up_coms.client_id));
+                        } else {
+                            match up.ds_state(up_coms.client_id) {
+                                DsState::Activated(expected_message) => {
+                                    if expected_message != 0 {
+                                        bail!("expected RegionInfo in state {:?}", up.ds_state(up_coms.client_id));
+                                    }
+                                }
+                                _ => {
+                                    // Reaching here shouldn't happen because of matches! check
+                                    // above
+                                    panic!("How did we get here?");
+                                }
+                            }
                         }
 
                         up.add_downstairs(up_coms.client_id, region_def)?;
 
+
                         /*
                          * Ask for the current version of all extents.
                          */
+                        up.ds_transition(up_coms.client_id, DsState::Activated(1));
                         fw.send(Message::ExtentVersionsPlease).await?;
                     },
                     Some(Message::ExtentVersions(versions)) => {
-                        if up.ds_state(up_coms.client_id) != DsState::Activated {
+                        if !matches!(up.ds_state(up_coms.client_id), DsState::Activated(_)) {
                             bail!("received ExtentVersions in state {:?}", up.ds_state(up_coms.client_id));
+                        } else {
+                            match up.ds_state(up_coms.client_id) {
+                                DsState::Activated(expected_message) => {
+                                    if expected_message != 1{
+                                        bail!("expected ExtentVersions in state {:?}", up.ds_state(up_coms.client_id));
+                                    }
+                                }
+                                _ => {
+                                    // Reaching here shouldn't happen because of matches! check
+                                    // above
+                                    panic!("How did we get here?");
+                                }
+                            }
                         }
 
                         /*
@@ -533,10 +560,7 @@ async fn proc(
                          */
                         process_downstairs(target, up, versions)?;
 
-                        up.ds_transition(
-                            up_coms.client_id,
-                            DsState::WaitQuorum
-                        );
+                        up.ds_transition(up_coms.client_id, DsState::WaitQuorum);
                         up.ds_state_show();
 
                         /*
@@ -1972,9 +1996,9 @@ enum DsState {
      */
     CompatVersion,
     /*
-     * Activated, grabbing information.
+     * Activated, grabbing information - integer state corresponds to expected information message.
      */
-    Activated,
+    Activated(i8),
     /*
      * Done grabbing information, waiting for the minimum number of downstairs to be present.
      */
