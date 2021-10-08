@@ -22,6 +22,12 @@ pub enum Message {
     PromoteToActive(Uuid),
     YouAreNowActive(Uuid),
 
+    /*
+     * If downstairs sees a UUID that doesn't match what was negotiated, it will send
+     * this message.
+     */
+    UuidMismatch(Uuid),
+
     Ruok,
     Imok,
 

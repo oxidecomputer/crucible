@@ -372,7 +372,6 @@ async fn do_work(
  * that.
  */
 async fn do_work_loop(
-    upstairs_uuid: Uuid,
     ads: &mut Arc<Mutex<Downstairs>>,
     fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
 ) -> Result<usize> {
@@ -426,7 +425,6 @@ async fn do_work_loop(
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
-                assert_eq!(upstairs_uuid, job.upstairs_uuid);
                 do_work(ads, fw, job).await?;
                 completed += 1;
             }
@@ -533,7 +531,11 @@ async fn proc_frame(
             fw.send(Message::ExtentVersions(versions)).await?;
         }
         Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
-            assert_eq!(*uuid, upstairs_uuid);
+            if upstairs_uuid != *uuid {
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
                 eid: *eid,
@@ -545,10 +547,14 @@ async fn proc_frame(
                 let d = ad.lock().await;
                 d.add_work(*uuid, *ds_id, new_write);
             }
-            completed = do_work_loop(*uuid, ad, fw).await?;
+            completed = do_work_loop(ad, fw).await?;
         }
         Message::Flush(uuid, ds_id, dependencies, flush_number) => {
-            assert_eq!(*uuid, upstairs_uuid);
+            if upstairs_uuid != *uuid {
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
             let new_flush = IOop::Flush {
                 dependencies: dependencies.to_vec(),
                 flush_number: *flush_number,
@@ -558,7 +564,7 @@ async fn proc_frame(
                 let d = ad.lock().await;
                 d.add_work(*uuid, *ds_id, new_flush);
             }
-            completed = do_work_loop(*uuid, ad, fw).await?;
+            completed = do_work_loop(ad, fw).await?;
         }
         Message::ReadRequest(
             uuid,
@@ -568,7 +574,11 @@ async fn proc_frame(
             offset,
             num_blocks,
         ) => {
-            assert_eq!(*uuid, upstairs_uuid);
+            if upstairs_uuid != *uuid {
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
                 eid: *eid,
@@ -580,7 +590,7 @@ async fn proc_frame(
                 let d = ad.lock().await;
                 d.add_work(*uuid, *ds_id, new_read);
             }
-            completed = do_work_loop(*uuid, ad, fw).await?;
+            completed = do_work_loop(ad, fw).await?;
         }
         x => bail!("unexpected frame {:?}", x),
     }
@@ -589,7 +599,7 @@ async fn proc_frame(
         /*
          * While we are making progress, keep calling the do_work_loop()
          */
-        completed = do_work_loop(upstairs_uuid, ad, fw).await?;
+        completed = do_work_loop(ad, fw).await?;
     }
 
     Ok(())
@@ -620,7 +630,7 @@ async fn proc(
                     ds.lossy
                 };
                 if lossy {
-                    do_work_loop(upstairs_uuid.unwrap(), ads, &mut fw).await?;
+                    do_work_loop(ads, &mut fw).await?;
                 }
             }
             /*
@@ -657,14 +667,16 @@ async fn proc(
                     }
                     Some(Message::PromoteToActive(uuid)) => {
                         // Only allowed to promote or demote self
-                        assert_eq!(upstairs_uuid.unwrap(), uuid);
+                        if upstairs_uuid.unwrap() != uuid {
+                            fw.send(Message::UuidMismatch(upstairs_uuid.unwrap())).await?;
+                        } else {
+                            {
+                                let mut ds = ads.lock().await;
+                                ds.promote_to_active(uuid)
+                            }
 
-                        {
-                            let mut ds = ads.lock().await;
-                            ds.promote_to_active(uuid)
+                            fw.send(Message::YouAreNowActive(uuid)).await?;
                         }
-
-                        fw.send(Message::YouAreNowActive(uuid)).await?;
                     }
                     Some(msg) => {
                         if !negotiated {

@@ -549,6 +549,10 @@ async fn proc(
                         }).await
                         .unwrap();
                     }
+                    Some(Message::UuidMismatch(expected_uuid)) => {
+                        // XXX what to do here?
+                        bail!("{} received UuidMismatch, expecting {:?}!", up.uuid, expected_uuid);
+                    }
                     Some(m) => {
                         bail!("unexpected command {:?} received in state {:?}", m, up.ds_state(up_coms.client_id));
                     }
@@ -611,6 +615,10 @@ async fn cmd_loop(
                     None => {
                         return Ok(())
                     },
+                    Some(Message::UuidMismatch(expected_uuid)) => {
+                        // XXX what to do here?
+                        bail!("{} received UuidMismatch, expecting {:?}!", up.uuid, expected_uuid);
+                    }
                     Some(m) => {
                         /*
                          * TODO: Add a check here to make sure we are
