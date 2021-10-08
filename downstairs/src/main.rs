@@ -743,8 +743,36 @@ impl Downstairs {
     }
 
     fn promote_to_active(&mut self, uuid: Uuid) {
+        let mut work = self.work.lock().unwrap();
+
         println!("{:?} is now active", uuid);
         self.active_upstairs = Some(uuid);
+
+        // Note: can differentiate between new upstairs connecting vs same upstairs reconnecting
+        // here.
+
+        /*
+         * Clear out the last flush and completed information, as
+         * that will not be valid any longer.
+         * TODO: Really work through this error case
+         */
+        if work.active.keys().len() > 0 {
+            println!(
+                "Crucible Downstairs promoting {} to active, discarding {} jobs",
+                uuid, work.active.keys().len()
+            );
+
+            /*
+             * In the future, we may decide there is some way to continue working
+             * on outstanding jobs, or a way to merge. But for now, we just
+             * throw out what we have and let the upstairs resend anything to
+             * us that it did not get an ACK for.
+             */
+            work.active = HashMap::new();
+        }
+
+        work.completed = Vec::with_capacity(32);
+        work.last_flush = 0;
     }
 
     fn is_active(&self, uuid: Uuid) -> bool {
