@@ -424,8 +424,12 @@ async fn proc(
     /*
      * As the "client", we must begin the negotiation.
      */
-    up.ds_transition(up_coms.client_id, DsState::BeginNegotiation);
     fw.send(Message::HereIAm(1, up.uuid)).await?;
+
+    /*
+     * Used to track where we are in the current negotiation.
+     */
+    let mut negotiated = 0;
 
     /*
      * Either we get all the way through the negotiation, or we hit the
@@ -449,7 +453,7 @@ async fn proc(
             _ = sleep_until(deadline_secs(5)) => {
                 fw.send(Message::Ruok).await?;
             }
-            _ = up_coms.ds_active_rx.changed(), if up.ds_state(up_coms.client_id) == DsState::CompatVersion => {
+            _ = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
                 /*
                  * Promote self to active when message arrives from the Guest.
                  */
@@ -462,8 +466,8 @@ async fn proc(
                         return Ok(())
                     }
                     Some(Message::YesItsMe(version)) => {
-                        if up.ds_state(up_coms.client_id) != DsState::BeginNegotiation {
-                            bail!("received YesItsMe in state {:?}", up.ds_state(up_coms.client_id));
+                        if negotiated != 0 {
+                            bail!("Got version already!");
                         }
 
                         /*
@@ -477,15 +481,12 @@ async fn proc(
                                 DsState::BadVersion
                             );
                             bail!("expected version 1, got {}", version);
-                        } else {
-                            up.ds_transition(
-                                up_coms.client_id,
-                                DsState::CompatVersion
-                            );
                         }
+
+                        negotiated = 1;
                     }
                     Some(Message::Imok) => {
-                        if up.ds_state(up_coms.client_id) == DsState::CompatVersion {
+                        if negotiated == 1 {
                             println!("{} client {} is waiting for promotion to active, received ping response.",
                                 up.uuid, up_coms.client_id
                             );
@@ -494,59 +495,32 @@ async fn proc(
                     Some(Message::YouAreNowActive(uuid)) => {
                         assert_eq!(uuid, up.uuid);
 
-                        if up.ds_state(up_coms.client_id) != DsState::CompatVersion {
-                            bail!("received YouAreNowActive in state {:?}", up.ds_state(up_coms.client_id));
+                        if negotiated != 1 {
+                            bail!("Received YouAreNowActive out of order!");
                         }
 
                         /*
                          * Get region info.
                          */
-                        up.ds_transition(up_coms.client_id, DsState::Activated(0));
+                        negotiated = 2;
                         fw.send(Message::RegionInfoPlease).await?;
                     }
                     Some(Message::RegionInfo(region_def)) => {
-                        if !matches!(up.ds_state(up_coms.client_id), DsState::Activated(_)) {
-                            bail!("received RegionInfo in state {:?}", up.ds_state(up_coms.client_id));
-                        } else {
-                            match up.ds_state(up_coms.client_id) {
-                                DsState::Activated(expected_message) => {
-                                    if expected_message != 0 {
-                                        bail!("expected RegionInfo in state {:?}", up.ds_state(up_coms.client_id));
-                                    }
-                                }
-                                _ => {
-                                    // Reaching here shouldn't happen because of matches! check
-                                    // above
-                                    panic!("How did we get here?");
-                                }
-                            }
+                        if negotiated != 2 {
+                            bail!("Received RegionInfo out of order!");
                         }
-
                         up.add_downstairs(up_coms.client_id, region_def)?;
+                        negotiated = 3;
 
 
                         /*
                          * Ask for the current version of all extents.
                          */
-                        up.ds_transition(up_coms.client_id, DsState::Activated(1));
                         fw.send(Message::ExtentVersionsPlease).await?;
                     },
                     Some(Message::ExtentVersions(versions)) => {
-                        if !matches!(up.ds_state(up_coms.client_id), DsState::Activated(_)) {
-                            bail!("received ExtentVersions in state {:?}", up.ds_state(up_coms.client_id));
-                        } else {
-                            match up.ds_state(up_coms.client_id) {
-                                DsState::Activated(expected_message) => {
-                                    if expected_message != 1{
-                                        bail!("expected ExtentVersions in state {:?}", up.ds_state(up_coms.client_id));
-                                    }
-                                }
-                                _ => {
-                                    // Reaching here shouldn't happen because of matches! check
-                                    // above
-                                    panic!("How did we get here?");
-                                }
-                            }
+                        if negotiated != 3 {
+                            bail!("Received ExtentVersions out of order!");
                         }
 
                         /*
@@ -1984,23 +1958,11 @@ enum DsState {
      */
     New,
     /*
-     * Begin negotiation
-     */
-    BeginNegotiation,
-    /*
      * Incompatable software version reported.
      */
     BadVersion,
     /*
-     * Compatible software version reported, waiting for activation.
-     */
-    CompatVersion,
-    /*
-     * Activated, grabbing information - integer state corresponds to expected information message.
-     */
-    Activated(i8),
-    /*
-     * Done grabbing information, waiting for the minimum number of downstairs to be present.
+     * Waiting for the minimum number of downstairs to be present.
      */
     WaitQuorum,
     /*
