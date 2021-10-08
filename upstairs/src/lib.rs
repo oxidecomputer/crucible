@@ -635,7 +635,8 @@ async fn cmd_loop(
                     flow_control = true;
                 }
             }
-            _ = sleep_until(deadline_secs(5)), if flow_control => {
+            // XXX figure out what deadline makes sense here
+            _ = sleep_until(deadline_secs(1)), if flow_control => {
                 let more = io_send(up, &mut fw, up_coms.client_id, lossy).await?;
                 if more {
                     flow_control = true;
