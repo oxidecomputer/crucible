@@ -4,12 +4,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /*
- * Where the unit is blocks, not bytes, make sure to reflect that in the types used.
+ * Where the unit is blocks, not bytes, make sure to reflect that in the types
+ * used.
  *
- * Consumers of this API should know when to use bytes (rarely), and when to use blocks.
+ * Consumers of this API should know when to use bytes (rarely), and when to
+ * use blocks.
  *
- * Blocks have a shift field to ensure that consumers and the upstairs agree on what a block is. It
- * wouldn't make sense to pass Block { 2, 9 } when the downstairs expects Block { 2, 12 }.
+ * Blocks have a shift field to ensure that consumers and the upstairs agree
+ * on what a block is. It wouldn't make sense to pass Block { 2, 9 } when the
+ * downstairs expects Block { 2, 12 }.
  */
 #[derive(Deserialize, Serialize, Copy, Clone, Debug, PartialEq, PartialOrd)]
 pub struct Block {

@@ -398,7 +398,7 @@ async fn do_work_loop(
         {
             let ds = ads.lock().await;
             if ds.lossy && random() && random() {
-                // Skip a job that needs to be done.. sometimes
+                // Skip a job that needs to be done. Sometimes
                 continue;
             }
         }
@@ -619,10 +619,10 @@ async fn proc(
     loop {
         tokio::select! {
             /*
-             * If we have set "lossy", then we need to check every now and then that
-             * there were not skipped jobs that we need to go back and finish up.
-             * If lossy is not set, then this should only trigger once then never
-             * again.
+             * If we have set "lossy", then we need to check every now and
+             * then that there were not skipped jobs that we need to go back
+             * and finish up. If lossy is not set, then this should only
+             * trigger once then never again.
              */
             _ = sleep_until(deadline_secs(5)) => {
                 let lossy = {
@@ -635,7 +635,8 @@ async fn proc(
             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
-             * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
+             * XXX Timeouts, timeouts: always wrong!  Some too short and
+             * some too long.
              */
             _ = sleep_until(deadline_secs(50)) => {
                 if !negotiated {
@@ -650,7 +651,10 @@ async fn proc(
                  */
                 match new_read.transpose()? {
                     None => {
-                        println!("upstairs {:?} disconnected", upstairs_uuid.unwrap());
+                        println!(
+                            "upstairs {:?} disconnected",
+                            upstairs_uuid.unwrap()
+                        );
                         return Ok(());
                     }
                     Some(Message::HereIAm(version, uuid)) => {
@@ -662,13 +666,16 @@ async fn proc(
                         }
                         negotiated = true;
                         upstairs_uuid = Some(uuid);
-                        println!("upstairs {:?} connected", upstairs_uuid.unwrap());
+                        println!("upstairs {:?} connected",
+                            upstairs_uuid.unwrap());
                         fw.send(Message::YesItsMe(1)).await?;
                     }
                     Some(Message::PromoteToActive(uuid)) => {
                         // Only allowed to promote or demote self
                         if upstairs_uuid.unwrap() != uuid {
-                            fw.send(Message::UuidMismatch(upstairs_uuid.unwrap())).await?;
+                            fw.send(
+                                Message::UuidMismatch(upstairs_uuid.unwrap())
+                            ).await?;
                         } else {
                             {
                                 let mut ds = ads.lock().await;
@@ -683,7 +690,9 @@ async fn proc(
                             bail!("expected HereIAm first");
                         }
 
-                        proc_frame(upstairs_uuid.unwrap(), ads, &msg, &mut fw).await?;
+                        proc_frame(
+                            upstairs_uuid.unwrap(), ads, &msg, &mut fw
+                        ).await?;
                     }
                 }
             }
@@ -760,25 +769,27 @@ impl Downstairs {
         println!("{:?} is now active", uuid);
         self.active_upstairs = Some(uuid);
 
-        // Note: can differentiate between new upstairs connecting vs same upstairs reconnecting
-        // here.
-
         /*
+         * Note: can differentiate between new upstairs connecting vs same
+         * upstairs reconnecting here.
+         *
          * Clear out the last flush and completed information, as
          * that will not be valid any longer.
          * TODO: Really work through this error case
          */
         if work.active.keys().len() > 0 {
             println!(
-                "Crucible Downstairs promoting {} to active, discarding {} jobs",
-                uuid, work.active.keys().len()
+                "Crucible Downstairs promoting {} to active, \
+                discarding {} jobs",
+                uuid,
+                work.active.keys().len()
             );
 
             /*
-             * In the future, we may decide there is some way to continue working
-             * on outstanding jobs, or a way to merge. But for now, we just
-             * throw out what we have and let the upstairs resend anything to
-             * us that it did not get an ACK for.
+             * In the future, we may decide there is some way to continue
+             * working on outstanding jobs, or a way to merge. But for now,
+             * we just throw out what we have and let the upstairs resend
+             * anything to us that it did not get an ACK for.
              */
             work.active = HashMap::new();
         }
@@ -1084,8 +1095,9 @@ async fn main() -> Result<()> {
              * it and wait on that function to finish.  If it does, we loop
              * and wait for another connection.
              *
-             * XXX We may want to consider taking special action when an upstairs
-             * has gone away, like perhaps flushing all outstanding writes?
+             * XXX We may want to consider taking special action when an
+             * upstairs has gone away, like perhaps flushing all outstanding
+             * writes?
              */
             println!("listening on {}", listen_on);
             loop {

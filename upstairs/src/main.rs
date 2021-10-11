@@ -37,7 +37,8 @@ impl Opt {
     /*
      * Use:
      *
-     *     let opt = Opt::from_string("-- -t 192.168.1.1:3801 -t 192.168.1.2:3801".to_string()).unwrap();
+     *     let opt = Opt::from_string("-- -t 192.168.1.1:3801 \
+     *        -t 192.168.1.2:3801".to_string()).unwrap();
      *
      */
     pub fn from_string(args: String) -> Result<Opt> {
@@ -82,7 +83,9 @@ mod tests {
                 .unwrap();
 
         let opt = Opt::from_string(
-            "-- -t 192.168.1.1:3801 -k 9YGqFSwBHCX/IbjstbI1WuUPKOfwrwNAJSFzUN2w4iU=".to_string(),
+            "-- -t 192.168.1.1:3801 \
+            -k 9YGqFSwBHCX/IbjstbI1WuUPKOfwrwNAJSFzUN2w4iU="
+                .to_string(),
         )
         .unwrap();
 
@@ -149,7 +152,7 @@ fn main() -> Result<()> {
 
 /*
  * This is a test workload that generates a write spanning an extent
- * then trys to read the same.
+ * then tries to read the same.
  */
 fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
     let my_offset = 512 * 99;
