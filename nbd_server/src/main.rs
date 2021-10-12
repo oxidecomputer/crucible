@@ -82,12 +82,12 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    guest.activate()?;
-
     // NBD server
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
     let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
+
+    cpf.activate()?;
 
     // sent to NBD client during handshake through Export struct
     println!("NBD advertised size as {} bytes", cpf.sz());

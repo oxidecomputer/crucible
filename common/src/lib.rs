@@ -60,6 +60,14 @@ impl From<std::io::Error> for CrucibleError {
     }
 }
 
+// Clippy complains but code won't compile without the Into!
+#[allow(clippy::from_over_into)]
+impl Into<std::io::Error> for CrucibleError {
+    fn into(self) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Other, self)
+    }
+}
+
 impl From<anyhow::Error> for CrucibleError {
     fn from(e: anyhow::Error) -> Self {
         CrucibleError::GenericError(format!("{:?}", e))
