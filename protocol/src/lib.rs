@@ -23,8 +23,8 @@ pub enum Message {
     YouAreNowActive(Uuid),
 
     /*
-     * If downstairs sees a UUID that doesn't match what was negotiated, it will send
-     * this message.
+     * If downstairs sees a UUID that doesn't match what was negotiated, it
+     * will send this message.
      */
     UuidMismatch(Uuid),
 

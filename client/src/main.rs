@@ -36,7 +36,13 @@ pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddrV4>,
 
-    #[structopt(short, long, possible_values = &Workload::variants(), default_value = "One", case_insensitive = true)]
+    #[structopt(
+        short,
+        long,
+        possible_values = &Workload::variants(),
+        default_value = "One",
+        case_insensitive = true
+    )]
     workload: Workload,
 
     /*

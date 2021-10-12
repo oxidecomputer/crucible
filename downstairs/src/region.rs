@@ -45,13 +45,13 @@ impl Inner {
 
     fn set_flush_number(&self, new_flush: u64) -> Result<()> {
         /*
-         * When we write out the new flush number, the dirty bit should be set back to false.
+         * When we write out the new flush number, the dirty bit should be
+         * set back to false.
          */
-        let mut stmt = self
-            .metadb
-            .prepare(
-                "UPDATE metadata SET value=?1 WHERE name='flush_number'; UPDATE metadata SET dirty=0",
-            )?;
+        let mut stmt = self.metadb.prepare(
+            "UPDATE metadata SET value=?1 WHERE \
+                name='flush_number'; UPDATE metadata SET dirty=0",
+        )?;
 
         let _rows_affected = stmt.execute(params![new_flush])?;
 
@@ -148,8 +148,8 @@ impl Extent {
         number: u32,
     ) -> Result<Extent> {
         /*
-         * Store extent data in files within a directory hierarchy so that there
-         * are not too many files in any level of that hierarchy.
+         * Store extent data in files within a directory hierarchy so that
+         * there are not too many files in any level of that hierarchy.
          */
         let mut path = extent_path(dir, number);
 
@@ -205,8 +205,8 @@ impl Extent {
         number: u32,
     ) -> Result<Extent> {
         /*
-         * Store extent data in files within a directory hierarchy so that there
-         * are not too many files in any level of that hierarchy.
+         * Store extent data in files within a directory hierarchy so that
+         * there are not too many files in any level of that hierarchy.
          */
         let mut path = extent_path(dir, number);
 
@@ -251,8 +251,11 @@ impl Extent {
 
         let meta = ExtentMeta::default();
 
-        //metadb.execute("INSERT INTO metadata (name, value) VALUES (?1, ?2)", params!["ext_version", meta.ext_version])?;
-        //metadb.execute("INSERT INTO metadata (name, value) VALUES (?1, ?2)", params!["gen", meta.gen])?;
+        // metadb.execute("INSERT INTO metadata
+        //     (name, value) VALUES (?1, ?2)",
+        //     params!["ext_version", meta.ext_version])?;
+        //metadb.execute("INSERT INTO metadata
+        //     (name, value) VALUES (?1, ?2)", params!["gen", meta.gen])?;
         metadb.execute(
             "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
             params!["flush_number", meta.flush_number],

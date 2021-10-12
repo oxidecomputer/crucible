@@ -164,7 +164,7 @@ pub fn extent_from_offset(
 
     while blocks_left > 0 {
         /*
-         * XXX We only support a single region (downstairs).  When we grow to
+         * XXX We only support a single region (downstairs). When we grow to
          * support a LBA size that is larger than a single region, then we will
          * need to write more code. But - that code may live upstairs?
          */
@@ -207,7 +207,7 @@ pub fn extent_from_offset(
  * sent us information about its extents.
  *
  * XXX At the moment we are doing both wait quorum and verify consistency
- * in the same function.  This will soon break out into two separate places
+ * in the same function. This will soon break out into two separate places
  * where we then decide what to do with each downstairs.
  */
 fn process_downstairs(
@@ -231,7 +231,7 @@ fn process_downstairs(
          */
         fi.flush_numbers = versions;
         fi.next_flush = *fi.flush_numbers.iter().max().unwrap() + 1;
-        print!("Set inital Extent versions to");
+        print!("Set initial Extent versions to");
         if fi.flush_numbers.len() > 12 {
             println!(" [0..12]{:?}", fi.flush_numbers[0..12].to_vec());
         } else {
@@ -241,7 +241,7 @@ fn process_downstairs(
     } else if fi.flush_numbers.len() != versions.len() {
         /*
          * I don't think there is much we can do here, the expected number
-         * of flush numbers does not match.  Possibly we have grown one but
+         * of flush numbers does not match. Possibly we have grown one but
          * not the rest of the downstairs?
          */
         panic!(
@@ -253,8 +253,8 @@ fn process_downstairs(
         );
     } else {
         /*
-         * We already have a list of versions to compare with.  Make that
-         * comparision now against this new list
+         * We already have a list of versions to compare with. Make that
+         * comparison now against this new list
          */
         let ver_cmp = fi.flush_numbers.iter().eq(versions.iter());
         if !ver_cmp {
@@ -294,8 +294,8 @@ async fn io_completed(
 /*
  * This function is called by a worker task after the main task has added
  * work to the hashmap and notified the worker tasks that new work is ready
- * to be serviced.  The worker task will walk the hashmap and build a list
- * of new work that it needs to do.  It will then iterate through those
+ * to be serviced. The worker task will walk the hashmap and build a list
+ * of new work that it needs to do. It will then iterate through those
  * work items and send them over the wire to this tasks waiting downstairs.
  *
  * V1 flow control, if we have more than X (where X = 100 for now, as we
@@ -315,10 +315,10 @@ async fn io_send(
      * have the job state for our client id in the IOState::New
      *
      * The length of this list (new work for a downstairs) can give us
-     * an idea of how that downstairs is doing.  If the number of jobs
+     * an idea of how that downstairs is doing. If the number of jobs
      * to be submitted is too big (for some value of big) then there is
-     * a problem.  All sorts of back pressure information can be
-     * gathered here.  As (for the moment) the same task does both
+     * a problem. All sorts of back pressure information can be
+     * gathered here. As (for the moment) the same task does both
      * transmit and receive, we can starve the receive side by spending
      * all our time sending work.
      *
@@ -330,7 +330,7 @@ async fn io_send(
     /*
      * Now we have a list of all the job IDs that are new for our client id.
      * Walk this list and process each job, marking it InProgress as we
-     * do the work.  We do this in two loops because we can't hold the
+     * do the work. We do this in two loops because we can't hold the
      * lock for the hashmap while we do work, and if we release the lock
      * to do work, we would have to start over and look at all jobs in the
      * map to see if they are new.
@@ -344,7 +344,7 @@ async fn io_send(
         u.downstairs.lock().unwrap().submitted_work(client_id);
     for new_id in new_work.iter() {
         if active_count >= 100 {
-            // Flow control inacted, stop sending work
+            // Flow control enacted, stop sending work
             return Ok(true);
         }
         /*
@@ -356,7 +356,8 @@ async fn io_send(
         }
 
         /*
-         * If in_progress returns None, it means that this client should be skipped.
+         * If in_progress returns None, it means that this client should
+         * be skipped.
          */
         let job = u.downstairs.lock().unwrap().in_progress(*new_id, client_id);
         if job.is_none() {
@@ -446,13 +447,14 @@ async fn proc(
      *
      * XXX There are many ways we can handle this, but as we figure out
      * how the upstairs is notified that a DS is new or moving, or other
-     * things, this way will work.  We will revisit when we have more info.
+     * things, this way will work. We will revisit when we have more info.
      */
     while !(*connected) {
         tokio::select! {
             /*
              * Don't wait more than 50 seconds to hear from the other side.
-             * XXX Timeouts, timeouts: always wrong! Some too short and some too long.
+             * XXX Timeouts, timeouts: always wrong! Some too short and some
+             * too long.
              * TODO: 50 is too long, but what is the correct value?
              */
             _ = sleep_until(deadline_secs(50)) => {
@@ -496,7 +498,9 @@ async fn proc(
                     }
                     Some(Message::Imok) => {
                         if negotiated == 1 {
-                            println!("{} client {} is waiting for promotion to active, received ping response.",
+                            println!(
+                                "{} client {} is waiting for promotion \
+                                to active, received ping response.",
                                 up.uuid, up_coms.client_id
                             );
                         }
@@ -545,7 +549,9 @@ async fn proc(
                          */
                         process_downstairs(target, up, versions)?;
 
-                        up.ds_transition(up_coms.client_id, DsState::WaitQuorum);
+                        up.ds_transition(
+                            up_coms.client_id, DsState::WaitQuorum
+                        );
                         up.ds_state_show();
 
                         /*
@@ -560,10 +566,16 @@ async fn proc(
                     }
                     Some(Message::UuidMismatch(expected_uuid)) => {
                         // XXX what to do here?
-                        bail!("{} received UuidMismatch, expecting {:?}!", up.uuid, expected_uuid);
+                        bail!(
+                            "{} received UuidMismatch, expecting {:?}!",
+                            up.uuid, expected_uuid
+                        );
                     }
                     Some(m) => {
-                        bail!("unexpected command {:?} received in state {:?}", m, up.ds_state(up_coms.client_id));
+                        bail!(
+                            "unexpected command {:?} received in state {:?}",
+                            m, up.ds_state(up_coms.client_id)
+                        );
                     }
                 }
             }
@@ -577,7 +589,7 @@ async fn proc(
 /*
  * Once we have negotiated a connection to a downstairs, this task takes
  * over and watches the input for changes, indicating that new work in on
- * the work hashmap.  We will walk the hashmap on the input signal and get
+ * the work hashmap. We will walk the hashmap on the input signal and get
  * any new work for this specific downstairs and mark that job as in progress.
  *
  * V1 flow control: To enable flow control we have a few things.
@@ -587,7 +599,7 @@ async fn proc(
  * 2. A resume timeout that is reset each time we try to do more work but
  * find the sending queue is "full" for some value of full we define in
  * the io_work function.
- * 3. Biased setting for the select loop.  We start with looking for work
+ * 3. Biased setting for the select loop. We start with looking for work
  * ACK messages before putting more new work on the list, which will
  * enable any downstairs to continue to send completed ACKs.
  */
@@ -626,7 +638,10 @@ async fn cmd_loop(
                     },
                     Some(Message::UuidMismatch(expected_uuid)) => {
                         // XXX what to do here?
-                        bail!("{} received UuidMismatch, expecting {:?}!", up.uuid, expected_uuid);
+                        bail!(
+                            "{} received UuidMismatch, expecting {:?}!",
+                            up.uuid, expected_uuid
+                        );
                     }
                     Some(m) => {
                         /*
@@ -642,11 +657,12 @@ async fn cmd_loop(
             _ = up_coms.ds_work_rx.changed() => {
                 /*
                  * A change here indicates the work hashmap has changed
-                 * and we should go look for new work to do.  It is possible
+                 * and we should go look for new work to do. It is possible
                  * that there is no new work but we won't know until we
                  * check.
                  */
-                let more = io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                let more =
+                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
                 if more && !flow_control {
                     println!("[{}] flow control start ", up_coms.client_id);
                     flow_control = true;
@@ -654,7 +670,9 @@ async fn cmd_loop(
             }
             // XXX figure out what deadline makes sense here
             _ = sleep_until(deadline_secs(1)), if flow_control => {
-                let more = io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                let more = io_send(
+                                up, &mut fw, up_coms.client_id, lossy
+                            ).await?;
                 if more {
                     flow_control = true;
                 } else {
@@ -664,7 +682,8 @@ async fn cmd_loop(
             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
-             * XXX Timeouts, timeouts: always wrong!  Some too short and some too long.
+             * XXX Timeouts, timeouts: always wrong!  Some too short and
+             * some too long.
              * TODO: 50 is too long, but what is the correct value?
              */
             _ = sleep_until(deadline_secs(50)) => {
@@ -680,7 +699,7 @@ async fn cmd_loop(
                 if lossy {
                     /*
                      * When lossy is set, we don't always send work to a
-                     * downstairs when we should.  This means we need to,
+                     * downstairs when we should. This means we need to,
                      * every now and then, signal the downstairs task to
                      * check and see if we skipped some work earlier.
                      */
@@ -718,7 +737,8 @@ struct UpComs {
      */
     ds_done_tx: mpsc::Sender<u64>,
     /**
-     * This channel is used to notify the proc task that it's time to this downstairs.
+     * This channel is used to notify the proc task that it's time to this
+     * downstairs.
      */
     ds_active_rx: watch::Receiver<bool>,
 }
@@ -783,7 +803,7 @@ async fn looper(
 
         /*
          * Once we have a connected downstairs, the proc task takes over and
-         * handles negiotation and work processing.
+         * handles negotiation and work processing.
          */
         if let Err(e) =
             proc(&target, up, tcp, &mut connected, &mut up_coms, lossy).await
@@ -840,7 +860,7 @@ pub struct Downstairs {
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
      * TODO: When growing to more than one region, should this become
-     * a 2d Vec? index for region, then index for the DS?
+     * a 2d Vec? Index for region, then index for the DS?
      */
     ds_state: Vec<DsState>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
@@ -891,9 +911,9 @@ impl Downstairs {
     }
 
     /**
-     * Mark this request as in progress for this client, and return a copy of the details of the
-     * request. If the downstairs client has experienced errors in the past, return None and mark
-     * this as Skipped.
+     * Mark this request as in progress for this client, and return a copy
+     * of the details of the request. If the downstairs client has experienced
+     * errors in the past, return None and mark this as Skipped.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.active.get_mut(&ds_id).unwrap();
@@ -932,7 +952,7 @@ impl Downstairs {
 
     /**
      * Return a count of downstairs request IDs of work we have sent
-     * for this client, but don't yet have a reponse.
+     * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: u8) -> usize {
         self.active
@@ -994,7 +1014,8 @@ impl Downstairs {
 
     fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
         /*
-         * If enough downstairs returned an error, then return an error to the Guest
+         * If enough downstairs returned an error, then return an error to
+         * the Guest
          *
          * Not ok:
          * - 2+ errors for Write/Flush
@@ -1010,7 +1031,8 @@ impl Downstairs {
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
         /*
-         * XXX: this code assumes that 3 downstairs is the max that we'll ever support.
+         * XXX: this code assumes that 3 downstairs is the max that we'll
+         * ever support.
          */
         let bad_job = match &job.work {
             IOop::Read {
@@ -1079,7 +1101,7 @@ impl Downstairs {
     }
 
     /**
-     * Mark this downstairs request as complete for this client.  Returns
+     * Mark this downstairs request as complete for this client. Returns
      * true if this completion is enough that we should message the
      * upstairs task that handles returning completions to the guest.
      *
@@ -1124,10 +1146,10 @@ impl Downstairs {
         let oldstate = job.state.insert(client_id, newstate.clone());
 
         if let Some(oldstate) = oldstate {
-            // we shouldn't be transitioning a state that was already transitioned
+            // We shouldn't be transitioning to our current state.
             assert_eq!(oldstate, IOState::InProgress);
         } else {
-            panic!("no old state! that's bad!");
+            panic!("no old state! That's bad!");
         }
 
         /*
@@ -1176,7 +1198,7 @@ impl Downstairs {
             }
         } else if matches!(newstate, IOState::Error(_)) {
             // Mark this downstairs as bad if this was a write or flush
-            // XXX: reconcilation, retries?
+            // XXX: reconciliation, retries?
             if matches!(
                 job.work,
                 IOop::Write {
@@ -1206,7 +1228,8 @@ impl Downstairs {
         if job.ack_status == AckStatus::Acked {
             self.retire_check(ds_id);
         } else {
-            // If we reach this then the job probably has errors and hasn't acked back yet.
+            // If we reach this then the job probably has errors and
+            // hasn't acked back yet.
             let wc = job.state_count();
             if (wc.error + wc.skipped + wc.done) == 3 {
                 notify_guest = true;
@@ -1218,9 +1241,10 @@ impl Downstairs {
     }
 
     /**
-     * This request is now complete on all peers. Remove it from the active set and mark it in the
-     * completed ring buffer. Note we shall not retire a job until it has been ack'd back to the
-     * guest. Just being ack ready is not enough.
+     * This request is now complete on all peers. Remove it from the active
+     * set and mark it in the completed ring buffer. Note we shall not
+     * retire a job until it has been ack'd back to the guest. Just being
+     * AckReady is not enough.
      */
     fn retire_check(&mut self, ds_id: u64) {
         let wc = self.state_count(ds_id).unwrap();
@@ -1235,7 +1259,8 @@ impl Downstairs {
 }
 
 /// Implement XTS encryption
-/// See: https://en.wikipedia.org/wiki/Disk_encryption_theory#XEX-based_tweaked-codebook_mode_with_ciphertext_stealing_(XTS)
+/// See: https://en.wikipedia.org/wiki/Disk_encryption_theory#XEX-based_\
+/// tweaked-codebook_mode_with_ciphertext_stealing_(XTS)
 pub struct EncryptionContext {
     xts: Xts128<Aes128>,
     key: Vec<u8>,
@@ -1304,9 +1329,9 @@ impl EncryptionContext {
 }
 
 /*
- * XXX Track scheduled storage work in the central structure.  Have the
+ * XXX Track scheduled storage work in the central structure. Have the
  * target management task check for work to do here by changing the value in
- * its watch::channel.  Have the main thread determine that an overflow of
+ * its watch::channel. Have the main thread determine that an overflow of
  * work to do backing up in here means we need to do something like mark the
  * target as behind or institute some kind of back pressure, etc.
  */
@@ -1324,7 +1349,7 @@ pub struct Upstairs {
 
     /*
      * The guest struct keeps track of jobs accepted from the Guest as they
-     * progress through crucible.  A single job submitted can produce
+     * progress through crucible. A single job submitted can produce
      * multiple downstairs requests.
      */
     guest: Arc<Guest>,
@@ -1332,38 +1357,39 @@ pub struct Upstairs {
     /*
      * This Downstairs struct keeps track of information about each
      * downstairs as well as tracking IO operations going between
-     * upstairs and downstairs.  New work for downstairs is generated
+     * upstairs and downstairs. New work for downstairs is generated
      * inside the upstairs on behalf of IO requests coming from the guest.
      */
     downstairs: Mutex<Downstairs>,
 
     /*
      * The flush info Vec is only used when first connecting or re-connecting
-     * to a downstairs.  It is populated with the versions the upstairs
-     * considers the "correct".  If a downstairs disconnects and then
+     * to a downstairs. It is populated with the versions the upstairs
+     * considers the "correct". If a downstairs disconnects and then
      * comes back, it has to match or be made to match what was decided
-     * as the correct list.  This may involve having to refresh the versions
+     * as the correct list. This may involve having to refresh the versions
      * vec.
      *
-     * The versions vec is not enough to solve a mismatch.  We really need
+     * The versions vec is not enough to solve a mismatch. We really need
      * Generation number, flush number, and dirty bit for every extent
      * when resolving conflicts.
      *
      * On Startup we determine the highest flush number from all three
-     * downstairs.  We add one to that and it becomes the next flush
-     * number.  Flush numbers increment by one each time.
+     * downstairs. We add one to that and it becomes the next flush
+     * number. Flush numbers increment by one each time.
      */
     flush_info: Mutex<FlushInfo>,
 
     /*
      * The global description of the downstairs region we are using.
      * This allows us to verify each downstairs is the same, as well as
-     * enables us to tranlate an LBA to an extent and block offset.
+     * enables us to translate an LBA to an extent and block offset.
      */
     ddef: Mutex<RegionDefinition>,
 
     /*
-     * Optional encryption context - Some if a key was supplied in the CrucibleOpts
+     * Optional encryption context - Some if a key was supplied in
+     * the CrucibleOpts
      */
     encryption_context: Option<EncryptionContext>,
 }
@@ -1398,11 +1424,13 @@ impl Upstairs {
             EncryptionContext::new(
                 key,
                 /*
-                 * XXX: It would be good to do BlockOp::QueryBlockSize here, but
-                 * this creates a deadlock. Upstairs::new runs before up_ds_listen in up_main,
-                 * and up_ds_listen needs to run to answer BlockOp::QueryBlockSize.
+                 * XXX: It would be good to do BlockOp::QueryBlockSize here,
+                 * but this creates a deadlock. Upstairs::new runs before
+                 * up_ds_listen in up_main, and up_ds_listen needs to run
+                 * to answer BlockOp::QueryBlockSize.
                  *
-                 * At this point ddef is the default, the downstairs haven't reported in.
+                 * At this point ddef is the default, the downstairs haven't
+                 * reported in.
                  */
                 512,
             )
@@ -1435,7 +1463,7 @@ impl Upstairs {
 
     /*
      * If we are doing a flush, the flush number and the rn number
-     * must both go up together.  We don't want a lower next_id
+     * must both go up together. We don't want a lower next_id
      * with a higher flush_number to be possible, as that can introduce
      * dependency deadlock.
      * To also avoid any problems, this method should be called only
@@ -1458,14 +1486,14 @@ impl Upstairs {
 
         /*
          * Lock first the guest_work struct where this new job will go,
-         * then lock the downstairs struct.  Once we have both we can proceed
+         * then lock the downstairs struct. Once we have both we can proceed
          * to build our flush command.
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut downstairs = self.downstairs.lock().unwrap();
 
         /*
-         * Get the next ID for our new guest work job.  Note that the flush
+         * Get the next ID for our new guest work job. Note that the flush
          * ID and the next_id are connected here, in that all future writes
          * should be flushed at the next flush ID.
          */
@@ -1475,7 +1503,7 @@ impl Upstairs {
 
         /*
          * Walk the downstairs work active list, and pull out all the active
-         * jobs.  Anything we have not submitted back to the guest.
+         * jobs. Anything we have not submitted back to the guest.
          *
          * TODO, we can go faster if we:
          * 1. Ignore everything that was before and including the last flush.
@@ -1515,9 +1543,10 @@ impl Upstairs {
     }
 
     /*
-     * When we have a guest write request with offset and buffer, take them and
-     * build both the upstairs work guest tracking struct as well as the downstairs
-     * work struct. Once both are ready, submit them to the required places.
+     * When we have a guest write request with offset and buffer, take them
+     * and build both the upstairs work guest tracking struct as well as the
+     * downstairs work struct. Once both are ready, submit them to the
+     * required places.
      */
     #[instrument]
     fn submit_write(
@@ -1532,7 +1561,7 @@ impl Upstairs {
 
         /*
          * Get the next ID for the guest work struct we will make at the
-         * end.  This ID is also put into the IO struct we create that
+         * end. This ID is also put into the IO struct we create that
          * handles the operation(s) on the storage side.
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
@@ -1540,7 +1569,7 @@ impl Upstairs {
 
         /*
          * Given the offset and buffer size, figure out what extent and
-         * byte offset that translates into.  Keep in mind that an offset
+         * byte offset that translates into. Keep in mind that an offset
          * and length may span two extents, and eventually XXX, two regions.
          */
         let ddef = self.ddef.lock().unwrap();
@@ -1551,8 +1580,8 @@ impl Upstairs {
         )?;
 
         /*
-         * Grab this ID after extent_from_offset: in case of Err we don't want to create a gap in
-         * the IDs.
+         * Grab this ID after extent_from_offset: in case of Err we don't want
+         * to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
 
@@ -1648,7 +1677,7 @@ impl Upstairs {
 
         /*
          * Get the next ID for the guest work struct we will make at the
-         * end.  This ID is also put into the IO struct we create that
+         * end. This ID is also put into the IO struct we create that
          * handles the operation(s) on the storage side.
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
@@ -1667,8 +1696,8 @@ impl Upstairs {
         )?;
 
         /*
-         * Grab this ID after extent_from_offset: in case of Err we don't want to create a gap in
-         * the IDs.
+         * Grab this ID after extent_from_offset: in case of Err we don't
+         * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
 
@@ -1693,11 +1722,11 @@ impl Upstairs {
             }
 
             /*
-             * When multiple operations are needed to satisfy a read, The offset
-             * and length will be divided across two downstairs requests.  It is
-             * required (for re-assembly on the other side) that the lower offset
-             * corresponds to the lower next_id.  The ID's don't need to be
-             * sequential.
+             * When multiple operations are needed to satisfy a read, The
+             * offset and length will be divided across two downstairs
+             * requests. It is required (for re-assembly on the other side)
+             * that the lower offset corresponds to the lower next_id.
+             * The ID's don't need to be sequential.
              */
             sub.insert(next_id, num_blocks);
             downstairs_buffer_sector_index.insert(next_id, bo.value as u128);
@@ -1713,9 +1742,9 @@ impl Upstairs {
         }
 
         /*
-         * New work created, add to the guest_work HM.  New work must be put
+         * New work created, add to the guest_work HM. New work must be put
          * on the guest_work active HM first, before it lands on the downstairs
-         * lists.  We don't want to miss a completion from downstairs.
+         * lists. We don't want to miss a completion from downstairs.
          */
         assert!(!sub.is_empty());
         let new_gtos = GtoS::new(
@@ -1868,7 +1897,7 @@ impl Upstairs {
                 != client_ddef.extent_size().block_size_in_bytes()
             || ddef.extent_count() != client_ddef.extent_count()
         {
-            // XXX Figure out if we can hande this error.  Possibly not.
+            // XXX Figure out if we can handle this error. Possibly not.
             panic!("New downstairs region info mismatch");
         }
 
@@ -1905,7 +1934,10 @@ impl Upstairs {
                 self.ds_transition(client_id, DsState::Deactivated);
                 self.set_inactive();
             }
-            // After work.complete, it's possible that the job is gone due to a retire check
+            /*
+             * After work.complete, it's possible that the job is gone
+             * due to a retire check
+             */
             else if let Some(job) = work.active.get_mut(&ds_id) {
                 if matches!(
                     job.work,
@@ -1948,7 +1980,7 @@ impl FlushInfo {
      * Upstairs flush_info mutex must be held when calling this.
      * In addition, a downstairs request ID should be obtained at the
      * same time the next flush number is obtained, such that any IO that
-     * is given a downstairs request number higer than the request number
+     * is given a downstairs request number higher than the request number
      * for the flush will happen after this flush, never before.
      */
     fn next_flush(&mut self) -> u64 {
@@ -1959,7 +1991,7 @@ impl FlushInfo {
 }
 /*
  * States a downstairs can be in.
- * XXX This very much still under development.  Most of these are place
+ * XXX This very much still under development. Most of these are place
  * holders and the final set of states will change.
  */
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -1969,7 +2001,7 @@ enum DsState {
      */
     New,
     /*
-     * Incompatable software version reported.
+     * Incompatible software version reported.
      */
     BadVersion,
     /*
@@ -1977,7 +2009,7 @@ enum DsState {
      */
     WaitQuorum,
     /*
-     * Incompatable region format reported.
+     * Incompatible region format reported.
      */
     _BadRegion,
     /*
@@ -2036,7 +2068,7 @@ struct DownstairsIO {
      * The length and keys on this hashmap will be used to determine which
      * downstairs will receive the IO request.
      * XXX Determine if it is required for all downstairs to get an entry
-     * or if by not putting a downstars in the hash, if that is valid.
+     * or if by not putting a downstairs in the hash, if that is valid.
      */
     state: HashMap<u8, IOState>,
     /*
@@ -2102,8 +2134,8 @@ pub enum IOState {
     InProgress,
     // The successful response came back from downstairs.
     Done,
-    // The IO request should be ignored. Ex: we could be doing recovery and we only want a specific
-    // downstairs to do that work.
+    // The IO request should be ignored. Ex: we could be doing recovery and
+    // we only want a specific downstairs to do that work.
     Skipped,
     // The IO returned an error.
     Error(CrucibleError),
@@ -2350,7 +2382,8 @@ enum BlockOp {
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<Block>> },
     QueryWorkQueue { data: Arc<Mutex<usize>> },
-    Commit, // Send update to all tasks that there is work on the queue.
+    // Send an update to all tasks that there is work on the queue.
+    Commit,
     // Show internal work queue, return outstanding IO requests.
     ShowWork { data: Arc<Mutex<WQCounts>> },
 }
@@ -2360,7 +2393,7 @@ enum BlockOp {
  * that map to a single Guest IO request. G to S stands for Guest
  * to Storage.
  *
- * The submitted hashmap is indexd by the request number (ds_id) for the
+ * The submitted hashmap is indexed by the request number (ds_id) for the
  * downstairs requests issued on behalf of this request.
  */
 #[derive(Debug)]
@@ -2384,7 +2417,7 @@ struct GtoS {
     /*
      * When we have an IO between the guest and crucible, it's possible
      * it will be broken into two smaller requests if the range happens
-     * to cross an extent boundary.  This hashmap is a list of those
+     * to cross an extent boundary. This hashmap is a list of those
      * buffers with the key being the downstairs request ID.
      *
      * Data moving in/out of this buffer will be encrypted or decrypted
@@ -2441,7 +2474,8 @@ impl GtoS {
                 let mut ds_vec =
                     self.downstairs_buffer.remove(ds_id).unwrap().to_vec();
 
-                // if there's an encryption context, decrypt the downstairs buffer.
+                // if there's an encryption context, decrypt the
+                // downstairs buffer.
                 if let Some(context) = &self.encryption_context {
                     context.decrypt_in_place(
                         &mut ds_vec[..],
@@ -2466,7 +2500,7 @@ impl GtoS {
         } else {
             /*
              * Should this panic?  If the caller is requesting a transfer,
-             * the guest_buffer should exist.  If it does not exist, then
+             * the guest_buffer should exist. If it does not exist, then
              * either there is a real problem, or the operation was a write
              * or flush and why are we requesting a transfer for those.
              */
@@ -2481,7 +2515,7 @@ impl GtoS {
         /*
          * XXX: If the guest is no longer listening and this returns an error,
          * do we care?  This could happen if the guest has given up
-         * becuase an IO took too long, or other possible guest side reasons.
+         * because an IO took too long, or other possible guest side reasons.
          */
         let _send_result = self.sender.send(result);
     }
@@ -2492,7 +2526,7 @@ impl GtoS {
  * "Guest", aka, Propolis.
  *
  * The active is a hashmap of GtoS structures for all I/Os that are
- * outstanding.  Either just created or in progress operations.  The key
+ * outstanding. Either just created or in progress operations. The key
  * for a new job comes from next_gw_id and should always increment.
  *
  * Once we have decided enough downstairs requests are finished, we remove
@@ -2539,7 +2573,7 @@ impl GuestWork {
      * GtoS struct for later transfer.
      *
      * A single GtoS job may have multiple downstairs jobs it created, so
-     * we may not be done yet.  When the required number of completions have
+     * we may not be done yet. When the required number of completions have
      * arrived from all the downstairs jobs we created, then we
      * can move forward with finishing up the guest work operation.
      * This may include moving/decrypting data buffers from completed reads.
@@ -2628,7 +2662,8 @@ pub struct BlockReq {
 }
 
 impl BlockReq {
-    // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc/index.html#communicating-between-sync-and-async-code
+    // https://docs.rs/tokio/1.9.0/tokio/sync/mpsc\
+    //     /index.html#communicating-between-sync-and-async-code
     // return the std::sync::mpsc Sender to non-tokio task callers
     fn new(
         op: BlockOp,
@@ -2663,9 +2698,9 @@ impl BlockReqWaiter {
 
 /**
  * This is the structure we use to keep track of work passed into crucible
- * from the the "Guest".
+ * from the "Guest".
  *
- * Requests from the guest are put into the reqs VecDeque initally.
+ * Requests from the guest are put into the reqs VecDeque initially.
  *
  * A task on the Crucible side will receive a notification that a new
  * operation has landed on the reqs queue and will take action:
@@ -2675,7 +2710,7 @@ impl BlockReqWaiter {
  *   Create a GtoS tracking structure with the id's for each
  *   downstairs task and the read result buffer if required.
  *   Add the GtoS struct to the in GuestWork active work hashmap.
- *   Put all the DownstairsIO strucutres on the downstairs work queue.
+ *   Put all the DownstairsIO structures on the downstairs work queue.
  *   Send notification to the upstairs tasks that there is new work.
  *
  * Work here will be added to storage side queues and the responses will
@@ -2691,8 +2726,8 @@ pub struct Guest {
      */
     active: Mutex<bool>,
     /*
-     * New requests from outside go onto this VecDeque.  The notify is how
-     * the submittion task tells the listening task that new work has been
+     * New requests from outside go onto this VecDeque. The notify is how
+     * the submission task tells the listening task that new work has been
      * added.
      */
     reqs: Mutex<VecDeque<BlockReq>>,
@@ -2705,7 +2740,7 @@ pub struct Guest {
      * Each new GuestWork request will get a unique gw_id, which is also
      * the index for that operation into the hashmap.
      *
-     * It is during this process that data will encrypted.  For a read, the
+     * It is during this process that data will encrypted. For a read, the
      * data is decrypted back to the guest provided buffer after all the
      * required downstairs operations are completed.
      */
@@ -2787,7 +2822,8 @@ impl Guest {
     }
 
     /*
-     * `read` and `write` accept a block offset, and data must be a multiple of block size.
+     * `read` and `write` accept a block offset, and data must be a
+     * multiple of block size.
      */
     pub fn read(
         &self,
@@ -2836,8 +2872,8 @@ impl Guest {
     }
 
     /*
-     * `read_from_byte_offset` and `write_to_byte_offset` accept a byte offset, and data must be a
-     * multiple of block size.
+     * `read_from_byte_offset` and `write_to_byte_offset` accept a byte
+     * offset, and data must be a multiple of block size.
      */
     pub fn read_from_byte_offset(
         &self,
@@ -2886,7 +2922,8 @@ impl Guest {
         let mut waiter = self.send(BlockOp::GoActive);
         waiter.block_wait()?;
 
-        // XXX is this the right number of retries? the right delay between retries?
+        // XXX is this the right number of retries? The right delay between
+        // retries?
         for _ in 0..10 {
             if self.query_is_active()? {
                 println!(
@@ -3038,7 +3075,7 @@ fn _send_work(t: &[Target], val: u64) {
             /*
              * TODO Write more code for this error,  If one downstairs
              * never receives a request, it may get picked up on the
-             * next request.  However, if the downstairs has gone away,
+             * next request. However, if the downstairs has gone away,
              * then action will need to be taken, and soon.
              */
         }
@@ -3046,8 +3083,8 @@ fn _send_work(t: &[Target], val: u64) {
 }
 
 /**
- * We listen on the ds_done channel to know when enough of the downstairs requests
- * for a downstairs work task have finished and it is time to complete
+ * We listen on the ds_done channel to know when enough of the downstairs
+ * requests for a downstairs work task have finished and it is time to complete
  * any buffer transfers (reads) and then notify the guest that their
  * work has been completed.
  */
@@ -3090,10 +3127,10 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 }
 
 /**
- * The upstairs has recieved a new IO request from the guest.  Here we
+ * The upstairs has received a new IO request from the guest. Here we
  * decide what to for that request.
  * For IO operations, we build the downstairs work and if required split
- * the single IO into multiple IOs to the downstairs.  Once we have built
+ * the single IO into multiple IOs to the downstairs. Once we have built
  * the work and updated the upstairs and downstairs work queues, we signal
  * to all the downstairs tasks there is new work for them to do.
  */
@@ -3104,8 +3141,8 @@ async fn process_new_io(
     lastcast: &mut u64,
 ) {
     /*
-     * If any of the submit_* functions fail to send to the downstairs, they return an error.
-     * These are reported to the Guest.
+     * If any of the submit_* functions fail to send to the downstairs, they
+     * return an error.  These are reported to the Guest.
      */
     match req.op {
         BlockOp::Read { offset, data } => {
@@ -3181,7 +3218,7 @@ async fn process_new_io(
 
 /*
  * This task will loop forever and wait for three downstairs to get into the
- * ready state.  We are notified of that through the ds_status_rx channel.
+ * ready state. We are notified of that through the ds_status_rx channel.
  * Once we have three connections, we then also listen for work requests
  * to come over the guest channel.
  * If we lose a connection to downstairs, we just panic. XXX Eventually we
@@ -3215,7 +3252,10 @@ async fn up_listen(
                                 break;
                             }
                         } else {
-                            println!("#### {:?} #### DISCONNECTED! ####", c.target);
+                            println!(
+                                "#### {:?} #### DISCONNECTED! ####",
+                                c.target
+                            );
                             ds_count -= 1;
                         }
                     } else {
@@ -3232,7 +3272,11 @@ async fn up_listen(
                     ) {
                         process_new_io(up, &dst, req, &mut lastcast).await;
                     } else {
-                        println!("{} ignoring {:?}, not all downstairs are connected", up.uuid, req.op);
+                        println!(
+                            "{} ignoring {:?}, not all \
+                            downstairs are connected",
+                            up.uuid, req.op
+                        );
                     }
                 }
             }
@@ -3241,7 +3285,7 @@ async fn up_listen(
         println!("All expected targets are online, Now accepting IO requests");
         /*
          * XXX The real check to transition from WaitQuorum to Active can
-         * happen now, as all three are connected and ready.  Right now this
+         * happen now, as all three are connected and ready. Right now this
          * happens in process_downstairs() and in the wrong way.
          */
 
@@ -3250,7 +3294,11 @@ async fn up_listen(
          */
         if !up.all_ds_state_match(DsState::WaitQuorum) {
             up.ds_state_show();
-            panic!("{} about to set all to active but not all state is WaitQuorum!!", up.uuid);
+            panic!(
+                "{} about to set all to active but not \
+                all state is WaitQuorum!!",
+                up.uuid
+            );
         }
 
         up.ds_transition_all(DsState::Active);
@@ -3260,7 +3308,7 @@ async fn up_listen(
 
         /*
          * We have three connections, so we can now start listening for
-         * more IO to come in.  We also need to make sure our downstairs
+         * more IO to come in. We also need to make sure our downstairs
          * stay connected, and we watch the ds_status_rx.recv() for that
          * to change which is our notification that a disconnect has happened.
          */
@@ -3269,9 +3317,9 @@ async fn up_listen(
                 c = ds_status_rx.recv() => {
                     /*
                      * If this is anything other than a disconnect, then
-                     * panic at this time.  Given our outer loop is doing the
+                     * panic at this time. Given our outer loop is doing the
                      * work of connecting all three downstairs, all this
-                     * should ever have to do (right now) is detatch a
+                     * should ever have to do (right now) is detach a
                      * downstairs and stop taking I/O.
                      */
                     if let Some(ref c) = c {
@@ -3281,20 +3329,25 @@ async fn up_listen(
                         }
                     } else {
                         /*
-                         * A None here means all senders were dropped, which means we should exit
-                         * gracefully.
+                         * A None here means all senders were dropped, which
+                         * means we should exit gracefully.
                          */
-                        println!("Saw None in up_listen, draining in-flight IO");
+                        println!(
+                            "Saw None in up_listen, draining in-flight IO"
+                        );
                         show_all_work(up);
 
                         // Terminate all in-flight IO
                         loop {
                             tokio::select! {
                                 _ = up.guest.drain_inflight_io() => {
-                                    println!("drained in-flight io");
+                                    println!("drained in-flight IO");
                                 }
                                 _ = sleep_until(deadline_secs(10)) => {
-                                    println!("Timed out for up.guest.recv drain, returning gracefully");
+                                    println!(
+                                        "Timed out for up.guest.recv drain, \
+                                        returning gracefully"
+                                    );
                                     return;
                                 }
                             }
@@ -3319,7 +3372,7 @@ async fn up_listen(
 pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     match register_probes() {
         Ok(()) => {
-            println!("DTrace probes registered ok");
+            println!("DTrace probes registered okay");
         }
         Err(e) => {
             println!("Error registering DTrace probes: {:?}", e);
@@ -3449,7 +3502,7 @@ fn create_write_eob(
 
 /*
  * Create a write DownstairsIO structure from an EID, and offset, and the
- * data buffer.  Used for converting a guest IO read request into a
+ * data buffer. Used for converting a guest IO read request into a
  * DownstairsIO that the downstairs can understand.
  */
 fn create_read_eob(
@@ -3635,7 +3688,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
  * to get better when calling it.
  *
  * TODO: make this one big dump, where we include the up.work.active
- * printing for each guest_work.  It will be much more dense, but require
+ * printing for each guest_work. It will be much more dense, but require
  * holding both locks for the duration.
  */
 fn show_guest_work(guest: &Arc<Guest>) -> usize {
@@ -3656,12 +3709,12 @@ fn show_guest_work(guest: &Arc<Guest>) -> usize {
 }
 
 /*
- * IO operations are ok to submit directly to Upstairs if:
+ * IO operations are okay to submit directly to Upstairs if:
  *
  * - the offset is block aligned, and
  * - the size is a multiple of block size
  *
- * If either of these is not true, then perform some fixup here.
+ * If either of these is not true, then perform some fix up here.
  */
 #[derive(Debug)]
 struct IOSpan {
@@ -3906,12 +3959,14 @@ impl CruciblePseudoFile {
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
         /*
-         * Crucible's dependency system will properly resolve requests in the order they are
-         * received but if the request is not block aligned and block sized we need to do
-         * read-modify-write (RMW) here. Use a reader-writer lock, and grab the write portion of
-         * the lock when doing RMW to cause all other operations (which only grab the read portion
-         * of the lock) to pause. Otherwise all operations can use the read portion of this lock
-         * and Crucible will sort it out.
+         * Crucible's dependency system will properly resolve requests in
+         * the order they are received but if the request is not block
+         * aligned and block sized we need to do read-modify-write (RMW)]
+         * here. Use a reader-writer lock, and grab the write portion of
+         * the lock when doing RMW to cause all other operations (which
+         * only grab the read portion
+         * of the lock) to pause. Otherwise all operations can use the
+         * read portion of this lock and Crucible will sort it out.
          */
         if !span.is_block_regular() {
             let _guard = self.rmw_lock.write().unwrap();
@@ -4772,7 +4827,8 @@ mod test {
         assert!(work.downstairs_errors.get(&1).is_some());
         assert!(work.downstairs_errors.get(&2).is_none());
 
-        // another read. make sure only client 2 returns data. the others should be skipped.
+        // another read. Make sure only client 2 returns data.
+        // The others should be skipped.
 
         let next_id = work.next_id();
         let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
@@ -4855,8 +4911,8 @@ mod test {
         assert!(work.downstairs_errors.get(&1).is_none());
         assert!(work.downstairs_errors.get(&2).is_none());
 
-        // send another read, and expect all to return something (reads shouldn't cause a Failed
-        // transition)
+        // send another read, and expect all to return something
+        // (reads shouldn't cause a Failed transition)
 
         let next_id = work.next_id();
         let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);

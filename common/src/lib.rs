@@ -77,8 +77,12 @@ impl From<anyhow::Error> for CrucibleError {
 #[macro_export]
 macro_rules! crucible_bail {
     ($i:ident) => { return Err(CrucibleError::$i) };
-    ($i:ident, $str:expr) => { return Err(CrucibleError::$i($str.to_string())) };
-    ($i:ident, $fmt:expr, $($arg:tt)*) => { return Err(CrucibleError::$i(format!($fmt, $($arg)*))) };
+    ($i:ident, $str:expr) => {
+        return Err(CrucibleError::$i($str.to_string()))
+    };
+    ($i:ident, $fmt:expr, $($arg:tt)*) => {
+        return Err(CrucibleError::$i(format!($fmt, $($arg)*)))
+    };
 }
 
 pub fn read_json_maybe<P, T>(file: P) -> Result<Option<T>>
