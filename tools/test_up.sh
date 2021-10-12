@@ -67,13 +67,13 @@ for tt in ${test_list}; do
 done
 
 echo "Running hammer"
-#if ! time cargo run -p crucible-hammer -- \
-#  "${args[@]}" \
-#  --key "$(openssl rand -base64 32)"; then
-#
-#	echo "Failed hammer test"
-#    res=1
-#fi
+if ! time cargo run -p crucible-hammer -- \
+  "${args[@]}" \
+  --key "$(openssl rand -base64 32)"; then
+
+	echo "Failed hammer test"
+    res=1
+fi
 
 echo ""
 echo "Running verify test: $tt"
