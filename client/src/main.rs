@@ -12,7 +12,6 @@ use structopt::StructOpt;
 use tokio::runtime::Builder;
 
 use crucible::*;
-use crucible_common::*;
 
 /*
  * The various tests this program supports.
