@@ -1071,8 +1071,10 @@ impl Downstairs {
      * Mark this request as in progress for this client, and return a copy
      * of the details of the request. If the downstairs client has
      * experienced errors in the past, return None and mark this as
-     * Skipped. XXX Better error handling might mean clearing previous
-     * downstairs errors, as for all we know it's a new downstairs.
+     * Skipped.
+     *
+     * XXX Better error handling might mean clearing previous downstairs
+     * errors, as for all we know it's a new downstairs.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.active.get_mut(&ds_id).unwrap();
