@@ -15,7 +15,8 @@ pub enum Message {
     YesItsMe(u32),
 
     /*
-     * Forcefully tell this downstairs to promote us (an Upstairs) to active.
+     * Forcefully tell this downstairs to promote us (an Upstairs) to
+     * active.
      *
      * Kick out the old Upstairs.
      */

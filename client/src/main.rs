@@ -244,7 +244,8 @@ fn main() -> Result<()> {
     };
 
     /*
-     * Call the function for the workload option passed from the command line.
+     * Call the function for the workload option passed from the command
+     * line.
      */
     match opt.workload {
         Workload::Balloon => {
@@ -498,8 +499,8 @@ fn validate_vec(
 /*
  * Write then read (and verify) to every possible block, with every size that
  * block can possibly support.
- * I named it balloon because each loop on a block "balloons" from the minimum
- * IO size to the largest possible.
+ * I named it balloon because each loop on a block "balloons" from the
+ * minimum IO size to the largest possible.
  */
 async fn balloon_workload(
     guest: &Arc<Guest>,
@@ -770,7 +771,7 @@ async fn burst_workload(
 ) -> Result<()> {
     // TODO: let user pick loop count
     for c in 0..count {
-        demo_workload(&guest, demo_count, ri).await?;
+        demo_workload(guest, demo_count, ri).await?;
         let mut wc = guest.show_work()?;
         while wc.up_count + wc.ds_count != 0 {
             std::thread::sleep(std::time::Duration::from_secs(1));

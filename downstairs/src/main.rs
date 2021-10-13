@@ -403,11 +403,12 @@ async fn do_work_loop(
             }
         }
         /*
-         * If this job is still new, take it and go to work.  The in_progress
-         * method will only return a job if all dependencies are met.  Because
-         * we build the list of potential work, then release the lock, it is
-         * possible to have things change, so we need to verify that the job
-         * is still in a new or dep wait state.
+         * If this job is still new, take it and go to work. The in_progress
+         * method will only return a job if all dependencies are met.
+         * Because we build the list of potential work, then release
+         * the lock, it is possible to have things change, so we need
+         * to verify that the job is still in a new or dep wait
+         * state.
          */
         let job = {
             let ds = ads.lock().await;
@@ -496,8 +497,8 @@ fn _show_work(ds: &Arc<Downstairs>) {
 
 /*
  * A new IO request has been received.
- * If the message is a ping or negotiation message, send the correct response.
- * If the message is an IO, then put the new IO the work hashmap.
+ * If the message is a ping or negotiation message, send the correct
+ * response. If the message is an IO, then put the new IO the work hashmap.
  * Call do_work_loop() to see if we can perform any job on the work hashmap.
  * Keep looping the work hashmap until we no longer make progress.
  * XXX Flow control work here: we should prioritize responses over new
@@ -827,9 +828,9 @@ pub struct Work {
 
     /*
      * We have to keep track of all IOs that have been issued since
-     * our last flush, as that is how we make sure dependencies are respected.
-     * The last_flush is the downstairs job ID number (ds_id typically) for
-     * the most recent flush.
+     * our last flush, as that is how we make sure dependencies are
+     * respected. The last_flush is the downstairs job ID number (ds_id
+     * typically) for the most recent flush.
      */
     last_flush: u64,
     completed: Vec<u64>,
@@ -873,10 +874,10 @@ impl Work {
      */
     fn in_progress(&mut self, ds_id: u64) -> Option<DownstairsWork> {
         /*
-         * Once we support multiple threads, we can obtain a ds_id that looked
-         * valid when we made a list of jobs, but something else moved that
-         * job along and now it no longer exists.  We need to handle that
-         * case correctly.
+         * Once we support multiple threads, we can obtain a ds_id that
+         * looked valid when we made a list of jobs, but something
+         * else moved that job along and now it no longer exists.  We
+         * need to handle that case correctly.
          */
         if let Some(job) = self.active.get_mut(&ds_id) {
             if job.state == WorkState::New || job.state == WorkState::DepWait {

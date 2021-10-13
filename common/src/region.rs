@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /*
- * Where the unit is blocks, not bytes, make sure to reflect that in the types
- * used.
+ * Where the unit is blocks, not bytes, make sure to reflect that in the
+ * types used.
  *
  * Consumers of this API should know when to use bytes (rarely), and when to
  * use blocks.

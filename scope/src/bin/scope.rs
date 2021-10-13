@@ -50,8 +50,8 @@ async fn client(sock: &str, cons: &mut mpsc::Receiver<String>) -> Result<()> {
     /*
      * Subsequent messages are prompt requests.  When we receive a prompt, we
      * need to display the prompt to the user.  The next line of input we
-     * receive from the user is sent to the server as a reply to the most recent
-     * prompt.
+     * receive from the user is sent to the server as a reply to the most
+     * recent prompt.
      */
     let mut prompt: Option<messages::PromptOut> = None;
     loop {
