@@ -431,6 +431,22 @@ async fn proc(
     let mut fr = FramedRead::new(r, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(w, CrucibleEncoder::new());
 
+    up.ds_state_show();
+    let my_state = {
+        let state = &up.downstairs.lock().unwrap().ds_state;
+        state[up_coms.client_id as usize]
+    };
+    println!("Proc runs for {} in state {:?}", target, my_state);
+    if my_state != DsState::New
+        && my_state != DsState::Disconnected
+        && my_state != DsState::Failed
+        && my_state != DsState::Offline
+    {
+        panic!(
+            "[{}] failed proc with state {:?}",
+            up_coms.client_id, my_state
+        );
+    }
     /*
      * As the "client", we must begin the negotiation.
      */
@@ -448,6 +464,58 @@ async fn proc(
      * XXX There are many ways we can handle this, but as we figure out
      * how the upstairs is notified that a DS is new or moving, or other
      * things, this way will work. We will revisit when we have more info.
+     *
+     * The negotiation flow starts as follows, with the value of the
+     * negotiated variable on the left:
+     *
+     *          Upstairs             Downstairs
+     * 0:          HereIAm(v)  --->
+     *                         <---  YesItsMe(v)
+     *
+     * At this point, a downstairs will wait for a "PromoteToActive" message
+     * to be sent to it.  If this is a new upstairs that has not yet
+     * connected to a downstairs, then we will wait for the guest to send
+     * us this message and pass it down to the downstairs.  If a downstairs
+     * is reconnecting after having already been active, then we look at our
+     * upstairs is_active() and, if the upstairs is active, we send the
+     * downstairs the message ourselves.
+     *
+     * 1: PromoteToActive(uuid)--->
+     *                         <---  YouAreNowActive(uuid)
+     *
+     * 2:    RegionInfoPlease  --->
+     *                         <---  RegionInfo(r)
+     *
+     *    At this point the upstairs looks to see what state the downstairs
+     *    is currently in.  It will be "New", "Disconnected" or "Offline".
+     *
+     *    For "New" or "Disconnected" it means this downstairs never was
+     *    "Active" and we have to go through the full compare of this
+     *    downstairs with other downstairs and make sure they are
+     *    consistent (This code still TBW).  The New/Disconnected steps
+     *    continue here:
+     *
+     *          Upstairs             Downstairs
+     * 4: ExtentVersionsPlease --->
+     *                         <---  ExtentVersions(versions)
+     *
+     *    Now with the extent info, Upstairs calls process_downstairs() and
+     *    if no problems, sends connected=true to the up_listen() task,
+     *    we set the downstairs to DsState::WaitQuorum and we exit the
+     *    while loop.
+     *
+     *    For the "Offline" state, the downstairs was connected and verified
+     *    and after that point the connection was lost.  To handle this
+     *    condition we follow these final steps to get this downstairs
+     *    working again:
+     *
+     *          Upstairs             Downstairs
+     * 3:       LastFlush(lf)) --->
+     *                         <---  LastFlushAck(lf)
+     *
+     * 5: Now the downstairs is ready to receive replay IOs from the
+     *    upstairs. We set the downstairs to DsState::Replay and the while
+     *    loop is exited.
      */
     while !(*connected) {
         tokio::select! {
@@ -458,7 +526,7 @@ async fn proc(
              * TODO: 50 is too long, but what is the correct value?
              */
             _ = sleep_until(deadline_secs(50)) => {
-                up.ds_transition(up_coms.client_id, DsState::Disconnected);
+                up.ds_missing(up_coms.client_id);
                 bail!("timed out during negotiation");
             }
             _ = sleep_until(deadline_secs(5)) => {
@@ -466,6 +534,10 @@ async fn proc(
             }
             _ = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
                 /*
+                 * This check must only be done when the proper
+                 * negotiation step is reached.  If we check too soon, then
+                 * we can be out of order.
+                *
                  * Promote self to active when message arrives from the Guest.
                  */
                 fw.send(Message::PromoteToActive(up.uuid)).await?;
@@ -474,6 +546,7 @@ async fn proc(
                 match f.transpose()? {
                     None => {
                         // hung up
+                        up.ds_missing(up_coms.client_id);
                         return Ok(())
                     }
                     Some(Message::YesItsMe(version)) => {
@@ -495,6 +568,14 @@ async fn proc(
                         }
 
                         negotiated = 1;
+                        if up.is_active() {
+                            /*
+                             * On a downstairs reconnect, we are not going
+                             * to receive another PromoteToActive from the
+                             * guest, so send one ourselves.
+                             */
+                            fw.send(Message::PromoteToActive(up.uuid)).await?;
+                        }
                     }
                     Some(Message::Imok) => {
                         if negotiated == 1 {
@@ -525,19 +606,79 @@ async fn proc(
                             bail!("Received RegionInfo out of order!");
                         }
                         up.add_downstairs(up_coms.client_id, region_def)?;
-                        negotiated = 3;
-
 
                         /*
-                         * Ask for the current version of all extents.
+                         * If we are coming from state Offline, then it means
+                         * the downstairs has departed then came back in
+                         * short enough time that it does not have to go into
+                         * full recovery/repair mode.  If we have verified
+                         * that the UUID and region info is the same, we
+                         * can reconnect and let any outstanding work
+                         * be replayed to catch us up.  We do need to tell
+                         * the downstairs the last flush ID it ACKd to us.
                          */
-                        fw.send(Message::ExtentVersionsPlease).await?;
+                        let my_state = {
+                            let state = &up.downstairs.lock().unwrap().ds_state;
+                            state[up_coms.client_id as usize]
+                        };
+                        if my_state == DsState::Offline {
+                            let lf = up.last_flush_id(up_coms.client_id);
+                            println!("[{}] send last flush ID to this DS: {}",
+                                up_coms.client_id, lf);
+                            negotiated = 3;
+                            fw.send(Message::LastFlush(lf)).await?;
+                        } else {
+                            if my_state != DsState::New &&
+                                my_state != DsState::Failed &&
+                                my_state != DsState::Disconnected
+                            {
+                                panic!("[{}] Negotiation failed, in state {:?}",
+                                    up_coms.client_id,
+                                    my_state,
+                                );
+                            }
+                            /*
+                             * Ask for the current version of all extents.
+                             */
+                            negotiated = 4;
+                            fw.send(Message::ExtentVersionsPlease).await?;
+                        }
+                        up.ds_state_show();
+                    },
+                    Some(Message::LastFlushAck(last_flush)) => {
+                        if negotiated != 3 {
+                            bail!("Received LastFlushAck out of order!");
+                        }
+                        let my_state = {
+                            let state = &up.downstairs.lock().unwrap().ds_state;
+                            state[up_coms.client_id as usize]
+                        };
+                        assert_eq!(my_state, DsState::Offline);
+                        println!("[{}] replied this last flush ID: {}",
+                            up_coms.client_id,
+                            last_flush,
+                        );
+                        // Assert now, but this should eventually be an
+                        // error and move the downstairs to failed. XXX
+                        assert_eq!(
+                            up.last_flush_id(up_coms.client_id), last_flush
+                        );
+                        up.ds_transition(
+                            up_coms.client_id, DsState::Replay);
+
+                        *connected = true;
+                        negotiated = 5;
                     },
                     Some(Message::ExtentVersions(versions)) => {
-                        if negotiated != 3 {
+                        if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
 
+                        let my_state = {
+                            let state = &up.downstairs.lock().unwrap().ds_state;
+                            state[up_coms.client_id as usize]
+                        };
+                        assert_eq!(my_state, DsState::New);
                         /*
                          * XXX This logic may move to a different location
                          * when we actually get the code written to handle
@@ -549,6 +690,7 @@ async fn proc(
                          */
                         process_downstairs(target, up, versions)?;
 
+                        negotiated = 5;
                         up.ds_transition(
                             up_coms.client_id, DsState::WaitQuorum
                         );
@@ -581,7 +723,12 @@ async fn proc(
             }
         }
     }
-
+    /*
+     * This check is just to make sure we have completed negotiation.
+     * But, XXX, this will go away when we redo the state transition code
+     * for a downstairs connection.
+     */
+    assert_eq!(negotiated, 5);
     println!("[{}] Client completed negotiation", up_coms.client_id);
     cmd_loop(up, fr, fw, up_coms, lossy).await
 }
@@ -593,7 +740,7 @@ async fn proc(
  * any new work for this specific downstairs and mark that job as in progress.
  *
  * V1 flow control: To enable flow control we have a few things.
- * 1. The boolean flow_control variable, that indicates we are in a
+ * 1. The boolean more_work variable, that indicates we are in a
  * flow control situation and should check for work to do even if new work
  * has not shown up.
  * 2. A resume timeout that is reset each time we try to do more work but
@@ -602,6 +749,10 @@ async fn proc(
  * 3. Biased setting for the select loop. We start with looking for work
  * ACK messages before putting more new work on the list, which will
  * enable any downstairs to continue to send completed ACKs.
+ *
+ * Note that the more_work variable is also used when we have a disconnected
+ * downstairs that comes back.  In that situation we also need to take our
+ * work queue and resend everything since the last flush that was ACK'd.
  */
 async fn cmd_loop(
     up: &Arc<Upstairs>,
@@ -623,7 +774,13 @@ async fn cmd_loop(
      * second.
      */
     let mut needping = false;
-    let mut flow_control = false;
+    /*
+     * We set more_work if we arrive here on a re-connection, this will
+     * allow us to replay any outstanding work.
+     */
+    let mut more_work = up.ds_replay_active(up_coms.client_id);
+
+    up.ds_state_show();
     loop {
         tokio::select! {
             /*
@@ -663,20 +820,20 @@ async fn cmd_loop(
                  */
                 let more =
                     io_send(up, &mut fw, up_coms.client_id, lossy).await?;
-                if more && !flow_control {
+                if more && !more_work {
                     println!("[{}] flow control start ", up_coms.client_id);
-                    flow_control = true;
+                    more_work = true;
                 }
             }
             // XXX figure out what deadline makes sense here
-            _ = sleep_until(deadline_secs(1)), if flow_control => {
+            _ = sleep_until(deadline_secs(1)), if more_work => {
                 let more = io_send(
                                 up, &mut fw, up_coms.client_id, lossy
                             ).await?;
                 if more {
-                    flow_control = true;
+                    more_work = true;
                 } else {
-                    flow_control = false;
+                    more_work = false;
                     println!("[{}] flow control end ", up_coms.client_id);
                 }
             }
@@ -695,7 +852,6 @@ async fn cmd_loop(
             }
             _ = sleep_until(deadline_secs(10)), if needping => {
                 fw.send(Message::Ruok).await?;
-                needping = false;
                 if lossy {
                     /*
                      * When lossy is set, we don't always send work to a
@@ -771,7 +927,10 @@ async fn looper(
         /*
          * Set a connect timeout, and connect to the target:
          */
-        println!("{0}[{1}] connecting to {0}", target, up_coms.client_id);
+        println!(
+            "{0}[{1}] looper connecting to {0}",
+            target, up_coms.client_id
+        );
         let deadline = tokio::time::sleep_until(deadline_secs(10));
         tokio::pin!(deadline);
         let tcp = sock.connect(target.into());
@@ -786,13 +945,13 @@ async fn looper(
                 tcp = &mut tcp => {
                     match tcp {
                         Ok(tcp) => {
-                            println!("{0}[{1}] ok, connected to {0}",
+                            println!("{0}[{1}] looper ok, connected to {0}",
                                 target,
                                 up_coms.client_id);
                             break tcp;
                         }
                         Err(e) => {
-                            println!("{0} connect to {0} failure: {1:?}",
+                            println!("{0} looper connect to {0} failure: {1:?}",
                                 target, e);
                             continue 'outer;
                         }
@@ -823,26 +982,17 @@ async fn looper(
 
         /*
          * If the connection goes down here, we need to know what state we
-         * were in to decide what state to transition to.
+         * were in to decide what state to transition to.  The ds_missing
+         * method will do that for us.
          */
-        up.ds_transition(up_coms.client_id, DsState::Disconnected);
+        up.ds_missing(up_coms.client_id);
         up.ds_state_show();
 
         println!(
             "{0}[{1}] connection to {0} closed",
             target, up_coms.client_id
         );
-        if connected {
-            up_coms
-                .ds_status_tx
-                .send(Condition {
-                    target,
-                    connected: false,
-                })
-                .await
-                .unwrap();
-            connected = false;
-        }
+        connected = false;
     }
 }
 
@@ -863,6 +1013,10 @@ pub struct Downstairs {
      * a 2d Vec? Index for region, then index for the DS?
      */
     ds_state: Vec<DsState>,
+    /*
+     * The last flush ID that this downstairs has acked.
+     */
+    ds_last_flush: Vec<u64>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
@@ -878,7 +1032,7 @@ pub struct WorkCounts {
     active: u64,  // New or in flight to downstairs.
     error: u64,   // This IO had an error.
     skipped: u64, // Skipped
-    done: u64,    // This IO has completed (but not used for ACK)
+    done: u64,    // This IO has completed
 }
 
 impl WorkCounts {
@@ -890,12 +1044,13 @@ impl WorkCounts {
 impl Default for Downstairs {
     fn default() -> Self {
         Self {
+            ds_uuid: HashMap::new(),
+            ds_state: vec![DsState::New; 3],
+            ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
             next_id: 1000,
-            ds_uuid: HashMap::new(),
-            ds_state: vec![DsState::New; 3],
         }
     }
 }
@@ -914,6 +1069,8 @@ impl Downstairs {
      * Mark this request as in progress for this client, and return a copy
      * of the details of the request. If the downstairs client has experienced
      * errors in the past, return None and mark this as Skipped.
+     * XXX Better error handling might mean clearing previous downstairs
+     * errors, as for all we know it's a new downstairs.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.active.get_mut(&ds_id).unwrap();
@@ -930,6 +1087,83 @@ impl Downstairs {
             IOState::Skipped => None,
             IOState::InProgress => Some(job.work.clone()),
             _ => panic!("bad state in in_progress!"),
+        }
+    }
+
+    /**
+     * We have disconnected from a downstairs. Move every job since the
+     * last flush for this client_id back to New, even if we already have
+     * an ACK back from the downstairs for this job. We must replay
+     * everything since the last flush to guarantee persistence.
+     *
+     * If the job has already been acked back to the guest, then we don't
+     * change that, but we do replay it to the downstairs.
+     *
+     * The special case we have to handle is a job that is AckReady.
+     * In this case, we need to understand if a success from this IO to
+     * this downstairs was used to decide that we can send an Ack back to
+     * the guest. If it was, then we need to retract that AckReady state,
+     * switch the overall job back to NotAcked, and then let the replay
+     * happen.
+     */
+    fn re_new(&mut self, client_id: u8) {
+        let lf = self.ds_last_flush[client_id as usize];
+        let mut kvec: Vec<u64> =
+            self.active.keys().cloned().collect::<Vec<u64>>();
+        kvec.sort_unstable();
+
+        println!("{} client re-new all jobs since flush {}", client_id, lf);
+        for ds_id in kvec.iter() {
+            let is_read = self.is_read(*ds_id).unwrap();
+            let wc = self.state_count(*ds_id).unwrap();
+            let jobs_completed_ok = wc.completed_ok();
+
+            let job = self.active.get_mut(ds_id).unwrap();
+
+            // We don't need to send anything before our last good flush
+            if *ds_id <= lf {
+                assert_eq!(Some(&IOState::Done), job.state.get(&client_id));
+                continue;
+            }
+
+            /*
+             * If the job is InProgress or New, then we can just go back
+             * to New and no extra work is required.
+             * If it's Done, then we need to look further
+             */
+            if Some(&IOState::Done) == job.state.get(&client_id) {
+                /*
+                 * If the job is acked, then we are good to go and
+                 * we can re-send it downstairs and the upstairs ack
+                 * path will handle a downstairs ack for a job that
+                 * we already ack'd back to the guest.
+                 *
+                 * If the job is AckReady, then we need to decide
+                 * if this downstairs job was part of what made it AckReady
+                 * and if so, we need to undo that AckReady status.
+                 */
+                if job.ack_status == AckStatus::AckReady {
+                    if is_read {
+                        if jobs_completed_ok == 1 {
+                            println!("Remove read data for {}", ds_id);
+                            job.data = None;
+                            job.ack_status = AckStatus::NotAcked;
+                        }
+                    } else {
+                        /*
+                         * For a write or flush, if we have 3 completed,
+                         * then we can leave this job as AckReady, if not,
+                         * then we have to undo the AckReady.
+                         */
+                        if jobs_completed_ok < 3 {
+                            println!("Remove AckReady for W/F {}", ds_id);
+                            job.ack_status = AckStatus::NotAcked;
+                        }
+                    }
+                }
+            }
+            println!("{} job goes back to IOState::New", ds_id);
+            job.state.insert(client_id, IOState::New);
         }
     }
 
@@ -998,18 +1232,19 @@ impl Downstairs {
         /*
          * Move AckReady to Acked.
          */
-
         let job = self
             .active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
 
-        if job.ack_status == AckStatus::AckReady {
-            job.ack_status = AckStatus::Acked;
-        } else {
-            panic!("already acked!");
+        if job.ack_status != AckStatus::AckReady {
+            panic!(
+                "Job {} not in proper state to ACK:{:?}",
+                ds_id, job.ack_status,
+            );
         }
+        job.ack_status = AckStatus::Acked;
     }
 
     fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
@@ -1022,6 +1257,7 @@ impl Downstairs {
          * - 3+ errors for Reads
          *
          * TODO: this doesn't tell the Guest what the error(s) were?
+         * TODO: Add retries here as well.
          */
         let wc = self.state_count(ds_id).unwrap();
 
@@ -1143,21 +1379,54 @@ impl Downstairs {
             IOState::Done
         };
 
-        let oldstate = job.state.insert(client_id, newstate.clone());
+        let oldstate = job.state.insert(client_id, newstate.clone()).unwrap();
+        // we shouldn't be transitioning to our current state
+        assert_eq!(oldstate, IOState::InProgress);
 
-        if let Some(oldstate) = oldstate {
-            // We shouldn't be transitioning to our current state.
-            assert_eq!(oldstate, IOState::InProgress);
+        if matches!(newstate, IOState::Error(_)) {
+            // Mark this downstairs as bad if this was a write or flush
+            // XXX: reconcilation, retries?
+            // XXX: Errors should be reported to nexus
+            if matches!(
+                job.work,
+                IOop::Write {
+                    dependencies: _,
+                    eid: _,
+                    data: _,
+                    offset: _
+                } | IOop::Flush {
+                    dependencies: _,
+                    flush_number: _
+                }
+            ) {
+                let errors: u64 = match self.downstairs_errors.get(&client_id) {
+                    Some(v) => *v,
+                    None => 0,
+                };
+                self.downstairs_errors.insert(client_id, errors + 1);
+                // XXX We don't count read errors here.
+            }
+        } else if job.ack_status == AckStatus::Acked {
+            assert_eq!(newstate, IOState::Done);
+            /*
+             * If this job is already acked, then we don't have much
+             * more to do here.  If it's a flush, then we want to be
+             * sure to update the last flush for this client.
+             */
+            if let IOop::Flush {
+                dependencies: _dependencies,
+                flush_number: _flush_number,
+            } = &job.work
+            {
+                self.ds_last_flush[client_id as usize] = ds_id;
+            }
         } else {
-            panic!("no old state! That's bad!");
-        }
-
-        /*
-         * Transition this job from Done to AckReady if enough have returned ok.
-         *
-         * XXX Any error needs to be passed to Nexus
-         */
-        if newstate == IOState::Done {
+            assert_eq!(newstate, IOState::Done);
+            assert_ne!(job.ack_status, AckStatus::Acked);
+            /*
+             * Transition this job from Done to AckReady if enough have
+             * returned ok.
+             */
             match &job.work {
                 IOop::Read {
                     dependencies: _dependencies,
@@ -1170,6 +1439,7 @@ impl Downstairs {
                         assert!(job.data.is_none());
                         job.data = read_data;
                         notify_guest = true;
+                        assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
                     }
                 }
@@ -1194,31 +1464,10 @@ impl Downstairs {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
                     }
+                    self.ds_last_flush[client_id as usize] = ds_id;
                 }
-            }
-        } else if matches!(newstate, IOState::Error(_)) {
-            // Mark this downstairs as bad if this was a write or flush
-            // XXX: reconciliation, retries?
-            if matches!(
-                job.work,
-                IOop::Write {
-                    dependencies: _,
-                    eid: _,
-                    data: _,
-                    offset: _
-                } | IOop::Flush {
-                    dependencies: _,
-                    flush_number: _
-                }
-            ) {
-                let errors: u64 = match self.downstairs_errors.get(&client_id) {
-                    Some(v) => *v,
-                    None => 0,
-                };
-                self.downstairs_errors.insert(client_id, errors + 1);
             }
         }
-
         /*
          * If all 3 jobs are done, we can check here to see if we can
          * remove this job from the DS list. If we have completed the ack
@@ -1227,9 +1476,11 @@ impl Downstairs {
          */
         if job.ack_status == AckStatus::Acked {
             self.retire_check(ds_id);
-        } else {
+        } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
-            // hasn't acked back yet.
+            // hasn't acked back yet. We check for NotAcked so we  don't
+            // double count three done and return true if we already have
+            // AckReady set.
             let wc = job.state_count();
             if (wc.error + wc.skipped + wc.done) == 3 {
                 notify_guest = true;
@@ -1241,19 +1492,84 @@ impl Downstairs {
     }
 
     /**
-     * This request is now complete on all peers. Remove it from the active
-     * set and mark it in the completed ring buffer. Note we shall not
-     * retire a job until it has been ack'd back to the guest. Just being
-     * AckReady is not enough.
+     * This request is now complete on all peers, but is is ready to retire?
+     * Only when a flush is complete on all three do we check
+     * to see if we can remove the job.  When we remove a job, we
+     * also take all the previous jobs out of the queue as well.
+     * Double check that all previous jobs have finished and panic
+     * if not.
      */
     fn retire_check(&mut self, ds_id: u64) {
+        // Only a completed flush will remove work from the active queue.
+        if !self.is_flush(ds_id).unwrap() {
+            return;
+        }
+        // Sort the job list, and retire all the work that is older than us.
         let wc = self.state_count(ds_id).unwrap();
-
         if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
-            self.active.remove(&ds_id).unwrap();
-            self.completed.push(ds_id);
+
+            /*
+             * Build the list of keys to iterate.  Don't bother to look
+             * at any key ids greater than our ds_id.
+             */
+            let mut kvec: Vec<u64> = self
+                .active
+                .keys()
+                .cloned()
+                .filter(|&x| x <= ds_id)
+                .collect::<Vec<u64>>();
+
+            kvec.sort_unstable();
+            for id in kvec.iter() {
+                assert!(*id <= ds_id);
+                let wc = self.state_count(*id).unwrap();
+                assert_eq!(wc.active, 0);
+                assert_eq!(wc.error + wc.skipped + wc.done, 3);
+                assert!(!self.completed.contains(id));
+
+                let oj = self.active.remove(id).unwrap();
+                assert_eq!(oj.ack_status, AckStatus::Acked);
+                self.completed.push(*id);
+            }
+        }
+    }
+
+    /**
+     * Check if an active job is a flush or not.
+     */
+    fn is_flush(&self, ds_id: u64) -> Result<bool> {
+        let job = self
+            .active
+            .get(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+        match &job.work {
+            IOop::Flush {
+                dependencies: _dependencies,
+                flush_number: _flush_number,
+            } => Ok(true),
+            _ => Ok(false),
+        }
+    }
+    /**
+     * Check if an active job is a read or not.
+     */
+    fn is_read(&self, ds_id: u64) -> Result<bool> {
+        let job = self
+            .active
+            .get(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+        match &job.work {
+            IOop::Read {
+                dependencies: _dependencies,
+                eid: _eid,
+                offset: _offset,
+                num_blocks: _num_blocks,
+            } => Ok(true),
+            _ => Ok(false),
         }
     }
 }
@@ -1392,6 +1708,17 @@ pub struct Upstairs {
      * the CrucibleOpts
      */
     encryption_context: Option<EncryptionContext>,
+
+    /*
+     * Upstairs keeps all IOs in memory until a flush is ACK'd back from
+     * all three downstairs.  If there are IOs we have accepted into the
+     * work queue that don't end with a flush, then we set this to indicate
+     * that the upstairs may need to issue a flush of its own to be sure
+     * that data is pushed to disk.  Note that this is not an indication of
+     * an ACK'd flush, just that the last IO command we put on the work
+     * queue was not a flush.
+     */
+    need_flush: Mutex<bool>,
 }
 
 impl Upstairs {
@@ -1444,6 +1771,7 @@ impl Upstairs {
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
+            need_flush: Mutex::new(false),
         })
     }
 
@@ -1475,10 +1803,27 @@ impl Upstairs {
         fi.next_flush()
     }
 
+    fn last_flush_id(&self, client_id: u8) -> u64 {
+        let lf = self.downstairs.lock().unwrap();
+        lf.ds_last_flush[client_id as usize]
+    }
+
+    fn set_flush_clear(&self) {
+        let mut flush = self.need_flush.lock().unwrap();
+        *flush = false;
+    }
+    fn set_flush_need(&self) {
+        let mut flush = self.need_flush.lock().unwrap();
+        *flush = true;
+    }
+    fn flush_needed(&self) -> bool {
+        *self.need_flush.lock().unwrap()
+    }
+
     #[instrument]
     pub fn submit_flush(
         &self,
-        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+        sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
     ) -> Result<(), CrucibleError> {
         if !self.is_active() {
             crucible_bail!(UpstairsInactive);
@@ -1491,6 +1836,7 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut downstairs = self.downstairs.lock().unwrap();
+        self.set_flush_clear();
 
         /*
          * Get the next ID for our new guest work job. Note that the flush
@@ -1566,6 +1912,7 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut downstairs = self.downstairs.lock().unwrap();
+        self.set_flush_need();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1643,7 +1990,7 @@ impl Upstairs {
             None,
             HashMap::new(),
             HashMap::new(),
-            sender,
+            Some(sender),
             None,
         );
         {
@@ -1665,7 +2012,7 @@ impl Upstairs {
      * required places.
      */
     #[instrument]
-    pub fn submit_read(
+    fn submit_read(
         &self,
         offset: Block,
         data: Buffer,
@@ -1682,7 +2029,7 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().unwrap();
         let mut downstairs = self.downstairs.lock().unwrap();
-
+        self.set_flush_need();
         /*
          * Given the offset and buffer size, figure out what extent and
          * byte offset that translates into. Keep in mind that an offset
@@ -1753,7 +2100,7 @@ impl Upstairs {
             Some(data),
             HashMap::new(),
             downstairs_buffer_sector_index,
-            sender,
+            Some(sender),
             self.encryption_context.clone(),
         );
         {
@@ -1769,7 +2116,61 @@ impl Upstairs {
     }
 
     /*
+     * Our connection to a downstairs has been lost.  Depending on what
+     * state the downstairs was in will indicate which state this downstairs
+     * needs to go to.
+     *
+     * Any IOs since the last ACK'd flush will be reset back to new.
+     */
+    fn ds_missing(&self, client_id: u8) {
+        let mut ds = self.downstairs.lock().unwrap();
+        let current = ds.ds_state[client_id as usize];
+        let new_state = match current {
+            DsState::Active => DsState::Offline,
+            DsState::Replay => DsState::Offline,
+            DsState::Offline => DsState::Offline,
+            DsState::_Migrating => DsState::Failed,
+            _ => {
+                /*
+                 * Any other state means we had not yet enabled this
+                 * downstairs to receive IO, so we go to the back of the
+                 * line and have to re-verify it again.
+                 */
+                DsState::Disconnected
+            }
+        };
+        println!(
+            "[{}] Gone missing, transition from {:?} to {:?}",
+            client_id, current, new_state,
+        );
+        ds.ds_state[client_id as usize] = new_state;
+
+        /*
+         * Mark any in progress jobs since the last good flush back to New,
+         * as we are now disconnected from this downstairs and will need to
+         * replay (or eventually discard) any work that it still needs to do.
+         */
+        ds.re_new(client_id);
+    }
+
+    /*
+     * Check and see if our DS was in replay and if so move
+     * it over to Active.  Return true if we did.
+     */
+    fn ds_replay_active(&self, client_id: u8) -> bool {
+        let mut ds = self.downstairs.lock().unwrap();
+        if ds.ds_state[client_id as usize] == DsState::Replay {
+            println!("[{}] Transition from Replay to Active", client_id);
+            ds.ds_state[client_id as usize] = DsState::Active;
+            return true;
+        }
+        false
+    }
+
+    /*
      * Move a single downstairs to this new state.
+     * XXX Perhaps state change logic can go here to prevent illegal
+     * state transitions.
      */
     fn ds_transition(&self, client_id: u8, new_state: DsState) {
         let mut ds = self.downstairs.lock().unwrap();
@@ -1779,6 +2180,8 @@ impl Upstairs {
                 client_id, ds.ds_state[client_id as usize], new_state,
             );
             ds.ds_state[client_id as usize] = new_state;
+        } else {
+            panic!("[{}] transition to same state: {:?}", client_id, new_state);
         }
     }
 
@@ -1868,8 +2271,6 @@ impl Upstairs {
         } else {
             ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
-
-        println!("UUIDS: {:?}", client_ddef.uuid());
 
         /*
          * XXX Until we are passed expected region info at start, we
@@ -2013,7 +2414,8 @@ enum DsState {
      */
     _BadRegion,
     /*
-     * We were connected, but have since gone offline.
+     * We were connected, but did not transition all the way to
+     * active before the connection went away.
      */
     Disconnected,
     /*
@@ -2040,15 +2442,17 @@ enum DsState {
     _Migrating,
     /*
      * This downstairs was active, but is now no longer connected.
+     * We may have work for it in memory, so a replay is possible
+     * if this downstairs reconnects in time.
      */
-    _Offline,
+    Offline,
     /*
      * This downstairs was offline but is now back online and we are
      * sending it all the I/O it missed when it was unavailable.
      */
-    _Replay,
+    Replay,
     /*
-     * Another Upstairs has connected and is now active
+     * Another Upstairs has connected and is now active.
      */
     Deactivated,
 }
@@ -2428,8 +2832,14 @@ struct GtoS {
 
     /*
      * Notify the caller waiting on the job to finish.
+     * This is an Option for the case where we want to send an IO on behalf
+     * of the Upstairs (not guest driven). Right now the only case where we
+     * need that is to flush data to downstairs when the guest has not sent
+     * us a flush in some time.  This allows us to free internal buffers.
+     * If the sender is None, we know it's a request from the Upstairs and
+     * we don't have to ACK it to anyone.
      */
-    sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+    sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
 
     /*
      * Optional encryption context - Some if the corresponding Upstairs is Some.
@@ -2444,7 +2854,7 @@ impl GtoS {
         guest_buffer: Option<Buffer>,
         downstairs_buffer: HashMap<u64, Bytes>,
         downstairs_buffer_sector_index: HashMap<u64, u128>,
-        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+        sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
         encryption_context: Option<EncryptionContext>,
     ) -> GtoS {
         GtoS {
@@ -2513,11 +2923,16 @@ impl GtoS {
      */
     pub fn notify(&mut self, result: Result<(), CrucibleError>) {
         /*
+         * If present, send the result to the guest.  If this is a flush
+         * issued on behalf of crucible, then there is no place to send
+         * a result to.
          * XXX: If the guest is no longer listening and this returns an error,
          * do we care?  This could happen if the guest has given up
          * because an IO took too long, or other possible guest side reasons.
          */
-        let _send_result = self.sender.send(result);
+        if let Some(sender) = &self.sender {
+            let _send_result = sender.send(result);
+        }
     }
 }
 
@@ -2922,7 +3337,7 @@ impl Guest {
         let mut waiter = self.send(BlockOp::GoActive);
         waiter.block_wait()?;
 
-        // XXX is this the right number of retries? The right delay between
+        // XXX Is this the right number of retries? The right delay between
         // retries?
         for _ in 0..10 {
             if self.query_is_active()? {
@@ -3061,23 +3476,36 @@ struct Condition {
     connected: bool,
 }
 
-/*
- * Send work to all the targets on this vector.
- * This can be much simpler, but we need to (eventually) take special action
- * when we fail to send a message to a task.
+/**
+ * Send work to all the targets.
+ * If a send fails, report an error.
  */
-fn _send_work(t: &[Target], val: u64) {
+fn send_work(t: &[Target], val: u64) {
     for d_client in t.iter() {
         // println!("#### send to client {:?}", d_client.target);
         let res = d_client.ds_work_tx.send(val);
         if let Err(e) = res {
-            panic!("#### error {:#?} sending work to {:?}", e, d_client.target);
-            /*
-             * TODO Write more code for this error,  If one downstairs
-             * never receives a request, it may get picked up on the
-             * next request. However, if the downstairs has gone away,
-             * then action will need to be taken, and soon.
-             */
+            println!(
+                "#### error {:#?} Failed to notify {:?} of new work",
+                e, d_client.target
+            );
+        }
+    }
+}
+
+/**
+ * Send active to all the targets.
+ * If a send fails, print an error.
+ */
+fn send_active(t: &[Target]) {
+    for d_client in t.iter() {
+        // println!("#### send to client {:?}", d_client.target);
+        let res = d_client.ds_active_tx.send(true);
+        if let Err(e) = res {
+            println!(
+                "#### error {:#?} Failed 'active' notification to {:?}",
+                e, d_client.target
+            );
         }
     }
 }
@@ -3100,13 +3528,27 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
          * process the set of things we know are done now, then the
          * ds_done_rx.recv() should trigger when we loop.
          */
-        let ack_list = up.downstairs.lock().unwrap().ackable_work();
+        let mut ack_list = up.downstairs.lock().unwrap().ackable_work();
+        /*
+         * This needs some sort order.  If we are not acking things in job
+         * ID order, then we must use a queue or something that will allow
+         * the jobs to be acked in the order they were completed on the
+         * downstairs.
+         */
+        ack_list.sort_unstable();
 
         let mut gw = up.guest.guest_work.lock().unwrap();
         for ds_id_done in ack_list.iter() {
             let mut work = up.downstairs.lock().unwrap();
 
             let done = work.active.get_mut(ds_id_done).unwrap();
+            /*
+             * Make sure the job state has not changed since we made the list.
+             */
+            if done.ack_status != AckStatus::AckReady {
+                println!("Job {} no longer ready, skip for now", ds_id_done);
+                continue;
+            }
 
             let gw_id = done.guest_id;
             let ds_id = done.ds_id;
@@ -3150,8 +3592,7 @@ async fn process_new_io(
                 let _ = req.send.send(Err(e));
                 return;
             }
-            dst.iter()
-                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            send_work(dst, *lastcast);
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
@@ -3159,21 +3600,19 @@ async fn process_new_io(
                 let _ = req.send.send(Err(e));
                 return;
             }
-            dst.iter()
-                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            send_work(dst, *lastcast);
             *lastcast += 1;
         }
         BlockOp::Flush => {
-            if let Err(e) = up.submit_flush(req.send.clone()) {
+            if let Err(e) = up.submit_flush(Some(req.send.clone())) {
                 let _ = req.send.send(Err(e));
                 return;
             }
-            dst.iter()
-                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            send_work(dst, *lastcast);
             *lastcast += 1;
         }
         BlockOp::GoActive => {
-            dst.iter().for_each(|t| t.ds_active_tx.send(true).unwrap());
+            send_active(dst);
             let _ = req.send.send(Ok(()));
         }
         // Query ops
@@ -3209,8 +3648,7 @@ async fn process_new_io(
             let _ = req.send.send(Ok(()));
         }
         BlockOp::Commit => {
-            dst.iter()
-                .for_each(|t| t.ds_work_tx.send(*lastcast).unwrap());
+            send_work(dst, *lastcast);
             *lastcast += 1;
         }
     }
@@ -3291,6 +3729,13 @@ async fn up_listen(
 
         /*
          * Consider how the DsState::Failed is handled here, if necessary
+         *
+         * TODO: This logic does not cover the case where downstairs are
+         * going up and down after the initial connection state.
+         * Eventually the check here needs to verify that all downstairs
+         * are still connected, and the actual work of making sure all
+         * downstairs are in sync is done only with all downstairs
+         * connected.
          */
         if !up.all_ds_state_match(DsState::WaitQuorum) {
             up.ds_state_show();
@@ -3311,21 +3756,23 @@ async fn up_listen(
          * more IO to come in. We also need to make sure our downstairs
          * stay connected, and we watch the ds_status_rx.recv() for that
          * to change which is our notification that a disconnect has happened.
+         *
+         * In addition, we also send a periodic flush when we determine it
+         * is time to do so. TODO: Figure out when is the best time to send
+         * a upstairs generated flush.
          */
+        let mut flush_check = deadline_secs(5);
         loop {
             tokio::select! {
                 c = ds_status_rx.recv() => {
-                    /*
-                     * If this is anything other than a disconnect, then
-                     * panic at this time. Given our outer loop is doing the
-                     * work of connecting all three downstairs, all this
-                     * should ever have to do (right now) is detach a
-                     * downstairs and stop taking I/O.
-                     */
-                    if let Some(ref c) = c {
+                    // XXX We need some more thought here.  We can re-use
+                    // this channel to enable flow control, but I'm not
+                    // sure exactly how the FC will work.
+                    if let Some(c) = &c {
                         if !c.connected {
-                            println!("{} offline, stop IO ", c.target);
-                            panic!("Can't recover if downstairs goes offline");
+                            println!("{} offline, pause IO ", c.target);
+                        } else {
+                            println!("{} online", c.target);
                         }
                     } else {
                         /*
@@ -3356,6 +3803,23 @@ async fn up_listen(
                 }
                 req = up.guest.recv() => {
                     process_new_io(up, &dst, req, &mut lastcast).await;
+                }
+                _ = sleep_until(flush_check) => {
+                    /*
+                     * This must fire every "flush_check" seconds to make sure
+                     * we don't leave any work in the work queues longer
+                     * than necessary.
+                     */
+                    if up.flush_needed() {
+                        println!("Need a flush");
+                        if let Err(e) = up.submit_flush(None) {
+                            println!("flush send failed:{:?}", e);
+                            // XXX What to do here?
+                        } else {
+                            send_work(&dst, 1);
+                        }
+                        flush_check = deadline_secs(5);
+                    }
                 }
             }
         }
@@ -3396,7 +3860,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Use this channel to indicate in the upstairs that all downstairs
      * operations for a specific request have completed.
      */
-    let (ds_done_tx, ds_done_rx) = mpsc::channel(100); // XXX 100?
+    let (ds_done_tx, ds_done_rx) = mpsc::channel(500); // XXX 500?
 
     /*
      * spawn a task to listen for ds completed work which will then
@@ -3627,10 +4091,10 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     job_type = "Flush".to_string();
                 }
             };
-            let state = job.ack_status;
+            let ack = job.ack_status;
             print!(
                 " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                job.guest_id, state, id, job_type, io_eid, io_offset, io_len
+                job.guest_id, ack, id, job_type, io_eid, io_offset, io_len
             );
 
             for cid in 0..3 {
@@ -3648,6 +4112,11 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             println!();
         }
         iosc.show_all();
+        print!("Last Flush: ");
+        for lf in work.ds_last_flush.iter() {
+            print!("{} ", lf);
+        }
+        println!();
     }
 
     let done = work.completed.to_vec();
@@ -4396,6 +4865,7 @@ mod test {
         assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
 
+        work.ack(next_id);
         work.retire_check(next_id);
 
         assert_eq!(work.completed.len(), 1);
@@ -4445,6 +4915,7 @@ mod test {
         );
         assert_eq!(work.ackable_work().len(), 1);
 
+        work.ack(next_id);
         work.retire_check(next_id);
 
         assert_eq!(work.completed.len(), 1);
@@ -4485,7 +4956,8 @@ mod test {
 
         assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
-        assert_eq!(work.completed.len(), 1);
+        // A flush is required to move work to completed
+        assert_eq!(work.completed.len(), 0);
     }
 
     #[test]
@@ -4532,7 +5004,9 @@ mod test {
 
         assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
-        assert_eq!(work.completed.len(), 1);
+        // A flush is required to move work to completed
+        // That this is still zero is part of the test
+        assert_eq!(work.completed.len(), 0);
     }
 
     #[test]
@@ -4585,9 +5059,12 @@ mod test {
         assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
 
+        work.ack(next_id);
         work.retire_check(next_id);
 
-        assert_eq!(work.completed.len(), 1);
+        // A flush is required to move work to completed
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
     }
 
     #[test]
@@ -4649,9 +5126,11 @@ mod test {
         );
         assert_eq!(work.ackable_work().len(), 1);
 
+        work.ack(next_id);
         work.retire_check(next_id);
 
-        assert_eq!(work.completed.len(), 1);
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
     }
 
     #[test]
@@ -4711,7 +5190,8 @@ mod test {
         {
             let mut work = upstairs.downstairs.lock().unwrap();
             assert_eq!(work.ackable_work().len(), 0);
-            assert_eq!(work.completed.len(), 1);
+            // Work won't be completed until we get a flush.
+            assert_eq!(work.completed.len(), 0);
         }
     }
 
@@ -4962,5 +5442,583 @@ mod test {
             work.active.get(&next_id).unwrap().data,
             Some(Bytes::from(vec![6]))
         );
+    }
+
+    #[test]
+    fn work_completed_read_flush() {
+        // Verify that a read remains on the active queue until a flush
+        // comes through and clears it.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Build our read, put it into the work queue
+        let next_id = work.next_id();
+
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+
+        work.enqueue(op);
+
+        // Move the work to submitted like we sent it to each downstairs
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Downstairs 0 now has completed this work.
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+
+        // One completion of a read means we can ACK
+        assert_eq!(work.ackable_work().len(), 1);
+
+        // Complete downstairs 1 and 2
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), false);
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
+
+        // Make sure the job is still active
+        assert_eq!(work.completed.len(), 0);
+
+        // The job should still be ack ready
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // Ack the job to the guest
+        work.ack(next_id);
+
+        // Nothing left to ACK, but untill the flush we keep the IO data.
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        // A flush is required to move work to completed
+        // Create the flush then send it to all downstairs.
+        let next_id = work.next_id();
+        let op = create_flush(next_id, vec![], 10, 0);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Complete the Flush at each downstairs.
+        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
+        // Two completed means we return true (ack ready now)
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // ACK the flush and let retire_check move things along.
+        work.ack(next_id);
+        work.retire_check(next_id);
+
+        // Verify no more work to ack.
+        assert_eq!(work.ackable_work().len(), 0);
+        // The read and the flush should now be moved to completed.
+        assert_eq!(work.completed.len(), 2);
+    }
+
+    #[test]
+    fn work_delay_completion_flush() {
+        // Verify that a write remains on the active queue until a flush
+        // comes through and clears it.  In this case, we only complete
+        // 2/3 for each IO.  We later come back and finish the 3rd IO
+        // and the flush, which then allows the work to be completed.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Create two writes, put them on the work queue
+        let id1 = work.next_id();
+        let id2 = work.next_id();
+
+        let op = create_write_eob(
+            id1,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        work.enqueue(op);
+
+        let op = create_write_eob(
+            id2,
+            vec![],
+            1,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        work.enqueue(op);
+
+        // Simulate sending both writes to downstairs 0 and 1
+        assert!(work.in_progress(id1, 0).is_some());
+        assert!(work.in_progress(id1, 1).is_some());
+        assert!(work.in_progress(id2, 0).is_some());
+        assert!(work.in_progress(id2, 1).is_some());
+
+        // Simulate completing  both writes to downstairs 0 and 1
+        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(id2, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id2, 1, None, Ok(()),).unwrap(), true);
+
+        // Both writes can now ACK to the guest.
+        work.ack(id1);
+        work.ack(id2);
+
+        // Work stays on active queue till the flush
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        // Create the flush, put on the work queue
+        let flush_id = work.next_id();
+        let op = create_flush(flush_id, vec![], 10, 0);
+        work.enqueue(op);
+
+        // Simulate sending the flush to downstairs 0 and 1
+        work.in_progress(flush_id, 0);
+        work.in_progress(flush_id, 1);
+
+        // Simulate completing the flush to downstairs 0 and 1
+        assert_eq!(work.complete(flush_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(flush_id, 1, None, Ok(())).unwrap(), true);
+
+        // Ack the flush back to the guest
+        work.ack(flush_id);
+
+        // Make sure downstairs 0 and 1 update their last flush id and
+        // that downstairs 2 does not.
+        assert_eq!(work.ds_last_flush[0], flush_id);
+        assert_eq!(work.ds_last_flush[1], flush_id);
+        assert_eq!(work.ds_last_flush[2], 0);
+
+        // Should not retire yet.
+        work.retire_check(flush_id);
+
+        assert_eq!(work.ackable_work().len(), 0);
+
+        // Make sure all work is still on the active side
+        assert_eq!(work.completed.len(), 0);
+
+        // Now, finish the writes to downstairs 2
+        assert!(work.in_progress(id1, 2).is_some());
+        assert!(work.in_progress(id2, 2).is_some());
+        assert_eq!(work.complete(id1, 2, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id2, 2, None, Ok(()),).unwrap(), false);
+
+        // The job should not move to completed until the flush goes as well.
+        assert_eq!(work.completed.len(), 0);
+
+        // Complete the flush on downstairs 2.
+        work.in_progress(flush_id, 2);
+        assert_eq!(work.complete(flush_id, 2, None, Ok(())).unwrap(), false);
+
+        // All three jobs should now move to completed
+        assert_eq!(work.completed.len(), 3);
+        // Downstairs 2 should update the last flush it just did.
+        assert_eq!(work.ds_last_flush[2], flush_id);
+    }
+
+    #[test]
+    fn work_completed_write_flush() {
+        // Verify that a write remains on the active queue until a flush
+        // comes through and clears it.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Build our write IO.
+        let next_id = work.next_id();
+
+        let op = create_write_eob(
+            next_id,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        // Put the write on the queue.
+        work.enqueue(op);
+
+        // Submit the write to all three downstairs.
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Complete the write on all three downstairs.
+        assert_eq!(work.complete(next_id, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, None, Ok(()),).unwrap(), false);
+
+        // Ack the write to the guest
+        work.ack(next_id);
+
+        // Work stays on active queue till the flush
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        // Create the flush IO
+        let next_id = work.next_id();
+        let op = create_flush(next_id, vec![], 10, 0);
+        work.enqueue(op);
+
+        // Submit the flush to all three downstairs.
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Complete the flush on all three downstairs.
+        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
+        work.retire_check(next_id);
+
+        assert_eq!(work.ackable_work().len(), 0);
+        // The write and flush should now be completed.
+        assert_eq!(work.completed.len(), 2);
+    }
+
+    #[test]
+    fn work_delay_completion_flush_order() {
+        // Verify that a write remains on the active queue until a flush
+        // comes through and clears it.  In this case, we only complete
+        // 2 of 3 for each IO.  We later come back and finish the 3rd IO
+        // and the flush, which then allows the work to be completed.
+        // Also, we mix up which client finishes which job first.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Build two writes, put them on the work queue.
+        let id1 = work.next_id();
+        let id2 = work.next_id();
+
+        let op = create_write_eob(
+            id1,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        work.enqueue(op);
+
+        let op = create_write_eob(
+            id2,
+            vec![],
+            1,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        work.enqueue(op);
+
+        // Submit the two writes, to 2/3 of the downstairs.
+        assert!(work.in_progress(id1, 0).is_some());
+        assert!(work.in_progress(id1, 1).is_some());
+        assert!(work.in_progress(id2, 1).is_some());
+        assert!(work.in_progress(id2, 2).is_some());
+
+        // Complete the writes that we sent to the 2 downstairs.
+        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(id2, 1, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id2, 2, None, Ok(()),).unwrap(), true);
+
+        // Ack the writes to the guest.
+        work.ack(id1);
+        work.ack(id2);
+
+        // Work stays on active queue till the flush.
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        // Create and enqueue the flush.
+        let flush_id = work.next_id();
+        let op = create_flush(flush_id, vec![], 10, 0);
+        work.enqueue(op);
+
+        // Send the flush to two downstairs.
+        work.in_progress(flush_id, 0);
+        work.in_progress(flush_id, 2);
+
+        // Complete the flush on those downstairs.
+        assert_eq!(work.complete(flush_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(flush_id, 2, None, Ok(())).unwrap(), true);
+
+        // Ack the flush
+        work.ack(flush_id);
+
+        // Should not retire yet
+        work.retire_check(flush_id);
+
+        assert_eq!(work.ackable_work().len(), 0);
+        // Not done yet, until all clients do the work.
+        assert_eq!(work.completed.len(), 0);
+
+        // Verify who has updated their last flush.
+        assert_eq!(work.ds_last_flush[0], flush_id);
+        assert_eq!(work.ds_last_flush[1], 0);
+        assert_eq!(work.ds_last_flush[2], flush_id);
+
+        // Now, finish sending and completing the writes
+        assert!(work.in_progress(id1, 2).is_some());
+        assert!(work.in_progress(id2, 0).is_some());
+        assert_eq!(work.complete(id1, 2, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id2, 0, None, Ok(()),).unwrap(), false);
+
+        // Completed work won't happen till the last flush is done
+        assert_eq!(work.completed.len(), 0);
+
+        // Send and complete the flush
+        work.in_progress(flush_id, 1);
+        assert_eq!(work.complete(flush_id, 1, None, Ok(())).unwrap(), false);
+
+        // Now, all three jobs (w,w,f) will move to completed.
+        assert_eq!(work.completed.len(), 3);
+
+        // downstairs 1 should now have that flush
+        assert_eq!(work.ds_last_flush[1], flush_id);
+    }
+
+    #[test]
+    fn work_completed_read_replay() {
+        // Verify that a single read will replay and move back from AckReady
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Build our read IO and submit it to the work queue.
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        work.enqueue(op);
+
+        // Submit the read to all three downstairs
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Complete the read on one downstairs.
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+
+        // One completion should allow for an ACK
+        assert_eq!(work.ackable_work().len(), 1);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // Now, take that downstairs offline
+        work.re_new(0);
+
+        // The act of taking a downstairs offline should move a read
+        // back from AckReady if it was the only completed read.
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::NotAcked);
+    }
+
+    #[test]
+    fn work_completed_two_read_replay() {
+        // Verify that a read will replay and move not back from AckReady if
+        // there is more than one done read.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Build a read and put it on the work queue.
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        work.enqueue(op);
+
+        // Submit the read to each downstairs.
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Complete the read on one downstairs, verify it is ack ready.
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // Complete the read on a 2nd downstairs.
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), false);
+
+        // Now, take the first downstairs offline.
+        work.re_new(0);
+
+        // Should still be ok to ACK this IO
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // Taking the second downstairs offline should revert the ACK.
+        work.re_new(1);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::NotAcked);
+
+        // Redo the read on DS 0, IO should go back to ackable.
+        let bytes = Some(Bytes::from(vec![]));
+        work.in_progress(next_id, 0);
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.ackable_work().len(), 1);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+    }
+
+    #[test]
+    fn work_completed_ack_read_replay() {
+        // Verify that a read we Acked will still replay if that downstairs
+        // goes away. Make sure everything still finishes ok.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Create the read and put it on the work queue.
+        let next_id = work.next_id();
+        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        work.enqueue(op);
+
+        // Submit the read to each downstairs.
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        // Complete the read on one downstairs.
+        let bytes = Some(Bytes::from(vec![]));
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+
+        // Verify the read is now AckReady
+        assert_eq!(work.ackable_work().len(), 1);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // Ack the read to the guest.
+        work.ack(next_id);
+
+        // Should not retire yet
+        work.retire_check(next_id);
+
+        // No new ackable work.
+        assert_eq!(work.ackable_work().len(), 0);
+        // Verify the IO has not completed yet.
+        assert_eq!(work.completed.len(), 0);
+
+        // Now, take that downstairs offline
+        work.re_new(0);
+
+        // Acked IO should remain so.
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::Acked);
+
+        // Redo on DS 0, IO should remain acked.
+        let bytes = Some(Bytes::from(vec![]));
+        work.in_progress(next_id, 0);
+        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.ackable_work().len(), 0);
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::Acked);
+    }
+
+    #[test]
+    fn work_completed_write_ack_ready_replay() {
+        // Verify that a replay when we have two completed writes will
+        // change state from AckReady back to NotAcked.
+        // If we then redo the work, it should go back to AckReady.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Create the write and put it on the work queue.
+        let id1 = work.next_id();
+        let op = create_write_eob(
+            id1,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        work.enqueue(op);
+
+        // Submit the read to two downstairs.
+        assert!(work.in_progress(id1, 0).is_some());
+        assert!(work.in_progress(id1, 1).is_some());
+
+        // Complete the write on two downstairs.
+        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+
+        // Verify AckReady
+        let state = work.active.get_mut(&id1).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        /* Now, take that downstairs offline */
+        work.re_new(1);
+
+        // State goes back to NotAcked
+        let state = work.active.get_mut(&id1).unwrap().ack_status;
+        assert_eq!(state, AckStatus::NotAcked);
+
+        // Re-submit and complete the write
+        assert!(work.in_progress(id1, 1).is_some());
+        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+
+        // State should go back to acked.
+        let state = work.active.get_mut(&id1).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+    }
+
+    #[test]
+    fn work_completed_write_acked_replay() {
+        // Verify that a replay when we have acked a write will not
+        // undo that ack.
+        let upstairs = Upstairs::default();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        // Create the write and put it on the work queue.
+        let id1 = work.next_id();
+        let op = create_write_eob(
+            id1,
+            vec![],
+            10,
+            0,
+            Block::new_512(7),
+            Bytes::from(vec![1]),
+        );
+        work.enqueue(op);
+
+        // Submit the write to two downstairs.
+        assert!(work.in_progress(id1, 0).is_some());
+        assert!(work.in_progress(id1, 1).is_some());
+
+        // Complete the write on two downstairs.
+        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+
+        // Verify it is ackable..
+        assert_eq!(work.ackable_work().len(), 1);
+
+        // Send the ACK to the guest
+        work.ack(id1);
+
+        // Verify no more ackable work
+        assert_eq!(work.ackable_work().len(), 0);
+
+        // Now, take that downstairs offline
+        work.re_new(0);
+
+        // State should stay acked
+        let state = work.active.get_mut(&id1).unwrap().ack_status;
+        assert_eq!(state, AckStatus::Acked);
+
+        // Finish the write all the way out.
+        assert!(work.in_progress(id1, 0).is_some());
+        assert!(work.in_progress(id1, 2).is_some());
+
+        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 2, None, Ok(()),).unwrap(), false);
     }
 }

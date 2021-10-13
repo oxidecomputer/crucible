@@ -503,6 +503,8 @@ fn _show_work(ds: &Arc<Downstairs>) {
  * XXX Flow control work here: we should prioritize responses over new
  * work, lest we back up the message channel indicating work done to be
  * ack'd back..
+ * TODO: Break out the downstairs protocol steps to a different
+ * task just like upstairs has now.
  */
 async fn proc_frame(
     upstairs_uuid: Uuid,
@@ -684,6 +686,19 @@ async fn proc(
 
                             fw.send(Message::YouAreNowActive(uuid)).await?;
                         }
+                    }
+                    Some(Message::LastFlush(last_flush)) => {
+                        // TODO: Make a proper negotiation connect flow.
+                        if !negotiated {
+                            bail!("expected HereIAm first");
+                        }
+                        {
+                            let ds = ads.lock().await;
+                            let mut work = ds.work.lock().unwrap();
+                            work.last_flush = last_flush;
+                            println!("Set last flush {}", last_flush);
+                        }
+                        fw.send(Message::LastFlushAck(last_flush)).await?;
                     }
                     Some(msg) => {
                         if !negotiated {
@@ -905,7 +920,7 @@ impl Work {
                             continue 'dep_walk;
                         }
                     }
-
+                    println!("{} job failed dep for {}", ds_id, dep);
                     /*
                      * If we got here, then the dep is not met.
                      * Set DepWait if not already set.

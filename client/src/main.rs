@@ -21,8 +21,10 @@ arg_enum! {
     enum Workload {
         Balloon,
         Big,
+        Burst,
         Demo,
         Dep,
+        Generic,
         One,
         Rand,
         Span,
@@ -147,7 +149,7 @@ fn get_region_info(
     /*
      * If requested, fill the write count from a provided file.
      */
-    if let Some(ref vi) = vi {
+    if let Some(vi) = &vi {
         let cp = history_file(vi);
         ri.write_count = match read_json(&cp) {
             Ok(write_count) => write_count,
@@ -253,49 +255,84 @@ fn main() -> Result<()> {
             println!("Run big test");
             big_workload(&guest, &mut region_info)?;
         }
+        Workload::Burst => {
+            println!("Run burst test (demo in a loop) in 5 seconds...");
+            std::thread::sleep(std::time::Duration::from_secs(5));
+
+            runtime.block_on(burst_workload(
+                &guest,
+                60,
+                190,
+                &mut region_info,
+                &opt.verify_out,
+            ))?;
+        }
         Workload::Demo => {
             println!("Run Demo test");
+            println!("Pause for 10 seconds, then start testing");
+            std::thread::sleep(std::time::Duration::from_secs(10));
+
             /*
              * The count provided here should be greater than the flow
              * control limit if we wish to test flow control.  Also, set
              * lossy on a downstairs otherwise it will probably keep up.
              */
-            runtime.block_on(demo_workload(&guest, 400, &mut region_info))?;
+            runtime.block_on(demo_workload(&guest, 300, &mut region_info))?;
         }
         Workload::Dep => {
             println!("Run dep test");
-            /*
-             * Attempted workaround to handle tokio async issues
-             * between this and the actual upstairs runtime.  I'm
-             * not convinced this actually does any better.
-            let dep_runtime = Builder::new_multi_thread()
-                .worker_threads(2)
-                .thread_name("crucible-deptest")
-                .enable_all()
-                .build()
-                .unwrap();
-            println!("dep runtime started");
-             */
             runtime.block_on(dep_workload(&guest, &mut region_info))?;
         }
+
+        Workload::Generic => {
+            println!("Run Generic test in 5 seconds");
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            runtime.block_on(generic_workload(
+                &guest,
+                5000,
+                &mut region_info,
+            ))?;
+        }
+
         Workload::One => {
             println!("One test");
             runtime.block_on(rand_workload(&guest, 1, &mut region_info))?;
         }
         Workload::Rand => {
             println!("Run random test");
-            runtime.block_on(rand_workload(&guest, 50, &mut region_info))?;
+            runtime.block_on(rand_workload(&guest, 5000, &mut region_info))?;
         }
         Workload::Span => {
             println!("Span test");
             span_workload(&guest, &mut region_info)?;
         }
         Workload::Verify => {
-            println!("Verify test completed at import");
+            /*
+             * For verify, if -q, we quit right away.  If we don't quit, then
+             * this turns into a read verify loop, sleep for some duration
+             * and then re-check the volume.
+             */
+            if opt.quit {
+                println!("Verify test completed at import");
+            } else {
+                println!("Verify read loop begins");
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    if let Err(e) = verify_volume(&guest, &mut region_info) {
+                        bail!("Volume verify failed: {:?}", e)
+                    }
+                    let mut wc = guest.show_work()?;
+                    while wc.up_count + wc.ds_count > 0 {
+                        println!("Waiting for all work to be completed");
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        wc = guest.show_work()?;
+                    }
+                }
+            }
         }
     }
 
-    if let Some(ref vo) = opt.verify_out {
+    if let Some(vo) = &opt.verify_out {
         let cp = history_file(vo);
         write_json(&cp, &region_info.write_count, true)?;
         println!("Wrote out file {:?}", cp);
@@ -309,7 +346,7 @@ fn main() -> Result<()> {
             println!("All crucible jobs finished, exiting program");
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_secs(4));
     }
 }
 
@@ -536,6 +573,105 @@ fn print_write_count(ri: &mut RegionInfo) {
 }
 
 /*
+ * Generic workload.  Do a random R/W/F, but wait for the operation to be
+ * ACK'd before sending the next.  Limit the size of the IO to 10 blocks.
+ * Read data is verified.
+ */
+async fn generic_workload(
+    guest: &Arc<Guest>,
+    count: u32,
+    ri: &mut RegionInfo,
+) -> Result<()> {
+    /*
+     * TODO: Allow the user to specify a seed here.
+     */
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    /*
+     * TODO: Let the user select the number of loops
+     */
+    for i in 0..count {
+        let op = rng.gen_range(0..10);
+        if op == 0 {
+            // flush
+            println!("{}/{} FLUSH", i, count);
+            let mut waiter = guest.flush()?;
+            waiter.block_wait()?;
+        } else {
+            // Read or Write both need this
+            // Pick a random size (in blocks) for the IO, up to 10
+            let size = rng.gen_range(1..=10) as usize;
+
+            // Once we have our IO size, decide where the starting offset should
+            // be, which is the total possible size minus the randomly chosen
+            // IO size.
+            let block_max = ri.total_blocks - size + 1;
+            let block_index = rng.gen_range(0..block_max) as usize;
+
+            // Convert offset and length to their byte values.
+            let offset =
+                Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+            if op <= 4 {
+                // Write
+                // Update the write count for all blocks we plan to write to.
+                for i in 0..size {
+                    ri.write_count[block_index + i] += 1;
+                }
+
+                let vec =
+                    fill_vec(block_index, size, &ri.write_count, ri.block_size);
+                let data = Bytes::from(vec);
+
+                println!(
+                    "{}/{} WRITE {}:{}",
+                    i,
+                    count,
+                    offset.value,
+                    data.len()
+                );
+                let mut waiter = guest.write(offset, data)?;
+                waiter.block_wait()?;
+            } else {
+                // Read (+ verify)
+                let length: usize = size * ri.block_size as usize;
+                let vec: Vec<u8> = vec![255; length];
+                let data = crucible::Buffer::from_vec(vec);
+                println!(
+                    "{}/{} READ  {}:{}",
+                    i,
+                    count,
+                    offset.value,
+                    data.len()
+                );
+                let mut waiter = guest.read(offset, data.clone())?;
+                waiter.block_wait()?;
+
+                let dl = data.as_vec().to_vec();
+                if !validate_vec(
+                    dl.clone(),
+                    block_index,
+                    &ri.write_count,
+                    ri.block_size,
+                ) {
+                    bail!("Verify Error at {} len:{}", block_index, length);
+                }
+            }
+        }
+    }
+
+    if let Err(e) = verify_volume(guest, ri) {
+        bail!("Final volume verify failed: {:?}", e)
+    }
+
+    if count >= 10 {
+        print_write_count(ri);
+    }
+
+    Ok(())
+}
+
+/*
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
@@ -622,6 +758,47 @@ async fn rand_workload(
 }
 
 /*
+ * Send bursts of work to the demo_workload function.
+ * Wait for each burst to finish, pause, then loop.
+ */
+async fn burst_workload(
+    guest: &Arc<Guest>,
+    count: u32,
+    demo_count: u32,
+    ri: &mut RegionInfo,
+    verify_out: &Option<PathBuf>,
+) -> Result<()> {
+    // TODO: let user pick loop count
+    for c in 0..count {
+        demo_workload(&guest, demo_count, ri).await?;
+        let mut wc = guest.show_work()?;
+        while wc.up_count + wc.ds_count != 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            println!("{}/{} Up:{} ds:{}", c, count, wc.up_count, wc.ds_count);
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            wc = guest.show_work()?;
+        }
+
+        /*
+         * Once everyone is caught up, save the state just in case
+         * the user wants to quit at this pause step
+         */
+        println!();
+        if let Some(vo) = &verify_out {
+            let cp = history_file(vo);
+            write_json(&cp, &ri.write_count, true)?;
+            println!("Wrote out file {:?} at this time", cp);
+        }
+        println!(
+            "{}/{}: 5 second pause, then run another test loop",
+            c, count
+        );
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    Ok(())
+}
+
+/*
  * Like the random test, but with IO not as large, and with frequent
  * showing of the internal work queues.  Submit a bunch of random IOs,
  * then watch them complete.
@@ -631,16 +808,14 @@ async fn demo_workload(
     count: u32,
     ri: &mut RegionInfo,
 ) -> Result<()> {
-    println!("Pause for 10 seconds, then start testing");
-    std::thread::sleep(std::time::Duration::from_secs(10));
-
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
     let mut waiterlist = Vec::new();
     // TODO: Let the user select the number of loops
-    for _ in 0..count {
-        let op = rng.gen_range(0..3);
+    // TODO: Allow user to request r/w/f percentage (how???)
+    for i in 0..count {
+        let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
             let waiter = guest.flush()?;
@@ -660,7 +835,7 @@ async fn demo_workload(
             let offset =
                 Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-            if op == 1 {
+            if op <= 4 {
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
@@ -675,12 +850,15 @@ async fn demo_workload(
                 waiterlist.push(waiter);
             } else {
                 // Read
-
                 let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 let waiter = guest.read(offset, data.clone())?;
                 waiterlist.push(waiter);
+            }
+
+            if i == 10 || i == 20 {
+                guest.show_work()?;
             }
         }
     }
@@ -688,10 +866,12 @@ async fn demo_workload(
         up_count: 0,
         ds_count: 0,
     };
+
     println!("loop over {} waiters", waiterlist.len());
     for wa in waiterlist.iter_mut() {
         wa.block_wait()?;
     }
+
     /*
      * Continue loping until all downstairs jobs finish also.
      */
