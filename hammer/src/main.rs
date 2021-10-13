@@ -190,7 +190,7 @@ fn main() -> Result<()> {
             // Read back every byte not written to to make sure it's zero
             cpf.seek(SeekFrom::Start(0))?;
 
-            // - read from 0 -> offset
+            // read from 0 -> offset
             let mut verify_vec: Vec<u8> = vec![0; offset as usize];
             cpf.read_exact(&mut verify_vec[..])?;
 
@@ -200,7 +200,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            // - read from (offset + bsz) -> sz
+            // read from (offset + bsz) -> sz
             cpf.seek(SeekFrom::Start(offset + bsz as u64))?;
 
             let len = sz - (offset + bsz as u64);

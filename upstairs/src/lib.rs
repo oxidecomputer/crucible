@@ -165,8 +165,9 @@ pub fn extent_from_offset(
     while blocks_left > 0 {
         /*
          * XXX We only support a single region (downstairs). When we grow to
-         * support a LBA size that is larger than a single region, then we will
-         * need to write more code. But - that code may live upstairs?
+         * support a LBA size that is larger than a single region, then we
+         * will need to write more code. But - that code may live
+         * upstairs?
          */
         let eid: u64 = o / ddef.extent_size().value;
         assert!((eid as u32) < ddef.extent_count());
@@ -737,7 +738,8 @@ async fn proc(
  * Once we have negotiated a connection to a downstairs, this task takes
  * over and watches the input for changes, indicating that new work in on
  * the work hashmap. We will walk the hashmap on the input signal and get
- * any new work for this specific downstairs and mark that job as in progress.
+ * any new work for this specific downstairs and mark that job as in
+ * progress.
  *
  * V1 flow control: To enable flow control we have a few things.
  * 1. The boolean more_work variable, that indicates we are in a
@@ -1067,10 +1069,10 @@ impl Downstairs {
 
     /**
      * Mark this request as in progress for this client, and return a copy
-     * of the details of the request. If the downstairs client has experienced
-     * errors in the past, return None and mark this as Skipped.
-     * XXX Better error handling might mean clearing previous downstairs
-     * errors, as for all we know it's a new downstairs.
+     * of the details of the request. If the downstairs client has
+     * experienced errors in the past, return None and mark this as
+     * Skipped. XXX Better error handling might mean clearing previous
+     * downstairs errors, as for all we know it's a new downstairs.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.active.get_mut(&ds_id).unwrap();
@@ -1679,12 +1681,12 @@ pub struct Upstairs {
     downstairs: Mutex<Downstairs>,
 
     /*
-     * The flush info Vec is only used when first connecting or re-connecting
-     * to a downstairs. It is populated with the versions the upstairs
-     * considers the "correct". If a downstairs disconnects and then
-     * comes back, it has to match or be made to match what was decided
-     * as the correct list. This may involve having to refresh the versions
-     * vec.
+     * The flush info Vec is only used when first connecting or
+     * re-connecting to a downstairs. It is populated with the versions
+     * the upstairs considers the "correct". If a downstairs disconnects
+     * and then comes back, it has to match or be made to match what was
+     * decided as the correct list. This may involve having to refresh
+     * the versions vec.
      *
      * The versions vec is not enough to solve a mismatch. We really need
      * Generation number, flush number, and dirty bit for every extent
@@ -1927,8 +1929,8 @@ impl Upstairs {
         )?;
 
         /*
-         * Grab this ID after extent_from_offset: in case of Err we don't want
-         * to create a gap in the IDs.
+         * Grab this ID after extent_from_offset: in case of Err we don't
+         * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
 
@@ -2090,8 +2092,9 @@ impl Upstairs {
 
         /*
          * New work created, add to the guest_work HM. New work must be put
-         * on the guest_work active HM first, before it lands on the downstairs
-         * lists. We don't want to miss a completion from downstairs.
+         * on the guest_work active HM first, before it lands on the
+         * downstairs lists. We don't want to miss a completion from
+         * downstairs.
          */
         assert!(!sub.is_empty());
         let new_gtos = GtoS::new(
@@ -2767,9 +2770,9 @@ fn test_buffer_len_over_block_size() {
 /*
  * Inspired from Propolis block.rs
  *
- * The following are the operations that Crucible supports from outside callers.
- * We have extended this to cover a bunch of test operations as well.
- * The first three are the supported operations, the other operations
+ * The following are the operations that Crucible supports from outside
+ * callers. We have extended this to cover a bunch of test operations as
+ * well. The first three are the supported operations, the other operations
  * tell the upstairs to behave in specific ways.
  */
 #[derive(Debug)]
@@ -2842,7 +2845,8 @@ struct GtoS {
     sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
 
     /*
-     * Optional encryption context - Some if the corresponding Upstairs is Some.
+     * Optional encryption context - Some if the corresponding Upstairs is
+     * Some.
      */
     encryption_context: Option<EncryptionContext>,
 }
@@ -2926,9 +2930,10 @@ impl GtoS {
          * If present, send the result to the guest.  If this is a flush
          * issued on behalf of crucible, then there is no place to send
          * a result to.
-         * XXX: If the guest is no longer listening and this returns an error,
-         * do we care?  This could happen if the guest has given up
-         * because an IO took too long, or other possible guest side reasons.
+         * XXX: If the guest is no longer listening and this returns an
+         * error, do we care?  This could happen if the guest has
+         * given up because an IO took too long, or other possible
+         * guest side reasons.
          */
         if let Some(sender) = &self.sender {
             let _send_result = sender.send(result);
@@ -3007,9 +3012,10 @@ impl GuestWork {
          */
         if let Some(gtos_job) = self.active.get_mut(&gw_id) {
             /*
-             * If the ds_id is on the submitted list, then we will take it off
-             * and, if it is a read, add the read result buffer to the gtos job
-             * structure for later copying.
+             * If the ds_id is on the submitted list, then we will take it
+             * off and, if it is a read, add the read result
+             * buffer to the gtos job structure for later
+             * copying.
              */
             if gtos_job.submitted.remove(&ds_id).is_some() {
                 if let Some(data) = data {
@@ -3024,7 +3030,8 @@ impl GuestWork {
                         /*
                          * Only the first successful read should fill the
                          * slot in the downstairs buffer for a ds_id. If
-                         * more than one is trying to, then we have a problem.
+                         * more than one is trying to, then we have a
+                         * problem.
                          */
                         panic!(
                             "gw_id:{} read buffer already present for {}",
@@ -3119,13 +3126,21 @@ impl BlockReqWaiter {
  *
  * A task on the Crucible side will receive a notification that a new
  * operation has landed on the reqs queue and will take action:
+ *
  *   Pop the request off the reqs queue.
- *   Copy (and optionally encrypt) any data buffers provided to us by the Guest.
+ *
+ *   Copy (and optionally encrypt) any data buffers provided to us by the
+ *   Guest.
+ *
  *   Create one or more downstairs DownstairsIO structures.
+ *
  *   Create a GtoS tracking structure with the id's for each
  *   downstairs task and the read result buffer if required.
+ *
  *   Add the GtoS struct to the in GuestWork active work hashmap.
+ *
  *   Put all the DownstairsIO structures on the downstairs work queue.
+ *
  *   Send notification to the upstairs tasks that there is new work.
  *
  * Work here will be added to storage side queues and the responses will
@@ -3149,11 +3164,12 @@ pub struct Guest {
     notify: Notify,
 
     /*
-     * When the crucible listening task has noticed a new IO request, it will
-     * pull it from the reqs queue and create an GuestWork struct as well as
-     * convert the new IO request into the matching downstairs request(s).
-     * Each new GuestWork request will get a unique gw_id, which is also
-     * the index for that operation into the hashmap.
+     * When the crucible listening task has noticed a new IO request, it
+     * will pull it from the reqs queue and create an GuestWork struct
+     * as well as convert the new IO request into the matching
+     * downstairs request(s). Each new GuestWork request will get a
+     * unique gw_id, which is also the index for that operation into the
+     * hashmap.
      *
      * It is during this process that data will encrypted. For a read, the
      * data is decrypted back to the guest provided buffer after all the
@@ -3512,13 +3528,14 @@ fn send_active(t: &[Target]) {
 
 /**
  * We listen on the ds_done channel to know when enough of the downstairs
- * requests for a downstairs work task have finished and it is time to complete
- * any buffer transfers (reads) and then notify the guest that their
- * work has been completed.
+ * requests for a downstairs work task have finished and it is time to
+ * complete any buffer transfers (reads) and then notify the guest that
+ * their work has been completed.
  */
 async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
     /*
-     * Accept _any_ ds_done message, but work on the whole list of ackable work.
+     * Accept _any_ ds_done message, but work on the whole list of ackable
+     * work.
      */
     while let Some(_ds_id) = ds_done_rx.recv().await {
         /*
@@ -3543,7 +3560,8 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let done = work.active.get_mut(ds_id_done).unwrap();
             /*
-             * Make sure the job state has not changed since we made the list.
+             * Make sure the job state has not changed since we made the
+             * list.
              */
             if done.ack_status != AckStatus::AckReady {
                 println!("Job {} no longer ready, skip for now", ds_id_done);
@@ -3755,7 +3773,8 @@ async fn up_listen(
          * We have three connections, so we can now start listening for
          * more IO to come in. We also need to make sure our downstairs
          * stay connected, and we watch the ds_status_rx.recv() for that
-         * to change which is our notification that a disconnect has happened.
+         * to change which is our notification that a disconnect has
+         * happened.
          *
          * In addition, we also send a periodic flush when we determine it
          * is time to do so. TODO: Figure out when is the best time to send

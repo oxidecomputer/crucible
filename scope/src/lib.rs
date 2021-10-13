@@ -132,8 +132,8 @@ async fn scope_connection(
     loop {
         let send = {
             /*
-             * Look at the prompt at the head of the display queue if there is
-             * one:
+             * Look at the prompt at the head of the display queue if there
+             * is one:
              */
             let q = c.queue.lock().unwrap();
             match (&lastsent, q.out.iter().next()) {
@@ -257,12 +257,13 @@ impl Server {
     }
 
     /**
-     * Submit a prompt message to all control clients and await a response from
-     * one of them.
+     * Submit a prompt message to all control clients and await a response
+     * from one of them.
      */
     pub async fn wait_for(&self, msg: &str) -> String {
         /*
-         * Create a broadcast subscriber to listen for a reply to our message.
+         * Create a broadcast subscriber to listen for a reply to our
+         * message.
          */
         let mut rxin = self.0.txin.subscribe();
 
