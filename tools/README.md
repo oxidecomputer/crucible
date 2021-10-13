@@ -2,6 +2,20 @@
 
 Various scripts used for Crucible
 
+## downstairs_daemon.sh
+A highly custom script that starts three downstairs in a loop and will
+keep them restarted when they are killed.  A bunch of assumptions are made
+around where the region directory is and which ports the downstairs use.
+You can pause the downstairs kill buy creating the /tmp/ds_test/up file.
+To stop the script all together, create the /tmp/ds_test/stop file.
+
+After starting the downstairs, the user can hit enter and the script
+will randomly kill (and then restart) a downstairs process.
+
+If a downstairs dies for any other reason then being killed with the
+generic default kill signal, the script will stop everything and leave
+the logs behind in /tmp/ds_test/
+
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
 crucible from the guest.  The way this works requires that crucible is

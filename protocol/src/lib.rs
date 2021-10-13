@@ -34,6 +34,8 @@ pub enum Message {
     RegionInfoPlease,
     RegionInfo(RegionDefinition),
     ExtentVersionsPlease,
+    LastFlush(u64),
+    LastFlushAck(u64),
     ExtentVersions(Vec<u64>),
 
     Write(Uuid, u64, u64, Vec<u64>, Block, bytes::Bytes),
