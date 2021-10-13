@@ -723,8 +723,11 @@ async fn proc(
             }
         }
     }
-
-    assert!(*connected);
+    /*
+     * This check is just to make sure we have completed negotiation.
+     * But, XXX, this will go away when we redo the state transition code
+     * for a downstairs connection.
+     */
     assert_eq!(negotiated, 5);
     println!("[{}] Client completed negotiation", up_coms.client_id);
     cmd_loop(up, fr, fw, up_coms, lossy).await
@@ -989,9 +992,6 @@ async fn looper(
             "{0}[{1}] connection to {0} closed",
             target, up_coms.client_id
         );
-        /*
-         * Before we sent a signal to up_listen.
-         */
         connected = false;
     }
 }
@@ -1152,7 +1152,7 @@ impl Downstairs {
                     } else {
                         /*
                          * For a write or flush, if we have 3 completed,
-                         * then we can leave this job as AckRead, if not,
+                         * then we can leave this job as AckReady, if not,
                          * then we have to undo the AckReady.
                          */
                         if jobs_completed_ok < 3 {
@@ -1710,7 +1710,13 @@ pub struct Upstairs {
     encryption_context: Option<EncryptionContext>,
 
     /*
-     * If true, we have IO that has not seen a flush.
+     * Upstairs keeps all IOs in memory until a flush is ACK'd back from
+     * all three downstairs.  If there are IOs we have accepted into the
+     * work queue that don't end with a flush, then we set this to indicate
+     * that the upstairs may need to issue a flush of its own to be sure
+     * that data is pushed to disk.  Note that this is not an indication of
+     * an ACK'd flush, just that the last IO command we put on the work
+     * queue was not a flush.
      */
     need_flush: Mutex<bool>,
 }
@@ -2119,29 +2125,20 @@ impl Upstairs {
     fn ds_missing(&self, client_id: u8) {
         let mut ds = self.downstairs.lock().unwrap();
         let current = ds.ds_state[client_id as usize];
-        let new_state;
-        match current {
-            DsState::Active => {
-                new_state = DsState::Offline;
-            }
-            DsState::Replay => {
-                new_state = DsState::Offline;
-            }
-            DsState::Offline => {
-                new_state = DsState::Offline;
-            }
-            DsState::_Migrating => {
-                new_state = DsState::Failed;
-            }
+        let new_state = match current {
+            DsState::Active => DsState::Offline,
+            DsState::Replay => DsState::Offline,
+            DsState::Offline => DsState::Offline,
+            DsState::_Migrating => DsState::Failed,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
                  * downstairs to receive IO, so we go to the back of the
                  * line and have to re-verify it again.
                  */
-                new_state = DsState::Disconnected;
+                DsState::Disconnected
             }
-        }
+        };
         println!(
             "[{}] Gone missing, transition from {:?} to {:?}",
             client_id, current, new_state,
@@ -2418,7 +2415,7 @@ enum DsState {
     _BadRegion,
     /*
      * We were connected, but did not transition all the way to
-     * acive before the connection went away.
+     * active before the connection went away.
      */
     Disconnected,
     /*
@@ -3820,7 +3817,6 @@ async fn up_listen(
                             // XXX What to do here?
                         } else {
                             send_work(&dst, 1);
-                            up.set_flush_clear();
                         }
                         flush_check = deadline_secs(5);
                     }
@@ -5563,7 +5559,7 @@ mod test {
         assert!(work.in_progress(id2, 0).is_some());
         assert!(work.in_progress(id2, 1).is_some());
 
-        // Simulate completeing  both writes to downstairs 0 and 1
+        // Simulate completing  both writes to downstairs 0 and 1
         assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
         assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
         assert_eq!(work.complete(id2, 0, None, Ok(()),).unwrap(), false);

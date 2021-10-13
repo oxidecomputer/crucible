@@ -6,7 +6,7 @@ Various scripts used for Crucible
 A highly custom script that starts three downstairs in a loop and will
 keep them restarted when they are killed.  A bunch of assumptions are made
 around where the region directory is and which ports the downstairs use.
-You can pause the downstairs kill buy creating the /tmp/ds_test/up file.
+You can pause the downstairs kill by creating the /tmp/ds_test/up file.
 To stop the script all together, create the /tmp/ds_test/stop file.
 
 After starting the downstairs, the user can hit enter and the script
