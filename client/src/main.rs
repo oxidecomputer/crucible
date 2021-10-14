@@ -297,7 +297,7 @@ fn main() -> Result<()> {
 
         Workload::One => {
             println!("One test");
-            runtime.block_on(rand_workload(&guest, 1, &mut region_info))?;
+            runtime.block_on(one_workload(&guest, &mut region_info))?;
         }
         Workload::Rand => {
             println!("Run random test");
@@ -667,6 +667,57 @@ async fn generic_workload(
 
     if count >= 10 {
         print_write_count(ri);
+    }
+
+    Ok(())
+}
+
+/*
+ * Generate a random offset and length, and write to then read from
+ * that offset/length.  Verify the data is what we expect.
+ */
+async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    /*
+     * TODO: Allow the user to specify a seed here.
+     */
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    /*
+     * Once we have our IO size, decide where the starting offset should
+     * be, which is the total possible size minus the randomly chosen
+     * IO size.
+     */
+    let size = 1;
+    let block_max = ri.total_blocks - size + 1;
+    let block_index = rng.gen_range(0..block_max) as usize;
+
+    /*
+     * Convert offset and length to their byte values.
+     */
+    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+    /*
+     * Update the write count for the block we plan to write to.
+     */
+    ri.write_count[block_index] += 1;
+
+    let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
+    let data = Bytes::from(vec);
+
+    println!("IO at block {}, len:{}", offset.value, data.len());
+
+    let mut waiter = guest.write(offset, data)?;
+    waiter.block_wait()?;
+
+    let length: usize = size * ri.block_size as usize;
+    let vec: Vec<u8> = vec![255; length];
+    let data = crucible::Buffer::from_vec(vec);
+    let mut waiter = guest.read(offset, data.clone())?;
+    waiter.block_wait()?;
+
+    let dl = data.as_vec().to_vec();
+    if !validate_vec(dl.clone(), block_index, &ri.write_count, ri.block_size) {
+        bail!("Error at {}", block_index);
     }
 
     Ok(())

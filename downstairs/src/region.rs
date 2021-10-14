@@ -27,7 +27,7 @@ pub struct Inner {
 }
 
 impl Inner {
-    fn flush_number(&self) -> Result<u64> {
+    pub fn flush_number(&self) -> Result<u64> {
         let mut stmt = self
             .metadb
             .prepare("SELECT value FROM metadata where name='flush_number'")?;
@@ -44,21 +44,24 @@ impl Inner {
     }
 
     fn set_flush_number(&self, new_flush: u64) -> Result<()> {
-        /*
-         * When we write out the new flush number, the dirty bit should be
-         * set back to false.
-         */
         let mut stmt = self.metadb.prepare(
-            "UPDATE metadata SET value=?1 WHERE \
-                name='flush_number'; UPDATE metadata SET dirty=0",
+            "UPDATE metadata SET value=?1 WHERE name='flush_number'",
         )?;
 
         let _rows_affected = stmt.execute(params![new_flush])?;
 
+        /*
+         * When we write out the new flush number, the dirty bit should be
+         * set back to false.
+         */
+        let _rows_affected = self
+            .metadb
+            .execute("UPDATE metadata SET value=0 WHERE name='dirty'", [])?;
+
         Ok(())
     }
 
-    fn dirty(&self) -> Result<bool> {
+    pub fn dirty(&self) -> Result<bool> {
         let mut stmt = self
             .metadb
             .prepare("SELECT value FROM metadata where name='dirty'")?;
@@ -276,8 +279,12 @@ impl Extent {
         })
     }
 
-    fn inner(&self) -> MutexGuard<Inner> {
+    pub fn inner(&self) -> MutexGuard<Inner> {
         self.inner.lock().unwrap()
+    }
+
+    pub fn number(&self) -> u32 {
+        self.number
     }
 
     #[instrument]
@@ -406,10 +413,13 @@ extern "C" {
 pub struct Region {
     dir: PathBuf,
     def: RegionDefinition,
-    extents: Vec<Extent>,
+    pub extents: Vec<Extent>,
 }
 
 impl Region {
+    /**
+     * Create a new region based on the given RegionOptions
+     */
     pub fn create<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
@@ -444,6 +454,9 @@ impl Region {
         Ok(region)
     }
 
+    /**
+     * Open an existing region file
+     */
     pub fn open<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
