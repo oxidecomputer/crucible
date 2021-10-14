@@ -53,6 +53,10 @@ enum Args {
         #[structopt(short, long, name = "UUID", parse(try_from_str))]
         uuid: Uuid,
     },
+    Dump {
+        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        data: PathBuf,
+    },
     Export {
         /*
          * Number of blocks to export.
@@ -1037,6 +1041,31 @@ async fn main() -> Result<()> {
                 region.def().extent_size().value,
                 region.def().extent_count(),
             );
+            Ok(())
+        }
+        Args::Dump { data } => {
+            region = Region::open(&data, Default::default())?;
+
+            println!("UUID: {:?}", region.def().uuid());
+            println!(
+                "Blocks per extent:{} Total Extents: {}",
+                region.def().extent_size().value,
+                region.def().extent_count(),
+            );
+
+            let ad =
+                Arc::new(Mutex::new(Downstairs::new(region, false, false)));
+            let d = ad.lock().await;
+            println!("NUMBER FLUSH_ID DIRTY");
+            for e in &d.region.extents {
+                let inner = e.inner();
+                println!(
+                    "{:6} {:8} {:?}",
+                    e.number(),
+                    inner.flush_number().unwrap(),
+                    inner.dirty().unwrap()
+                );
+            }
             Ok(())
         }
         Args::Export {
