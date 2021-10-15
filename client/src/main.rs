@@ -716,7 +716,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     let dl = data.as_vec().to_vec();
-    if !validate_vec(dl.clone(), block_index, &ri.write_count, ri.block_size) {
+    if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
         bail!("Error at {}", block_index);
     }
 
