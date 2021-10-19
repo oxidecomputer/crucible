@@ -107,14 +107,14 @@ pub fn dump_region(
     let mut ext_num = all_extents.keys().collect::<Vec<&u32>>();
     ext_num.sort_unstable();
 
-    print!("N");
+    print!("  N");
     for _ in 0..dir_count {
         print!("      GEN FLUSH_ID D");
     }
     println!();
 
     for en in ext_num.iter() {
-        print!("{} ", en);
+        print!("{:3} ", en);
         if let Some(ei) = all_extents.get(en) {
             for dir_index in 0..dir_count {
                 if let Some(em) = ei.ei_hm.get(&(dir_index as u32)) {
@@ -142,7 +142,7 @@ pub fn dump_region(
 }
 
 /*
- * Show the metata and a block by block diff of a single extent
+ * Show the metadata and a block by block diff of a single extent
  * We need at least two directories to compare, and no more than three.
  */
 fn show_extent(
@@ -175,7 +175,6 @@ fn show_extent(
     for dir_index in 0..dir_count {
         if let Some(em) = ei_hm.get(&(dir_index as u32)) {
             print!("{:8} ", em.flush_number);
-            // Read buffer here. Make a buffer for each extent, then dump?
         } else {
             print!("-");
         }
