@@ -27,7 +27,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
+mod dump;
 mod region;
+use dump::dump_region;
 use region::Region;
 
 #[derive(Debug, StructOpt)]
@@ -53,9 +55,24 @@ enum Args {
         #[structopt(short, long, name = "UUID", parse(try_from_str))]
         uuid: Uuid,
     },
+    /*
+     * Dump region information.
+     * Multiple directories can be passed (up to 3)
+     * With -e, you can dump just a single extent which will include
+     * a block by block comparison.
+     */
     Dump {
+        /*
+         * Directories containing a region.
+         */
         #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
-        data: PathBuf,
+        data: Vec<PathBuf>,
+
+        /*
+         * Just dump this extent number
+         */
+        #[structopt(short, long)]
+        extent: Option<u32>,
     },
     Export {
         /*
@@ -1043,29 +1060,8 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Args::Dump { data } => {
-            region = Region::open(&data, Default::default())?;
-
-            println!("UUID: {:?}", region.def().uuid());
-            println!(
-                "Blocks per extent:{} Total Extents: {}",
-                region.def().extent_size().value,
-                region.def().extent_count(),
-            );
-
-            let ad =
-                Arc::new(Mutex::new(Downstairs::new(region, false, false)));
-            let d = ad.lock().await;
-            println!("NUMBER FLUSH_ID DIRTY");
-            for e in &d.region.extents {
-                let inner = e.inner();
-                println!(
-                    "{:6} {:8} {:?}",
-                    e.number(),
-                    inner.flush_number().unwrap(),
-                    inner.dirty().unwrap()
-                );
-            }
+        Args::Dump { data, extent } => {
+            dump_region(data, extent)?;
             Ok(())
         }
         Args::Export {
@@ -1074,7 +1070,7 @@ async fn main() -> Result<()> {
             export_path,
             skip,
         } => {
-            region = Region::open(&data, Default::default())?;
+            region = Region::open(&data, Default::default(), true)?;
 
             downstairs_export(&mut region, export_path, skip, count).unwrap();
             Ok(())
@@ -1087,7 +1083,7 @@ async fn main() -> Result<()> {
             return_errors,
             trace_endpoint,
         } => {
-            region = Region::open(&data, Default::default())?;
+            region = Region::open(&data, Default::default(), true)?;
 
             println!("UUID: {:?}", region.def().uuid());
             println!(

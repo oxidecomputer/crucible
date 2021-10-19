@@ -1008,7 +1008,7 @@ async fn looper(
  * connections as well as the work that each is doing.
  */
 #[derive(Debug)]
-pub struct Downstairs {
+struct Downstairs {
     /*
      * UUID for each downstairs, index by client ID
      */
