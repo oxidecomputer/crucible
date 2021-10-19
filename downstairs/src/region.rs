@@ -27,6 +27,32 @@ pub struct Inner {
 }
 
 impl Inner {
+    pub fn gen_number(&self) -> Result<u64> {
+        let mut stmt = self
+            .metadb
+            .prepare("SELECT value FROM metadata where name='gen_number'")?;
+        let gen_number_iter = stmt.query_map([], |row| row.get(0))?;
+
+        let mut gen_number_values: Vec<u64> = vec![];
+        for gen_number_value in gen_number_iter {
+            gen_number_values.push(gen_number_value?);
+        }
+
+        assert!(gen_number_values.len() == 1);
+
+        Ok(gen_number_values[0])
+    }
+
+    fn _set_gen_number(&self, new_gen: u64) -> Result<()> {
+        let mut stmt = self
+            .metadb
+            .prepare("UPDATE metadata SET value=?1 WHERE name='gen_number'")?;
+
+        let _rows_affected = stmt.execute(params![new_gen])?;
+
+        Ok(())
+    }
+
     pub fn flush_number(&self) -> Result<u64> {
         let mut stmt = self
             .metadb
@@ -91,31 +117,31 @@ pub struct ExtentMeta {
      * Version information regarding the extent structure.
      * Not currently connected to anything XXX
      */
-    ext_version: u32,
+    pub ext_version: u32,
     /**
      * Increasing value provided from upstairs every time it connects to
      * a downstairs.  Used to help break ties if flash numbers are the same
      * on extents.
      * Not currently connected to anything XXX
      */
-    gen: u64,
+    pub gen_number: u64,
     /**
      * Increasing value incremented on every write to an extent.
      * All mirrors of an extent should have the same value.
      */
-    flush_number: u64,
+    pub flush_number: u64,
     /**
      * Used to indicate data was written to disk, but not yet flushed
      * Should be set back to false once data has been flushed.
      */
-    dirty: bool,
+    pub dirty: bool,
 }
 
 impl Default for ExtentMeta {
     fn default() -> ExtentMeta {
         ExtentMeta {
             ext_version: 1,
-            gen: 0,
+            gen_number: 0,
             flush_number: 0,
             dirty: false,
         }
@@ -254,11 +280,16 @@ impl Extent {
 
         let meta = ExtentMeta::default();
 
-        // metadb.execute("INSERT INTO metadata
-        //     (name, value) VALUES (?1, ?2)",
-        //     params!["ext_version", meta.ext_version])?;
-        //metadb.execute("INSERT INTO metadata
-        //     (name, value) VALUES (?1, ?2)", params!["gen", meta.gen])?;
+        metadb.execute(
+            "INSERT INTO metadata
+            (name, value) VALUES (?1, ?2)",
+            params!["ext_version", meta.ext_version],
+        )?;
+        metadb.execute(
+            "INSERT INTO metadata
+            (name, value) VALUES (?1, ?2)",
+            params!["gen_number", meta.gen_number],
+        )?;
         metadb.execute(
             "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
             params!["flush_number", meta.flush_number],
@@ -460,6 +491,7 @@ impl Region {
     pub fn open<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
+        verbose: bool,
     ) -> Result<Region> {
         options.validate()?;
 
@@ -473,7 +505,9 @@ impl Region {
             Err(e) => bail!("Error {:?} opening region config {:?}", e, cp),
         };
 
-        println!("Opened existing region file {:?}", cp);
+        if verbose {
+            println!("Opened existing region file {:?}", cp);
+        }
         /*
          * Open every extent that presently exists.
          */
@@ -608,6 +642,7 @@ impl Region {
 mod test {
     use super::extent_path;
     use super::*;
+    use crate::dump::dump_region;
     use bytes::BufMut;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -665,7 +700,7 @@ mod test {
     fn new_existing_region() -> Result<()> {
         let dir = tempdir()?;
         let _ = Region::create(&dir, new_region_options());
-        let _ = Region::open(&dir, new_region_options());
+        let _ = Region::open(&dir, new_region_options(), false);
         Ok(())
     }
 
@@ -675,6 +710,7 @@ mod test {
         let _ = Region::open(
             &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
+            false,
         )
         .unwrap();
         ()
@@ -795,5 +831,94 @@ mod test {
             extent_path("/var/region", u32::MAX),
             p("/var/region/FF/FFF/FFF")
         );
+    }
+
+    #[test]
+    fn dump_a_region() -> Result<()> {
+        /*
+         * Create a region, give it actual size
+         */
+        let dir = tempdir()?;
+        let mut r1 = Region::create(&dir, new_region_options()).unwrap();
+        r1.extend(2)?;
+
+        /*
+         * Build the Vec for our region dir
+         */
+        let pdir = dir.into_path();
+        let mut dvec = Vec::new();
+        dvec.push(pdir);
+
+        /*
+         * Dump the region
+         */
+        dump_region(dvec, None)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn dump_two_region() -> Result<()> {
+        /*
+         * Create our temp dirs
+         */
+        let dir = tempdir()?;
+        let dir2 = tempdir()?;
+        /*
+         * Create the regions, give them some actual size
+         */
+        let mut r1 = Region::create(&dir, new_region_options()).unwrap();
+        let mut r2 = Region::create(&dir2, new_region_options()).unwrap();
+        r1.extend(2)?;
+        r2.extend(2)?;
+
+        /*
+         * Build the Vec for our region dirs
+         */
+        let mut dvec = Vec::new();
+        let pdir = dir.into_path();
+        dvec.push(pdir);
+        let pdir = dir2.into_path();
+        dvec.push(pdir);
+
+        /*
+         * Dump the region
+         */
+        dump_region(dvec, None)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn dump_extent() -> Result<()> {
+        /*
+         * Create our temp dirs
+         */
+        let dir = tempdir()?;
+        let dir2 = tempdir()?;
+
+        /*
+         * Create the regions, give them some actual size
+         */
+        let mut r1 = Region::create(&dir, new_region_options()).unwrap();
+        r1.extend(3)?;
+        let mut r2 = Region::create(&dir2, new_region_options()).unwrap();
+        r2.extend(3)?;
+
+        /*
+         * Build the Vec for our region dirs
+         */
+        let mut dvec = Vec::new();
+        let pdir = dir.into_path();
+        dvec.push(pdir);
+        let pdir = dir2.into_path();
+        dvec.push(pdir);
+
+        /*
+         * Dump the region
+         */
+        dump_region(dvec, Some(2))?;
+
+        Ok(())
     }
 }
