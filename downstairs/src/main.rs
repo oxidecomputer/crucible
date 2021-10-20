@@ -675,16 +675,20 @@ async fn proc(
                 }
             }
             /*
-             * This Upstairs' thread will receive this signal when another Upstairs promotes itself
-             * to active. The only way this path is reached is if this Upstairs promoted itself to
-             * active, storing another_upstairs_active_tx in the Downstairs active_upstairs tuple.
+             * This Upstairs' thread will receive this signal when another
+             * Upstairs promotes itself to active. The only way this path is
+             * reached is if this Upstairs promoted itself to active, storing
+             * another_upstairs_active_tx in the Downstairs active_upstairs
+             * tuple.
              *
-             * The two unwraps here should be safe: this thread negotiated and activated, and then
-             * another did (in order to send this thread this signal).
+             * The two unwraps here should be safe: this thread negotiated and
+             * activated, and then another did (in order to send this thread
+             * this signal).
              */
             _ = another_upstairs_active_rx.recv() => {
                 let upstairs_uuid = upstairs_uuid.unwrap();
-                println!("Another upstairs promoted to active, shutting down connection for {:?}", upstairs_uuid);
+                println!("Another upstairs promoted to active, \
+                    shutting down connection for {:?}", upstairs_uuid);
 
                 let active_upstairs = {
                     let ds = ads.lock().await;
@@ -709,8 +713,8 @@ async fn proc(
                             );
 
                             if ds.is_active(upstairs_uuid) {
-                                println!("upstairs {:?} was previously active, clearing",
-                                    upstairs_uuid);
+                                println!("upstairs {:?} was previously \
+                                    active, clearing", upstairs_uuid);
                                 ds.clear_active();
                             }
                         } else {
@@ -744,7 +748,10 @@ async fn proc(
                         } else {
                             {
                                 let mut ds = ads.lock().await;
-                                ds.promote_to_active(uuid, another_upstairs_active_tx.clone());
+                                ds.promote_to_active(
+                                    uuid,
+                                    another_upstairs_active_tx.clone()
+                                );
                             }
 
                             fw.send(Message::YouAreNowActive(uuid)).await?;
@@ -757,7 +764,9 @@ async fn proc(
                         }
                         {
                             let ds = ads.lock().await;
-                            let mut work = ds.work_lock(upstairs_uuid.unwrap())?;
+                            let mut work = ds.work_lock(
+                                upstairs_uuid.unwrap()
+                            )?;
                             work.last_flush = last_flush;
                             println!("Set last flush {}", last_flush);
                         }
