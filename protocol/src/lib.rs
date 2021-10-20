@@ -37,7 +37,7 @@ pub enum Message {
     ExtentVersionsPlease,
     LastFlush(u64),
     LastFlushAck(u64),
-    ExtentVersions(Vec<u64>),
+    ExtentVersions(Vec<u64>, Vec<u64>, Vec<bool>),
 
     Write(Uuid, u64, u64, Vec<u64>, Block, bytes::Bytes),
     WriteAck(Uuid, u64, Result<(), CrucibleError>),
@@ -198,14 +198,18 @@ mod tests {
 
     #[test]
     fn rt_ev_0() -> Result<()> {
-        let input = Message::ExtentVersions(vec![]);
+        let input = Message::ExtentVersions(vec![], vec![], vec![]);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
 
     #[test]
     fn rt_ev_7() -> Result<()> {
-        let input = Message::ExtentVersions(vec![1, 2, 3, 4, u64::MAX, 1, 0]);
+        let input = Message::ExtentVersions(
+            vec![1, 2, 3, 4, u64::MAX, 1, 0],
+            vec![1, 2, 3, 4, u64::MAX, 1, 0],
+            vec![true, true, false, true, true, false, true],
+        );
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

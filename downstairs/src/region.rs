@@ -581,7 +581,7 @@ impl Region {
         self.def
     }
 
-    pub fn versions(&self) -> Result<Vec<u64>> {
+    pub fn flush_numbers(&self) -> Result<Vec<u64>> {
         let mut ver = self
             .extents
             .iter()
@@ -596,6 +596,19 @@ impl Region {
         self.extents
             .iter()
             .map(|e| e.inner().flush_number())
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn gen_numbers(&self) -> Result<Vec<u64>> {
+        self.extents
+            .iter()
+            .map(|e| e.inner().gen_number())
+            .collect::<Result<Vec<_>>>()
+    }
+    pub fn dirty(&self) -> Result<Vec<bool>> {
+        self.extents
+            .iter()
+            .map(|e| e.inner().dirty())
             .collect::<Result<Vec<_>>>()
     }
 

@@ -219,12 +219,18 @@ pub fn extent_from_offset(
 fn process_downstairs(
     target: &SocketAddrV4,
     u: &Arc<Upstairs>,
+    gens: Vec<u64>,
     versions: Vec<u64>,
+    dirty: Vec<bool>,
 ) -> Result<()> {
     if versions.len() > 12 {
         println!("{} versions[0..12]: {:?}", target, versions[0..12].to_vec());
+        println!("{} gens[0..12]: {:?}", target, gens[0..12].to_vec());
+        println!("{} dirty[0..12]: {:?}", target, dirty[0..12].to_vec());
     } else {
         println!("{}  versions: {:?}", target, versions);
+        println!("{}  gens: {:?}", target, gens);
+        println!("{}  dirty: {:?}", target, dirty);
     }
 
     let mut fi = u.flush_info.lock().unwrap();
@@ -503,7 +509,7 @@ async fn proc(
      *
      *          Upstairs             Downstairs
      * 4: ExtentVersionsPlease --->
-     *                         <---  ExtentVersions(versions)
+     *                         <---  ExtentVersions(g, v, d)
      *
      *    Now with the extent info, Upstairs calls process_downstairs() and
      *    if no problems, sends connected=true to the up_listen() task,
@@ -675,7 +681,7 @@ async fn proc(
                         *connected = true;
                         negotiated = 5;
                     },
-                    Some(Message::ExtentVersions(versions)) => {
+                    Some(Message::ExtentVersions(gen, flush, dirty)) => {
                         if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
@@ -694,7 +700,7 @@ async fn proc(
                          * downstairs, and make the decision on which data is
                          * correct once we have everything.
                          */
-                        process_downstairs(target, up, versions)?;
+                        process_downstairs(target, up, gen, flush, dirty)?;
 
                         negotiated = 5;
                         up.ds_transition(
@@ -900,8 +906,8 @@ struct UpComs {
      */
     ds_done_tx: mpsc::Sender<u64>,
     /**
-     * This channel is used to notify the proc task that it's time to this
-     * downstairs.
+     * This channel is used to notify the proc task that it's time to
+     * promote this downstairs to active.
      */
     ds_active_rx: watch::Receiver<bool>,
 }

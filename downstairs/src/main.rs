@@ -548,11 +548,17 @@ async fn proc_frame(
             fw.send(Message::RegionInfo(rd)).await?;
         }
         Message::ExtentVersionsPlease => {
-            let versions = {
-                let d = ad.lock().await;
-                d.region.versions()?
-            };
-            fw.send(Message::ExtentVersions(versions)).await?;
+            let d = ad.lock().await;
+            let flush_numbers = d.region.flush_numbers()?;
+            let generation_numbers = d.region.gen_numbers()?;
+            let dirty_bits = d.region.dirty()?;
+            drop(d);
+            fw.send(Message::ExtentVersions(
+                generation_numbers,
+                flush_numbers,
+                dirty_bits,
+            ))
+            .await?;
         }
         Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
             if upstairs_uuid != *uuid {
