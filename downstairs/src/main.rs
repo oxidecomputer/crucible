@@ -617,16 +617,12 @@ async fn proc_frame(
         x => bail!("unexpected frame {:?}", x),
     }
 
-    if work_to_do {
-        loop {
-            /*
-             * While we are making progress, keep calling the do_work_loop()
-             */
-            let completed = do_work_loop(upstairs_uuid, ad, fw).await?;
-            if completed == 0 {
-                break;
-            }
-        }
+    while work_to_do {
+        /*
+         * While we are making progress, keep calling the do_work_loop()
+         */
+        let completed = do_work_loop(upstairs_uuid, ad, fw).await?;
+        work_to_do = completed != 0;
     }
 
     Ok(())

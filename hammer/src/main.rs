@@ -109,7 +109,7 @@ fn main() -> Result<()> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
 
-    let rounds = 25000;
+    let rounds = 1500;
     let handoff_amount = rounds / 5;
     let mut cpf_idx = 0;
 
