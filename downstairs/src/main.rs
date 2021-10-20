@@ -436,10 +436,6 @@ async fn do_work_loop(
         let job = ds.in_progress(*new_id);
         match job {
             Some(job) => {
-                if ds.lossy && random() && random() {
-                    // Add a little time to completion for this operation.
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
                 jobs.push(job);
             }
             None => {
@@ -453,6 +449,11 @@ async fn do_work_loop(
     let mut completed = 0;
 
     for job in jobs {
+        if ds.lossy && random() && random() {
+            // Add a little time to completion for this operation.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
         do_work(ads, fw, job).await?;
         completed += 1;
     }
