@@ -812,7 +812,36 @@ impl Downstairs {
         }
     }
 
-    /// Only grab the lock if the Upstairs UUID matches
+    /*
+     * Only grab the lock if the Upstairs UUID matches.
+     *
+     * Multiple Upstairs connecting to this Downstairs will spawn multiple
+     * threads that all can potentially add work to the same `active` hash map.
+     * Only one Upstairs can be "active" at any one time though. When
+     * promote_to_active takes the work lock, it will clear out the `active`
+     * hash map and (if applicable) will signal to the currently active Upstairs
+     * to terminate the connection.
+     *
+     * `new_work` and `add_work` both grab their work lock through this
+     * function. Let's say `promote_to_active` and `add_work` are racing for the
+     * work lock. If `add_work` wins the race it will put work into `active`,
+     * then `promote_to_active` will clear it out. If `promote_to_active` wins
+     * the race, it will change the UUID and signal to the previously active
+     * Upstairs that it should close this connection. If `add_work` does fire,
+     * it will fail to grab the lock because the UUID is no longer active, and
+     * the connection thread should close.
+     *
+     * Let's say `new_work` and `promote_to_active` are racing. If `new_work`
+     * wins, then it will return and run those jobs in `do_work_loop`. However,
+     * `promote_to_active` will grab the lock and change the UUID, causing
+     * `do_work` to return UpstairsInactive for the jobs that were just
+     * returned. If `promote_to_active` wins, it will clear out the jobs of the
+     * old UUID.
+     *
+     * Grabbing the lock in this way should properly clear out the previously
+     * active Upstairs without causing jobs to be incorrectly sent to the newly
+     * active Upstairs.
+     */
     fn work_lock(
         &self,
         upstairs_uuid: Uuid,
