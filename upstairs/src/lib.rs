@@ -3833,9 +3833,11 @@ async fn up_listen(
                             up.guest.notify.notify_one();
                             tokio::select! {
                                 req = up.guest.recv() => {
-                                    let _ = req.send.send(Err(CrucibleError::GenericError(
-                                        "Draining IO".to_string(),
-                                    )));
+                                    let _ = req.send.send(
+                                        Err(CrucibleError::GenericError(
+                                            "Draining IO".to_string(),
+                                        ))
+                                    );
                                     println!("drained in-flight IO {:?}", req);
                                 }
                                 _ = sleep_until(deadline_secs(10)) => {
