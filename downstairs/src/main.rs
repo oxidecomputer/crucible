@@ -393,7 +393,7 @@ async fn do_work(
  * so, then do that work.
  *
  * Upstairs UUID is passed in so we can skip jobs that aren't for this
- * upstair's thread (all jobs are pushed onto the same Downstairs).
+ * Upstairs thread (all jobs are pushed onto the same Downstairs).
  *
  * We return the number of jobs completed so any caller can make use of
  * that.
@@ -675,7 +675,7 @@ async fn proc(
                 }
             }
             /*
-             * This Upstair's thread will receive this signal when another Upstairs promotes itself
+             * This Upstairs' thread will receive this signal when another Upstairs promotes itself
              * to active. The only way this path is reached is if this Upstairs promoted itself to
              * active, storing another_upstairs_active_tx in the Downstairs active_upstairs tuple.
              *
