@@ -9,6 +9,10 @@ mod test {
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
 
+    fn extent_tuple(eid: u64, offset: u64, len: u64) -> (u64, Block, Block) {
+        (eid, Block::new_512(offset), Block::new_512(len))
+    }
+
     #[test]
     fn test_extent_from_offset() {
         let mut ddef = RegionDefinition::default();
@@ -18,49 +22,55 @@ mod test {
 
         // Test block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), 1).unwrap(),
-            vec![(0, Block::new_512(0), 1),]
+            extent_from_offset(ddef, Block::new_512(0), Block::new_512(1))
+                .unwrap(),
+            vec![extent_tuple(0, 0, 1)],
         );
 
         // Test greater than block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), 2).unwrap(),
-            vec![(0, Block::new_512(0), 2),]
+            extent_from_offset(ddef, Block::new_512(0), Block::new_512(2))
+                .unwrap(),
+            vec![extent_tuple(0, 0, 2)],
         );
 
         // Test greater than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), 4).unwrap(),
-            vec![(0, Block::new_512(0), 2), (1, Block::new_512(0), 2),]
+            extent_from_offset(ddef, Block::new_512(0), Block::new_512(4))
+                .unwrap(),
+            vec![extent_tuple(0, 0, 2), extent_tuple(1, 0, 2)],
         );
 
         // Test offsets
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(1), 4).unwrap(),
+            extent_from_offset(ddef, Block::new_512(1), Block::new_512(4))
+                .unwrap(),
             vec![
-                (0, Block::new_512(1), 1),
-                (1, Block::new_512(0), 2),
-                (2, Block::new_512(0), 1),
-            ]
+                extent_tuple(0, 1, 1),
+                extent_tuple(1, 0, 2),
+                extent_tuple(2, 0, 1),
+            ],
         );
 
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(2), 4).unwrap(),
-            vec![(1, Block::new_512(0), 2), (2, Block::new_512(0), 2),]
+            extent_from_offset(ddef, Block::new_512(2), Block::new_512(4))
+                .unwrap(),
+            vec![extent_tuple(1, 0, 2), extent_tuple(2, 0, 2)],
         );
 
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(2), 16).unwrap(),
+            extent_from_offset(ddef, Block::new_512(2), Block::new_512(16))
+                .unwrap(),
             vec![
-                (1, Block::new_512(0), 2),
-                (2, Block::new_512(0), 2),
-                (3, Block::new_512(0), 2),
-                (4, Block::new_512(0), 2),
-                (5, Block::new_512(0), 2),
-                (6, Block::new_512(0), 2),
-                (7, Block::new_512(0), 2),
-                (8, Block::new_512(0), 2),
-            ]
+                extent_tuple(1, 0, 2),
+                extent_tuple(2, 0, 2),
+                extent_tuple(3, 0, 2),
+                extent_tuple(4, 0, 2),
+                extent_tuple(5, 0, 2),
+                extent_tuple(6, 0, 2),
+                extent_tuple(7, 0, 2),
+                extent_tuple(8, 0, 2),
+            ],
         );
     }
 
@@ -153,8 +163,9 @@ mod test {
         up: &Arc<Upstairs>,
         offset: Block,
         num_blocks: u64,
-    ) -> Result<Vec<(u64, Block, u64)>> {
+    ) -> Result<Vec<(u64, Block, Block)>> {
         let ddef = up.ddef.lock().unwrap();
+        let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
         extent_from_offset(*ddef, offset, num_blocks)
     }
 
@@ -163,19 +174,19 @@ mod test {
         let up = make_upstairs();
 
         for i in 0..100 {
-            let exv = vec![(0, Block::new_512(i), 1)];
+            let exv = vec![extent_tuple(0, i, 1)];
             assert_eq!(up_efo(&up, Block::new_512(i), 1).unwrap(), exv);
         }
 
         for i in 0..100 {
-            let exv = vec![(1, Block::new_512(i), 1)];
+            let exv = vec![extent_tuple(1, i, 1)];
             assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).unwrap(), exv);
         }
 
-        let exv = vec![(2, Block::new_512(0), 1)];
+        let exv = vec![extent_tuple(2, 0, 1)];
         assert_eq!(up_efo(&up, Block::new_512(200), 1).unwrap(), exv);
 
-        let exv = vec![(9, Block::new_512(99), 1)];
+        let exv = vec![extent_tuple(9, 99, 1)];
         assert_eq!(up_efo(&up, Block::new_512(999), 1).unwrap(), exv);
     }
 
@@ -184,25 +195,25 @@ mod test {
         let up = make_upstairs();
 
         for i in 0..99 {
-            let exv = vec![(0, Block::new_512(i), 2)];
+            let exv = vec![extent_tuple(0, i, 2)];
             assert_eq!(up_efo(&up, Block::new_512(i), 2).unwrap(), exv);
         }
 
-        let exv = vec![(0, Block::new_512(99), 1), (1, Block::new_512(0), 1)];
+        let exv = vec![extent_tuple(0, 99, 1), extent_tuple(1, 0, 1)];
         assert_eq!(up_efo(&up, Block::new_512(99), 2).unwrap(), exv);
 
         for i in 0..99 {
-            let exv = vec![(1, Block::new_512(i), 1)];
+            let exv = vec![extent_tuple(1, i, 1)];
             assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).unwrap(), exv);
         }
 
-        let exv = vec![(1, Block::new_512(99), 1), (2, Block::new_512(0), 1)];
+        let exv = vec![extent_tuple(1, 99, 1), extent_tuple(2, 0, 1)];
         assert_eq!(up_efo(&up, Block::new_512(199), 2).unwrap(), exv);
 
-        let exv = vec![(2, Block::new_512(0), 2)];
+        let exv = vec![extent_tuple(2, 0, 2)];
         assert_eq!(up_efo(&up, Block::new_512(200), 2).unwrap(), exv);
 
-        let exv = vec![(9, Block::new_512(98), 2)];
+        let exv = vec![extent_tuple(9, 98, 2)];
         assert_eq!(up_efo(&up, Block::new_512(998), 2).unwrap(), exv);
     }
 
@@ -216,26 +227,38 @@ mod test {
         /*
          * 1024 buffer
          */
-        let exv = vec![(0, Block::new_512(99), 1), (1, Block::new_512(0), 1)];
-        assert_eq!(up_efo(&up, Block::new_512(99), 2).unwrap(), exv);
-        let exv = vec![(0, Block::new_512(98), 2), (1, Block::new_512(0), 2)];
-        assert_eq!(up_efo(&up, Block::new_512(98), 4).unwrap(), exv);
+        assert_eq!(
+            up_efo(&up, Block::new_512(99), 2).unwrap(),
+            vec![extent_tuple(0, 99, 1), extent_tuple(1, 0, 1)],
+        );
+        assert_eq!(
+            up_efo(&up, Block::new_512(98), 4).unwrap(),
+            vec![extent_tuple(0, 98, 2), extent_tuple(1, 0, 2)],
+        );
 
         /*
          * Largest buffer
          */
-        let exv = vec![(0, Block::new_512(1), 99), (1, Block::new_512(0), 1)];
-        assert_eq!(up_efo(&up, Block::new_512(1), 100).unwrap(), exv);
-        let exv = vec![(0, Block::new_512(2), 98), (1, Block::new_512(0), 2)];
-        assert_eq!(up_efo(&up, Block::new_512(2), 100).unwrap(), exv);
-        let exv = vec![(0, Block::new_512(4), 96), (1, Block::new_512(0), 4)];
-        assert_eq!(up_efo(&up, Block::new_512(4), 100).unwrap(), exv);
+        assert_eq!(
+            up_efo(&up, Block::new_512(1), 100).unwrap(),
+            vec![extent_tuple(0, 1, 99), extent_tuple(1, 0, 1),],
+        );
+        assert_eq!(
+            up_efo(&up, Block::new_512(2), 100).unwrap(),
+            vec![extent_tuple(0, 2, 98), extent_tuple(1, 0, 2)],
+        );
+        assert_eq!(
+            up_efo(&up, Block::new_512(4), 100).unwrap(),
+            vec![extent_tuple(0, 4, 96), extent_tuple(1, 0, 4)],
+        );
 
         /*
          * Largest buffer, last block offset possible
          */
-        let exv = vec![(0, Block::new_512(99), 1), (1, Block::new_512(0), 99)];
-        assert_eq!(up_efo(&up, Block::new_512(99), 100).unwrap(), exv);
+        assert_eq!(
+            up_efo(&up, Block::new_512(99), 100).unwrap(),
+            vec![extent_tuple(0, 99, 1), extent_tuple(1, 0, 99)],
+        );
     }
 
     /*
