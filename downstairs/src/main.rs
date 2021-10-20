@@ -449,9 +449,12 @@ async fn do_work_loop(
     let mut completed = 0;
 
     for job in jobs {
-        if ds.lossy && random() && random() {
-            // Add a little time to completion for this operation.
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        {
+            let ds = ads.lock().await;
+            if ds.lossy && random() && random() {
+                // Add a little time to completion for this operation.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
 
         do_work(ads, fw, job).await?;
