@@ -2,7 +2,6 @@
 use futures::lock::Mutex;
 use std::collections::HashMap;
 use std::fmt;
-use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -11,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible::*;
-use crucible_common::{Block, CrucibleError};
+use crucible_common::{Block, CrucibleError, MAX_BLOCK_SIZE};
 use crucible_protocol::*;
 
 use anyhow::{bail, Result};
@@ -202,19 +201,12 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     import_path: P,
 ) -> Result<()> {
     /*
-     * We are only allowing the import on an empty Region, i.e.
-     * one that has just been created.  If you want to overwrite
-     * an existing region, write more code: TODO
+     * Open the file to import and determine how many extents we will need
+     * based on the length.
      */
-    assert!(region.def().extent_count() == 0);
-
-    /*
-     * Get some information about our file and the region defaults
-     * and figure out how many extents we will need to import
-     * this file.
-     */
-    let file_size = fs::metadata(&import_path)?.len();
-    let (block_size, extent_size, _) = region.region_def();
+    let mut f = File::open(&import_path)?;
+    let file_size = f.metadata()?.len();
+    let (_, extent_size, _) = region.region_def();
     let space_per_extent = extent_size.byte_value();
 
     let mut extents_needed = file_size / space_per_extent;
@@ -222,52 +214,85 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         extents_needed += 1;
     }
     println!(
-        "Import file_size: {}  Extent size:{}  Total extents:{}",
+        "Import file_size: {}  Extent size: {}  Needed extents: {}",
         file_size, space_per_extent, extents_needed
     );
 
-    /*
-     * Create the number of extents the file will require
-     */
-    region.extend(extents_needed as u32)?;
+    if extents_needed > region.def().extent_count().into() {
+        /*
+         * The file to import would require more extents than we have.
+         * Extend the region to fit the file.
+         */
+        println!("Extending region to fit image");
+        region.extend(extents_needed as u32)?;
+    } else {
+        println!("Region already large enough for image");
+    }
+
+    println!("Importing {:?} to region", import_path);
     let rm = region.def();
 
-    println!("Importing {:?} to new region", import_path);
+    /*
+     * We want to read and write large chunks of data, rather than individual
+     * blocks, to improve import performance.  The chunk buffer must be a
+     * whole number of the largest block size we are able to support.
+     */
+    const CHUNK_SIZE: usize = 32 * 1024 * 1024;
+    assert_eq!(CHUNK_SIZE % MAX_BLOCK_SIZE, 0);
+    let mut buffer = vec![0; CHUNK_SIZE];
 
-    let mut buffer = vec![0; block_size as usize];
-    buffer.resize(block_size as usize, 0);
-
-    let mut fp = File::open(import_path)?;
     let mut offset = Block::new_with_ddef(0, &region.def());
-    let mut blocks_copied = 0;
-    while let Ok(n) = fp.read(&mut buffer[..]) {
-        if n == 0 {
+    loop {
+        buffer.resize(CHUNK_SIZE, 0);
+
+        /*
+         * Read data into the buffer until it is full, or we hit EOF.
+         */
+        let mut total = 0;
+        loop {
+            assert!(total <= CHUNK_SIZE);
+            if total == CHUNK_SIZE {
+                break;
+            }
+
+            let n = f.read(&mut buffer[total..(CHUNK_SIZE - total)])?;
+
+            if n == 0 {
+                /*
+                 * We have hit EOF.  Extend the read buffer with zeroes until
+                 * it is a multiple of the block size.
+                 */
+                while !Block::is_valid_byte_size(total, &rm) {
+                    buffer[total] = 0;
+                    total += 1;
+                }
+                break;
+            }
+
+            total += n;
+        }
+
+        if total == 0 {
             /*
-             * If we read 0 without error, then we are done
+             * If we read zero bytes without error, then we are done.
              */
             break;
         }
-
-        blocks_copied += 1;
 
         /*
          * Use the same function upsairs uses to decide where to put the
          * data based on the LBA offset.
          */
-        let nwo = extent_from_offset(rm, offset, 1).unwrap();
-        assert_eq!(nwo.len(), 1);
-        let (eid, block_offset, _) = nwo[0];
-
-        if n != (block_size as usize) {
-            if n != 0 {
-                let rest = &buffer[0..n];
-                region.region_write(eid, block_offset, rest)?;
-            }
-            break;
-        } else {
-            region.region_write(eid, block_offset, &buffer)?;
-            offset.value += 1;
+        let nblocks = Block::from_bytes(total, &rm);
+        let mut pos = Block::from_bytes(0, &rm);
+        for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
+            let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
+            region.region_write(eid, offset, data)?;
+            pos.advance(len);
         }
+        assert_eq!(nblocks, pos);
+        assert_eq!(total, pos.bytes());
+        offset.advance(nblocks);
     }
 
     /*
@@ -276,8 +301,10 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      * want, use that to extract just this imported file.
      */
     println!(
-        "Created {} extents and Copied {} blocks",
-        extents_needed, blocks_copied
+        "Populated {} extents by copying {} bytes ({} blocks)",
+        extents_needed,
+        offset.byte_value(),
+        offset.value,
     );
 
     Ok(())
@@ -1046,6 +1073,7 @@ async fn main() -> Result<()> {
             region_options.set_uuid(uuid);
 
             region = Region::create(&data, region_options)?;
+            region.extend(extent_count as u32)?;
 
             if let Some(ref ip) = import_path {
                 downstairs_import(&mut region, ip).unwrap();
@@ -1054,8 +1082,6 @@ async fn main() -> Result<()> {
                  * new data and inital flush number is written to disk.
                  */
                 region.region_flush(1)?;
-            } else {
-                region.extend(extent_count as u32)?;
             }
 
             println!("UUID: {:?}", region.def().uuid());

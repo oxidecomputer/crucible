@@ -145,11 +145,11 @@ async fn process_message(
 pub fn extent_from_offset(
     ddef: RegionDefinition,
     offset: Block,
-    num_blocks: u64,
-) -> Result<Vec<(u64, Block, u64)>> {
-    assert!(num_blocks > 0);
+    num_blocks: Block,
+) -> Result<Vec<(u64, Block, Block)>> {
+    assert!(num_blocks.value > 0);
     assert!(
-        (offset.value + num_blocks)
+        (offset.value + num_blocks.value)
             <= (ddef.extent_size().value * ddef.extent_count() as u64)
     );
     assert_eq!(offset.block_size_in_bytes() as u64, ddef.block_size());
@@ -165,7 +165,7 @@ pub fn extent_from_offset(
      */
     let mut result = Vec::new();
     let mut o: u64 = offset.value;
-    let mut blocks_left: u64 = num_blocks;
+    let mut blocks_left: u64 = num_blocks.value;
 
     while blocks_left > 0 {
         /*
@@ -183,7 +183,11 @@ pub fn extent_from_offset(
             sz = blocks_left;
         }
 
-        result.push((eid, Block::new_with_ddef(extent_offset, &ddef), sz));
+        result.push((
+            eid,
+            Block::new_with_ddef(extent_offset, &ddef),
+            Block::new_with_ddef(sz, &ddef),
+        ));
 
         match blocks_left.checked_sub(sz) {
             Some(v) => {
@@ -200,9 +204,9 @@ pub fn extent_from_offset(
     {
         let mut blocks = 0;
         for r in &result {
-            blocks += r.2;
+            blocks += r.2.value;
         }
-        assert_eq!(blocks, num_blocks);
+        assert_eq!(blocks, num_blocks.value);
     }
 
     Ok(result)
@@ -1938,7 +1942,7 @@ impl Upstairs {
         let nwo = extent_from_offset(
             *ddef,
             offset,
-            data.len() as u64 / ddef.block_size(),
+            Block::from_bytes(data.len(), &ddef),
         )?;
 
         /*
@@ -1968,7 +1972,7 @@ impl Upstairs {
             }
 
             let byte_len: usize =
-                num_blocks as usize * ddef.block_size() as usize;
+                num_blocks.value as usize * ddef.block_size() as usize;
 
             let sub_data = if let Some(context) = &self.encryption_context {
                 // Encrypt here
@@ -1981,7 +1985,7 @@ impl Upstairs {
                 data.slice(cur_offset..(cur_offset + byte_len))
             };
 
-            sub.insert(next_id, num_blocks);
+            sub.insert(next_id, num_blocks.value);
 
             let wr = create_write_eob(
                 next_id,
@@ -2054,7 +2058,7 @@ impl Upstairs {
         let nwo = extent_from_offset(
             *ddef,
             offset,
-            data.len() as u64 / ddef.block_size(),
+            Block::from_bytes(data.len(), &ddef),
         )?;
 
         /*
@@ -2090,7 +2094,7 @@ impl Upstairs {
              * that the lower offset corresponds to the lower next_id.
              * The ID's don't need to be sequential.
              */
-            sub.insert(next_id, num_blocks);
+            sub.insert(next_id, num_blocks.value);
             downstairs_buffer_sector_index.insert(next_id, bo.value as u128);
             let wr = create_read_eob(
                 next_id,
@@ -2098,7 +2102,7 @@ impl Upstairs {
                 gw_id,
                 eid,
                 bo,
-                num_blocks,
+                num_blocks.value,
             );
             new_ds_work.push(wr);
         }

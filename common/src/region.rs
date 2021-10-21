@@ -25,11 +25,17 @@ pub struct Block {
     pub shift: u32,
 }
 
+pub const MIN_SHIFT: u32 = 9;
+pub const MAX_SHIFT: u32 = 15;
+
+pub const MIN_BLOCK_SIZE: usize = (1 << MIN_SHIFT) as usize;
+pub const MAX_BLOCK_SIZE: usize = (1 << MAX_SHIFT) as usize;
+
 impl Block {
     pub fn new(value: u64, shift: u32) -> Block {
         // are you sure you need blocks that small?
         // are you sure you need blocks that big?
-        assert!((9..16).contains(&shift));
+        assert!((MIN_SHIFT..=MAX_SHIFT).contains(&shift));
 
         Block { value, shift }
     }
@@ -45,12 +51,47 @@ impl Block {
         }
     }
 
+    /**
+     * Create a block number from a byte length using the region definition
+     * to determine the block size.  This routine will panic if the byte
+     * length is not a whole number of blocks.
+     */
+    pub fn from_bytes(bytelen: usize, ddef: &RegionDefinition) -> Block {
+        assert!(Self::is_valid_byte_size(bytelen, ddef));
+        Block {
+            value: (bytelen as u64) / ddef.block_size(),
+            shift: ddef.block_size().trailing_zeros(),
+        }
+    }
+
+    pub fn is_valid_byte_size(bytelen: usize, ddef: &RegionDefinition) -> bool {
+        bytelen % (ddef.block_size() as usize) == 0
+    }
+
     pub fn block_size_in_bytes(&self) -> u32 {
         1 << self.shift
     }
 
     pub fn byte_value(&self) -> u64 {
         self.value * self.block_size_in_bytes() as u64
+    }
+
+    /**
+     * The size of this block value in bytes, for use in indexing into
+     * buffers.
+     */
+    pub fn bytes(&self) -> usize {
+        (self.value as usize) * (self.block_size_in_bytes() as usize)
+    }
+
+    /**
+     * If this block value is an offset, advance that offset by another
+     * block value representing a length.  Both block values must have
+     * the same block size or this routine will panic.
+     */
+    pub fn advance(&mut self, offset: Block) {
+        assert_eq!(offset.shift, self.shift);
+        self.value = self.value.checked_add(offset.value).unwrap();
     }
 }
 
@@ -164,8 +205,12 @@ impl RegionOptions {
             bail!("block size must be a power of two, not {}", self.block_size);
         }
 
-        if self.block_size < 512 {
-            bail!("minimum block size is 512 bytes, not {}", self.block_size);
+        if self.block_size < (MIN_BLOCK_SIZE as u64) {
+            bail!(
+                "minimum block size is {} bytes, not {}",
+                MIN_BLOCK_SIZE,
+                self.block_size
+            );
         }
 
         if self.extent_size.value < 1 {
@@ -205,8 +250,9 @@ impl RegionOptions {
 impl Default for RegionOptions {
     fn default() -> Self {
         /* XXX bigger? */
+        assert_eq!(MIN_BLOCK_SIZE, 512);
         RegionOptions {
-            block_size: 512,
+            block_size: MIN_BLOCK_SIZE as u64,
             extent_size: Block::new(100, 9),
             uuid: Uuid::nil(),
         }

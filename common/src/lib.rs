@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 mod region;
-pub use region::{Block, RegionDefinition, RegionOptions};
+pub use region::{
+    Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
+};
 
 #[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CrucibleError {
