@@ -96,6 +96,32 @@ else
     fi
 fi
 
+args=()
+for (( i = 0; i < 3; i++ )); do
+    (( port = 3801 + i ))
+    dir="${testdir}/$port"
+    args+=( -d "$dir" )
+done
+echo cargo run -p crucible-downstairs -- dump "${args[@]}"
+if ! cargo run -p crucible-downstairs -- dump "${args[@]}"; then
+    res=1
+    echo ""
+    echo "Failed crucible-client dump test"
+    echo ""
+else
+    echo "dump test passed"
+fi
+
+args+=( -e 1 )
+echo cargo run -p crucible-downstairs -- dump "${args[@]}"
+if ! cargo run -p crucible-downstairs -- dump "${args[@]}"; then
+    res=1
+    echo ""
+    echo "Failed crucible-client dump test 2"
+    echo ""
+else
+    echo "dump test 2 passed"
+fi
 
 echo "Tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do

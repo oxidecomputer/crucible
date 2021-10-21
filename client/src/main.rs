@@ -24,6 +24,7 @@ arg_enum! {
         Burst,
         Demo,
         Dep,
+        Dirty,
         Generic,
         One,
         Rand,
@@ -130,7 +131,7 @@ fn get_region_info(
 
     println!(
         "Region has: es:{:?}  bs:{}  ts:{}  tb:{}",
-        extent_size, block_size, total_size, total_blocks
+        extent_size.value, block_size, total_size, total_blocks
     );
 
     /*
@@ -285,6 +286,17 @@ fn main() -> Result<()> {
             runtime.block_on(dep_workload(&guest, &mut region_info))?;
         }
 
+        Workload::Dirty => {
+            println!("Run dirty test");
+            runtime.block_on(dirty_workload(&guest, &mut region_info))?;
+            if let Some(vo) = &opt.verify_out {
+                let cp = history_file(vo);
+                write_json(&cp, &region_info.write_count, true)?;
+                println!("Wrote out file {:?}", cp);
+            }
+            return Ok(());
+        }
+
         Workload::Generic => {
             println!("Run Generic test in 5 seconds");
             std::thread::sleep(std::time::Duration::from_secs(5));
@@ -367,12 +379,7 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(
-            dl.clone(),
-            block_index,
-            &ri.write_count,
-            ri.block_size,
-        ) {
+        if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
             bail!("Error at {}", block_index);
         }
     }
@@ -542,12 +549,7 @@ async fn balloon_workload(
             waiter.block_wait()?;
 
             let dl = data.as_vec().to_vec();
-            if !validate_vec(
-                dl.clone(),
-                block_index,
-                &ri.write_count,
-                ri.block_size,
-            ) {
+            if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
                 bail!("Error at {}", block_index);
             }
         }
@@ -650,7 +652,7 @@ async fn generic_workload(
 
                 let dl = data.as_vec().to_vec();
                 if !validate_vec(
-                    dl.clone(),
+                    dl,
                     block_index,
                     &ri.write_count,
                     ri.block_size,
@@ -669,6 +671,58 @@ async fn generic_workload(
         print_write_count(ri);
     }
 
+    Ok(())
+}
+
+/*
+ * Do a few writes to random offsets then exit as soon as they finish.
+ * We are trying to leave extents "dirty" so we want to exit before the
+ * automatic flush can come through and sync our data.
+ */
+async fn dirty_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    /*
+     * TODO: Allow the user to specify a seed here.
+     */
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    /*
+     * To store our write requests
+     */
+    let mut waiterlist = Vec::new();
+
+    let size = 1;
+    /*
+     * Once we have our IO size, decide where the starting offset should
+     * be, which is the total possible size minus the randomly chosen
+     * IO size.
+     */
+    let block_max = ri.total_blocks - size + 1;
+    for _ in 0..10 {
+        let block_index = rng.gen_range(0..block_max) as usize;
+        /*
+         * Convert offset and length to their byte values.
+         */
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+        /*
+         * Update the write count for the block we plan to write to.
+         */
+        ri.write_count[block_index] += 1;
+
+        let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
+        let data = Bytes::from(vec);
+
+        println!("Write at block {}, len:{}", offset.value, data.len());
+
+        let waiter = guest.write(offset, data)?;
+        waiterlist.push(waiter);
+    }
+
+    println!("loop over {} waiters", waiterlist.len());
+    for wa in waiterlist.iter_mut() {
+        wa.block_wait()?;
+    }
     Ok(())
 }
 
@@ -716,9 +770,12 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     let dl = data.as_vec().to_vec();
-    if !validate_vec(dl.clone(), block_index, &ri.write_count, ri.block_size) {
+    if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
         bail!("Error at {}", block_index);
     }
+
+    let mut waiter = guest.flush()?;
+    waiter.block_wait()?;
 
     Ok(())
 }
@@ -788,12 +845,7 @@ async fn rand_workload(
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(
-            dl.clone(),
-            block_index,
-            &ri.write_count,
-            ri.block_size,
-        ) {
+        if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
             bail!("Error at {}", block_index);
         }
     }
@@ -1015,12 +1067,7 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(
-            dl.clone(),
-            block_index,
-            &ri.write_count,
-            ri.block_size,
-        ) {
+        if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
             bail!("Verify error at block:{}", block_index);
         }
     }
