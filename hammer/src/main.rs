@@ -109,12 +109,17 @@ fn main() -> Result<()> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
 
-    let rounds = 25000;
-    let handoff_amount = 25000 / 5;
+    let rounds = 1500;
+    let handoff_amount = rounds / 5;
     let mut cpf_idx = 0;
 
     println!("Handing off to CPF {}", cpf_idx);
     cpfs[cpf_idx].activate()?;
+    println!(
+        "Handed off to CPF {} {:?}",
+        cpf_idx,
+        cpfs[cpf_idx].upstairs_uuid()
+    );
 
     if opt.verify_isolation {
         println!("clearing...");
@@ -139,6 +144,9 @@ fn main() -> Result<()> {
 
             let cpf = &mut cpfs[cpf_idx];
             cpf.activate()?;
+
+            println!("Handed off to CPF {} {:?}", cpf_idx, cpf.upstairs_uuid());
+
             cpf
         } else {
             &mut cpfs[cpf_idx]
@@ -222,6 +230,8 @@ fn main() -> Result<()> {
         }
     }
 
+    println!("Done ok, waiting on show_work");
+
     loop {
         let cpf = &mut cpfs[4];
         let wc = cpf.show_work()?;
@@ -229,6 +239,7 @@ fn main() -> Result<()> {
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 
     Ok(())

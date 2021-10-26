@@ -123,6 +123,7 @@ pub struct CruciblePseudoFile {
     sz: u64,
     block_size: u64,
     rmw_lock: RwLock<bool>,
+    upstairs_uuid: Uuid,
 }
 
 impl CruciblePseudoFile {
@@ -134,6 +135,7 @@ impl CruciblePseudoFile {
             sz: 0,
             block_size: 0,
             rmw_lock: RwLock::new(false),
+            upstairs_uuid: Uuid::default(),
         })
     }
 
@@ -150,6 +152,7 @@ impl CruciblePseudoFile {
 
         self.sz = self.guest.query_total_size()? as u64;
         self.block_size = self.guest.query_block_size()? as u64;
+        self.upstairs_uuid = self.guest.query_upstairs_uuid()?;
 
         self.active = true;
 
@@ -158,6 +161,10 @@ impl CruciblePseudoFile {
 
     pub fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         self.guest.show_work()
+    }
+
+    pub fn upstairs_uuid(&self) -> Uuid {
+        self.upstairs_uuid
     }
 }
 

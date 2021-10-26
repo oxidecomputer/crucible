@@ -81,6 +81,10 @@ async fn process_message(
         Message::Imok => Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
+                println!(
+                    "u.uuid {:?} != job uuid {:?} on WriteAck",
+                    u.uuid, *uuid
+                );
                 return Err(CrucibleError::UuidMismatch.into());
             }
 
@@ -96,6 +100,10 @@ async fn process_message(
         }
         Message::FlushAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
+                println!(
+                    "u.uuid {:?} != job uuid {:?} on FlushAck",
+                    u.uuid, *uuid
+                );
                 return Err(CrucibleError::UuidMismatch.into());
             }
 
@@ -111,6 +119,10 @@ async fn process_message(
         }
         Message::ReadResponse(uuid, ds_id, data, result) => {
             if u.uuid != *uuid {
+                println!(
+                    "u.uuid {:?} != job uuid {:?} on ReadResponse",
+                    u.uuid, *uuid
+                );
                 return Err(CrucibleError::UuidMismatch.into());
             }
 
@@ -723,7 +735,7 @@ async fn proc(
                         .unwrap();
                     }
                     Some(Message::UuidMismatch(expected_uuid)) => {
-                        // XXX what to do here?
+                        up.set_inactive();
                         bail!(
                             "{} received UuidMismatch, expecting {:?}!",
                             up.uuid, expected_uuid
@@ -811,7 +823,7 @@ async fn cmd_loop(
                         return Ok(())
                     },
                     Some(Message::UuidMismatch(expected_uuid)) => {
-                        // XXX what to do here?
+                        up.set_inactive();
                         bail!(
                             "{} received UuidMismatch, expecting {:?}!",
                             up.uuid, expected_uuid
@@ -1836,6 +1848,9 @@ impl Upstairs {
         *flush = true;
     }
     fn flush_needed(&self) -> bool {
+        if !self.is_active() {
+            return false;
+        }
         *self.need_flush.lock().unwrap()
     }
 
@@ -3133,6 +3148,18 @@ impl BlockReqWaiter {
             Err(_) => crucible_bail!(RecvDisconnected),
         }
     }
+
+    pub fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
+        match self.recv.try_recv() {
+            Ok(v) => Some(v),
+            Err(e) => match e {
+                std_mpsc::TryRecvError::Empty => None,
+                std_mpsc::TryRecvError::Disconnected => {
+                    Some(Err(CrucibleError::RecvDisconnected))
+                }
+            },
+        }
+    }
 }
 
 /**
@@ -3244,16 +3271,6 @@ impl Guest {
             }
             self.notify.notified().await;
         }
-    }
-
-    async fn drain_inflight_io(&self) -> Result<()> {
-        // When calling this, process_new_io should no longer be running!
-        self.notify.notify_one();
-        let req = self.recv().await;
-        req.send.send(Err(CrucibleError::GenericError(
-            "Draining IO".to_string(),
-        )))?;
-        Ok(())
     }
 
     pub fn byte_offset_to_block(
@@ -3798,6 +3815,7 @@ async fn up_listen(
          * a upstairs generated flush.
          */
         let mut flush_check = deadline_secs(5);
+
         loop {
             tokio::select! {
                 c = ds_status_rx.recv() => {
@@ -3822,9 +3840,15 @@ async fn up_listen(
 
                         // Terminate all in-flight IO
                         loop {
+                            up.guest.notify.notify_one();
                             tokio::select! {
-                                _ = up.guest.drain_inflight_io() => {
-                                    println!("drained in-flight IO");
+                                req = up.guest.recv() => {
+                                    let _ = req.send.send(
+                                        Err(CrucibleError::GenericError(
+                                            "Draining IO".to_string(),
+                                        ))
+                                    );
+                                    println!("drained in-flight IO {:?}", req);
                                 }
                                 _ = sleep_until(deadline_secs(10)) => {
                                     println!(
