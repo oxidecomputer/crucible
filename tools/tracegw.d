@@ -1,28 +1,30 @@
-// Trace all the guest submitted and completed IOs.
-// Note, the way dtrace works with Rust means you have to start crucible
-// running before you can run this.
+/*
+ * Trace all the guest submitted and completed IOs.
+ * Note, the way dtrace works with Rust means you have to start crucible
+ * running before you can run this.
+ */
 #pragma D option quiet
-crutrace*:::gw_read_start
+cdt*:::gw_read_start
 {
     @read_start = count();
 }
-crutrace*:::gw_read_end
+cdt*:::gw_read_end
 {
     @read_end = count();
 }
-crutrace*:::gw_write_start
+cdt*:::gw_write_start
 {
     @write_start = count();
 }
-crutrace*:::gw_write_end
+cdt*:::gw_write_end
 {
     @write_end = count();
 }
-crutrace*:::gw_flush_start
+cdt*:::gw_flush_start
 {
     @flush_start = count();
 }
-crutrace*:::gw_flush_end
+cdt*:::gw_flush_end
 {
     @flush_end = count();
 }

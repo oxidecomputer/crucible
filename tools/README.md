@@ -16,6 +16,27 @@ If a downstairs dies for any other reason then being killed with the
 generic default kill signal, the script will stop everything and leave
 the logs behind in /tmp/ds_test/
 
+## ds_state.d
+This is a dtrace script for printing some crude upstairs state info.
+The way this works requires that crucible is
+running before you run this, otherwise it won't find the probes.
+```
+pfexec dtrace -s tools/ds_state.d
+```
+
+You start crucible, then run the above script.  Output should start appearing
+right away with the state of the three downstairs and a count of active
+jobs for upstairs and downstairs.
+
+Here is an example of how it might look:
+```
+alan@cat:crucible$ pfexec dtrace -s tools/ds_state.d
+["Active","Active","Active"] Upstairs:   1 Downstairs:   3
+["Active","Active","Active"] Upstairs:   1 Downstairs:   3
+["Active","Active","Active"] Upstairs:   1 Downstairs:   6
+["Active","Active","Active"] Upstairs:   1 Downstairs:   6
+```
+
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
 crucible from the guest.  The way this works requires that crucible is
