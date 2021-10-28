@@ -752,8 +752,8 @@ async fn proc(
                             }
                         } else {
                             println!(
-                                "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_uuid.unwrap(), ds.jobs(),
+                                "upstairs disconnected, {} jobs left",
+                                ds.jobs(),
                             );
                         }
 
