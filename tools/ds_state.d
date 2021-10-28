@@ -1,7 +1,5 @@
 /*
  * Display internal Upstairs status.
- * Note, the way dtrace works with Rust means you have to start crucible
- * running before you can run this.
  */
 #pragma D option quiet
 cdt*:::up_status

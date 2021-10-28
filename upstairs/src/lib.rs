@@ -381,7 +381,7 @@ async fn io_send(
     let mut active_count =
         u.downstairs.lock().unwrap().submitted_work(client_id);
     for new_id in new_work.iter() {
-        if active_count >= 40 {
+        if active_count >= 100 {
             // Flow control enacted, stop sending work
             return Ok(true);
         }
@@ -3764,6 +3764,7 @@ fn stat_update(up: &Arc<Upstairs>, msg: &str) {
         ds_count: up.ds_work_active(),
         buffer: up.ds_state_copy(),
     };
+
     cdt_up_status!(|| { (msg, &arg) });
 }
 
@@ -3784,7 +3785,7 @@ async fn up_listen(
     let mut ds_count = 0u32;
     let mut lastcast = 1;
 
-    stat_update(up, &"start".to_string());
+    stat_update(up, "start");
 
     loop {
         /*
@@ -3834,7 +3835,7 @@ async fn up_listen(
                 }
             }
         }
-        stat_update(up, &"loop end".to_string());
+        stat_update(up, "loop end");
 
         println!("All expected targets are online, Now accepting IO requests");
         /*
@@ -3867,7 +3868,7 @@ async fn up_listen(
 
         up.set_active();
 
-        stat_update(up, &"active".to_string());
+        stat_update(up, "active");
         /*
          * We have three connections, so we can now start listening for
          * more IO to come in. We also need to make sure our downstairs
@@ -3950,7 +3951,7 @@ async fn up_listen(
                      * a flush, we can also use this to update the dtrace
                      * counters with some regularity.
                      */
-                    stat_update(up, &"loop".to_string());
+                    stat_update(up, "loop");
                 }
             }
         }

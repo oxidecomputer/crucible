@@ -1,7 +1,5 @@
 /*
  * Trace all the guest submitted and completed IOs.
- * Note, the way dtrace works with Rust means you have to start crucible
- * running before you can run this.
  */
 cdt*:::gw_read_start,
 cdt*:::gw_write_start,

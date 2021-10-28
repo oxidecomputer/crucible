@@ -18,8 +18,8 @@ the logs behind in /tmp/ds_test/
 
 ## ds_state.d
 This is a dtrace script for printing some crude upstairs state info.
-The way this works requires that crucible is
-running before you run this, otherwise it won't find the probes.
+If the upstairs is not yet running, add the -Z flag to dtrace so it will
+wait to find the matching probe.
 ```
 pfexec dtrace -s tools/ds_state.d
 ```
@@ -39,18 +39,19 @@ alan@cat:crucible$ pfexec dtrace -s tools/ds_state.d
 
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
-crucible from the guest.  The way this works requires that crucible is
-running before you run this, otherwise it won't find the probes.
+crucible from the guest.
+If the upstairs is not yet running, add the -Z flag to dtrace so it will
+wait to find the matching probe.
 ```
 sudo dtrace -s tools/tracegw.d
 ```
 
-You start crucible, then run the above script.  When you are ready to see
-results, hit Control-C and the final counts will be printed.
+When you are ready to see results, hit Control-C and the final counts will
+be printed.
 
 Here is an example of how it might look:
 ```
-final:crucible alan$ sudo dtrace -s tools/tracegw.d
+final:crucible alan$ sudo dtrace Z -s tools/tracegw.d
 dtrace: system integrity protection is on, some features will not be available
 
 ^C
@@ -63,6 +64,8 @@ dtrace: system integrity protection is on, some features will not be available
 This is a simple dtrace script that measures latency times for when a r/w/f
 job is submitted to the internal upstairs work queue, to when that job has
 completed and the notification was sent back to the guest.
+If the upstairs is not yet running, add the -Z flag to dtrace so it will
+wait to find the matching probe.
 ```
 sudo dtrace -s tools/perfgw.d
 ```
