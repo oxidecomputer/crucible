@@ -968,7 +968,20 @@ impl Downstairs {
          */
         if let Some(old_upstairs) = &self.active_upstairs {
             println!("Signaling to {:?} thread", old_upstairs.0);
-            futures::executor::block_on(old_upstairs.1.send(0)).unwrap();
+            match futures::executor::block_on(old_upstairs.1.send(0)) {
+                Ok(_) => {},
+                Err(e) => {
+                    /*
+                     * It's possible the old thread died due to some connection
+                     * error. In that case the receiver will have closed and
+                     * the above send will fail.
+                     */
+                    println!("Error while signaling to {:?} thread: {:?}",
+                        old_upstairs.0,
+                        e,
+                    );
+                },
+            }
         }
 
         self.active_upstairs = Some((uuid, tx));
