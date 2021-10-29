@@ -485,6 +485,10 @@ async fn proc(
      */
     let mut negotiated = 0;
 
+    // XXX figure out what deadlines make sense here
+    let mut ping_interval = deadline_secs(5);
+    let mut timeout_deadline = deadline_secs(50);
+
     /*
      * Either we get all the way through the negotiation, or we hit the
      * timeout and exit to retry.
@@ -553,12 +557,13 @@ async fn proc(
              * too long.
              * TODO: 50 is too long, but what is the correct value?
              */
-            _ = sleep_until(deadline_secs(50)) => {
+            _ = sleep_until(timeout_deadline) => {
                 up.ds_missing(up_coms.client_id);
                 bail!("timed out during negotiation");
             }
-            _ = sleep_until(deadline_secs(5)) => {
+            _ = sleep_until(ping_interval) => {
                 fw.send(Message::Ruok).await?;
+                ping_interval = deadline_secs(5);
             }
             _ = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
                 /*
@@ -571,7 +576,15 @@ async fn proc(
                 fw.send(Message::PromoteToActive(up.uuid)).await?;
             }
             f = fr.next() => {
-                match f.transpose()? {
+                let response = f.transpose()?;
+
+                // When the downstairs responds, push the deadlines
+                if let Some(_) = response {
+                    timeout_deadline = deadline_secs(50);
+                    ping_interval = deadline_secs(5);
+                }
+
+                match response {
                     None => {
                         // hung up
                         up.ds_missing(up_coms.client_id);
@@ -737,8 +750,9 @@ async fn proc(
                     Some(Message::UuidMismatch(expected_uuid)) => {
                         up.set_inactive();
                         bail!(
-                            "{} received UuidMismatch, expecting {:?}!",
-                            up.uuid, expected_uuid
+                            "{} received UuidMismatch during negotiation, \
+                            expecting {:?}!",
+                            up.uuid, expected_uuid,
                         );
                     }
                     Some(m) => {
@@ -799,15 +813,20 @@ async fn cmd_loop(
     println!("[{}] Starts cmd_loop", up_coms.client_id);
 
     /*
-     * To keep things alive, initiate a ping any time we have been idle for a
-     * second.
-     */
-    let mut needping = false;
-    /*
      * We set more_work if we arrive here on a re-connection, this will
      * allow us to replay any outstanding work.
      */
     let mut more_work = up.ds_replay_active(up_coms.client_id);
+
+    /*
+     * To keep things alive, initiate a ping any time we have been idle for 10
+     * seconds.
+     *
+     * XXX figure out what deadlines make sense here
+     */
+    let mut more_work_interval = deadline_secs(1);
+    let mut ping_interval = deadline_secs(10);
+    let mut timeout_deadline = deadline_secs(50);
 
     up.ds_state_show();
     loop {
@@ -818,7 +837,15 @@ async fn cmd_loop(
              */
             biased;
             f = fr.next() => {
-                match f.transpose()? {
+                let response = f.transpose()?;
+
+                // When the downstairs responds, push the deadlines
+                if let Some(_) = response {
+                    timeout_deadline = deadline_secs(50);
+                    ping_interval = deadline_secs(10);
+                }
+
+                match response {
                     None => {
                         return Ok(())
                     },
@@ -836,7 +863,6 @@ async fn cmd_loop(
                          * accept any commands.
                          */
                         process_message(up, &m, up_coms.clone()).await?;
-                        needping = true;
                     }
                 }
             }
@@ -849,22 +875,27 @@ async fn cmd_loop(
                  */
                 let more =
                     io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+
                 if more && !more_work {
                     println!("[{}] flow control start ", up_coms.client_id);
+
                     more_work = true;
+                    more_work_interval = deadline_secs(1);
                 }
             }
-            // XXX figure out what deadline makes sense here
-            _ = sleep_until(deadline_secs(1)), if more_work => {
+            _ = sleep_until(more_work_interval), if more_work => {
                 let more = io_send(
                                 up, &mut fw, up_coms.client_id, lossy
                             ).await?;
+
                 if more {
                     more_work = true;
                 } else {
                     more_work = false;
                     println!("[{}] flow control end ", up_coms.client_id);
                 }
+
+                more_work_interval = deadline_secs(1);
             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -872,15 +903,17 @@ async fn cmd_loop(
              * some too long.
              * TODO: 50 is too long, but what is the correct value?
              */
-            _ = sleep_until(deadline_secs(50)) => {
+            _ = sleep_until(timeout_deadline) => {
                 /*
                  * XXX What should happen here?  At the moment we just
                  * ignore it..
                  */
                 println!("[{}] proc 2 Deadline ignored", up_coms.client_id);
+                timeout_deadline = deadline_secs(50);
             }
-            _ = sleep_until(deadline_secs(10)), if needping => {
+            _ = sleep_until(ping_interval) => {
                 fw.send(Message::Ruok).await?;
+
                 if lossy {
                     /*
                      * When lossy is set, we don't always send work to a
@@ -890,6 +923,8 @@ async fn cmd_loop(
                      */
                     io_send(up, &mut fw, up_coms.client_id, lossy).await?;
                 }
+
+                ping_interval = deadline_secs(10);
             }
         }
     }
@@ -1005,7 +1040,6 @@ async fn looper(
         if !up.is_active() {
             drop(up_coms.ds_status_tx);
             drop(up_coms.ds_done_tx);
-            println!("No longer active, returning from looper!");
             return;
         }
 
@@ -3815,9 +3849,14 @@ async fn up_listen(
          * a upstairs generated flush.
          */
         let mut flush_check = deadline_secs(5);
+        let mut show_work_interval = deadline_secs(5);
 
         loop {
             tokio::select! {
+                _ = sleep_until(show_work_interval) => {
+                    //show_all_work(up);
+                    show_work_interval = deadline_secs(5);
+                }
                 c = ds_status_rx.recv() => {
                     // XXX We need some more thought here.  We can re-use
                     // this channel to enable flow control, but I'm not
@@ -3872,14 +3911,16 @@ async fn up_listen(
                      */
                     if up.flush_needed() {
                         println!("Need a flush");
+
                         if let Err(e) = up.submit_flush(None) {
                             println!("flush send failed:{:?}", e);
                             // XXX What to do here?
                         } else {
                             send_work(&dst, 1);
                         }
-                        flush_check = deadline_secs(5);
                     }
+
+                    flush_check = deadline_secs(5);
                 }
             }
         }
