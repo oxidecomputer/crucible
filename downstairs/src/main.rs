@@ -1021,7 +1021,14 @@ impl Downstairs {
     }
 
     fn is_active(&self, uuid: Uuid) -> bool {
-        self.active_upstairs.as_ref().unwrap().0 == uuid
+        match self.active_upstairs.as_ref() {
+            None => {
+                false
+            }
+            Some(tuple) => {
+                tuple.0 == uuid
+            }
+        }
     }
 
     fn active_upstairs(&self) -> Option<Uuid> {
