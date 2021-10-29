@@ -950,13 +950,27 @@ impl Downstairs {
      */
     fn complete_work(&self, ds_id: u64, is_flush: bool) {
         let mut work = self.work.lock().unwrap();
-        let job = work.active.remove(&ds_id).unwrap();
-        assert_eq!(job.state, WorkState::InProgress);
-        if is_flush {
-            work.last_flush = ds_id;
-            work.completed = Vec::with_capacity(32);
-        } else {
-            work.completed.push(ds_id);
+        match work.active.remove(&ds_id) {
+            Some(job) => {
+                assert_eq!(job.state, WorkState::InProgress);
+                if is_flush {
+                    work.last_flush = ds_id;
+                    work.completed = Vec::with_capacity(32);
+                } else {
+                    work.completed.push(ds_id);
+                }
+            },
+            None => {
+                /*
+                 * This branch occurs when another Upstairs has promoted itself
+                 * to active, causing active work to be cleared (in
+                 * promote_to_active).
+                 *
+                 * If this has happened, work.completed and work.last_flush have
+                 * also been reset. Do nothing here, especially since the
+                 * Upstairs has already been notified.
+                 */
+            }
         }
     }
 
