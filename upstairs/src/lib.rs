@@ -42,7 +42,7 @@ pub use pseudo_file::CruciblePseudoFile;
 #[usdt::provider]
 mod cdt {
     use crate::Arg;
-    fn up_status(_: String, arg: &Arg) {}
+    fn up_status(_: String, arg: Arg) {}
     fn gw_read_start(_: u64) {}
     fn gw_write_start(_: u64) {}
     fn gw_flush_start(_: u64) {}
@@ -2252,12 +2252,7 @@ impl Upstairs {
      * DTraces uses this.
      */
     fn ds_state_copy(&self) -> Vec<DsState> {
-        let mut buffer: Vec<DsState> = Vec::new();
-        let ds = self.downstairs.lock().unwrap();
-        for (index, dst) in ds.ds_state.iter().clone().enumerate() {
-            buffer.insert(index, *dst);
-        }
-        buffer
+        self.downstairs.lock().unwrap().ds_state.clone()
     }
 
     /**
@@ -3750,7 +3745,7 @@ async fn process_new_io(
 pub struct Arg {
     up_count: u32,
     ds_count: u32,
-    buffer: Vec<DsState>,
+    ds_state: Vec<DsState>,
 }
 
 /**
@@ -3759,13 +3754,14 @@ pub struct Arg {
  * up_status counter.
  */
 fn stat_update(up: &Arc<Upstairs>, msg: &str) {
-    let arg = Arg {
-        up_count: up.up_work_active(),
-        ds_count: up.ds_work_active(),
-        buffer: up.ds_state_copy(),
-    };
-
-    cdt_up_status!(|| { (msg, &arg) });
+    cdt_up_status!(|| {
+        let arg = Arg {
+            up_count: up.up_work_active(),
+            ds_count: up.ds_work_active(),
+            ds_state: up.ds_state_copy(),
+        };
+        (msg, arg)
+    });
 }
 
 /*

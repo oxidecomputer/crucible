@@ -51,7 +51,7 @@ be printed.
 
 Here is an example of how it might look:
 ```
-final:crucible alan$ sudo dtrace Z -s tools/tracegw.d
+final:crucible alan$ sudo dtrace -Z -s tools/tracegw.d
 dtrace: system integrity protection is on, some features will not be available
 
 ^C
