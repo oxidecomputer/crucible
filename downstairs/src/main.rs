@@ -494,8 +494,8 @@ async fn do_work_loop(
 /*
  * Debug function to dump the work list.
  */
-fn _show_work(ds: &Arc<Downstairs>) {
-    println!("Active Upstairs UUID: {:?}", ds.active_upstairs);
+fn show_work(ds: &Downstairs) {
+    println!("Active Upstairs UUID: {:?}", ds.active_upstairs());
     let work = ds.work.lock().unwrap();
 
     let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
@@ -676,6 +676,8 @@ async fn proc(
 
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
+    let mut lossy_interval = deadline_secs(5);
+
     loop {
         tokio::select! {
             /*
@@ -684,9 +686,10 @@ async fn proc(
              * and finish up. If lossy is not set, then this should only
              * trigger once then never again.
              */
-            _ = sleep_until(deadline_secs(5)) => {
+            _ = sleep_until(lossy_interval) => {
                 let lossy = {
                     let ds = ads.lock().await;
+                    //show_work(&ds);
                     ds.lossy
                 };
                 if lossy {
@@ -694,6 +697,7 @@ async fn proc(
                         do_work_loop(upstairs_uuid, ads, &mut fw).await?;
                     }
                 }
+                lossy_interval = deadline_secs(5);
             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -752,8 +756,8 @@ async fn proc(
                             }
                         } else {
                             println!(
-                                "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_uuid.unwrap(), ds.jobs(),
+                                "upstairs disconnected, {} jobs left",
+                                ds.jobs(),
                             );
                         }
 
@@ -946,13 +950,28 @@ impl Downstairs {
      */
     fn complete_work(&self, ds_id: u64, is_flush: bool) {
         let mut work = self.work.lock().unwrap();
-        let job = work.active.remove(&ds_id).unwrap();
-        assert_eq!(job.state, WorkState::InProgress);
-        if is_flush {
-            work.last_flush = ds_id;
-            work.completed = Vec::with_capacity(32);
-        } else {
-            work.completed.push(ds_id);
+        match work.active.remove(&ds_id) {
+            Some(job) => {
+                assert_eq!(job.state, WorkState::InProgress);
+                if is_flush {
+                    work.last_flush = ds_id;
+                    work.completed = Vec::with_capacity(32);
+                } else {
+                    work.completed.push(ds_id);
+                }
+            }
+            None => {
+                /*
+                 * This branch occurs when another Upstairs has promoted
+                 * itself to active, causing active work to
+                 * be cleared (in promote_to_active).
+                 *
+                 * If this has happened, work.completed and work.last_flush
+                 * have also been reset. Do nothing here,
+                 * especially since the Upstairs has already
+                 * been notified.
+                 */
+            }
         }
     }
 
@@ -968,7 +987,21 @@ impl Downstairs {
          */
         if let Some(old_upstairs) = &self.active_upstairs {
             println!("Signaling to {:?} thread", old_upstairs.0);
-            futures::executor::block_on(old_upstairs.1.send(0)).unwrap();
+            match futures::executor::block_on(old_upstairs.1.send(0)) {
+                Ok(_) => {}
+                Err(e) => {
+                    /*
+                     * It's possible the old thread died due to some
+                     * connection error. In that case the
+                     * receiver will have closed and
+                     * the above send will fail.
+                     */
+                    println!(
+                        "Error while signaling to {:?} thread: {:?}",
+                        old_upstairs.0, e,
+                    );
+                }
+            }
         }
 
         self.active_upstairs = Some((uuid, tx));
@@ -1004,7 +1037,10 @@ impl Downstairs {
     }
 
     fn is_active(&self, uuid: Uuid) -> bool {
-        self.active_upstairs.as_ref().unwrap().0 == uuid
+        match self.active_upstairs.as_ref() {
+            None => false,
+            Some(tuple) => tuple.0 == uuid,
+        }
     }
 
     fn active_upstairs(&self) -> Option<Uuid> {
