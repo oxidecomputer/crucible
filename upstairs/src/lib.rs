@@ -3753,6 +3753,7 @@ pub struct Arg {
  * This one method will update the fields of the
  * up_status counter.
  */
+#[inline]
 fn stat_update(up: &Arc<Upstairs>, msg: &str) {
     cdt_up_status!(|| {
         let arg = Arg {
