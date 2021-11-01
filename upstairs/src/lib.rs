@@ -819,8 +819,8 @@ async fn cmd_loop(
     let mut more_work = up.ds_replay_active(up_coms.client_id);
 
     /*
-     * To keep things alive, initiate a ping any time we have been idle for 10
-     * seconds.
+     * To keep things alive, initiate a ping any time we have been idle for
+     * 10 seconds.
      *
      * XXX figure out what deadlines make sense here
      */

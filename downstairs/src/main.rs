@@ -689,7 +689,7 @@ async fn proc(
             _ = sleep_until(lossy_interval) => {
                 let lossy = {
                     let ds = ads.lock().await;
-                    show_work(&ds);
+                    //show_work(&ds);
                     ds.lossy
                 };
                 if lossy {
@@ -959,16 +959,17 @@ impl Downstairs {
                 } else {
                     work.completed.push(ds_id);
                 }
-            },
+            }
             None => {
                 /*
-                 * This branch occurs when another Upstairs has promoted itself
-                 * to active, causing active work to be cleared (in
-                 * promote_to_active).
+                 * This branch occurs when another Upstairs has promoted
+                 * itself to active, causing active work to
+                 * be cleared (in promote_to_active).
                  *
-                 * If this has happened, work.completed and work.last_flush have
-                 * also been reset. Do nothing here, especially since the
-                 * Upstairs has already been notified.
+                 * If this has happened, work.completed and work.last_flush
+                 * have also been reset. Do nothing here,
+                 * especially since the Upstairs has already
+                 * been notified.
                  */
             }
         }
@@ -987,18 +988,19 @@ impl Downstairs {
         if let Some(old_upstairs) = &self.active_upstairs {
             println!("Signaling to {:?} thread", old_upstairs.0);
             match futures::executor::block_on(old_upstairs.1.send(0)) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
                     /*
-                     * It's possible the old thread died due to some connection
-                     * error. In that case the receiver will have closed and
+                     * It's possible the old thread died due to some
+                     * connection error. In that case the
+                     * receiver will have closed and
                      * the above send will fail.
                      */
-                    println!("Error while signaling to {:?} thread: {:?}",
-                        old_upstairs.0,
-                        e,
+                    println!(
+                        "Error while signaling to {:?} thread: {:?}",
+                        old_upstairs.0, e,
                     );
-                },
+                }
             }
         }
 
@@ -1036,12 +1038,8 @@ impl Downstairs {
 
     fn is_active(&self, uuid: Uuid) -> bool {
         match self.active_upstairs.as_ref() {
-            None => {
-                false
-            }
-            Some(tuple) => {
-                tuple.0 == uuid
-            }
+            None => false,
+            Some(tuple) => tuple.0 == uuid,
         }
     }
 
