@@ -659,8 +659,13 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
     /*
      * See the comment in the proc() function on the upstairs side that
      * describes how this negotiation takes place.
+     *
+     * The final step in negotiation (as dictated by the upstairs) is
+     * either LastFlush, or ExtentVersionsPlease.  Once we respond to
+     * that message, we can move forward and start receiving IO from
+     * the upstairs.
      */
-    while negotiated < 5 {
+    while negotiated < 4 {
         tokio::select! {
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -782,7 +787,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                             bail!("Received LastFlush out of order {}",
                                 negotiated);
                         }
-                        negotiated = 5;
+                        negotiated = 4;
                         {
                             let ds = ads.lock().await;
                             let mut work = ds.work_lock(
@@ -792,13 +797,17 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                             println!("Set last flush {}", last_flush);
                         }
                         fw.send(Message::LastFlushAck(last_flush)).await?;
+                        /*
+                         * Once this command is sent, we are ready to exit
+                         * the loop and move forward with receiving IOs
+                         */
                     }
                     Some(Message::ExtentVersionsPlease) => {
                         if negotiated != 3 {
                             bail!("Received ExtentVersions out of order {}",
                                 negotiated);
                         }
-                        negotiated = 5;
+                        negotiated = 4;
                         let ds= ads.lock().await;
                         let flush_numbers = ds.region.flush_numbers()?;
                         let generation_numbers = ds.region.gen_numbers()?;
@@ -810,6 +819,10 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                             dirty_bits,
                         ))
                         .await?;
+                        /*
+                         * Once this command is sent, we are ready to exit
+                         * the loop and move forward with receiving IOs
+                         */
                     }
                     Some(_msg) => {
                         println!("Ignored message received during negotiation");
