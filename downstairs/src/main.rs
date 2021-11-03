@@ -319,13 +319,13 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
  */
 async fn do_work(
     ds: &mut Arc<Mutex<Downstairs>>,
-    fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
     ack_ready_tx: mpsc::Sender<u64>,
-    job: DownstairsWork,
+    job: &mut DownstairsWork,
 ) -> Result<()> {
     assert_eq!(job.state, WorkState::InProgress);
 
-    match job.work {
+    let my_job = &job.work;
+    match my_job {
         IOop::Read {
             dependencies: _dependencies,
             eid,
@@ -342,7 +342,7 @@ async fn do_work(
              * uninitialized buffer. Until then, we have this workaround.
              */
             let (bs, _, _) = ds.region.region_def();
-            let sz = num_blocks as usize * bs as usize;
+            let sz = *num_blocks as usize * bs as usize;
             let mut data = BytesMut::with_capacity(sz);
             data.resize(sz, 1);
 
@@ -350,26 +350,20 @@ async fn do_work(
              * Any error from an IO should be intercepted here and passed
              * back to the upstairs.
              */
-            let result = if ds.return_errors && random() && random() {
+            let _result = if ds.return_errors && random() && random() {
                 println!("returning error on read!");
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else if !ds.is_active(job.upstairs_uuid) {
                 Err(CrucibleError::UpstairsInactive)
             } else {
-                ds.region.region_read(eid, offset, &mut data)
+                ds.region.region_read(*eid, *offset, &mut data)
             };
 
+            // my_job.data = data.freeze();
+            // my_job.result = result XXX ???
+            println!("Add data here {:#?}", my_job);
             ds.ack_ready(job.ds_id);
             ack_ready_tx.send(job.ds_id).await?;
-
-            fw.send(Message::ReadResponse(
-                job.upstairs_uuid,
-                job.ds_id,
-                data.freeze(),
-                result,
-            ))
-            .await?;
-            ds.complete_work(job.ds_id, false);
 
             Ok(())
         }
@@ -381,19 +375,17 @@ async fn do_work(
         } => {
             let ds = ds.lock().await;
 
-            let result = if ds.return_errors && random() && random() {
+            let _result = if ds.return_errors && random() && random() {
                 println!("returning error on write!");
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else if !ds.is_active(job.upstairs_uuid) {
                 Err(CrucibleError::UpstairsInactive)
             } else {
-                ds.region.region_write(eid, offset, &data)
+                ds.region.region_write(*eid, *offset, &data)
             };
 
             ds.ack_ready(job.ds_id);
-            fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
-                .await?;
-            ds.complete_work(job.ds_id, false);
+            ack_ready_tx.send(job.ds_id).await?;
             Ok(())
         }
         IOop::Flush {
@@ -402,19 +394,17 @@ async fn do_work(
         } => {
             let ds = ds.lock().await;
 
-            let result = if ds.return_errors && random() && random() {
+            let _result = if ds.return_errors && random() && random() {
                 println!("returning error on flush!");
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else if !ds.is_active(job.upstairs_uuid) {
                 Err(CrucibleError::UpstairsInactive)
-            } else {
-                ds.region.region_flush(flush_number)
+            } else{
+                ds.region.region_flush(*flush_number)
             };
 
             ds.ack_ready(job.ds_id);
-            fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
-                .await?;
-            ds.complete_work(job.ds_id, true);
+            ack_ready_tx.send(job.ds_id).await?;
             Ok(())
         }
     }
@@ -436,7 +426,6 @@ async fn do_work(
 async fn do_work_loop(
     upstairs_uuid: Uuid,
     ads: &mut Arc<Mutex<Downstairs>>,
-    fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
     ack_ready_tx: mpsc::Sender<u64>,
 ) -> Result<usize> {
     /*
@@ -484,7 +473,7 @@ async fn do_work_loop(
 
     let mut completed = 0;
 
-    for job in jobs {
+    for mut job in jobs {
         {
             let ds = ads.lock().await;
             if ds.lossy && random() && random() {
@@ -493,7 +482,7 @@ async fn do_work_loop(
             }
         }
 
-        do_work(ads, fw, ack_ready_tx.clone(), job).await?;
+        do_work(ads, ack_ready_tx.clone(), &mut job).await?;
         completed += 1;
     }
 
@@ -571,21 +560,23 @@ fn _show_work(ds: &Downstairs) {
  * task just like upstairs has now.
  */
 async fn proc_frame(
-    upstairs_uuid: Uuid,
     ad: &mut Arc<Mutex<Downstairs>>,
     m: &Message,
-    fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    upstairs_uuid: Uuid,
     ack_ready_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
     let mut work_to_do = false;
     match m {
         Message::Ruok => {
-            fw.send(Message::Imok).await?;
+            // fw.send(Message::Imok).await?;
+            println!("I should ack a ping somehow...");
+            return Ok(());
         }
         // Regular work path
         Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
             if upstairs_uuid != *uuid {
-                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                // fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                println!("Write from old UUID: {}", upstairs_uuid);
                 return Ok(());
             }
 
@@ -602,7 +593,8 @@ async fn proc_frame(
         }
         Message::Flush(uuid, ds_id, dependencies, flush_number) => {
             if upstairs_uuid != *uuid {
-                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                // fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                println!("Flush from old UUID: {}", upstairs_uuid);
                 return Ok(());
             }
 
@@ -624,7 +616,8 @@ async fn proc_frame(
             num_blocks,
         ) => {
             if upstairs_uuid != *uuid {
-                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                // fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                println!("Read from old UUID: {}", upstairs_uuid);
                 return Ok(());
             }
 
@@ -648,22 +641,11 @@ async fn proc_frame(
          * While we are making progress, keep calling the do_work_loop()
          */
         let completed =
-            do_work_loop(upstairs_uuid, ad, fw, ack_ready_tx.clone()).await?;
+            do_work_loop(upstairs_uuid, ad, ack_ready_tx.clone()).await?;
         work_to_do = completed != 0;
     }
 
     Ok(())
-}
-
-async fn ack_sender(
-    _ads: &Arc<Mutex<Downstairs>>,
-    // fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
-    mut ack_ready_rx: mpsc::Receiver<u64>,
-) {
-    println!("Ack sender started");
-    while let Some(_) = ack_ready_rx.recv().await {
-        println!("Ack sender got message");
-    }
 }
 
 async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
@@ -843,8 +825,51 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
 
     println!("Downstairs has completed Negotiation");
     assert!(upstairs_uuid.is_some());
+    let u_uuid = upstairs_uuid.unwrap();
+    resp_loop(ads, fr, fw, another_upstairs_active_rx, u_uuid).await
+}
 
-    resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_uuid).await
+/*
+ * This task is responsible for sending all the ACKs, once the upstairs
+ * has verified our extents are valid.
+ */
+async fn ack_sender(
+    ads: &Arc<Mutex<Downstairs>>,
+    _fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    mut ack_ready_rx: mpsc::Receiver<u64>,
+    upstairs_uuid: Uuid,
+) {
+    println!("Ack sender started");
+    while let Some(m) = ack_ready_rx.recv().await {
+        println!("Ack sender got message: {}", m);
+        let ds = ads.lock().await;
+        let ack_work = ds.ack_work(upstairs_uuid);
+
+        for job in ack_work.iter() {
+            println!("Ack job {:#?}", job);
+        }
+
+    /*
+            fw.send(Message::ReadResponse(
+                job.upstairs_uuid,
+                job.ds_id,
+                data.freeze(),
+                result,
+            ))
+            .await?;
+            ds.complete_work(job.ds_id, false);
+
+            /* Write */
+
+            fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
+                .await?;
+            ds.complete_work(job.ds_id, false);
+
+            fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
+                .await?;
+            ds.complete_work(job.ds_id, true);
+            */
+    }
 }
 
 /*
@@ -856,15 +881,14 @@ async fn resp_loop(
     mut fr: FramedRead<OwnedReadHalf, CrucibleDecoder>,
     mut fw: FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
     mut another_upstairs_active_rx: mpsc::Receiver<u64>,
-    upstairs_uuid: Option<Uuid>,
+    upstairs_uuid: Uuid,
 ) -> Result<()> {
 
     // Spawn async task to ACK work
     let (ack_ready_tx, ack_ready_rx) = mpsc::channel(1);
     let adsc = Arc::clone(&ads);
     tokio::spawn(async move {
-        //ack_sender(&adsc, &mut fw, ack_ready_rx).await;
-        ack_sender(&adsc, ack_ready_rx).await;
+        ack_sender(&adsc, &mut fw, ack_ready_rx, upstairs_uuid).await;
     });
 
     let mut lossy_interval = deadline_secs(5);
@@ -883,9 +907,7 @@ async fn resp_loop(
                     ds.lossy
                 };
                 if lossy {
-                    if let Some(upstairs_uuid) = upstairs_uuid {
-                        do_work_loop(upstairs_uuid, ads, &mut fw, ack_ready_tx.clone()).await?;
-                    }
+                    do_work_loop(upstairs_uuid, ads, ack_ready_tx.clone()).await?;
                 }
                 lossy_interval = deadline_secs(5);
             }
@@ -909,15 +931,20 @@ async fn resp_loop(
              * this signal).
              */
             _ = another_upstairs_active_rx.recv() => {
-                let upstairs_uuid = upstairs_uuid.unwrap();
                 println!("Another upstairs promoted to active, \
                     shutting down connection for {:?}", upstairs_uuid);
 
+                /*
+                 * XXX Figure out how to do handle this?
+                 * Perhaps the ack task takes this channel also and selects
+                 * on it?  We need this task to also exit itself if
+                 * another upstairs takes over.
                 let active_upstairs = {
                     let ds = ads.lock().await;
                     ds.active_upstairs().unwrap()
                 };
                 fw.send(Message::UuidMismatch(active_upstairs)).await?;
+                 */
 
                 return Ok(());
             }
@@ -926,29 +953,22 @@ async fn resp_loop(
                     None => {
                         let mut ds = ads.lock().await;
 
-                        if let Some(upstairs_uuid) = upstairs_uuid {
-                            println!(
-                                "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_uuid, ds.jobs(),
-                            );
+                        println!(
+                            "upstairs {:?} disconnected, {} jobs left",
+                            upstairs_uuid, ds.jobs(),
+                        );
 
-                            if ds.is_active(upstairs_uuid) {
-                                println!("upstairs {:?} was previously \
-                                    active, clearing", upstairs_uuid);
-                                ds.clear_active();
-                            }
-                        } else {
-                            println!(
-                                "upstairs disconnected, {} jobs left",
-                                ds.jobs(),
-                            );
+                        if ds.is_active(upstairs_uuid) {
+                            println!("upstairs {:?} was previously \
+                                active, clearing", upstairs_uuid);
+                            ds.clear_active();
                         }
 
                         return Ok(());
                     }
                     Some(msg) => {
                         proc_frame(
-                            upstairs_uuid.unwrap(), ads, &msg, &mut fw, ack_ready_tx.clone(),
+                            ads, &msg, upstairs_uuid, ack_ready_tx.clone(),
                         ).await?;
                     }
                 }
@@ -1043,6 +1063,11 @@ impl Downstairs {
         work.new_work(upstairs_uuid)
     }
 
+    fn ack_work(&self, upstairs_uuid: Uuid) -> Vec<u64> {
+        let work = self.work_lock(upstairs_uuid).unwrap();
+        work.ack_work(upstairs_uuid)
+    }
+
     fn add_work(
         &self,
         upstairs_uuid: Uuid,
@@ -1087,7 +1112,7 @@ impl Downstairs {
             Some(job) => {
                 assert_eq!(job.state, WorkState::InProgress);
                 job.state = WorkState::AckReady;
-                println!("[{}] goes to AckReady", ds_id);
+                println!("[{}] goes to AckReady {:?}", ds_id, job);
             }
             None => {
                 println!("[{}] Job does not exist", ds_id);
@@ -1267,6 +1292,26 @@ impl Work {
     }
 
     /**
+     * Return a list of downstairs request IDs that are ACK ready or have
+     * the wrong UUID
+     */
+    fn ack_work(&self, upstairs_uuid: Uuid) -> Vec<u64> {
+        let mut result = Vec::with_capacity(self.active.len());
+
+        for job in self.active.values() {
+            if job.upstairs_uuid != upstairs_uuid {
+                panic!("Old Upstairs Job in ack_work!");
+            }
+
+            if job.state == WorkState::AckReady || job.state == WorkState::BadUUID {
+                result.push(job.ds_id);
+            }
+        }
+
+        result
+    }
+
+    /**
      * If the requested job is still new, and the dependencies are all met,
      * return the DownstairsWork struct and let the caller take action
      * with it, leaving the state as InProgress.
@@ -1412,6 +1457,7 @@ pub enum WorkState {
     DepWait,
     InProgress,
     AckReady,
+    BadUUID,
     Done,
     Error,
 }
@@ -1430,6 +1476,9 @@ impl fmt::Display for WorkState {
             }
             WorkState::AckReady => {
                 write!(f, "AckR")
+            }
+            WorkState::BadUUID => {
+                write!(f, "B UU")
             }
             WorkState::Done => {
                 write!(f, "Done")
