@@ -18,8 +18,9 @@ use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use structopt::StructOpt;
-use tokio::net::tcp::WriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -318,7 +319,8 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
  */
 async fn do_work(
     ds: &mut Arc<Mutex<Downstairs>>,
-    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+    fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    ack_ready_tx: mpsc::Sender<u64>,
     job: DownstairsWork,
 ) -> Result<()> {
     assert_eq!(job.state, WorkState::InProgress);
@@ -329,6 +331,7 @@ async fn do_work(
             eid,
             offset,
             num_blocks,
+            data: _data,
         } => {
             let ds = ds.lock().await;
 
@@ -355,6 +358,9 @@ async fn do_work(
             } else {
                 ds.region.region_read(eid, offset, &mut data)
             };
+
+            ds.ack_ready(job.ds_id);
+            ack_ready_tx.send(job.ds_id).await?;
 
             fw.send(Message::ReadResponse(
                 job.upstairs_uuid,
@@ -384,6 +390,7 @@ async fn do_work(
                 ds.region.region_write(eid, offset, &data)
             };
 
+            ds.ack_ready(job.ds_id);
             fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
                 .await?;
             ds.complete_work(job.ds_id, false);
@@ -404,6 +411,7 @@ async fn do_work(
                 ds.region.region_flush(flush_number)
             };
 
+            ds.ack_ready(job.ds_id);
             fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
                 .await?;
             ds.complete_work(job.ds_id, true);
@@ -428,7 +436,8 @@ async fn do_work(
 async fn do_work_loop(
     upstairs_uuid: Uuid,
     ads: &mut Arc<Mutex<Downstairs>>,
-    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+    fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    ack_ready_tx: mpsc::Sender<u64>,
 ) -> Result<usize> {
     /*
      * Build ourselves a list of all the jobs on the work hashmap that
@@ -484,7 +493,7 @@ async fn do_work_loop(
             }
         }
 
-        do_work(ads, fw, job).await?;
+        do_work(ads, fw, ack_ready_tx.clone(), job).await?;
         completed += 1;
     }
 
@@ -494,7 +503,7 @@ async fn do_work_loop(
 /*
  * Debug function to dump the work list.
  */
-fn show_work(ds: &Downstairs) {
+fn _show_work(ds: &Downstairs) {
     println!("Active Upstairs UUID: {:?}", ds.active_upstairs());
     let work = ds.work.lock().unwrap();
 
@@ -515,6 +524,7 @@ fn show_work(ds: &Downstairs) {
                     eid: _eid,
                     offset: _offset,
                     num_blocks: _num_blocks,
+                    data: _data,
                 } => {
                     dsw_type = "Read ".to_string();
                     dep_list = dependencies.to_vec();
@@ -564,33 +574,15 @@ async fn proc_frame(
     upstairs_uuid: Uuid,
     ad: &mut Arc<Mutex<Downstairs>>,
     m: &Message,
-    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+    fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    ack_ready_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
     let mut work_to_do = false;
     match m {
         Message::Ruok => {
             fw.send(Message::Imok).await?;
         }
-        Message::RegionInfoPlease => {
-            let rd = {
-                let d = ad.lock().await;
-                d.region.def()
-            };
-            fw.send(Message::RegionInfo(rd)).await?;
-        }
-        Message::ExtentVersionsPlease => {
-            let d = ad.lock().await;
-            let flush_numbers = d.region.flush_numbers()?;
-            let generation_numbers = d.region.gen_numbers()?;
-            let dirty_bits = d.region.dirty()?;
-            drop(d);
-            fw.send(Message::ExtentVersions(
-                generation_numbers,
-                flush_numbers,
-                dirty_bits,
-            ))
-            .await?;
-        }
+        // Regular work path
         Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
             if upstairs_uuid != *uuid {
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
@@ -641,6 +633,7 @@ async fn proc_frame(
                 eid: *eid,
                 offset: *offset,
                 num_blocks: *num_blocks,
+                data: None,
             };
 
             let d = ad.lock().await;
@@ -654,62 +647,50 @@ async fn proc_frame(
         /*
          * While we are making progress, keep calling the do_work_loop()
          */
-        let completed = do_work_loop(upstairs_uuid, ad, fw).await?;
+        let completed =
+            do_work_loop(upstairs_uuid, ad, fw, ack_ready_tx.clone()).await?;
         work_to_do = completed != 0;
     }
 
     Ok(())
 }
 
-async fn proc(
-    ads: &mut Arc<Mutex<Downstairs>>,
-    mut sock: TcpStream,
-) -> Result<()> {
-    let (read, write) = sock.split();
+async fn ack_sender(
+    _ads: &Arc<Mutex<Downstairs>>,
+    // fw: &mut FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    mut ack_ready_rx: mpsc::Receiver<u64>,
+) {
+    println!("Ack sender started");
+    while let Some(_) = ack_ready_rx.recv().await {
+        println!("Ack sender got message");
+    }
+}
+
+async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
+    let (read, write) = sock.into_split();
     let mut fr = FramedRead::new(read, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-    let mut negotiated = false;
+    let mut negotiated = 0;
     let mut upstairs_uuid = None;
     let (_another_upstairs_active_tx, mut another_upstairs_active_rx) =
         channel(1);
 
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
-    let mut lossy_interval = deadline_secs(5);
-
-    loop {
+    /*
+     * See the comment in the proc() function on the upstairs side that
+     * describes how this negotiation takes place.
+     */
+    while negotiated < 5 {
         tokio::select! {
-            /*
-             * If we have set "lossy", then we need to check every now and
-             * then that there were not skipped jobs that we need to go back
-             * and finish up. If lossy is not set, then this should only
-             * trigger once then never again.
-             */
-            _ = sleep_until(lossy_interval) => {
-                let lossy = {
-                    let ds = ads.lock().await;
-                    //show_work(&ds);
-                    ds.lossy
-                };
-                if lossy {
-                    if let Some(upstairs_uuid) = upstairs_uuid {
-                        do_work_loop(upstairs_uuid, ads, &mut fw).await?;
-                    }
-                }
-                lossy_interval = deadline_secs(5);
-            }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
              * XXX Timeouts, timeouts: always wrong!  Some too short and
              * some too long.
              */
             _ = sleep_until(deadline_secs(50)) => {
-                if !negotiated {
-                    bail!("did not negotiate a protocol");
-                } else {
-                    bail!("inactivity timeout");
-                }
+                bail!("did not negotiate a protocol");
             }
             /*
              * This Upstairs' thread will receive this signal when another
@@ -737,7 +718,7 @@ async fn proc(
             }
             new_read = fr.next() => {
                 /*
-                 * Negotiate protocol before we get into specifics.
+                 * Negotiate protocol before we take any IO requests.
                  */
                 match new_read.transpose()? {
                     None => {
@@ -763,25 +744,37 @@ async fn proc(
 
                         return Ok(());
                     }
+                    Some(Message::Ruok) => {
+                        fw.send(Message::Imok).await?;
+                    }
                     Some(Message::HereIAm(version, uuid)) => {
-                        if negotiated {
-                            bail!("negotiated already!");
+                        if negotiated != 0 {
+                            bail!("Received connect out of order {}",
+                                negotiated);
                         }
                         if version != 1 {
                             bail!("expected version 1, got {}", version);
                         }
-                        negotiated = true;
+                        negotiated = 1;
                         upstairs_uuid = Some(uuid);
                         println!("upstairs {:?} connected",
                             upstairs_uuid.unwrap());
                         fw.send(Message::YesItsMe(1)).await?;
                     }
                     Some(Message::PromoteToActive(uuid)) => {
+                        if negotiated != 1 {
+                            bail!("Received activate out of order {}",
+                                negotiated);
+                        }
                         // Only allowed to promote or demote self
                         if upstairs_uuid.unwrap() != uuid {
                             fw.send(
                                 Message::UuidMismatch(upstairs_uuid.unwrap())
                             ).await?;
+                            /*
+                             * At this point, should we just return error?
+                             * XXX
+                             */
                         } else {
                             {
                                 let mut ds = ads.lock().await;
@@ -790,15 +783,28 @@ async fn proc(
                                     another_upstairs_active_tx.clone()
                                 );
                             }
-
+                            negotiated = 2;
                             fw.send(Message::YouAreNowActive(uuid)).await?;
                         }
                     }
-                    Some(Message::LastFlush(last_flush)) => {
-                        // TODO: Make a proper negotiation connect flow.
-                        if !negotiated {
-                            bail!("expected HereIAm first");
+                    Some(Message::RegionInfoPlease) => {
+                        if negotiated != 2 {
+                            bail!("Received RegionInfo out of order {}",
+                                negotiated);
                         }
+                        negotiated = 3;
+                        let rd = {
+                            let ds = ads.lock().await;
+                            ds.region.def()
+                        };
+                        fw.send(Message::RegionInfo(rd)).await?;
+                    }
+                    Some(Message::LastFlush(last_flush)) => {
+                        if negotiated != 3 {
+                            bail!("Received LastFlush out of order {}",
+                                negotiated);
+                        }
+                        negotiated = 5;
                         {
                             let ds = ads.lock().await;
                             let mut work = ds.work_lock(
@@ -809,13 +815,140 @@ async fn proc(
                         }
                         fw.send(Message::LastFlushAck(last_flush)).await?;
                     }
-                    Some(msg) => {
-                        if !negotiated {
-                            bail!("expected HereIAm first");
+                    Some(Message::ExtentVersionsPlease) => {
+                        if negotiated != 3 {
+                            bail!("Received ExtentVersions out of order {}",
+                                negotiated);
+                        }
+                        negotiated = 5;
+                        let ds= ads.lock().await;
+                        let flush_numbers = ds.region.flush_numbers()?;
+                        let generation_numbers = ds.region.gen_numbers()?;
+                        let dirty_bits = ds.region.dirty()?;
+                        drop(ds);
+                        fw.send(Message::ExtentVersions(
+                            generation_numbers,
+                            flush_numbers,
+                            dirty_bits,
+                        ))
+                        .await?;
+                    }
+                    Some(_msg) => {
+                        println!("Ignored message received during negotiation");
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Downstairs has completed Negotiation");
+    assert!(upstairs_uuid.is_some());
+
+    resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_uuid).await
+}
+
+/*
+ * This function listens for and answers requests from the upstairs.
+ * It is required we call this after negotiation has completed.
+ */
+async fn resp_loop(
+    ads: &mut Arc<Mutex<Downstairs>>,
+    mut fr: FramedRead<OwnedReadHalf, CrucibleDecoder>,
+    mut fw: FramedWrite<OwnedWriteHalf, CrucibleEncoder>,
+    mut another_upstairs_active_rx: mpsc::Receiver<u64>,
+    upstairs_uuid: Option<Uuid>,
+) -> Result<()> {
+
+    // Spawn async task to ACK work
+    let (ack_ready_tx, ack_ready_rx) = mpsc::channel(1);
+    let adsc = Arc::clone(&ads);
+    tokio::spawn(async move {
+        //ack_sender(&adsc, &mut fw, ack_ready_rx).await;
+        ack_sender(&adsc, ack_ready_rx).await;
+    });
+
+    let mut lossy_interval = deadline_secs(5);
+    loop {
+        tokio::select! {
+            /*
+             * If we have set "lossy", then we need to check every now and
+             * then that there were not skipped jobs that we need to go back
+             * and finish up. If lossy is not set, then this should only
+             * trigger once then never again.
+             */
+            _ = sleep_until(lossy_interval) => {
+                let lossy = {
+                    let ds = ads.lock().await;
+                    //show_work(&ds);
+                    ds.lossy
+                };
+                if lossy {
+                    if let Some(upstairs_uuid) = upstairs_uuid {
+                        do_work_loop(upstairs_uuid, ads, &mut fw, ack_ready_tx.clone()).await?;
+                    }
+                }
+                lossy_interval = deadline_secs(5);
+            }
+            /*
+             * Don't wait more than 50 seconds to hear from the other side.
+             * XXX Timeouts, timeouts: always wrong!  Some too short and
+             * some too long.
+             */
+            _ = sleep_until(deadline_secs(50)) => {
+                bail!("inactivity timeout");
+            }
+            /*
+             * This Upstairs' thread will receive this signal when another
+             * Upstairs promotes itself to active. The only way this path is
+             * reached is if this Upstairs promoted itself to active, storing
+             * another_upstairs_active_tx in the Downstairs active_upstairs
+             * tuple.
+             *
+             * The two unwraps here should be safe: this thread negotiated and
+             * activated, and then another did (in order to send this thread
+             * this signal).
+             */
+            _ = another_upstairs_active_rx.recv() => {
+                let upstairs_uuid = upstairs_uuid.unwrap();
+                println!("Another upstairs promoted to active, \
+                    shutting down connection for {:?}", upstairs_uuid);
+
+                let active_upstairs = {
+                    let ds = ads.lock().await;
+                    ds.active_upstairs().unwrap()
+                };
+                fw.send(Message::UuidMismatch(active_upstairs)).await?;
+
+                return Ok(());
+            }
+            new_read = fr.next() => {
+                match new_read.transpose()? {
+                    None => {
+                        let mut ds = ads.lock().await;
+
+                        if let Some(upstairs_uuid) = upstairs_uuid {
+                            println!(
+                                "upstairs {:?} disconnected, {} jobs left",
+                                upstairs_uuid, ds.jobs(),
+                            );
+
+                            if ds.is_active(upstairs_uuid) {
+                                println!("upstairs {:?} was previously \
+                                    active, clearing", upstairs_uuid);
+                                ds.clear_active();
+                            }
+                        } else {
+                            println!(
+                                "upstairs disconnected, {} jobs left",
+                                ds.jobs(),
+                            );
                         }
 
+                        return Ok(());
+                    }
+                    Some(msg) => {
                         proc_frame(
-                            upstairs_uuid.unwrap(), ads, &msg, &mut fw
+                            upstairs_uuid.unwrap(), ads, &msg, &mut fw, ack_ready_tx.clone(),
                         ).await?;
                     }
                 }
@@ -945,14 +1078,44 @@ impl Downstairs {
     }
 
     /*
+     * Mark a job from the active list as ready for ACK.
+     * Message the channel to alert the ACK task there is work to ACK.
+     */
+    fn ack_ready(&self, ds_id: u64) {
+        let mut work = self.work.lock().unwrap();
+        match work.active.get_mut(&ds_id) {
+            Some(job) => {
+                assert_eq!(job.state, WorkState::InProgress);
+                job.state = WorkState::AckReady;
+                println!("[{}] goes to AckReady", ds_id);
+            }
+            None => {
+                println!("[{}] Job does not exist", ds_id);
+                /*
+                 * This branch occurs when another Upstairs has promoted
+                 * itself to active, causing active work to
+                 * be cleared (in promote_to_active).
+                 *
+                 * If this has happened, work.completed and work.last_flush
+                 * have also been reset. Do nothing here,
+                 * especially since the Upstairs has already
+                 * been notified.
+                 */
+            }
+        }
+    }
+
+    /*
      * Remove a job from the active list and put it on the completed list.
      * This should only be done after the upstairs has been notified.
      */
     fn complete_work(&self, ds_id: u64, is_flush: bool) {
         let mut work = self.work.lock().unwrap();
         match work.active.remove(&ds_id) {
-            Some(job) => {
-                assert_eq!(job.state, WorkState::InProgress);
+            Some(mut job) => {
+                assert_eq!(job.state, WorkState::AckReady);
+                println!("[{}] goes to Done", ds_id);
+                job.state = WorkState::Done;
                 if is_flush {
                     work.last_flush = ds_id;
                     work.completed = Vec::with_capacity(32);
@@ -1141,6 +1304,7 @@ impl Work {
                         eid: _eid,
                         offset: _offset,
                         num_blocks: _num_blocks,
+                        data: _data,
                     } => dependencies,
                 };
 
@@ -1193,6 +1357,7 @@ impl Work {
                                     eid: _eid,
                                     offset: _offset,
                                     num_blocks: _num_blocks,
+                                    data: _data,
                                 } => "Read",
                             },
                             job.upstairs_uuid,
@@ -1246,6 +1411,7 @@ pub enum WorkState {
     New,
     DepWait,
     InProgress,
+    AckReady,
     Done,
     Error,
 }
@@ -1261,6 +1427,9 @@ impl fmt::Display for WorkState {
             }
             WorkState::InProgress => {
                 write!(f, "In P")
+            }
+            WorkState::AckReady => {
+                write!(f, "AckR")
             }
             WorkState::Done => {
                 write!(f, "Done")

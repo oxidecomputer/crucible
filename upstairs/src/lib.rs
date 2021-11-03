@@ -437,6 +437,7 @@ async fn io_send(
                 eid,
                 offset,
                 num_blocks,
+                data: _data,
             } => {
                 fw.send(Message::ReadRequest(
                     u.uuid,
@@ -1351,6 +1352,7 @@ impl Downstairs {
                 eid: _eid,
                 offset: _offset,
                 num_blocks: _num_blocks,
+                data: _data,
             } => wc.error == 3,
             IOop::Write {
                 dependencies: _dependencies,
@@ -1391,6 +1393,7 @@ impl Downstairs {
                 eid: _,
                 offset: _,
                 num_blocks: _,
+                data: _,
             } => {
                 cdt_gw_read_end!(|| (gw_id));
             }
@@ -1508,6 +1511,7 @@ impl Downstairs {
                     eid: _eid,
                     offset: _offset,
                     num_blocks: _num_blocks,
+                    data: _data,
                 } => {
                     assert!(read_data.is_some());
                     if jobs_completed_ok == 1 {
@@ -1643,6 +1647,7 @@ impl Downstairs {
                 eid: _eid,
                 offset: _offset,
                 num_blocks: _num_blocks,
+                data: _data,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -2622,6 +2627,7 @@ pub enum IOop {
         eid: u64,
         offset: Block,
         num_blocks: u64,
+        data: Option<Bytes>,
     },
     Flush {
         dependencies: Vec<u64>, // Jobs that must finish before this
@@ -4152,6 +4158,7 @@ fn create_read_eob(
         eid,
         offset,
         num_blocks,
+        data: None,
     };
 
     let mut state = HashMap::new();
@@ -4237,6 +4244,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     eid,
                     offset,
                     num_blocks,
+                    data: _data,
                 } => {
                     job_type = "Read ".to_string();
                     io_eid = *eid;
