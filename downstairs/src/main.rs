@@ -399,7 +399,7 @@ async fn do_work(
                 Err(CrucibleError::GenericError("test error".to_string()))
             } else if !ds.is_active(job.upstairs_uuid) {
                 Err(CrucibleError::UpstairsInactive)
-            } else{
+            } else {
                 ds.region.region_flush(*flush_number)
             };
 
@@ -849,26 +849,26 @@ async fn ack_sender(
             println!("Ack job {:#?}", job);
         }
 
-    /*
-            fw.send(Message::ReadResponse(
-                job.upstairs_uuid,
-                job.ds_id,
-                data.freeze(),
-                result,
-            ))
+        /*
+        fw.send(Message::ReadResponse(
+            job.upstairs_uuid,
+            job.ds_id,
+            data.freeze(),
+            result,
+        ))
+        .await?;
+        ds.complete_work(job.ds_id, false);
+
+        /* Write */
+
+        fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
             .await?;
-            ds.complete_work(job.ds_id, false);
+        ds.complete_work(job.ds_id, false);
 
-            /* Write */
-
-            fw.send(Message::WriteAck(job.upstairs_uuid, job.ds_id, result))
-                .await?;
-            ds.complete_work(job.ds_id, false);
-
-            fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
-                .await?;
-            ds.complete_work(job.ds_id, true);
-            */
+        fw.send(Message::FlushAck(job.upstairs_uuid, job.ds_id, result))
+            .await?;
+        ds.complete_work(job.ds_id, true);
+        */
     }
 }
 
@@ -883,7 +883,6 @@ async fn resp_loop(
     mut another_upstairs_active_rx: mpsc::Receiver<u64>,
     upstairs_uuid: Uuid,
 ) -> Result<()> {
-
     // Spawn async task to ACK work
     let (ack_ready_tx, ack_ready_rx) = mpsc::channel(1);
     let adsc = Arc::clone(&ads);
@@ -1303,7 +1302,9 @@ impl Work {
                 panic!("Old Upstairs Job in ack_work!");
             }
 
-            if job.state == WorkState::AckReady || job.state == WorkState::BadUUID {
+            if job.state == WorkState::AckReady
+                || job.state == WorkState::BadUUID
+            {
                 result.push(job.ds_id);
             }
         }
