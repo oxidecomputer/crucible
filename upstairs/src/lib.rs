@@ -3780,7 +3780,7 @@ async fn process_new_io(
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Arg {
     up_count: u32,
     ds_count: u32,
