@@ -86,6 +86,25 @@ impl Encoder<Message> for CrucibleEncoder {
     }
 }
 
+impl Encoder<&Message> for CrucibleEncoder {
+    type Error = anyhow::Error;
+
+    fn encode(
+        &mut self,
+        m: &Message,
+        dst: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        let serialized_len: usize = bincode::serialized_size(&m)? as usize;
+        let len = serialized_len + 4;
+
+        dst.reserve(len);
+        dst.put_u32_le(len as u32);
+        bincode::serialize_into(dst.writer(), &m)?;
+
+        Ok(())
+    }
+}
+
 pub struct CrucibleDecoder {}
 
 impl CrucibleDecoder {

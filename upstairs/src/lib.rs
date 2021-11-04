@@ -589,7 +589,7 @@ async fn proc(
                 let response = f.transpose()?;
 
                 // When the downstairs responds, push the deadlines
-                if let Some(_) = response {
+                if response.is_some() {
                     timeout_deadline = deadline_secs(50);
                     ping_interval = deadline_secs(5);
                 }
@@ -850,7 +850,7 @@ async fn cmd_loop(
                 let response = f.transpose()?;
 
                 // When the downstairs responds, push the deadlines
-                if let Some(_) = response {
+                if response.is_some() {
                     timeout_deadline = deadline_secs(50);
                     ping_interval = deadline_secs(10);
                 }
@@ -894,6 +894,11 @@ async fn cmd_loop(
                 }
             }
             _ = sleep_until(more_work_interval), if more_work => {
+                println!(
+                    "[{}] flow control sending more work",
+                    up_coms.client_id
+                );
+
                 let more = io_send(
                                 up, &mut fw, up_coms.client_id, lossy
                             ).await?;
