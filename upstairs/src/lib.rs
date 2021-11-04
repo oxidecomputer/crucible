@@ -2883,22 +2883,42 @@ fn test_buffer_len_over_block_size() {
  */
 #[derive(Debug)]
 enum BlockOp {
-    Read { offset: Block, data: Buffer },
-    Write { offset: Block, data: Bytes },
+    Read {
+        offset: Block,
+        data: Buffer,
+    },
+    Write {
+        offset: Block,
+        data: Bytes,
+    },
     Flush,
     GoActive,
     // Query ops
-    QueryBlockSize { data: Arc<Mutex<u64>> },
-    QueryTotalSize { data: Arc<Mutex<u64>> },
-    QueryUpstairsActive { data: Arc<Mutex<bool>> },
-    QueryUpstairsUuid { data: Arc<Mutex<Uuid>> },
+    QueryBlockSize {
+        data: Arc<Mutex<u64>>,
+    },
+    QueryTotalSize {
+        data: Arc<Mutex<u64>>,
+    },
+    QueryUpstairsActive {
+        data: Arc<Mutex<bool>>,
+    },
+    QueryUpstairsUuid {
+        data: Arc<Mutex<Uuid>>,
+    },
     // Begin testing options.
-    QueryExtentSize { data: Arc<Mutex<Block>> },
-    QueryWorkQueue { data: Arc<Mutex<usize>> },
+    QueryExtentSize {
+        data: Arc<Mutex<Block>>,
+    },
+    QueryWorkQueue {
+        data: Arc<Mutex<usize>>,
+    },
     // Send an update to all tasks that there is work on the queue.
     Commit,
     // Show internal work queue, return outstanding IO requests.
-    ShowWork { data: Arc<Mutex<WQCounts>> },
+    ShowWork {
+        data: Arc<Mutex<WQCounts>>
+    },
 }
 
 /*
