@@ -110,6 +110,7 @@ struct RegionInfo {
     total_size: u64,
     total_blocks: usize,
     write_count: Vec<u32>,
+    max_block_io: usize,
 }
 
 /*
@@ -129,9 +130,19 @@ fn get_region_info(
     let total_size = guest.query_total_size()?;
     let total_blocks = (total_size / block_size) as usize;
 
+    /*
+     * Limit the max IO size (in blocks) to be 1M or the size
+     * of the volume, whichever is smaller
+     */
+    const MAX_IO_BYTES: usize = 1 * 1024 * 1024;
+    let mut max_block_io = MAX_IO_BYTES / block_size as usize;
+    if total_blocks < max_block_io as usize {
+        max_block_io = total_blocks as usize;
+    }
+
     println!(
-        "Region has: es:{:?}  bs:{}  ts:{}  tb:{}",
-        extent_size.value, block_size, total_size, total_blocks
+        "Region has: es:{:?}  bs:{}  ts:{}  tb:{} max_io:{}",
+        extent_size.value, block_size, total_size, total_blocks, max_block_io,
     );
 
     /*
@@ -146,6 +157,7 @@ fn get_region_info(
         total_size,
         total_blocks,
         write_count,
+        max_block_io,
     };
     /*
      * If requested, fill the write count from a provided file.
@@ -507,7 +519,7 @@ fn validate_vec(
  * Write then read (and verify) to every possible block, with every size that
  * block can possibly support.
  * I named it balloon because each loop on a block "balloons" from the
- * minimum IO size to the largest possible.
+ * minimum IO size to the largest possible IO size.
  */
 async fn balloon_workload(
     guest: &Arc<Guest>,
@@ -519,7 +531,7 @@ async fn balloon_workload(
          * have, given our starting block and the total number of blocks
          * We always have at least one block, and possibly more.
          */
-        for size in 1..=(ri.total_blocks - block_index) {
+        for size in 1..=(ri.max_block_io - block_index) {
             /*
              * Update the write count for all blocks we plan to write to.
              */
@@ -536,6 +548,7 @@ async fn balloon_workload(
             let offset =
                 Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
+            println!("IO at block:{}  size in blocks:{}", block_index, size);
             let mut waiter = guest.write(offset, data)?;
             waiter.block_wait()?;
 
@@ -797,12 +810,12 @@ async fn rand_workload(
     /*
      * TODO: Let the user select the number of loops
      */
-    for _ in 0..count {
+    for c in 0..count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
          * entire region.
          */
-        let size = rng.gen_range(1..=ri.total_blocks) as usize;
+        let size = rng.gen_range(1..=ri.max_block_io) as usize;
 
         /*
          * Once we have our IO size, decide where the starting offset should
@@ -828,10 +841,13 @@ async fn rand_workload(
         let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
         let data = Bytes::from(vec);
 
-        if count < 10 {
-            // When count is small, print out the IO info
-            println!("IO at block {}, len:{}", offset.value, data.len());
-        }
+        println!(
+            "{}/{} IO at block {}, len:{}",
+            c,
+            count,
+            offset.value,
+            data.len()
+        );
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
 
