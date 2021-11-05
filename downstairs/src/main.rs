@@ -1408,6 +1408,15 @@ impl Work {
         }
     }
 
+    /*
+     * This method calls into the Downstair's region and performs the read /
+     * write / flush action. A reference to Downstairs is required to do this so
+     * that the job can continue to be owned by Work.
+     *
+     * If by the time this job_id is processed here the job is no longer on the
+     * active work queue, return None. If this happens no response will have
+     * been put onto the response queue.
+     */
     async fn do_work(
         &mut self,
         ds: &Downstairs,
