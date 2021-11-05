@@ -586,15 +586,11 @@ async fn proc(
                 fw.send(Message::PromoteToActive(up.uuid)).await?;
             }
             f = fr.next() => {
-                let response = f.transpose()?;
-
                 // When the downstairs responds, push the deadlines
-                if response.is_some() {
-                    timeout_deadline = deadline_secs(50);
-                    ping_interval = deadline_secs(5);
-                }
+                timeout_deadline = deadline_secs(50);
+                ping_interval = deadline_secs(5);
 
-                match response {
+                match f.transpose()? {
                     None => {
                         // hung up
                         up.ds_missing(up_coms.client_id);
@@ -847,15 +843,11 @@ async fn cmd_loop(
              */
             biased;
             f = fr.next() => {
-                let response = f.transpose()?;
-
                 // When the downstairs responds, push the deadlines
-                if response.is_some() {
-                    timeout_deadline = deadline_secs(50);
-                    ping_interval = deadline_secs(10);
-                }
+                timeout_deadline = deadline_secs(50);
+                ping_interval = deadline_secs(10);
 
-                match response {
+                match f.transpose()? {
                     None => {
                         return Ok(())
                     },

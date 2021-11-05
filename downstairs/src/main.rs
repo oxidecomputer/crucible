@@ -891,14 +891,10 @@ async fn resp_loop(
                 return Ok(());
             }
             new_read = fr.next() => {
-                let response = new_read.transpose()?;
-
                 // When the downstairs responds, push the deadlines
-                if response.is_some() {
-                    more_work_interval = deadline_secs(5);
-                }
+                more_work_interval = deadline_secs(5);
 
-                match response {
+                match new_read.transpose()? {
                     None => {
                         let mut ds = ads.lock().await;
 
