@@ -1002,7 +1002,7 @@ impl Downstairs {
                 Ok(self.work.lock().await)
             }
         } else {
-            Ok(self.work.lock().await)
+            panic!("cannot grab work lock, nothing is active!");
         }
     }
 
