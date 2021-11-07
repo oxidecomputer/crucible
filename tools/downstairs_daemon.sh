@@ -14,7 +14,13 @@
 
 set -o pipefail
 
-#
+# Control-C to cleanup.
+trap ctrl_c INT
+function ctrl_c() {
+    echo "Stopping at your request"
+    touch "$testdir"/stop
+}
+
 # This loop will sleep some random time, then kill a downstairs.
 # We currently pick
 downstairs_restart() {
@@ -67,15 +73,17 @@ downstairs_daemon() {
                 -d var/"$port">> "$outfile" 2> "$errfile"
         res=$?
         if [[ $res -ne 143 ]]; then
-            echo "Downstairs $port had bad exit $res"
-            exit 1
+            echo "Downstairs $port exited with: $res"
+            exit $res
         fi
         echo "$(date) Downstairs ${port} ended"
+
         sleep 1
         if [[ -f ${testdir}/stop ]]; then
             break
         fi
         echo "$(date) Restaring downstairs ${port}"
+
     done
     echo "$(date) downstairs ${port} exit on request"
 }
@@ -94,7 +102,7 @@ if ! cargo build; then
     exit 1
 fi
 
-if [[ ! -d var/3801 ]] || [[ ! -d var/3801 ]] || [[ ! -d var/3801 ]]; then
+if [[ ! -d var/3801 ]] || [[ ! -d var/3802 ]] || [[ ! -d var/3803 ]]; then
     echo "Missing var/380* directories"
     echo "This test requires you to have created a region at var/380*"
     exit 1
@@ -120,10 +128,8 @@ dsd_pid[1]=$!
 downstairs_daemon 3803 2>/dev/null &
 dsd_pid[2]=$!
 
+echo "Downstairs have been started"
 sleep 1
-echo "Downstairs started, give you a chance to start the test"
-echo "Press return to begin the random restart of downstairs"
-read ignored
 
 downstairs_restart &
 dsd_pid[3]=$!
@@ -133,8 +139,12 @@ dsd_pid[3]=$!
 while :; do
     for pid in ${dsd_pid[*]}; do
         if ! ps -p $pid > /dev/null; then
-            echo "$pid is gone, check $testdir for errors"
-            touch ${testdir}/stop
+            if [[ -f ${testdir}/stop ]]; then
+                echo "Stop requested for $pid"
+            else
+                echo "Downstairs PID: $pid is gone, check $testdir for errors"
+                touch ${testdir}/stop
+            fi
         fi
     done
     if [[ -f ${testdir}/stop ]]; then
@@ -150,7 +160,7 @@ for pid in ${ds}; do
     kill "$pid"
 done
 
-echo "Downstairs should all now stop for good"
+echo "Downstairs will all now stop for good"
 for pid in ${dsd_pid[*]}; do
     kill "$pid"
     wait "$pid"
