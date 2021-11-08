@@ -656,7 +656,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                             if ds.is_active(upstairs_uuid) {
                                 println!("upstairs {:?} was previously \
                                     active, clearing", upstairs_uuid);
-                                ds.clear_active();
+                                ds.clear_active().await;
                             }
                         } else {
                             println!(
@@ -906,7 +906,7 @@ async fn resp_loop(
                         if ds.is_active(upstairs_uuid) {
                             println!("upstairs {:?} was previously \
                                 active, clearing", upstairs_uuid);
-                            ds.clear_active();
+                            ds.clear_active().await;
                         }
 
                         return Ok(());
@@ -1199,8 +1199,14 @@ impl Downstairs {
         self.active_upstairs.as_ref().map(|e| e.0)
     }
 
-    fn clear_active(&mut self) {
+    async fn clear_active(&mut self) {
+        let mut work = self.work.lock().await;
+
         self.active_upstairs = None;
+
+        work.active = HashMap::new();
+        work.completed = Vec::with_capacity(32);
+        work.last_flush = 0;
     }
 
     async fn unblock_jobs(
