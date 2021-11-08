@@ -38,6 +38,9 @@ pub struct Opt {
 
     #[structopt(short, long)]
     key: Option<String>,
+
+    #[structopt(short, long, default_value = "0")]
+    gen: u64,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -58,6 +61,7 @@ fn main() -> Result<()> {
         lossy: false,
         key: opt.key,
     };
+    let mut generation_number = opt.gen;
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {
         let tracer = opentelemetry_jaeger::new_pipeline()
@@ -114,7 +118,8 @@ fn main() -> Result<()> {
     let mut cpf_idx = 0;
 
     println!("Handing off to CPF {}", cpf_idx);
-    cpfs[cpf_idx].activate()?;
+    cpfs[cpf_idx].activate(generation_number)?;
+    generation_number += 1;
     println!(
         "Handed off to CPF {} {:?}",
         cpf_idx,
@@ -143,7 +148,8 @@ fn main() -> Result<()> {
             println!("Handing off to CPF {}", cpf_idx);
 
             let cpf = &mut cpfs[cpf_idx];
-            cpf.activate()?;
+            cpf.activate(generation_number)?;
+            generation_number += 1;
 
             println!("Handed off to CPF {} {:?}", cpf_idx, cpf.upstairs_uuid());
 

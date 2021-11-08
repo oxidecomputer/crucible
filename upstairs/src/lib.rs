@@ -575,12 +575,29 @@ async fn proc(
                 fw.send(Message::Ruok).await?;
                 ping_interval = deadline_secs(5);
             }
-            _ = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
+            r = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
+                /*
+                 * The activating guest sends us the generation number.
+                 * TODO: Update the promote to active message to send
+                 * the generation number along with the UUID for the
+                 * downstairs to validate.
+                 */
+                match r {
+                    Ok(_) => {
+                        let gen = up_coms.ds_active_rx.borrow();
+                        println!("[{}] received activate with gen {:?}",
+                            up_coms.client_id, *gen);
+                    }
+                    Err(e) => {
+                        println!("[{}] received activate error {:?}",
+                            up_coms.client_id, e);
+                    }
+                }
                 /*
                  * This check must only be done when the proper
                  * negotiation step is reached.  If we check too soon, then
                  * we can be out of order.
-                *
+                 *
                  * Promote self to active when message arrives from the Guest.
                  */
                 fw.send(Message::PromoteToActive(up.uuid)).await?;
@@ -967,7 +984,7 @@ struct UpComs {
      * This channel is used to notify the proc task that it's time to
      * promote this downstairs to active.
      */
-    ds_active_rx: watch::Receiver<bool>,
+    ds_active_rx: watch::Receiver<u64>,
 }
 
 /*
@@ -1736,6 +1753,12 @@ pub struct Upstairs {
     uuid: Uuid,
 
     /*
+     * Upstairs Generation number.
+     * Will always increase each time an Upstairs starts.
+     */
+    _generation: u64,
+
+    /*
      * The guest struct keeps track of jobs accepted from the Guest as they
      * progress through crucible. A single job submitted can produce
      * multiple downstairs requests.
@@ -1838,6 +1861,7 @@ impl Upstairs {
         Arc::new(Upstairs {
             active: Mutex::new(false),
             uuid: Uuid::new_v4(), // XXX get from Nexus?
+            _generation: 0,       // XXX Also get from Nexus?
             guest,
             downstairs: Mutex::new(Downstairs::default()),
             flush_info: Mutex::new(FlushInfo::new()),
@@ -2878,7 +2902,7 @@ enum BlockOp {
     Read { offset: Block, data: Buffer },
     Write { offset: Block, data: Bytes },
     Flush,
-    GoActive,
+    GoActive { gen: u64 },
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
@@ -3449,8 +3473,8 @@ impl Guest {
         *active
     }
 
-    pub fn activate(&self) -> Result<(), CrucibleError> {
-        let mut waiter = self.send(BlockOp::GoActive);
+    pub fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
+        let mut waiter = self.send(BlockOp::GoActive { gen });
         waiter.block_wait()?;
 
         // XXX Is this the right number of retries? The right delay between
@@ -3583,7 +3607,7 @@ pub struct Target {
     #[allow(dead_code)]
     target: SocketAddrV4,
     ds_work_tx: watch::Sender<u64>,
-    ds_active_tx: watch::Sender<bool>,
+    ds_active_tx: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
@@ -3613,10 +3637,11 @@ fn send_work(t: &[Target], val: u64) {
  * Send active to all the targets.
  * If a send fails, print an error.
  */
-fn send_active(t: &[Target]) {
+fn send_active(t: &[Target], gen: u64) {
     for d_client in t.iter() {
         // println!("#### send to client {:?}", d_client.target);
-        let res = d_client.ds_active_tx.send(true);
+        let res = d_client.ds_active_tx.send(gen);
+        println!("res: {:?}", res);
         if let Err(e) = res {
             println!(
                 "#### error {:#?} Failed 'active' notification to {:?}",
@@ -3729,8 +3754,8 @@ async fn process_new_io(
             send_work(dst, *lastcast);
             *lastcast += 1;
         }
-        BlockOp::GoActive => {
-            send_active(dst);
+        BlockOp::GoActive { gen } => {
+            send_active(dst, gen);
             let _ = req.send.send(Ok(()));
         }
         // Query ops
@@ -3848,7 +3873,7 @@ async fn up_listen(
                 req = up.guest.recv() => {
                     // Wait for the pre-activate related messages
                     if matches!(req.op,
-                        BlockOp::GoActive |
+                        BlockOp::GoActive { gen: _ } |
                         BlockOp::QueryUpstairsActive { data: _ } |
                         BlockOp::QueryUpstairsUuid { data: _ }
                     ) {
@@ -4054,7 +4079,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
             let (ds_work_tx, ds_work_rx) = watch::channel(100);
 
             // Notify when it's time to go active.
-            let (ds_active_tx, ds_active_rx) = watch::channel(false);
+            let (ds_active_tx, ds_active_rx) = watch::channel(0);
 
             let up = Arc::clone(&up);
             let t0 = *dst;

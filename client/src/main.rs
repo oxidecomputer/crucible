@@ -68,6 +68,9 @@ pub struct Opt {
     #[structopt(short, long)]
     key: Option<String>,
 
+    #[structopt(short, long, default_value = "0")]
+    gen: u64,
+
     /*
      * For tests that support it, load the expected write count from
      * the provided file.
@@ -234,7 +237,7 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    guest.activate()?;
+    guest.activate(opt.gen)?;
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
