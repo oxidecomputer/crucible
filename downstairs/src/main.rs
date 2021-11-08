@@ -1277,6 +1277,8 @@ impl Work {
             }
         }
 
+        result.sort_unstable();
+
         result
     }
 
