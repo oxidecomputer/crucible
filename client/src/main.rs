@@ -1107,7 +1107,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let final_offset = ri.total_size - ri.block_size;
 
     let mut my_offset: u64 = 0;
-    for my_count in 1..15 {
+    for my_count in 1..150 {
         let mut waiterlist = Vec::new();
 
         /*
@@ -1153,9 +1153,11 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         }
 
         guest.show_work()?;
-        println!("Loop:{} send a final flush and wait", my_count);
-        let mut flush_waiter = guest.flush()?;
-        flush_waiter.block_wait()?;
+        if random() && random() {
+            println!("Loop:{} send a final flush and wait", my_count);
+            let mut flush_waiter = guest.flush()?;
+            flush_waiter.block_wait()?;
+        }
 
         println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
         for wa in waiterlist.iter_mut() {
