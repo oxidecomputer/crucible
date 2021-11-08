@@ -2626,6 +2626,29 @@ pub enum IOop {
     },
 }
 
+impl IOop {
+    pub fn deps(&self) -> &Vec<u64> {
+        match &self {
+            IOop::Write {
+                dependencies,
+                eid: _eid,
+                offset: _offset,
+                data: _data,
+            } => dependencies,
+            IOop::Flush {
+                dependencies,
+                flush_number: _flush_number,
+            } => dependencies,
+            IOop::Read {
+                dependencies,
+                eid: _eid,
+                offset: _offset,
+                num_blocks: _num_blocks,
+            } => dependencies,
+        }
+    }
+}
+
 /*
  * The various states an IO can be in when it is on the work hashmap.
  * There is a state that is unique to each downstairs task we have and

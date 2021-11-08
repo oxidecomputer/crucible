@@ -1307,24 +1307,7 @@ impl Work {
                  * holding this locked, check the dep list if there is one
                  * and make sure all dependencies are completed.
                  */
-                let dep_list = match &job.work {
-                    IOop::Write {
-                        dependencies,
-                        eid: _eid,
-                        offset: _offset,
-                        data: _data,
-                    } => dependencies,
-                    IOop::Flush {
-                        dependencies,
-                        flush_number: _flush_number,
-                    } => dependencies,
-                    IOop::Read {
-                        dependencies,
-                        eid: _eid,
-                        offset: _offset,
-                        num_blocks: _num_blocks,
-                    } => dependencies,
-                };
+                let dep_list = job.work.deps();
 
                 /*
                  * See which of our dependencies are met.
