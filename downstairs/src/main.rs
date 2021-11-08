@@ -1026,7 +1026,7 @@ impl Downstairs {
         };
 
         let mut work = self.work_lock(upstairs_uuid).await?;
-        work.active.insert(ds_id, dsw);
+        work.add_work(ds_id, dsw);
 
         Ok(())
     }
@@ -1280,10 +1280,15 @@ impl Work {
         result
     }
 
+    fn add_work(&mut self, ds_id: u64, dsw: DownstairsWork) {
+        self.active.insert(ds_id, dsw);
+    }
+
     /**
      * If the requested job is still new, and the dependencies are all met,
      * return the DownstairsWork struct and let the caller take action
      * with it, leaving the state as InProgress.
+     *
      * If this job is not new, then just return none.  This can be okay as
      * we build or work list with the new_work fn above, but we drop and
      * re-aquire the Work mutex and things can change.
