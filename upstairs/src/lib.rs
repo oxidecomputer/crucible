@@ -1389,7 +1389,7 @@ impl Downstairs {
                 offset: _,
                 num_blocks: _,
             } => {
-                cdt_gw_read_end!(|| (gw_id));
+                cdt::gw_read_end!(|| (gw_id));
             }
             IOop::Write {
                 dependencies: _,
@@ -1397,13 +1397,13 @@ impl Downstairs {
                 offset: _,
                 data: _,
             } => {
-                cdt_gw_write_end!(|| (gw_id));
+                cdt::gw_write_end!(|| (gw_id));
             }
             IOop::Flush {
                 dependencies: _,
                 flush_number: _,
             } => {
-                cdt_gw_flush_end!(|| (gw_id));
+                cdt::gw_flush_end!(|| (gw_id));
             }
         }
     }
@@ -1956,7 +1956,7 @@ impl Upstairs {
             None,
         );
         gw.active.insert(gw_id, new_gtos);
-        cdt_gw_flush_start!(|| (gw_id));
+        cdt::gw_flush_start!(|| (gw_id));
 
         downstairs.enqueue(fl);
 
@@ -2071,7 +2071,7 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt_gw_write_start!(|| (gw_id));
+        cdt::gw_write_start!(|| (gw_id));
 
         for wr in new_ds_work {
             downstairs.enqueue(wr);
@@ -2182,7 +2182,7 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt_gw_read_start!(|| (gw_id));
+        cdt::gw_read_start!(|| (gw_id));
 
         for wr in new_ds_work {
             downstairs.enqueue(wr);
@@ -3786,7 +3786,7 @@ pub struct Arg {
  */
 #[inline]
 fn stat_update(up: &Arc<Upstairs>, msg: &str) {
-    cdt_up_status!(|| {
+    cdt::up_status!(|| {
         let arg = Arg {
             up_count: up.up_work_active(),
             ds_count: up.ds_work_active(),
