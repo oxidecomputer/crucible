@@ -1359,11 +1359,7 @@ impl Work {
                 None
             }
         } else {
-            /*
-             * This ID is no longer a valid job id.  That would be ok
-             * if there a multiple things running at the same time.
-             */
-            None
+            panic!("This ID is no longer a valid job id");
         }
     }
 
