@@ -801,7 +801,6 @@ async fn resp_loop(
     upstairs_uuid: Uuid,
 ) -> Result<()> {
     let mut lossy_interval = deadline_secs(5);
-    let mut more_work_interval = deadline_secs(5);
 
     // XXX flow control size to 100?
     let (_job_channel_tx, job_channel_rx) = channel(100);
@@ -836,15 +835,6 @@ async fn resp_loop(
                 }
                 lossy_interval = deadline_secs(5);
             }
-            _ = sleep_until(more_work_interval) => {
-                /*
-                 * Unblock any stuck jobs. XXX how does this happen?
-                 */
-                let ds = ads.lock().await;
-                ds.unblock_jobs(&job_channel_tx).await?;
-
-                more_work_interval = deadline_secs(5);
-             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
              * XXX Timeouts, timeouts: always wrong!  Some too short and
@@ -879,9 +869,6 @@ async fn resp_loop(
                 return Ok(());
             }
             new_read = fr.next() => {
-                // When the downstairs responds, push the deadlines
-                more_work_interval = deadline_secs(5);
-
                 match new_read.transpose()? {
                     None => {
                         let mut ds = ads.lock().await;
