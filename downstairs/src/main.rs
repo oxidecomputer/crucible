@@ -368,7 +368,7 @@ async fn push_next_jobs(
          * to verify that the job is still in a new or dep wait
          * state.
          */
-        let job = ds.in_progress(*new_id).await;
+        let job = ds.in_progress(*new_id, &jobs).await;
         match job {
             Some(job) => {
                 jobs.push(job);
@@ -1019,9 +1019,15 @@ impl Downstairs {
         Ok(())
     }
 
-    async fn in_progress(&self, ds_id: u64) -> Option<u64> {
+    async fn in_progress(
+        &self,
+        ds_id: u64,
+        next_jobs_batch: &[u64],
+    ) -> Option<u64> {
         let mut work = self.work.lock().await;
-        if let Some((job_id, upstairs_uuid)) = work.in_progress(ds_id) {
+        if let Some((job_id, upstairs_uuid)) =
+            work.in_progress(ds_id, next_jobs_batch)
+        {
             if !self.is_active(upstairs_uuid) {
                 // Don't return a job with the wrong uuid! `promote_to_active`
                 // should have removed any active jobs, and
@@ -1249,7 +1255,11 @@ impl Work {
      * we build or work list with the new_work fn above, but we drop and
      * re-aquire the Work mutex and things can change.
      */
-    fn in_progress(&mut self, ds_id: u64) -> Option<(u64, Uuid)> {
+    fn in_progress(
+        &mut self,
+        ds_id: u64,
+        next_jobs_batch: &[u64],
+    ) -> Option<(u64, Uuid)> {
         /*
          * Once we support multiple threads, we can obtain a ds_id that
          * looked valid when we made a list of jobs, but something
@@ -1280,7 +1290,19 @@ impl Work {
                         continue;
                     }
 
-                    if !self.completed.contains(dep) {
+                    let dep_completed = self.completed.contains(dep);
+
+                    /*
+                     * Outside of this, jobs are accumulating on a list to be
+                     * run next. This can be considered to unblock jobs
+                     * because they are run sequentially,
+                     * and anything in that list will run
+                     * first because push_next_jobs appends jobs.
+                     */
+                    let dep_going_to_run_in_next_batch =
+                        next_jobs_batch.contains(dep);
+
+                    if !(dep_completed || dep_going_to_run_in_next_batch) {
                         deps_outstanding.push(*dep);
                     }
                 }
@@ -1391,6 +1413,15 @@ impl Work {
 
         assert_eq!(job.state, WorkState::InProgress);
         assert_eq!(job_id, job.ds_id);
+
+        // validate that deps are done
+        let dep_list = job.work.deps();
+        for dep in dep_list {
+            let last_flush_satisfied = dep <= &self.last_flush;
+            let complete_satisfied = self.completed.contains(dep);
+
+            assert!(last_flush_satisfied || complete_satisfied);
+        }
 
         match &job.work {
             IOop::Read {
@@ -1659,24 +1690,58 @@ async fn main() -> Result<()> {
 mod test {
     use super::*;
 
-    fn add_work(work: &mut Work, uuid: Uuid, ds_id: u64, deps: Vec<u64>) {
+    fn add_work(
+        work: &mut Work,
+        uuid: Uuid,
+        ds_id: u64,
+        deps: Vec<u64>,
+        is_flush: bool,
+    ) {
         work.add_work(
             ds_id,
             DownstairsWork {
                 upstairs_uuid: uuid,
                 ds_id: ds_id,
-                work: IOop::Read {
-                    dependencies: deps,
-                    eid: 1,
-                    offset: Block::new_512(1),
-                    num_blocks: 1,
+                work: if is_flush {
+                    IOop::Flush {
+                        dependencies: deps,
+                        flush_number: 10,
+                    }
+                } else {
+                    IOop::Read {
+                        dependencies: deps,
+                        eid: 1,
+                        offset: Block::new_512(1),
+                        num_blocks: 1,
+                    }
                 },
                 state: WorkState::New,
             },
         );
     }
 
-    fn complete(work: &mut Work, ds_id: u64, is_flush: bool) {
+    fn complete(work: &mut Work, ds_id: u64) {
+        let is_flush = {
+            let job = work.active.get(&ds_id).unwrap();
+
+            // validate that deps are done
+            let dep_list = job.work.deps();
+            for dep in dep_list {
+                let last_flush_satisfied = dep <= &work.last_flush;
+                let complete_satisfied = work.completed.contains(dep);
+
+                assert!(last_flush_satisfied || complete_satisfied);
+            }
+
+            matches!(
+                job.work,
+                IOop::Flush {
+                    dependencies: _,
+                    flush_number: _
+                }
+            )
+        };
+
         let _ = work.active.remove(&ds_id);
 
         if is_flush {
@@ -1687,25 +1752,84 @@ mod test {
         }
     }
 
+    fn test_push_next_jobs(work: &mut Work, uuid: Uuid) -> Vec<u64> {
+        let mut jobs = vec![];
+        let mut new_work = work.new_work(uuid);
+
+        new_work.sort_unstable();
+
+        for new_id in new_work.iter() {
+            let job = work.in_progress(*new_id, &new_work);
+            match job {
+                Some(job) => {
+                    jobs.push(job.0);
+                }
+                None => {
+                    continue;
+                }
+            }
+        }
+
+        for job in &jobs {
+            assert_eq!(
+                work.active.get(job).unwrap().state,
+                WorkState::InProgress
+            );
+        }
+
+        jobs
+    }
+
+    fn test_do_work(work: &mut Work, jobs: Vec<u64>) {
+        for job_id in jobs {
+            complete(work, job_id);
+        }
+    }
+
     #[test]
     fn you_had_one_job() {
         let mut work = Work::default();
         let uuid = Uuid::new_v4();
 
-        add_work(&mut work, uuid, 1000, vec![]);
+        add_work(&mut work, uuid, 1000, vec![], false);
 
         assert_eq!(work.new_work(uuid), vec![1000]);
 
-        assert_eq!(work.in_progress(1000), Some((1000, uuid)));
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
 
-        assert_eq!(
-            work.active.get(&1000).unwrap().state,
-            WorkState::InProgress
-        );
+        test_do_work(&mut work, next_jobs);
 
-        complete(&mut work, 1000, false);
+        assert_eq!(work.completed, vec![1000]);
 
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+    }
+
+    #[test]
+    fn jobs_independent() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add two independent jobs
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![], false);
+
+        // new_work returns all new jobs
+        assert_eq!(work.new_work(uuid), vec![1000, 1001]);
+
+        // should push both, they're independent
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001]);
+
+        // new work returns only jobs in new or dep wait
         assert!(work.new_work(uuid).is_empty());
+
+        // do work
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001]);
+
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
     }
 
     #[test]
@@ -1714,33 +1838,24 @@ mod test {
         let uuid = Uuid::new_v4();
 
         // Add two jobs, one blocked on another
-        add_work(&mut work, uuid, 1000, vec![]);
-        add_work(&mut work, uuid, 1001, vec![1000]);
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
 
         // new_work returns all new jobs
         assert_eq!(work.new_work(uuid), vec![1000, 1001]);
 
-        // a loop in push_next_jobs tries to in_progress each one
-        assert_eq!(work.in_progress(1000), Some((1000, uuid)));
-        assert_eq!(work.in_progress(1001), None); // blocked
-
-        // one is in progress, one is dep wait
-        assert_eq!(
-            work.active.get(&1000).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
+        // should push both, because running in order will satisfy deps
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001]);
 
         // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1001]);
+        assert!(work.new_work(uuid).is_empty());
 
-        // complete 1000
-        complete(&mut work, 1000, false);
+        test_do_work(&mut work, next_jobs);
 
-        // once 1000 is complete, 1001 should move to in progress
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.new_work(uuid), vec![1001]);
-        assert_eq!(work.in_progress(1001), Some((1001, uuid)));
+        assert_eq!(work.completed, vec![1000, 1001]);
+
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
     }
 
     #[test]
@@ -1748,62 +1863,22 @@ mod test {
         let mut work = Work::default();
         let uuid = Uuid::new_v4();
 
-        // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![]);
-        add_work(&mut work, uuid, 1001, vec![1000]);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001]);
+        // Add three jobs all blocked on each other in a chain
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
 
         // new_work returns all new jobs
         assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
 
-        // a loop in push_next_jobs tries to in_progress each one
-        assert_eq!(work.in_progress(1000), Some((1000, uuid)));
-        assert_eq!(work.in_progress(1001), None); // blocked
-        assert_eq!(work.in_progress(1002), None); // blocked
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001, 1002]);
 
-        // one is in progress, others are dep wait
-        assert_eq!(
-            work.active.get(&1000).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
+        test_do_work(&mut work, next_jobs);
 
-        // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+        assert_eq!(work.completed, vec![1000, 1001, 1002]);
 
-        // complete 1000
-        complete(&mut work, 1000, false);
-
-        // once 1000 is complete, 1001 should move to in progress
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
-        assert_eq!(work.in_progress(1001), Some((1001, uuid)));
-        assert_eq!(work.in_progress(1002), None);
-
-        assert_eq!(
-            work.active.get(&1001).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1002]);
-
-        // complete 1001
-        complete(&mut work, 1001, false);
-
-        // once 1001 is complete, 1002 should move to in progress
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        assert_eq!(work.new_work(uuid), vec![1002]);
-        assert_eq!(work.in_progress(1002), Some((1002, uuid)));
-        assert_eq!(
-            work.active.get(&1002).unwrap().state,
-            WorkState::InProgress
-        );
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
     }
 
     #[test]
@@ -1811,62 +1886,23 @@ mod test {
         let mut work = Work::default();
         let uuid = Uuid::new_v4();
 
-        // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![]);
-        add_work(&mut work, uuid, 1001, vec![1000]);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001]);
+        // Add three jobs all blocked on each other in a chain, first is flush
+        add_work(&mut work, uuid, 1000, vec![], true);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
 
         // new_work returns all new jobs
         assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
 
-        // a loop in push_next_jobs tries to in_progress each one
-        assert_eq!(work.in_progress(1000), Some((1000, uuid)));
-        assert_eq!(work.in_progress(1001), None); // blocked
-        assert_eq!(work.in_progress(1002), None); // blocked
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001, 1002]);
 
-        // one is in progress, others are dep wait
-        assert_eq!(
-            work.active.get(&1000).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
+        test_do_work(&mut work, next_jobs);
 
-        // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+        assert_eq!(work.last_flush, 1000);
+        assert_eq!(work.completed, vec![1001, 1002]);
 
-        // complete 1000 - let's pretend it is a flush
-        complete(&mut work, 1000, true);
-
-        // once 1000 is complete, 1001 should move to in progress
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
-        assert_eq!(work.in_progress(1001), Some((1001, uuid)));
-        assert_eq!(work.in_progress(1002), None);
-
-        assert_eq!(
-            work.active.get(&1001).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1002]);
-
-        // complete 1001
-        complete(&mut work, 1001, false);
-
-        // once 1001 is complete, 1002 should move to in progress
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        assert_eq!(work.new_work(uuid), vec![1002]);
-        assert_eq!(work.in_progress(1002), Some((1002, uuid)));
-        assert_eq!(
-            work.active.get(&1002).unwrap().state,
-            WorkState::InProgress
-        );
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
     }
 
     #[test]
@@ -1874,62 +1910,23 @@ mod test {
         let mut work = Work::default();
         let uuid = Uuid::new_v4();
 
-        // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![]);
-        add_work(&mut work, uuid, 1001, vec![1000]);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001]);
+        // Add three jobs all blocked on each other in a chain, first is flush
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], true);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
 
         // new_work returns all new jobs
         assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
 
-        // a loop in push_next_jobs tries to in_progress each one
-        assert_eq!(work.in_progress(1000), Some((1000, uuid)));
-        assert_eq!(work.in_progress(1001), None); // blocked
-        assert_eq!(work.in_progress(1002), None); // blocked
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001, 1002]);
 
-        // one is in progress, others are dep wait
-        assert_eq!(
-            work.active.get(&1000).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
+        test_do_work(&mut work, next_jobs);
 
-        // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+        assert_eq!(work.last_flush, 1001);
+        assert_eq!(work.completed, vec![1002]);
 
-        // complete 1000
-        complete(&mut work, 1000, false);
-
-        // once 1000 is complete, 1001 should move to in progress
-        assert_eq!(work.active.get(&1001).unwrap().state, WorkState::DepWait);
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
-        assert_eq!(work.in_progress(1001), Some((1001, uuid)));
-        assert_eq!(work.in_progress(1002), None);
-
-        assert_eq!(
-            work.active.get(&1001).unwrap().state,
-            WorkState::InProgress
-        );
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        // new work returns only jobs in new or dep wait
-        assert_eq!(work.new_work(uuid), vec![1002]);
-
-        // complete 1001 - let's pretend it is a flush
-        complete(&mut work, 1001, true);
-
-        // once 1001 is complete, 1002 should move to in progress
-        assert_eq!(work.active.get(&1002).unwrap().state, WorkState::DepWait);
-
-        assert_eq!(work.new_work(uuid), vec![1002]);
-        assert_eq!(work.in_progress(1002), Some((1002, uuid)));
-        assert_eq!(
-            work.active.get(&1002).unwrap().state,
-            WorkState::InProgress
-        );
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
     }
 
     #[test]
@@ -1938,38 +1935,81 @@ mod test {
         let uuid = Uuid::new_v4();
 
         // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![]);
-        add_work(&mut work, uuid, 1001, vec![1000]);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001]);
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
 
         // Downstairs is really fast!
-        complete(&mut work, 1000, false);
-        complete(&mut work, 1001, false);
-        complete(&mut work, 1002, true);
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001, 1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1002);
+        assert!(work.completed.is_empty());
 
         // Upstairs sends a job with these three in deps, not knowing Downstairs
         // has done the jobs already
-        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002]);
-        add_work(&mut work, uuid, 1004, vec![1000, 1001, 1002, 1003]);
+        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+        add_work(&mut work, uuid, 1004, vec![1000, 1001, 1002, 1003], false);
 
         // should still go
-        assert_eq!(work.new_work(uuid), vec![1003, 1004]);
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1003, 1004]);
 
-        assert_eq!(work.in_progress(1003), Some((1003, uuid)));
-        assert_eq!(work.in_progress(1004), None);
+        test_do_work(&mut work, next_jobs);
 
-        complete(&mut work, 1003, true);
+        assert_eq!(work.last_flush, 1002);
+        assert_eq!(work.completed, vec![1003, 1004]);
+    }
 
-        assert_eq!(work.new_work(uuid), vec![1004]);
+    #[test]
+    fn job_dep_not_satisfied() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
 
-        assert_eq!(work.in_progress(1004), Some((1004, uuid)));
+        // Add three jobs all blocked on each other
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
 
-        complete(&mut work, 1004, false);
+        // Add one that can't run yet
+        add_work(&mut work, uuid, 1003, vec![2000], false);
 
-        assert!(work.new_work(uuid).is_empty());
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001, 1002]);
 
-        assert!(work.active.is_empty());
-        assert_eq!(work.last_flush, 1003);
-        assert_eq!(work.completed, vec![1004]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1002);
+        assert!(work.completed.is_empty());
+
+        assert_eq!(work.new_work(uuid), vec![1003]);
+        assert_eq!(work.active.get(&1003).unwrap().state, WorkState::DepWait);
+    }
+
+    #[test]
+    fn two_job_chains() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
+
+        // Add another set of jobs blocked on each other
+        add_work(&mut work, uuid, 2000, vec![], false);
+        add_work(&mut work, uuid, 2001, vec![2000], false);
+        add_work(&mut work, uuid, 2002, vec![2000, 2001], true);
+
+        // should grab all of them
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001, 1002, 2000, 2001, 2002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 2002);
+        assert!(work.completed.is_empty());
     }
 }
