@@ -526,7 +526,7 @@ async fn proc_frame(
      */
     {
         let d = ad.lock().await;
-        d.unblock_jobs(upstairs_uuid, &job_channel_tx).await?;
+        d.unblock_jobs(&job_channel_tx).await?;
     }
 
     Ok(())
@@ -535,14 +535,15 @@ async fn proc_frame(
 async fn do_work_task(
     ads: &mut Arc<Mutex<Downstairs>>,
     mut job_channel_rx: Receiver<u64>,
-    ack_ready_tx: Sender<u64>,
+    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
+    fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
 ) -> Result<()> {
     loop {
         tokio::select! {
             job_id = job_channel_rx.recv() => {
                 match job_id {
                     Some(job_id) => {
-                        let ds = ads.lock().await;
+                        let mut ds = ads.lock().await;
 
                         if ds.lossy && random() && random() {
                             // Add a little time to completion for this
@@ -550,7 +551,17 @@ async fn do_work_task(
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
 
-                        ds.do_work(job_id, &ack_ready_tx).await?;
+                        let m = ds.do_work(job_id).await?;
+
+                        if let Some(m) = m {
+                            ds.complete_work(job_id, m, fw).await?;
+                        }
+
+                        /*
+                         * Immediately unblock jobs that were waiting on this
+                         * one to complete.
+                         */
+                        ds.unblock_jobs(job_channel_tx).await?;
                     }
                     None => {
                         // hung up
@@ -560,20 +571,6 @@ async fn do_work_task(
             }
         }
     }
-}
-
-async fn ack_sender(
-    ads: &Arc<Mutex<Downstairs>>,
-    fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
-    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
-    mut ack_ready_rx: Receiver<u64>,
-) -> Result<()> {
-    while let Some(job_id) = ack_ready_rx.recv().await {
-        let mut ds = ads.lock().await;
-        ds.complete_work(job_id, fw, job_channel_tx).await?;
-    }
-
-    Ok(())
 }
 
 /*
@@ -810,21 +807,12 @@ async fn resp_loop(
     let (_job_channel_tx, job_channel_rx) = channel(100);
     let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
 
-    let (ack_ready_tx, ack_ready_rx) = channel(100);
-
     {
         let mut adc = ads.clone();
-        tokio::spawn(async move {
-            do_work_task(&mut adc, job_channel_rx, ack_ready_tx).await
-        });
-    }
-
-    {
-        let adc = ads.clone();
-        let mut fwc = fw.clone();
         let tx = job_channel_tx.clone();
+        let mut fwc = fw.clone();
         tokio::spawn(async move {
-            ack_sender(&adc, &mut fwc, &tx, ack_ready_rx).await
+            do_work_task(&mut adc, job_channel_rx, &tx, &mut fwc).await
         });
     }
 
@@ -844,7 +832,7 @@ async fn resp_loop(
                 };
                 if lossy {
                     let ds = ads.lock().await;
-                    ds.unblock_jobs(upstairs_uuid, &job_channel_tx).await?;
+                    ds.unblock_jobs(&job_channel_tx).await?;
                 }
                 lossy_interval = deadline_secs(5);
             }
@@ -853,7 +841,7 @@ async fn resp_loop(
                  * Unblock any stuck jobs. XXX how does this happen?
                  */
                 let ds = ads.lock().await;
-                ds.unblock_jobs(upstairs_uuid, &job_channel_tx).await?;
+                ds.unblock_jobs(&job_channel_tx).await?;
 
                 more_work_interval = deadline_secs(5);
              }
@@ -1048,21 +1036,9 @@ impl Downstairs {
     }
 
     /// Given a job ID, do the work for that IO.
-    async fn do_work(
-        &self,
-        job_id: u64,
-        ack_ready_tx: &Sender<u64>,
-    ) -> Result<()> {
-        let result = {
-            let mut work = self.work.lock().await;
-            work.do_work(self, job_id).await?
-        };
-
-        if result.is_some() {
-            ack_ready_tx.send(job_id).await?;
-        }
-
-        Ok(())
+    async fn do_work(&self, job_id: u64) -> Result<Option<Message>> {
+        let mut work = self.work.lock().await;
+        work.do_work(self, job_id).await
     }
 
     /*
@@ -1076,34 +1052,20 @@ impl Downstairs {
     async fn complete_work(
         &mut self,
         ds_id: u64,
+        m: Message,
         fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
-        job_channel_tx: &Arc<Mutex<Sender<u64>>>,
     ) -> Result<()> {
         let mut work = self.work.lock().await;
 
-        let m = work.responses.get(&ds_id).unwrap();
-
         // Notify the upstairs
         let mut fw = fw.lock().await;
-        fw.send(m).await?;
+        fw.send(&m).await?;
 
         // Complete the job
         let is_flush = matches!(m, Message::FlushAck(_, _, _));
 
-        let upstairs_uuid = match &m {
-            Message::WriteAck(uuid, _, _) => *uuid,
-            Message::ReadResponse(uuid, _, _, _) => *uuid,
-            Message::FlushAck(uuid, _, _) => *uuid,
-            _ => {
-                panic!("Unexpected {:?} message in ack_sender", m);
-            }
-        };
-
         // _ can be None if promote_to_active ran and cleared out active.
         let _ = work.active.remove(&ds_id);
-
-        let existing = work.responses.remove(&ds_id);
-        assert!(existing.is_some());
 
         if is_flush {
             work.last_flush = ds_id;
@@ -1111,14 +1073,6 @@ impl Downstairs {
         } else {
             work.completed.push(ds_id);
         }
-
-        drop(work);
-
-        /*
-         * Immediately unblock jobs that were waiting on this one to
-         * complete.
-         */
-        self.unblock_jobs(upstairs_uuid, job_channel_tx).await?;
 
         Ok(())
     }
@@ -1160,10 +1114,6 @@ impl Downstairs {
          *
          * Clear out active jobs, the last flush, and completed information,
          * as that will not be valid any longer.
-         *
-         * Don't clear out responses, we need to inform the Upstairs of what
-         * happened. Clear out active jobs so no more work is done for the
-         * now non-active Upstairs.
          *
          * TODO: Really work through this error case
          */
@@ -1211,9 +1161,14 @@ impl Downstairs {
 
     async fn unblock_jobs(
         &self,
-        upstairs_uuid: Uuid,
         job_channel_tx: &Arc<Mutex<Sender<u64>>>,
     ) -> Result<()> {
+        let upstairs_uuid = if let Some(u) = self.active_upstairs() {
+            u
+        } else {
+            return Ok(());
+        };
+
         loop {
             let pushed_jobs =
                 push_next_jobs(upstairs_uuid, self, job_channel_tx).await?;
@@ -1235,7 +1190,6 @@ impl Downstairs {
 pub struct Work {
     active: HashMap<u64, DownstairsWork>,
     outstanding_deps: HashMap<u64, usize>,
-    responses: HashMap<u64, Message>,
 
     /*
      * We have to keep track of all IOs that have been issued since
@@ -1417,7 +1371,7 @@ impl Work {
         &mut self,
         ds: &Downstairs,
         job_id: u64,
-    ) -> Result<Option<()>> {
+    ) -> Result<Option<Message>> {
         let job = match self.active.get(&job_id) {
             Some(job) => job,
             None => {
@@ -1469,18 +1423,12 @@ impl Work {
                     ds.region.region_read(*eid, *offset, &mut data)
                 };
 
-                let existing = self.responses.insert(
-                    job_id,
-                    Message::ReadResponse(
-                        job.upstairs_uuid,
-                        job.ds_id,
-                        data.freeze(),
-                        result,
-                    ),
-                );
-                assert!(existing.is_none());
-
-                Ok(Some(()))
+                Ok(Some(Message::ReadResponse(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    data.freeze(),
+                    result,
+                )))
             }
             IOop::Write {
                 dependencies: _dependencies,
@@ -1497,13 +1445,11 @@ impl Work {
                     ds.region.region_write(*eid, *offset, data)
                 };
 
-                let existing = self.responses.insert(
-                    job_id,
-                    Message::WriteAck(job.upstairs_uuid, job.ds_id, result),
-                );
-                assert!(existing.is_none());
-
-                Ok(Some(()))
+                Ok(Some(Message::WriteAck(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    result,
+                )))
             }
             IOop::Flush {
                 dependencies: _dependencies,
@@ -1518,13 +1464,11 @@ impl Work {
                     ds.region.region_flush(*flush_number)
                 };
 
-                let existing = self.responses.insert(
-                    job_id,
-                    Message::FlushAck(job.upstairs_uuid, job.ds_id, result),
-                );
-                assert!(existing.is_none());
-
-                Ok(Some(()))
+                Ok(Some(Message::FlushAck(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    result,
+                )))
             }
         }
     }
