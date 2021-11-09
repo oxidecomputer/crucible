@@ -1995,4 +1995,31 @@ mod test {
         assert_eq!(work.last_flush, 2002);
         assert!(work.completed.is_empty());
     }
+
+    #[test]
+    fn out_of_order() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001]);
+
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002, 1003]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001, 1002, 1003]);
+    }
 }
