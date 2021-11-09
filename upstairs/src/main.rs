@@ -20,6 +20,9 @@ pub struct Opt {
 
     #[structopt(short, long)]
     key: Option<String>,
+
+    #[structopt(short, long, default_value = "0")]
+    gen: u64,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -137,7 +140,7 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("runtime is spawned");
 
-    guest.activate()?;
+    guest.activate(opt.gen)?;
 
     /*
      * The rest of this is just test code

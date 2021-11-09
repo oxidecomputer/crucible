@@ -147,8 +147,8 @@ impl CruciblePseudoFile {
         self.sz
     }
 
-    pub fn activate(&mut self) -> Result<(), CrucibleError> {
-        self.guest.activate()?;
+    pub fn activate(&mut self, gen: u64) -> Result<(), CrucibleError> {
+        self.guest.activate(gen)?;
 
         self.sz = self.guest.query_total_size()? as u64;
         self.block_size = self.guest.query_block_size()? as u64;

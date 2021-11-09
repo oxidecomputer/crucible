@@ -38,6 +38,9 @@ pub struct Opt {
 
     #[structopt(short, long)]
     key: Option<String>,
+
+    #[structopt(short, long, default_value = "0")]
+    gen: u64,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -87,7 +90,7 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
     let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
 
-    cpf.activate()?;
+    cpf.activate(opt.gen)?;
 
     // sent to NBD client during handshake through Export struct
     println!("NBD advertised size as {} bytes", cpf.sz());
