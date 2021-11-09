@@ -310,8 +310,6 @@ fn main() -> Result<()> {
         }
 
         Workload::Generic => {
-            println!("Run Generic test in 5 seconds");
-            std::thread::sleep(std::time::Duration::from_secs(5));
             runtime.block_on(generic_workload(
                 &guest,
                 5000,
@@ -1113,7 +1111,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         /*
          * Generate some number of operations
          */
-        for ioc in 0..20 {
+        for ioc in 0..200 {
             my_offset = (my_offset + ri.block_size) % final_offset;
             if random() {
                 /*
