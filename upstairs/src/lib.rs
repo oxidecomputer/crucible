@@ -834,6 +834,40 @@ async fn cmd_loop(
     let mut ping_interval = deadline_secs(10);
     let mut timeout_deadline = deadline_secs(50);
 
+    let (tx, mut rx) = mpsc::channel(100);
+
+    {
+        let up_c = up.clone();
+        let up_coms_c = up_coms.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select!{
+                    x = rx.recv() => {
+                        match x {
+                            Some(m) => {
+                                /*
+                                 * TODO: Add a check here to make sure we are
+                                 * connected and in the proper state before we
+                                 * accept any commands.
+                                 */
+                                let _result =
+                                    process_message(
+                                        &up_c,
+                                        &m,
+                                        up_coms_c.clone()
+                                    ).await;
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     up.ds_state_show();
     loop {
         tokio::select! {
@@ -859,12 +893,7 @@ async fn cmd_loop(
                         );
                     }
                     Some(m) => {
-                        /*
-                         * TODO: Add a check here to make sure we are
-                         * connected and in the proper state before we
-                         * accept any commands.
-                         */
-                        process_message(up, &m, up_coms.clone()).await?;
+                        tx.send(m).await?;
                     }
                 }
             }
