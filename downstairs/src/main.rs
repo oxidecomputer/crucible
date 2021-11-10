@@ -543,25 +543,28 @@ async fn do_work_task(
             job_id = job_channel_rx.recv() => {
                 match job_id {
                     Some(job_id) => {
-                        let mut ds = ads.lock().await;
-
-                        if ds.lossy && random() && random() {
+                        if ads.lock().await.lossy && random() && random() {
                             // Add a little time to completion for this
                             // operation.
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
 
-                        let m = ds.do_work(job_id).await?;
+                        let m = ads.lock().await.do_work(job_id).await?;
 
                         if let Some(m) = m {
-                            ds.complete_work(job_id, m, fw).await?;
+                            // Notify the upstairs
+                            let mut fw = fw.lock().await;
+                            fw.send(&m).await?;
+                            drop(fw);
+
+                            ads.lock().await.complete_work(job_id, m).await?;
                         }
 
                         /*
                          * Immediately unblock jobs that were waiting on this
                          * one to complete.
                          */
-                        ds.unblock_jobs(job_channel_tx).await?;
+                        ads.lock().await.unblock_jobs(job_channel_tx).await?;
                     }
                     None => {
                         // hung up
@@ -826,7 +829,7 @@ async fn resp_loop(
             _ = sleep_until(lossy_interval) => {
                 let lossy = {
                     let ds = ads.lock().await;
-                    //show_work(&ds);
+                    //_show_work(&ds).await;
                     ds.lossy
                 };
                 if lossy {
@@ -1046,13 +1049,8 @@ impl Downstairs {
         &mut self,
         ds_id: u64,
         m: Message,
-        fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
     ) -> Result<()> {
         let mut work = self.work.lock().await;
-
-        // Notify the upstairs
-        let mut fw = fw.lock().await;
-        fw.send(&m).await?;
 
         // Complete the job
         let is_flush = matches!(m, Message::FlushAck(_, _, _));
