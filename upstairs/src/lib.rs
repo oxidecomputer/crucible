@@ -842,7 +842,7 @@ async fn cmd_loop(
 
         tokio::spawn(async move {
             loop {
-                tokio::select!{
+                tokio::select! {
                     x = rx.recv() => {
                         match x {
                             Some(m) => {
