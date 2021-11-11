@@ -92,6 +92,16 @@ fn main() -> Result<()> {
         .build()
         .unwrap();
 
+    /*
+     * If any of our async tasks in our runtime panic, then we should
+     * exit the program right away.
+     */
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     // Create 5 CruciblePseudoFiles to test activation handoff.
     let mut cpfs: Vec<crucible::CruciblePseudoFile> = Vec::with_capacity(5);
 
