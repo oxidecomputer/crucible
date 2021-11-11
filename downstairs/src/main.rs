@@ -388,7 +388,7 @@ async fn proc_frame(
             fw.send(Message::Imok).await?;
         }
         // Regular work path
-        Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
+        Message::Write(uuid, ds_id, dependencies, eid, offset, data) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
