@@ -1072,6 +1072,7 @@ async fn looper(
             proc(&target, up, tcp, &mut connected, &mut up_coms, lossy).await
         {
             eprintln!("ERROR: {}: proc: {:?}", target, e);
+            panic!("{:?}", e);
         }
 
         /*
