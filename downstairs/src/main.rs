@@ -241,11 +241,10 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      */
     const CHUNK_SIZE: usize = 32 * 1024 * 1024;
     assert_eq!(CHUNK_SIZE % MAX_BLOCK_SIZE, 0);
-    let mut buffer = vec![0; CHUNK_SIZE];
 
     let mut offset = Block::new_with_ddef(0, &region.def());
     loop {
-        buffer.resize(CHUNK_SIZE, 0);
+        let mut buffer = vec![0; CHUNK_SIZE];
 
         /*
          * Read data into the buffer until it is full, or we hit EOF.
@@ -282,16 +281,30 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         /*
-         * Use the same function upsairs uses to decide where to put the
+         * Use the same function upstairs uses to decide where to put the
          * data based on the LBA offset.
          */
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
+        let mut writes: Vec<crucible_protocol::Write> = vec![];
         for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
-            let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
-            region.region_write(eid, offset, data)?;
+            let mut data = bytes::BytesMut::with_capacity(len.bytes());
+            data.copy_from_slice(
+                &buffer[pos.bytes()..(pos.bytes() + len.bytes())],
+            );
+
+            let write = crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+            };
+
+            writes.push(write);
             pos.advance(len);
         }
+
+        region.region_write(&writes)?;
+
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
         offset.advance(nblocks);
@@ -342,9 +355,7 @@ async fn _show_work(ds: &Downstairs) {
                 }
                 IOop::Write {
                     dependencies,
-                    eid: _eid,
-                    offset: _offset,
-                    data: _data,
+                    writes: _,
                 } => {
                     dsw_type = "Write".to_string();
                     dep_list = dependencies.to_vec();
@@ -388,7 +399,7 @@ async fn proc_frame(
             fw.send(Message::Imok).await?;
         }
         // Regular work path
-        Message::Write(uuid, ds_id, dependencies, eid, offset, data) => {
+        Message::Write(uuid, ds_id, dependencies, writes) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
@@ -397,9 +408,7 @@ async fn proc_frame(
 
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
-                eid: *eid,
-                offset: *offset,
-                data: data.clone(),
+                writes: writes.to_vec(),
             };
 
             let d = ad.lock().await;
@@ -1226,9 +1235,7 @@ impl Work {
                             match &job.work {
                                 IOop::Write {
                                     dependencies: _,
-                                    eid: _eid,
-                                    offset: _offset,
-                                    data: _data,
+                                    writes: _,
                                 } => "Write",
                                 IOop::Flush {
                                     dependencies: _,
@@ -1362,9 +1369,7 @@ impl Work {
             }
             IOop::Write {
                 dependencies: _dependencies,
-                eid,
-                offset,
-                data,
+                writes,
             } => {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on write!");
@@ -1372,7 +1377,7 @@ impl Work {
                 } else if !ds.is_active(job.upstairs_uuid) {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_write(*eid, *offset, data)
+                    ds.region.region_write(writes)
                 };
 
                 Ok(Some(Message::WriteAck(

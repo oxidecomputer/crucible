@@ -814,9 +814,11 @@ mod test {
             next_id,
             vec![],
             10,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
 
         work.enqueue(op);
@@ -1087,9 +1089,11 @@ mod test {
             id1,
             vec![],
             10,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         work.enqueue(op);
 
@@ -1097,9 +1101,11 @@ mod test {
             id2,
             vec![],
             1,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         work.enqueue(op);
 
@@ -1186,9 +1192,11 @@ mod test {
             next_id,
             vec![],
             10,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         // Put the write on the queue.
         work.enqueue(op);
@@ -1253,9 +1261,11 @@ mod test {
             id1,
             vec![],
             10,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         work.enqueue(op);
 
@@ -1263,9 +1273,11 @@ mod test {
             id2,
             vec![],
             1,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         work.enqueue(op);
 
@@ -1487,9 +1499,11 @@ mod test {
             id1,
             vec![],
             10,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         work.enqueue(op);
 
@@ -1534,9 +1548,11 @@ mod test {
             id1,
             vec![],
             10,
-            0,
-            Block::new_512(7),
-            Bytes::from(vec![1]),
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+            }],
         );
         work.enqueue(op);
 

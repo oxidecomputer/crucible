@@ -615,12 +615,12 @@ impl Region {
     #[instrument]
     pub fn region_write(
         &self,
-        eid: u64,
-        offset: Block,
-        data: &[u8],
+        writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
-        let extent = &self.extents[eid as usize];
-        extent.write(offset, data)?;
+        for write in writes {
+            let extent = &self.extents[write.eid as usize];
+            extent.write(write.offset, &write.data)?;
+        }
         Ok(())
     }
 

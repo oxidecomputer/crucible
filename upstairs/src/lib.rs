@@ -406,17 +406,13 @@ async fn io_send(
         match job.unwrap() {
             IOop::Write {
                 dependencies,
-                eid,
-                offset,
-                data,
+                writes,
             } => {
                 fw.send(Message::Write(
                     u.uuid,
                     *new_id,
                     dependencies.clone(),
-                    eid,
-                    offset,
-                    data.clone(),
+                    writes.clone(),
                 ))
                 .await?
             }
@@ -1382,9 +1378,7 @@ impl Downstairs {
             } => wc.error == 3,
             IOop::Write {
                 dependencies: _dependencies,
-                eid: _eid,
-                data: _data,
-                offset: _offset,
+                writes: _writes,
             } => wc.error >= 2,
             IOop::Flush {
                 dependencies: _dependencies,
@@ -1424,9 +1418,7 @@ impl Downstairs {
             }
             IOop::Write {
                 dependencies: _,
-                eid: _,
-                offset: _,
-                data: _,
+                writes: _,
             } => {
                 cdt::gw_write_end!(|| (gw_id));
             }
@@ -1494,9 +1486,7 @@ impl Downstairs {
                 job.work,
                 IOop::Write {
                     dependencies: _,
-                    eid: _,
-                    data: _,
-                    offset: _
+                    writes: _,
                 } | IOop::Flush {
                     dependencies: _,
                     flush_number: _
@@ -1547,10 +1537,8 @@ impl Downstairs {
                     }
                 }
                 IOop::Write {
-                    dependencies: _dependencies,
-                    eid: _eid,
-                    data: _data,
-                    offset: _offset,
+                    dependencies: _,
+                    writes: _,
                 } => {
                     assert!(read_data.is_none());
                     if jobs_completed_ok == 2 {
@@ -2053,18 +2041,18 @@ impl Upstairs {
          * on behalf of this guest job.
          */
         let mut sub = HashMap::new();
+        let next_id = downstairs.next_id();
         let mut new_ds_work = Vec::new();
-        let mut next_id: u64;
         let mut cur_offset: usize = 0;
 
         let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(nwo.len());
+
         /* Lock here, through both jobs submitted */
         for (eid, bo, num_blocks) in nwo {
-            {
-                next_id = downstairs.next_id();
-            }
-
             let byte_len: usize =
                 num_blocks.value as usize * ddef.block_size() as usize;
 
@@ -2079,20 +2067,19 @@ impl Upstairs {
                 data.slice(cur_offset..(cur_offset + byte_len))
             };
 
-            sub.insert(next_id, num_blocks.value);
-
-            let wr = create_write_eob(
-                next_id,
-                dep.clone(),
-                gw_id,
+            writes.push(crucible_protocol::Write {
                 eid,
-                bo,
-                sub_data,
-            );
+                offset: bo,
+                data: sub_data,
+            });
 
-            new_ds_work.push(wr);
             cur_offset += byte_len;
         }
+
+        let wr = create_write_eob(next_id, dep.clone(), gw_id, writes);
+
+        sub.insert(next_id, 0); // XXX does value here matter?
+        new_ds_work.push(wr);
 
         /*
          * New work created, add to the guest_work HM
@@ -2482,9 +2469,7 @@ impl Upstairs {
                     job.work,
                     IOop::Write {
                         dependencies: _,
-                        eid: _,
-                        data: _,
-                        offset: _
+                        writes: _,
                     } | IOop::Flush {
                         dependencies: _,
                         flush_number: _
@@ -2648,9 +2633,7 @@ impl DownstairsIO {
 pub enum IOop {
     Write {
         dependencies: Vec<u64>, // Jobs that must finish before this
-        eid: u64,
-        offset: Block,
-        data: Bytes,
+        writes: Vec<crucible_protocol::Write>,
     },
     Read {
         dependencies: Vec<u64>, // Jobs that must finish before this
@@ -2669,9 +2652,7 @@ impl IOop {
         match &self {
             IOop::Write {
                 dependencies,
-                eid: _eid,
-                offset: _offset,
-                data: _data,
+                writes: _,
             } => dependencies,
             IOop::Flush {
                 dependencies,
@@ -4163,9 +4144,7 @@ fn create_write_eob(
     ds_id: u64,
     dependencies: Vec<u64>,
     gw_id: u64,
-    eid: u64,
-    offset: Block,
-    data: Bytes,
+    writes: Vec<crucible_protocol::Write>,
 ) -> DownstairsIO {
     /*
      * Note to self:  Should the dependency list cover everything since
@@ -4173,9 +4152,7 @@ fn create_write_eob(
      */
     let awrite = IOop::Write {
         dependencies,
-        eid,
-        offset,
-        data,
+        writes,
     };
 
     let mut state = HashMap::new();
@@ -4285,11 +4262,9 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         );
         kvec.sort_unstable();
         for id in kvec.iter() {
-            let mut io_eid = 0;
-            let mut io_offset = 0;
-            let mut io_len = 0;
-            let job_type;
             let job = work.active.get(id).unwrap();
+            let ack = job.ack_status;
+
             match &job.work {
                 IOop::Read {
                     dependencies: _dependencies,
@@ -4297,34 +4272,49 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     offset,
                     num_blocks,
                 } => {
-                    job_type = "Read ".to_string();
-                    io_eid = *eid;
-                    io_offset = offset.value;
-                    io_len = *num_blocks as usize;
+                    let job_type = "Read ".to_string();
+                    print!(
+                        " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
+                        job.guest_id,
+                        ack,
+                        id,
+                        job_type,
+                        *eid,
+                        offset.value,
+                        *num_blocks as usize,
+                    );
                 }
                 IOop::Write {
                     dependencies: _dependencies,
-                    eid,
-                    offset,
-                    data,
+                    writes,
                 } => {
-                    job_type = "Write".to_string();
-                    io_eid = *eid;
-                    io_offset = offset.value;
-                    io_len = data.len() / (1 << offset.shift);
+                    let job_type = "Write".to_string();
+
+                    for write in writes {
+                        print!(
+                            " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
+                            job.guest_id,
+                            ack,
+                            id,
+                            job_type,
+                            write.eid,
+                            write.offset.value,
+                            write.data.len() / (1 << write.offset.shift),
+                        );
+                    }
                 }
                 IOop::Flush {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
                 } => {
-                    job_type = "Flush".to_string();
+                    let job_type = "Flush".to_string();
+
+                    print!(
+                        " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
+                        job.guest_id, ack, id, job_type, 0, 0, 0,
+                    );
                 }
             };
-            let ack = job.ack_status;
-            print!(
-                " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                job.guest_id, ack, id, job_type, io_eid, io_offset, io_len
-            );
 
             for cid in 0..3 {
                 let state = job.state.get(&cid);
