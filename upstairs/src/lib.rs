@@ -851,6 +851,25 @@ async fn cmd_loop(
     let mut ping_interval = deadline_secs(10);
     let mut timeout_deadline = deadline_secs(50);
 
+    let (tx, mut rx) = mpsc::channel::<Message>(100);
+
+    {
+        let up_c = up.clone();
+        let up_coms_c = up_coms.clone();
+
+        tokio::spawn(async move {
+            while let Some(m) = rx.recv().await {
+                /*
+                 * TODO: Add a check here to make sure we are
+                 * connected and in the proper state before we
+                 * accept any commands.
+                 */
+                let _result =
+                    process_message(&up_c, &m, up_coms_c.clone()).await;
+            }
+        });
+    }
+
     up.ds_state_show();
     loop {
         tokio::select! {
@@ -876,12 +895,7 @@ async fn cmd_loop(
                         );
                     }
                     Some(m) => {
-                        /*
-                         * TODO: Add a check here to make sure we are
-                         * connected and in the proper state before we
-                         * accept any commands.
-                         */
-                        process_message(up, &m, up_coms.clone()).await?;
+                        tx.send(m).await?;
                     }
                 }
             }
@@ -2648,6 +2662,29 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         flush_number: u64,
     },
+}
+
+impl IOop {
+    pub fn deps(&self) -> &Vec<u64> {
+        match &self {
+            IOop::Write {
+                dependencies,
+                eid: _eid,
+                offset: _offset,
+                data: _data,
+            } => dependencies,
+            IOop::Flush {
+                dependencies,
+                flush_number: _flush_number,
+            } => dependencies,
+            IOop::Read {
+                dependencies,
+                eid: _eid,
+                offset: _offset,
+                num_blocks: _num_blocks,
+            } => dependencies,
+        }
+    }
 }
 
 /*

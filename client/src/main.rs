@@ -313,8 +313,6 @@ fn main() -> Result<()> {
         }
 
         Workload::Generic => {
-            println!("Run Generic test in 5 seconds");
-            std::thread::sleep(std::time::Duration::from_secs(5));
             runtime.block_on(generic_workload(
                 &guest,
                 5000,
@@ -1110,13 +1108,13 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let final_offset = ri.total_size - ri.block_size;
 
     let mut my_offset: u64 = 0;
-    for my_count in 1..15 {
+    for my_count in 1..150 {
         let mut waiterlist = Vec::new();
 
         /*
          * Generate some number of operations
          */
-        for ioc in 0..20 {
+        for ioc in 0..200 {
             my_offset = (my_offset + ri.block_size) % final_offset;
             if random() {
                 /*
@@ -1156,6 +1154,10 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         }
 
         guest.show_work()?;
+
+        // The final flush is to help prevent the pause that we get when the
+        // last command is a write or read and we have to wait x seconds for the
+        // flush check to trigger.
         println!("Loop:{} send a final flush and wait", my_count);
         let mut flush_waiter = guest.flush()?;
         flush_waiter.block_wait()?;

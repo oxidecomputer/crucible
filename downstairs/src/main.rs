@@ -313,81 +313,6 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 }
 
 /*
- * Look at all the work outstanding for this downstairs and make a list
- * if jobs that are new or are waiting for dependencies.
- *
- * Once we have that list, walk them and see if any are ready to go.  If
- * so, then do that work.
- * so, then push that work.
- *
- * Upstairs UUID is passed in so we can skip jobs that aren't for this
- * Upstairs thread (all jobs are pushed onto the same Downstairs).
- *
- * We return the number of jobs completed so any caller can make use of
- * We return the number of jobs pushed so any caller can make use of
- * that.
- */
-async fn push_next_jobs(
-    upstairs_uuid: Uuid,
-    ds: &Downstairs,
-    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
-) -> Result<usize> {
-    /*
-     * Build ourselves a list of all the jobs on the work hashmap that
-     * have the job state for our client id in the IOState::New
-     */
-    let mut jobs = vec![];
-    let new_work = ds.new_work(upstairs_uuid).await;
-
-    if new_work.is_err() {
-        // This means we couldn't unblock jobs for this UUID, so bail.
-        return Ok(0);
-    }
-
-    let mut new_work = new_work.unwrap();
-
-    /*
-     * We don't have to do jobs in order, but the dependencies are, at
-     * least for now, always going to be in order of job id.  So, to best
-     * move things forward it is going to be fewer laps through the list
-     * if we take the lowest job id first.
-     */
-    new_work.sort_unstable();
-
-    for new_id in new_work.iter() {
-        if ds.lossy && random() && random() {
-            // Skip a job that needs to be done. Sometimes
-            continue;
-        }
-
-        /*
-         * If this job is still new, take it and go to work. The in_progress
-         * method will only return a job if all dependencies are met.
-         * Because we build the list of potential work, then release
-         * the lock, it is possible to have things change, so we need
-         * to verify that the job is still in a new or dep wait
-         * state.
-         */
-        let job = ds.in_progress(*new_id).await;
-        match job {
-            Some(job) => {
-                jobs.push(job);
-            }
-            None => {
-                continue;
-            }
-        }
-    }
-
-    let jobs_count = jobs.len();
-    for job in jobs {
-        job_channel_tx.lock().await.send(job).await?;
-    }
-
-    Ok(jobs_count)
-}
-
-/*
  * Debug function to dump the work list.
  */
 async fn _show_work(ds: &Downstairs) {
@@ -454,8 +379,9 @@ async fn proc_frame(
     ad: &mut Arc<Mutex<Downstairs>>,
     m: &Message,
     fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
-    job_channel_tx: Arc<Mutex<Sender<u64>>>,
+    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
 ) -> Result<()> {
+    let mut new_ds_id = None;
     match m {
         Message::Ruok => {
             let mut fw = fw.lock().await;
@@ -478,6 +404,7 @@ async fn proc_frame(
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_write).await?;
+            new_ds_id = Some(*ds_id);
         }
         Message::Flush(uuid, ds_id, dependencies, flush_number) => {
             if upstairs_uuid != *uuid {
@@ -493,6 +420,7 @@ async fn proc_frame(
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_flush).await?;
+            new_ds_id = Some(*ds_id);
         }
         Message::ReadRequest(
             uuid,
@@ -517,16 +445,16 @@ async fn proc_frame(
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_read).await?;
+            new_ds_id = Some(*ds_id);
         }
         x => bail!("unexpected frame {:?}", x),
     }
 
     /*
-     * After adding work, start those that can be started.
+     * If we added work, tell the work task to get busy.
      */
-    {
-        let d = ad.lock().await;
-        d.unblock_jobs(upstairs_uuid, &job_channel_tx).await?;
+    if let Some(new_ds_id) = new_ds_id {
+        job_channel_tx.lock().await.send(new_ds_id).await?;
     }
 
     Ok(())
@@ -535,44 +463,76 @@ async fn proc_frame(
 async fn do_work_task(
     ads: &mut Arc<Mutex<Downstairs>>,
     mut job_channel_rx: Receiver<u64>,
-    ack_ready_tx: Sender<u64>,
+    fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
 ) -> Result<()> {
-    loop {
-        tokio::select! {
-            job_id = job_channel_rx.recv() => {
-                match job_id {
-                    Some(job_id) => {
-                        let ds = ads.lock().await;
+    /*
+     * job_channel_rx is a notification that we should look for new work.
+     */
+    while job_channel_rx.recv().await.is_some() {
+        // Add a little time to completion for this operation.
+        if ads.lock().await.lossy && random() && random() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
-                        if ds.lossy && random() && random() {
-                            // Add a little time to completion for this
-                            // operation.
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
+        let upstairs_uuid = {
+            if let Some(upstairs_uuid) = ads.lock().await.active_upstairs() {
+                upstairs_uuid
+            } else {
+                // We are not an active downstairs, wait until we are
+                continue;
+            }
+        };
 
-                        ds.do_work(job_id, &ack_ready_tx).await?;
-                    }
-                    None => {
-                        // hung up
-                         return Ok(());
-                    }
+        /*
+         * Build ourselves a list of all the jobs on the work hashmap that
+         * are New or DepWait.
+         */
+        let mut new_work = {
+            if let Ok(new_work) = ads.lock().await.new_work(upstairs_uuid).await
+            {
+                new_work
+            } else {
+                // This means we couldn't unblock jobs for this UUID
+                continue;
+            }
+        };
+
+        /*
+         * We don't have to do jobs in order, but the dependencies are, at
+         * least for now, always going to be in order of job id.  So,
+         * to best move things forward it is going to be fewer laps
+         * through the list if we take the lowest job id first.
+         */
+        new_work.sort_unstable();
+
+        for new_id in new_work.iter() {
+            if ads.lock().await.lossy && random() && random() {
+                // Skip a job that needs to be done. Sometimes
+                continue;
+            }
+
+            /*
+             * If this job is still new, take it and go to work. The
+             * in_progress method will only return a job if all
+             * dependencies are met.
+             */
+            let job_id = ads.lock().await.in_progress(*new_id).await;
+            if let Some(job_id) = job_id {
+                let m = ads.lock().await.do_work(job_id).await?;
+
+                if let Some(m) = m {
+                    // Notify the upstairs before completing work
+                    let mut fw = fw.lock().await;
+                    fw.send(&m).await?;
+                    drop(fw);
+
+                    ads.lock().await.complete_work(job_id, m).await?;
                 }
             }
         }
     }
-}
 
-async fn ack_sender(
-    ads: &Arc<Mutex<Downstairs>>,
-    fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
-    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
-    mut ack_ready_rx: Receiver<u64>,
-) -> Result<()> {
-    while let Some(job_id) = ack_ready_rx.recv().await {
-        let mut ds = ads.lock().await;
-        ds.complete_work(job_id, fw, job_channel_tx).await?;
-    }
-
+    // None means the channel is closed
     Ok(())
 }
 
@@ -656,7 +616,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                             if ds.is_active(upstairs_uuid) {
                                 println!("upstairs {:?} was previously \
                                     active, clearing", upstairs_uuid);
-                                ds.clear_active();
+                                ds.clear_active().await;
                             }
                         } else {
                             println!(
@@ -799,32 +759,36 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
 async fn resp_loop(
     ads: &mut Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<OwnedReadHalf, CrucibleDecoder>,
-    mut fw: Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
+    fw: Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
     mut another_upstairs_active_rx: mpsc::Receiver<u64>,
     upstairs_uuid: Uuid,
 ) -> Result<()> {
     let mut lossy_interval = deadline_secs(5);
-    let mut more_work_interval = deadline_secs(5);
 
-    // XXX flow control size to 100?
-    let (_job_channel_tx, job_channel_rx) = channel(100);
+    // XXX flow control size to double what Upstairs has for upper limit?
+    let (_job_channel_tx, job_channel_rx) = channel(200);
     let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
-
-    let (ack_ready_tx, ack_ready_rx) = channel(100);
 
     {
         let mut adc = ads.clone();
+        let mut fwc = fw.clone();
         tokio::spawn(async move {
-            do_work_task(&mut adc, job_channel_rx, ack_ready_tx).await
+            do_work_task(&mut adc, job_channel_rx, &mut fwc).await
         });
     }
 
+    let (message_channel_tx, mut message_channel_rx) = channel(200);
+
     {
-        let adc = ads.clone();
-        let mut fwc = fw.clone();
+        let mut adc = ads.clone();
         let tx = job_channel_tx.clone();
+        let mut fwc = fw.clone();
         tokio::spawn(async move {
-            ack_sender(&adc, &mut fwc, &tx, ack_ready_rx).await
+            while let Some(m) = message_channel_rx.recv().await {
+                proc_frame(upstairs_uuid, &mut adc, &m, &mut fwc, &tx)
+                    .await
+                    .unwrap();
+            }
         });
     }
 
@@ -839,24 +803,14 @@ async fn resp_loop(
             _ = sleep_until(lossy_interval) => {
                 let lossy = {
                     let ds = ads.lock().await;
-                    //show_work(&ds);
+                    //_show_work(&ds).await;
                     ds.lossy
                 };
                 if lossy {
-                    let ds = ads.lock().await;
-                    ds.unblock_jobs(upstairs_uuid, &job_channel_tx).await?;
+                    job_channel_tx.lock().await.send(0).await?;
                 }
                 lossy_interval = deadline_secs(5);
             }
-            _ = sleep_until(more_work_interval) => {
-                /*
-                 * Unblock any stuck jobs. XXX how does this happen?
-                 */
-                let ds = ads.lock().await;
-                ds.unblock_jobs(upstairs_uuid, &job_channel_tx).await?;
-
-                more_work_interval = deadline_secs(5);
-             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
              * XXX Timeouts, timeouts: always wrong!  Some too short and
@@ -891,9 +845,6 @@ async fn resp_loop(
                 return Ok(());
             }
             new_read = fr.next() => {
-                // When the downstairs responds, push the deadlines
-                more_work_interval = deadline_secs(5);
-
                 match new_read.transpose()? {
                     None => {
                         let mut ds = ads.lock().await;
@@ -906,19 +857,13 @@ async fn resp_loop(
                         if ds.is_active(upstairs_uuid) {
                             println!("upstairs {:?} was previously \
                                 active, clearing", upstairs_uuid);
-                            ds.clear_active();
+                            ds.clear_active().await;
                         }
 
                         return Ok(());
                     }
                     Some(msg) => {
-                        proc_frame(
-                            upstairs_uuid,
-                            ads,
-                            &msg,
-                            &mut fw,
-                            job_channel_tx.clone(),
-                        ).await?;
+                        message_channel_tx.send(msg).await?;
                     }
                 }
             }
@@ -1026,7 +971,7 @@ impl Downstairs {
         };
 
         let mut work = self.work_lock(upstairs_uuid).await?;
-        work.active.insert(ds_id, dsw);
+        work.add_work(ds_id, dsw);
 
         Ok(())
     }
@@ -1048,21 +993,9 @@ impl Downstairs {
     }
 
     /// Given a job ID, do the work for that IO.
-    async fn do_work(
-        &self,
-        job_id: u64,
-        ack_ready_tx: &Sender<u64>,
-    ) -> Result<()> {
-        let result = {
-            let mut work = self.work.lock().await;
-            work.do_work(self, job_id).await?
-        };
-
-        if result.is_some() {
-            ack_ready_tx.send(job_id).await?;
-        }
-
-        Ok(())
+    async fn do_work(&self, job_id: u64) -> Result<Option<Message>> {
+        let mut work = self.work.lock().await;
+        work.do_work(self, job_id).await
     }
 
     /*
@@ -1073,37 +1006,14 @@ impl Downstairs {
      * - removing the response
      * - putting the id on the completed list.
      */
-    async fn complete_work(
-        &mut self,
-        ds_id: u64,
-        fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
-        job_channel_tx: &Arc<Mutex<Sender<u64>>>,
-    ) -> Result<()> {
+    async fn complete_work(&mut self, ds_id: u64, m: Message) -> Result<()> {
         let mut work = self.work.lock().await;
-
-        let m = work.responses.get(&ds_id).unwrap();
-
-        // Notify the upstairs
-        let mut fw = fw.lock().await;
-        fw.send(m).await?;
 
         // Complete the job
         let is_flush = matches!(m, Message::FlushAck(_, _, _));
 
-        let upstairs_uuid = match &m {
-            Message::WriteAck(uuid, _, _) => *uuid,
-            Message::ReadResponse(uuid, _, _, _) => *uuid,
-            Message::FlushAck(uuid, _, _) => *uuid,
-            _ => {
-                panic!("Unexpected {:?} message in ack_sender", m);
-            }
-        };
-
         // _ can be None if promote_to_active ran and cleared out active.
         let _ = work.active.remove(&ds_id);
-
-        let existing = work.responses.remove(&ds_id);
-        assert!(existing.is_some());
 
         if is_flush {
             work.last_flush = ds_id;
@@ -1111,14 +1021,6 @@ impl Downstairs {
         } else {
             work.completed.push(ds_id);
         }
-
-        drop(work);
-
-        /*
-         * Immediately unblock jobs that were waiting on this one to
-         * complete.
-         */
-        self.unblock_jobs(upstairs_uuid, job_channel_tx).await?;
 
         Ok(())
     }
@@ -1161,10 +1063,6 @@ impl Downstairs {
          * Clear out active jobs, the last flush, and completed information,
          * as that will not be valid any longer.
          *
-         * Don't clear out responses, we need to inform the Upstairs of what
-         * happened. Clear out active jobs so no more work is done for the
-         * now non-active Upstairs.
-         *
          * TODO: Really work through this error case
          */
         if work.active.keys().len() > 0 {
@@ -1199,26 +1097,14 @@ impl Downstairs {
         self.active_upstairs.as_ref().map(|e| e.0)
     }
 
-    fn clear_active(&mut self) {
+    async fn clear_active(&mut self) {
+        let mut work = self.work.lock().await;
+
         self.active_upstairs = None;
-    }
 
-    async fn unblock_jobs(
-        &self,
-        upstairs_uuid: Uuid,
-        job_channel_tx: &Arc<Mutex<Sender<u64>>>,
-    ) -> Result<()> {
-        loop {
-            let pushed_jobs =
-                push_next_jobs(upstairs_uuid, self, job_channel_tx).await?;
-
-            // If any jobs were unblocked, try to unblock more.
-            if pushed_jobs == 0 {
-                break;
-            }
-        }
-
-        Ok(())
+        work.active = HashMap::new();
+        work.completed = Vec::with_capacity(32);
+        work.last_flush = 0;
     }
 }
 
@@ -1229,7 +1115,6 @@ impl Downstairs {
 pub struct Work {
     active: HashMap<u64, DownstairsWork>,
     outstanding_deps: HashMap<u64, usize>,
-    responses: HashMap<u64, Message>,
 
     /*
      * We have to keep track of all IOs that have been issued since
@@ -1271,13 +1156,20 @@ impl Work {
             }
         }
 
+        result.sort_unstable();
+
         result
+    }
+
+    fn add_work(&mut self, ds_id: u64, dsw: DownstairsWork) {
+        self.active.insert(ds_id, dsw);
     }
 
     /**
      * If the requested job is still new, and the dependencies are all met,
      * return the DownstairsWork struct and let the caller take action
      * with it, leaving the state as InProgress.
+     *
      * If this job is not new, then just return none.  This can be okay as
      * we build or work list with the new_work fn above, but we drop and
      * re-aquire the Work mutex and things can change.
@@ -1296,24 +1188,7 @@ impl Work {
                  * holding this locked, check the dep list if there is one
                  * and make sure all dependencies are completed.
                  */
-                let dep_list = match &job.work {
-                    IOop::Write {
-                        dependencies,
-                        eid: _eid,
-                        offset: _offset,
-                        data: _data,
-                    } => dependencies,
-                    IOop::Flush {
-                        dependencies,
-                        flush_number: _flush_number,
-                    } => dependencies,
-                    IOop::Read {
-                        dependencies,
-                        eid: _eid,
-                        offset: _offset,
-                        num_blocks: _num_blocks,
-                    } => dependencies,
-                };
+                let dep_list = job.work.deps();
 
                 /*
                  * See which of our dependencies are met.
@@ -1400,11 +1275,7 @@ impl Work {
                 None
             }
         } else {
-            /*
-             * This ID is no longer a valid job id.  That would be ok
-             * if there a multiple things running at the same time.
-             */
-            None
+            panic!("This ID is no longer a valid job id");
         }
     }
 
@@ -1421,7 +1292,7 @@ impl Work {
         &mut self,
         ds: &Downstairs,
         job_id: u64,
-    ) -> Result<Option<()>> {
+    ) -> Result<Option<Message>> {
         let job = match self.active.get(&job_id) {
             Some(job) => job,
             None => {
@@ -1441,6 +1312,15 @@ impl Work {
 
         assert_eq!(job.state, WorkState::InProgress);
         assert_eq!(job_id, job.ds_id);
+
+        // validate that deps are done
+        let dep_list = job.work.deps();
+        for dep in dep_list {
+            let last_flush_satisfied = dep <= &self.last_flush;
+            let complete_satisfied = self.completed.contains(dep);
+
+            assert!(last_flush_satisfied || complete_satisfied);
+        }
 
         match &job.work {
             IOop::Read {
@@ -1473,18 +1353,12 @@ impl Work {
                     ds.region.region_read(*eid, *offset, &mut data)
                 };
 
-                let existing = self.responses.insert(
-                    job_id,
-                    Message::ReadResponse(
-                        job.upstairs_uuid,
-                        job.ds_id,
-                        data.freeze(),
-                        result,
-                    ),
-                );
-                assert!(existing.is_none());
-
-                Ok(Some(()))
+                Ok(Some(Message::ReadResponse(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    data.freeze(),
+                    result,
+                )))
             }
             IOop::Write {
                 dependencies: _dependencies,
@@ -1501,13 +1375,11 @@ impl Work {
                     ds.region.region_write(*eid, *offset, data)
                 };
 
-                let existing = self.responses.insert(
-                    job_id,
-                    Message::WriteAck(job.upstairs_uuid, job.ds_id, result),
-                );
-                assert!(existing.is_none());
-
-                Ok(Some(()))
+                Ok(Some(Message::WriteAck(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    result,
+                )))
             }
             IOop::Flush {
                 dependencies: _dependencies,
@@ -1522,13 +1394,11 @@ impl Work {
                     ds.region.region_flush(*flush_number)
                 };
 
-                let existing = self.responses.insert(
-                    job_id,
-                    Message::FlushAck(job.upstairs_uuid, job.ds_id, result),
-                );
-                assert!(existing.is_none());
-
-                Ok(Some(()))
+                Ok(Some(Message::FlushAck(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    result,
+                )))
             }
         }
     }
@@ -1712,5 +1582,526 @@ async fn main() -> Result<()> {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn add_work(
+        work: &mut Work,
+        uuid: Uuid,
+        ds_id: u64,
+        deps: Vec<u64>,
+        is_flush: bool,
+    ) {
+        work.add_work(
+            ds_id,
+            DownstairsWork {
+                upstairs_uuid: uuid,
+                ds_id: ds_id,
+                work: if is_flush {
+                    IOop::Flush {
+                        dependencies: deps,
+                        flush_number: 10,
+                    }
+                } else {
+                    IOop::Read {
+                        dependencies: deps,
+                        eid: 1,
+                        offset: Block::new_512(1),
+                        num_blocks: 1,
+                    }
+                },
+                state: WorkState::New,
+            },
+        );
+    }
+
+    fn complete(work: &mut Work, ds_id: u64) {
+        let is_flush = {
+            let job = work.active.get(&ds_id).unwrap();
+
+            // validate that deps are done
+            let dep_list = job.work.deps();
+            for dep in dep_list {
+                let last_flush_satisfied = dep <= &work.last_flush;
+                let complete_satisfied = work.completed.contains(dep);
+
+                assert!(last_flush_satisfied || complete_satisfied);
+            }
+
+            matches!(
+                job.work,
+                IOop::Flush {
+                    dependencies: _,
+                    flush_number: _
+                }
+            )
+        };
+
+        let _ = work.active.remove(&ds_id);
+
+        if is_flush {
+            work.last_flush = ds_id;
+            work.completed = Vec::with_capacity(32);
+        } else {
+            work.completed.push(ds_id);
+        }
+    }
+
+    fn test_push_next_jobs(work: &mut Work, uuid: Uuid) -> Vec<u64> {
+        let mut jobs = vec![];
+        let mut new_work = work.new_work(uuid);
+
+        new_work.sort_unstable();
+
+        for new_id in new_work.iter() {
+            let job = work.in_progress(*new_id);
+            match job {
+                Some(job) => {
+                    jobs.push(job.0);
+                }
+                None => {
+                    continue;
+                }
+            }
+        }
+
+        for job in &jobs {
+            assert_eq!(
+                work.active.get(job).unwrap().state,
+                WorkState::InProgress
+            );
+        }
+
+        jobs
+    }
+
+    fn test_do_work(work: &mut Work, jobs: Vec<u64>) {
+        for job_id in jobs {
+            complete(work, job_id);
+        }
+    }
+
+    #[test]
+    fn you_had_one_job() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        add_work(&mut work, uuid, 1000, vec![], false);
+
+        assert_eq!(work.new_work(uuid), vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+    }
+
+    #[test]
+    fn jobs_independent() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add two independent jobs
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![], false);
+
+        // new_work returns all new jobs
+        assert_eq!(work.new_work(uuid), vec![1000, 1001]);
+
+        // should push both, they're independent
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 1001]);
+
+        // new work returns only jobs in new or dep wait
+        assert!(work.new_work(uuid).is_empty());
+
+        // do work
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001]);
+
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+    }
+
+    #[test]
+    fn unblock_job() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add two jobs, one blocked on another
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+
+        // new_work returns all new or dep wait jobs
+        assert_eq!(work.new_work(uuid), vec![1000, 1001]);
+
+        // only one is ready to run
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        // new_work returns all new or dep wait jobs
+        assert_eq!(work.new_work(uuid), vec![1001]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+    }
+
+    #[test]
+    fn unblock_job_chain() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other in a chain
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        // new_work returns all new or dep wait jobs
+        assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
+
+        // only one is ready to run at a time
+
+        assert!(work.completed.is_empty());
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        assert_eq!(work.new_work(uuid), vec![1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001]);
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        assert!(work.new_work(uuid).is_empty());
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001, 1002]);
+    }
+
+    #[test]
+    fn unblock_job_chain_first_is_flush() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other in a chain, first is flush
+        add_work(&mut work, uuid, 1000, vec![], true);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        // new_work returns all new or dep wait jobs
+        assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
+
+        // only one is ready to run at a time
+
+        assert!(work.completed.is_empty());
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1000);
+        assert!(work.completed.is_empty());
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        assert_eq!(work.new_work(uuid), vec![1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1000);
+        assert_eq!(work.completed, vec![1001]);
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        assert!(work.new_work(uuid).is_empty());
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1000);
+        assert_eq!(work.completed, vec![1001, 1002]);
+    }
+
+    #[test]
+    fn unblock_job_chain_second_is_flush() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other in a chain, second is flush
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], true);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        // new_work returns all new or dep wait jobs
+        assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
+
+        // only one is ready to run at a time
+
+        assert!(work.completed.is_empty());
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        assert_eq!(work.new_work(uuid), vec![1002]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1001);
+        assert!(work.completed.is_empty());
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        assert!(work.new_work(uuid).is_empty());
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1001);
+        assert_eq!(work.completed, vec![1002]);
+    }
+
+    #[test]
+    fn unblock_job_upstairs_sends_big_deps() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
+
+        // Downstairs is really fast!
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1002);
+        assert!(work.completed.is_empty());
+
+        // Upstairs sends a job with these three in deps, not knowing Downstairs
+        // has done the jobs already
+        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+        add_work(&mut work, uuid, 1004, vec![1000, 1001, 1002, 1003], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1003]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1004]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1002);
+        assert_eq!(work.completed, vec![1003, 1004]);
+    }
+
+    #[test]
+    fn job_dep_not_satisfied() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
+
+        // Add one that can't run yet
+        add_work(&mut work, uuid, 1003, vec![2000], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 1002);
+        assert!(work.completed.is_empty());
+
+        assert_eq!(work.new_work(uuid), vec![1003]);
+        assert_eq!(work.active.get(&1003).unwrap().state, WorkState::DepWait);
+    }
+
+    #[test]
+    fn two_job_chains() {
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        // Add another set of jobs blocked on each other
+        add_work(&mut work, uuid, 2000, vec![], false);
+        add_work(&mut work, uuid, 2001, vec![2000], false);
+        add_work(&mut work, uuid, 2002, vec![2000, 2001], true);
+
+        // should do each chain in sequence
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000, 2000]);
+        test_do_work(&mut work, next_jobs);
+        assert_eq!(work.completed, vec![1000, 2000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001, 2001]);
+        test_do_work(&mut work, next_jobs);
+        assert_eq!(work.completed, vec![1000, 2000, 1001, 2001]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002, 2002]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.last_flush, 2002);
+        assert!(work.completed.is_empty());
+    }
+
+    #[test]
+    fn out_of_order_arrives_after_first_push_next_jobs() {
+        /*
+         * Test that jobs arriving out of order still complete.
+         */
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other (missing 1002)
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1003]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001, 1002, 1003]);
+    }
+
+    #[test]
+    fn out_of_order_arrives_after_first_do_work() {
+        /*
+         * Test that jobs arriving out of order still complete.
+         */
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other (missing 1002)
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        test_do_work(&mut work, next_jobs);
+
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1003]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001, 1002, 1003]);
+    }
+
+    #[test]
+    fn out_of_order_arrives_after_1001_completes() {
+        /*
+         * Test that jobs arriving out of order still complete.
+         */
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        // Add three jobs all blocked on each other (missing 1002)
+        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1001]);
+        test_do_work(&mut work, next_jobs);
+
+        // can't run anything, dep not satisfied
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert!(next_jobs.is_empty());
+        test_do_work(&mut work, next_jobs);
+
+        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1002]);
+        test_do_work(&mut work, next_jobs);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1003]);
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000, 1001, 1002, 1003]);
     }
 }

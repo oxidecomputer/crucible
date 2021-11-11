@@ -232,4 +232,30 @@ mod tests {
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
+
+    #[test]
+    fn correctly_detect_truncated_message() -> Result<()> {
+        let mut encoder = CrucibleEncoder::new();
+        let mut decoder = CrucibleDecoder::new();
+
+        let input = Message::HereIAm(0, Uuid::new_v4());
+        let mut buffer = BytesMut::new();
+
+        encoder.encode(input, &mut buffer)?;
+
+        buffer.truncate(buffer.len() - 1);
+
+        let result = decoder.decode(&mut buffer);
+
+        match result {
+            Err(_) => {
+                result?;
+            }
+            Ok(v) => {
+                assert_eq!(v, None);
+            }
+        };
+
+        Ok(())
+    }
 }
