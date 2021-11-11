@@ -11,6 +11,9 @@ use crucible_common::{Block, CrucibleError, RegionDefinition};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
+    /*
+     * Initial negotiation
+     */
     HereIAm(u32, Uuid),
     YesItsMe(u32),
 
@@ -29,9 +32,15 @@ pub enum Message {
      */
     UuidMismatch(Uuid),
 
+    /*
+     * Ping related
+     */
     Ruok,
     Imok,
 
+    /*
+     * Metadata exchange
+     */
     RegionInfoPlease,
     RegionInfo(RegionDefinition),
     ExtentVersionsPlease,
@@ -39,12 +48,25 @@ pub enum Message {
     LastFlushAck(u64),
     ExtentVersions(Vec<u64>, Vec<u64>, Vec<bool>),
 
+    /*
+     * Write: Uuid, job id, extent id, dependencies, extent offset, data to
+     *        write
+     * WriteAck: Uuid, job id, result
+     */
     Write(Uuid, u64, u64, Vec<u64>, Block, bytes::Bytes),
     WriteAck(Uuid, u64, Result<(), CrucibleError>),
+
     Flush(Uuid, u64, Vec<u64>, u64),
     FlushAck(Uuid, u64, Result<(), CrucibleError>),
+
+    /*
+     * ReadRequest: Uuid, job id, dependencies, extent id, extent offset, number
+     *              of blocks
+     * ReadResponse: Uuid, job id, block of data, result
+     */
     ReadRequest(Uuid, u64, Vec<u64>, u64, Block, u64),
     ReadResponse(Uuid, u64, bytes::Bytes, Result<(), CrucibleError>),
+
     Unknown(u32, BytesMut),
 }
 
