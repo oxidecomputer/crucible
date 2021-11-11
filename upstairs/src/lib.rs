@@ -657,6 +657,11 @@ async fn proc(
                         negotiated = 2;
                         fw.send(Message::RegionInfoPlease).await?;
                     }
+                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                        if up.uuid != new_active_uuid {
+                            up.set_inactive();
+                        }
+                    }
                     Some(Message::RegionInfo(region_def)) => {
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
@@ -879,6 +884,11 @@ async fn cmd_loop(
                     None => {
                         return Ok(())
                     },
+                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                        if up.uuid != new_active_uuid {
+                            up.set_inactive();
+                        }
+                    }
                     Some(Message::UuidMismatch(expected_uuid)) => {
                         up.set_inactive();
                         bail!(

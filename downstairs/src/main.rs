@@ -579,7 +579,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                     ds.active_upstairs().unwrap()
                 };
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(active_upstairs)).await?;
+                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
 
                 return Ok(());
             }
@@ -824,7 +824,7 @@ async fn resp_loop(
                 };
 
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(active_upstairs)).await?;
+                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
 
                 return Ok(());
             }

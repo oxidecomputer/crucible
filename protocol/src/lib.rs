@@ -39,6 +39,7 @@ pub enum Message {
      */
     PromoteToActive(Uuid),
     YouAreNowActive(Uuid),
+    YouAreNoLongerActive(Uuid), // UUID of new active Upstairs
 
     /*
      * If downstairs sees a UUID that doesn't match what was negotiated, it
