@@ -282,24 +282,15 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          */
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
-        let mut writes: Vec<crucible_protocol::Write> = vec![];
         for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
             let mut data = bytes::BytesMut::with_capacity(len.bytes());
             data.copy_from_slice(
                 &buffer[pos.bytes()..(pos.bytes() + len.bytes())],
             );
+            region.single_block_region_write(eid, offset, data.freeze())?;
 
-            let write = crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-            };
-
-            writes.push(write);
             pos.advance(len);
         }
-
-        region.region_write(&writes)?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());

@@ -613,6 +613,16 @@ impl Region {
     }
 
     #[instrument]
+    pub fn single_block_region_write(
+        &self,
+        eid: u64,
+        offset: Block,
+        data: bytes::Bytes,
+    ) -> Result<(), CrucibleError> {
+        self.region_write(&[crucible_protocol::Write { eid, offset, data }])
+    }
+
+    #[instrument]
     pub fn region_write(
         &self,
         writes: &[crucible_protocol::Write],
