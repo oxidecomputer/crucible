@@ -1315,7 +1315,9 @@ impl Work {
                  */
                 let (bs, _, _) = ds.region.region_def();
 
-                let mut responses: Vec<(ReadRequest, BytesMut)> = vec![];
+                let mut responses: Vec<(ReadRequest, BytesMut)> =
+                    Vec::with_capacity(requests.len());
+
                 for request in requests {
                     let sz = request.num_blocks as usize * bs as usize;
                     let mut data = BytesMut::with_capacity(sz);
