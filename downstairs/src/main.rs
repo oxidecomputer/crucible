@@ -283,11 +283,10 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
         for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
-            let mut data = bytes::BytesMut::with_capacity(len.bytes());
-            data.copy_from_slice(
-                &buffer[pos.bytes()..(pos.bytes() + len.bytes())],
-            );
-            region.single_block_region_write(eid, offset, data.freeze())?;
+            let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
+            let mut buffer = BytesMut::with_capacity(data.len());
+            buffer.copy_from_slice(data);
+            region.single_block_region_write(eid, offset, buffer.freeze())?;
 
             pos.advance(len);
         }
