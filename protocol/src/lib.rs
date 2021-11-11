@@ -16,6 +16,13 @@ pub struct Write {
     pub data: bytes::Bytes,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+pub struct ReadRequest {
+    pub eid: u64,
+    pub offset: Block,
+    pub num_blocks: u64,
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     /*
@@ -66,12 +73,16 @@ pub enum Message {
     FlushAck(Uuid, u64, Result<(), CrucibleError>),
 
     /*
-     * ReadRequest: Uuid, job id, dependencies, extent id, extent offset,
-     *              number of blocks
-     * ReadResponse: Uuid, job id, block of data, result
+     * ReadRequest: Uuid, job id, dependencies, [ReadRequest]
+     * ReadResponse: Uuid, job id, [(ReadRequest, block)], result
      */
-    ReadRequest(Uuid, u64, Vec<u64>, u64, Block, u64),
-    ReadResponse(Uuid, u64, bytes::Bytes, Result<(), CrucibleError>),
+    ReadRequest(Uuid, u64, Vec<u64>, Vec<ReadRequest>),
+    ReadResponse(
+        Uuid,
+        u64,
+        Vec<(ReadRequest, bytes::Bytes)>,
+        Result<(), CrucibleError>,
+    ),
 
     Unknown(u32, BytesMut),
 }

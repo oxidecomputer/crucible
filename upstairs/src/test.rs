@@ -478,7 +478,12 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -486,9 +491,9 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -496,15 +501,15 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         work.ack(next_id);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
-        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
         assert_eq!(work.completed.len(), 0);
@@ -517,7 +522,12 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -525,13 +535,13 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -540,9 +550,9 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
-        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -550,9 +560,9 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         work.ack(next_id);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
         // That this is still zero is part of the test
@@ -566,7 +576,12 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -574,13 +589,13 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -589,13 +604,13 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -604,9 +619,9 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
 
         work.ack(next_id);
@@ -624,7 +639,12 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -632,13 +652,13 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -647,13 +667,13 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -662,13 +682,13 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 2,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -687,13 +707,18 @@ mod test {
     fn work_read_two_ok_one_bad() {
         let upstairs = Upstairs::default();
 
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+
         let next_id = {
             let mut work = upstairs.downstairs.lock().unwrap();
 
             let next_id = work.next_id();
 
-            let op =
-                create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+            let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
             work.enqueue(op);
 
@@ -704,12 +729,15 @@ mod test {
             next_id
         };
 
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(upstairs.complete(next_id, 2, bytes, Ok(())).unwrap(), true);
-
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
         assert_eq!(
-            upstairs.complete(next_id, 0, bytes, Ok(())).unwrap(),
+            upstairs.complete(next_id, 2, response, Ok(())).unwrap(),
+            true
+        );
+
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(
+            upstairs.complete(next_id, 0, response, Ok(())).unwrap(),
             false
         );
 
@@ -724,13 +752,13 @@ mod test {
             work.retire_check(next_id);
         }
 
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
         assert_eq!(
             upstairs
                 .complete(
                     next_id,
                     1,
-                    bytes,
+                    response,
                     Err(CrucibleError::GenericError(format!("bad")))
                 )
                 .unwrap(),
@@ -752,7 +780,12 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -760,13 +793,13 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let bytes = Some(Bytes::from(vec![1]));
+        let response = Some(vec![(request, Bytes::from(vec![1]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -775,13 +808,13 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let bytes = Some(Bytes::from(vec![2]));
+        let response = Some(vec![(request, Bytes::from(vec![2]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -790,14 +823,14 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let bytes = Some(Bytes::from(vec![3]));
+        let response = Some(vec![(request, Bytes::from(vec![3]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(Bytes::from(vec![3]))
+            Some(vec![(request, Bytes::from(vec![3]))])
         );
     }
 
@@ -863,7 +896,12 @@ mod test {
         // The others should be skipped.
 
         let next_id = work.next_id();
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -871,14 +909,14 @@ mod test {
         assert!(work.in_progress(next_id, 1).is_none());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let bytes = Some(Bytes::from(vec![3]));
+        let response = Some(vec![(request, Bytes::from(vec![3]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(Bytes::from(vec![3]))
+            Some(vec![(request, Bytes::from(vec![3]))])
         );
     }
 
@@ -891,7 +929,12 @@ mod test {
 
         // send a read, and clients 0 and 1 will return errors
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -899,13 +942,13 @@ mod test {
         assert!(work.in_progress(next_id, 1).is_some());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let bytes = Some(Bytes::from(vec![1]));
+        let response = Some(vec![(request, Bytes::from(vec![1]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -914,13 +957,13 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let bytes = Some(Bytes::from(vec![2]));
+        let response = Some(vec![(request, Bytes::from(vec![2]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -929,14 +972,14 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let bytes = Some(Bytes::from(vec![3]));
+        let response = Some(vec![(request, Bytes::from(vec![3]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(Bytes::from(vec![3]))
+            Some(vec![(request, Bytes::from(vec![3]))])
         );
 
         assert!(work.downstairs_errors.get(&0).is_none());
@@ -947,7 +990,12 @@ mod test {
         // (reads shouldn't cause a Failed transition)
 
         let next_id = work.next_id();
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -955,13 +1003,13 @@ mod test {
         assert!(work.in_progress(next_id, 1).is_some());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let bytes = Some(Bytes::from(vec![4]));
+        let response = Some(vec![(request, Bytes::from(vec![4]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -970,13 +1018,13 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let bytes = Some(Bytes::from(vec![5]));
+        let response = Some(vec![(request, Bytes::from(vec![5]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                bytes,
+                response,
                 Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
@@ -985,14 +1033,14 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let bytes = Some(Bytes::from(vec![6]));
+        let response = Some(vec![(request, Bytes::from(vec![6]))]);
 
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(Bytes::from(vec![6]))
+            Some(vec![(request, Bytes::from(vec![6]))])
         );
     }
 
@@ -1006,7 +1054,12 @@ mod test {
         // Build our read, put it into the work queue
         let next_id = work.next_id();
 
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         work.enqueue(op);
 
@@ -1016,17 +1069,17 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Downstairs 0 now has completed this work.
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
 
         // One completion of a read means we can ACK
         assert_eq!(work.ackable_work().len(), 1);
 
         // Complete downstairs 1 and 2
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), false);
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 2, bytes, Ok(())).unwrap(), false);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), false);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), false);
 
         // Make sure the job is still active
         assert_eq!(work.completed.len(), 0);
@@ -1357,7 +1410,12 @@ mod test {
 
         // Build our read IO and submit it to the work queue.
         let next_id = work.next_id();
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
         work.enqueue(op);
 
         // Submit the read to all three downstairs
@@ -1366,8 +1424,8 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the read on one downstairs.
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
 
         // One completion should allow for an ACK
         assert_eq!(work.ackable_work().len(), 1);
@@ -1392,7 +1450,12 @@ mod test {
 
         // Build a read and put it on the work queue.
         let next_id = work.next_id();
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
         work.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -1401,15 +1464,15 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the read on one downstairs, verify it is ack ready.
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Complete the read on a 2nd downstairs.
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 1, bytes, Ok(())).unwrap(), false);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), false);
 
         // Now, take the first downstairs offline.
         work.re_new(0);
@@ -1424,9 +1487,9 @@ mod test {
         assert_eq!(state, AckStatus::NotAcked);
 
         // Redo the read on DS 0, IO should go back to ackable.
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
         work.in_progress(next_id, 0);
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1441,7 +1504,12 @@ mod test {
 
         // Create the read and put it on the work queue.
         let next_id = work.next_id();
-        let op = create_read_eob(next_id, vec![], 10, 0, Block::new_512(7), 2);
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
         work.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -1450,8 +1518,8 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the read on one downstairs.
-        let bytes = Some(Bytes::from(vec![]));
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), true);
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
 
         // Verify the read is now AckReady
         assert_eq!(work.ackable_work().len(), 1);
@@ -1477,9 +1545,9 @@ mod test {
         assert_eq!(state, AckStatus::Acked);
 
         // Redo on DS 0, IO should remain acked.
-        let bytes = Some(Bytes::from(vec![]));
+        let response = Some(vec![(request, Bytes::from(vec![]))]);
         work.in_progress(next_id, 0);
-        assert_eq!(work.complete(next_id, 0, bytes, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);

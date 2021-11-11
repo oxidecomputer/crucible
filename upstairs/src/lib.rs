@@ -127,7 +127,7 @@ async fn process_message(
             )
             .await?)
         }
-        Message::ReadResponse(uuid, ds_id, data, result) => {
+        Message::ReadResponse(uuid, ds_id, responses, result) => {
             if u.uuid != *uuid {
                 println!(
                     "u.uuid {:?} != job uuid {:?} on ReadResponse",
@@ -140,7 +140,7 @@ async fn process_message(
                 u,
                 *ds_id,
                 up_coms.client_id,
-                Some(data.clone()),
+                Some(responses.clone()),
                 up_coms.ds_done_tx,
                 result.clone(),
             )
@@ -318,11 +318,11 @@ async fn io_completed(
     up: &Arc<Upstairs>,
     ds_id: u64,
     client_id: u8,
-    data: Option<Bytes>,
+    responses: Option<Vec<(ReadRequest, bytes::Bytes)>>,
     ds_done_tx: mpsc::Sender<u64>,
     result: Result<(), CrucibleError>,
 ) -> Result<()> {
-    if up.complete(ds_id, client_id, data, result)? {
+    if up.complete(ds_id, client_id, responses, result)? {
         ds_done_tx.send(ds_id).await?
     }
 
@@ -430,17 +430,13 @@ async fn io_send(
             }
             IOop::Read {
                 dependencies,
-                eid,
-                offset,
-                num_blocks,
+                requests,
             } => {
                 fw.send(Message::ReadRequest(
                     u.uuid,
                     *new_id,
                     dependencies.clone(),
-                    eid,
-                    offset,
-                    num_blocks,
+                    requests,
                 ))
                 .await?
             }
@@ -1372,13 +1368,11 @@ impl Downstairs {
         let bad_job = match &job.work {
             IOop::Read {
                 dependencies: _dependencies,
-                eid: _eid,
-                offset: _offset,
-                num_blocks: _num_blocks,
+                requests: _,
             } => wc.error == 3,
             IOop::Write {
                 dependencies: _dependencies,
-                writes: _writes,
+                writes: _,
             } => wc.error >= 2,
             IOop::Flush {
                 dependencies: _dependencies,
@@ -1410,9 +1404,7 @@ impl Downstairs {
         match &job.work {
             IOop::Read {
                 dependencies: _,
-                eid: _,
-                offset: _,
-                num_blocks: _,
+                requests: _,
             } => {
                 cdt::gw_read_end!(|| (gw_id));
             }
@@ -1444,7 +1436,7 @@ impl Downstairs {
         &mut self,
         ds_id: u64,
         client_id: u8,
-        read_data: Option<Bytes>,
+        read_data: Option<Vec<(ReadRequest, Bytes)>>,
         result: Result<(), CrucibleError>,
     ) -> Result<bool> {
         /*
@@ -1523,9 +1515,7 @@ impl Downstairs {
             match &job.work {
                 IOop::Read {
                     dependencies: _dependencies,
-                    eid: _eid,
-                    offset: _offset,
-                    num_blocks: _num_blocks,
+                    requests: _,
                 } => {
                     assert!(read_data.is_some());
                     if jobs_completed_ok == 1 {
@@ -1644,6 +1634,7 @@ impl Downstairs {
             _ => Ok(false),
         }
     }
+
     /**
      * Check if an active job is a read or not.
      */
@@ -1656,9 +1647,7 @@ impl Downstairs {
         match &job.work {
             IOop::Read {
                 dependencies: _dependencies,
-                eid: _eid,
-                offset: _offset,
-                num_blocks: _num_blocks,
+                requests: _,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -1972,15 +1961,8 @@ impl Upstairs {
         let mut sub = HashMap::new();
         sub.insert(next_id, 0);
 
-        let new_gtos = GtoS::new(
-            sub,
-            Vec::new(),
-            None,
-            HashMap::new(),
-            HashMap::new(),
-            sender,
-            None,
-        );
+        let new_gtos =
+            GtoS::new(sub, Vec::new(), None, HashMap::new(), sender, None);
         gw.active.insert(gw_id, new_gtos);
         cdt::gw_flush_start!(|| (gw_id));
 
@@ -2089,7 +2071,6 @@ impl Upstairs {
             Vec::new(),
             None,
             HashMap::new(),
-            HashMap::new(),
             Some(sender),
             None,
         );
@@ -2153,9 +2134,8 @@ impl Upstairs {
          * will create on behalf of this guest job.
          */
         let mut sub = HashMap::new();
+        let next_id = downstairs.next_id();
         let mut new_ds_work = Vec::new();
-        let mut downstairs_buffer_sector_index = HashMap::new();
-        let mut next_id: u64;
 
         /*
          * Now create a downstairs work job for each (eid, bo, len) returned
@@ -2163,11 +2143,10 @@ impl Upstairs {
          */
         let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
         dep.sort_unstable();
-        for (eid, bo, num_blocks) in nwo {
-            {
-                next_id = downstairs.next_id();
-            }
 
+        let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
+
+        for (eid, bo, num_blocks) in nwo {
             /*
              * When multiple operations are needed to satisfy a read, The
              * offset and length will be divided across two downstairs
@@ -2175,18 +2154,17 @@ impl Upstairs {
              * that the lower offset corresponds to the lower next_id.
              * The ID's don't need to be sequential.
              */
-            sub.insert(next_id, num_blocks.value);
-            downstairs_buffer_sector_index.insert(next_id, bo.value as u128);
-            let wr = create_read_eob(
-                next_id,
-                dep.clone(),
-                gw_id,
+            requests.push(ReadRequest {
                 eid,
-                bo,
-                num_blocks.value,
-            );
-            new_ds_work.push(wr);
+                offset: bo,
+                num_blocks: num_blocks.value,
+            });
         }
+
+        sub.insert(next_id, 0); // XXX does this value matter?
+
+        let wr = create_read_eob(next_id, dep.clone(), gw_id, requests);
+        new_ds_work.push(wr);
 
         /*
          * New work created, add to the guest_work HM. New work must be put
@@ -2200,7 +2178,6 @@ impl Upstairs {
             Vec::new(),
             Some(data),
             HashMap::new(),
-            downstairs_buffer_sector_index,
             Some(sender),
             self.encryption_context.clone(),
         );
@@ -2439,14 +2416,14 @@ impl Upstairs {
         &self,
         ds_id: u64,
         client_id: u8,
-        data: Option<Bytes>,
+        read_data: Option<Vec<(ReadRequest, Bytes)>>,
         result: Result<(), CrucibleError>,
     ) -> Result<bool> {
         let mut work = self.downstairs.lock().unwrap();
 
         // Mark this ds_id for the client_id as completed.
         let notify_guest =
-            work.complete(ds_id, client_id, data, result.clone())?;
+            work.complete(ds_id, client_id, read_data, result.clone())?;
 
         // Mark this downstairs as bad if this was a write or flush
         if let Some(err) = result.err() {
@@ -2606,7 +2583,7 @@ struct DownstairsIO {
     /*
      * If the operation is a Read, this holds the resulting buffer
      */
-    data: Option<Bytes>,
+    data: Option<Vec<(ReadRequest, Bytes)>>,
 }
 
 impl DownstairsIO {
@@ -2637,9 +2614,7 @@ pub enum IOop {
     },
     Read {
         dependencies: Vec<u64>, // Jobs that must finish before this
-        eid: u64,
-        offset: Block,
-        num_blocks: u64,
+        requests: Vec<ReadRequest>,
     },
     Flush {
         dependencies: Vec<u64>, // Jobs that must finish before this
@@ -2660,9 +2635,7 @@ impl IOop {
             } => dependencies,
             IOop::Read {
                 dependencies,
-                eid: _eid,
-                offset: _offset,
-                num_blocks: _num_blocks,
+                requests: _,
             } => dependencies,
         }
     }
@@ -2970,8 +2943,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, Bytes>,
-    downstairs_buffer_sector_index: HashMap<u64, u128>,
+    downstairs_buffer: HashMap<u64, Vec<(ReadRequest, Bytes)>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -2996,8 +2968,7 @@ impl GtoS {
         submitted: HashMap<u64, u64>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, Bytes>,
-        downstairs_buffer_sector_index: HashMap<u64, u128>,
+        downstairs_buffer: HashMap<u64, Vec<(ReadRequest, Bytes)>>,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
         encryption_context: Option<EncryptionContext>,
     ) -> GtoS {
@@ -3006,7 +2977,6 @@ impl GtoS {
             completed,
             guest_buffer,
             downstairs_buffer,
-            downstairs_buffer_sector_index,
             sender,
             encryption_context,
         }
@@ -3025,29 +2995,30 @@ impl GtoS {
 
             let mut offset = 0;
             for ds_id in self.completed.iter() {
-                let mut ds_vec =
-                    self.downstairs_buffer.remove(ds_id).unwrap().to_vec();
+                let data = self.downstairs_buffer.remove(ds_id).unwrap();
 
-                // if there's an encryption context, decrypt the
-                // downstairs buffer.
-                if let Some(context) = &self.encryption_context {
-                    context.decrypt_in_place(
-                        &mut ds_vec[..],
-                        *self
-                            .downstairs_buffer_sector_index
-                            .get(ds_id)
-                            .unwrap(),
-                    );
-                }
+                for (request, ds_vec) in data {
+                    let mut ds_vec = ds_vec.to_vec();
 
-                // Copy over into guest memory.
-                {
-                    let _ignored =
-                        span!(Level::TRACE, "copy to guest buffer").entered();
-                    let mut vec = guest_buffer.as_vec();
-                    for i in &ds_vec {
-                        vec[offset] = *i;
-                        offset += 1;
+                    // if there's an encryption context, decrypt the
+                    // downstairs buffer.
+                    if let Some(context) = &self.encryption_context {
+                        context.decrypt_in_place(
+                            &mut ds_vec[..],
+                            request.offset.value as u128,
+                        );
+                    }
+
+                    // Copy over into guest memory.
+                    {
+                        let _ignored =
+                            span!(Level::TRACE, "copy to guest buffer")
+                                .entered();
+                        let mut vec = guest_buffer.as_vec();
+                        for i in &ds_vec {
+                            vec[offset] = *i;
+                            offset += 1;
+                        }
                     }
                 }
             }
@@ -3143,7 +3114,7 @@ impl GuestWork {
         &mut self,
         gw_id: u64,
         ds_id: u64,
-        data: Option<Bytes>,
+        data: Option<Vec<(ReadRequest, Bytes)>>,
         result: Result<(), CrucibleError>,
     ) {
         /*
@@ -4179,15 +4150,11 @@ fn create_read_eob(
     ds_id: u64,
     dependencies: Vec<u64>,
     gw_id: u64,
-    eid: u64,
-    offset: Block,
-    num_blocks: u64,
+    requests: Vec<ReadRequest>,
 ) -> DownstairsIO {
     let aread = IOop::Read {
         dependencies,
-        eid,
-        offset,
-        num_blocks,
+        requests,
     };
 
     let mut state = HashMap::new();
@@ -4268,36 +4235,43 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             match &job.work {
                 IOop::Read {
                     dependencies: _dependencies,
-                    eid,
-                    offset,
-                    num_blocks,
+                    requests,
                 } => {
                     let job_type = "Read ".to_string();
-                    print!(
-                        " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                        job.guest_id,
-                        ack,
-                        id,
-                        job_type,
-                        *eid,
-                        offset.value,
-                        *num_blocks as usize,
-                    );
+                    let mut first_line = true;
 
-                    for cid in 0..3 {
-                        let state = job.state.get(&cid);
-                        match state {
-                            Some(state) => {
-                                print!("{} ", state);
-                                iosc.incr(state, cid);
-                            }
-                            _x => {
-                                print!("???? ");
+                    for request in requests {
+                        print!(
+                            " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
+                            if first_line {
+                                format!("{:4}", job.guest_id)
+                            } else {
+                                "   |".to_string()
+                            },
+                            ack,
+                            id,
+                            job_type,
+                            request.eid,
+                            request.offset.value,
+                            1,
+                        );
+                        first_line = false;
+
+                        for cid in 0..3 {
+                            let state = job.state.get(&cid);
+                            match state {
+                                Some(state) => {
+                                    print!("{} ", state);
+                                    iosc.incr(state, cid);
+                                }
+                                _x => {
+                                    print!("???? ");
+                                }
                             }
                         }
-                    }
 
-                    println!();
+                        println!();
+                    }
                 }
                 IOop::Write {
                     dependencies: _dependencies,
@@ -4366,7 +4340,6 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     println!();
                 }
             };
-
         }
         iosc.show_all();
         print!("Last Flush: ");

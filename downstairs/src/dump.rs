@@ -28,12 +28,10 @@ pub fn dump_region(
     let dir_count = region_dir.len();
     let mut blocks_per_extent = 0;
     let mut total_extents = 0;
-    let mut block_size = 0;
 
     for (index, dir) in region_dir.iter().enumerate() {
         let region = Region::open(&dir, Default::default(), false)?;
 
-        block_size = region.def().block_size() as usize;
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
 
@@ -96,7 +94,7 @@ pub fn dump_region(
             bail!("Need more than one region directory to compare data");
         }
         let en = all_extents.get(&ce).unwrap();
-        show_extent(region_dir, &en.ei_hm, ce, blocks_per_extent, block_size)?;
+        show_extent(region_dir, &en.ei_hm, ce, blocks_per_extent)?;
 
         return Ok(());
     };
@@ -150,7 +148,6 @@ fn show_extent(
     ei_hm: &HashMap<u32, ExtentMeta>,
     cmp_extent: u32,
     blocks_per_extent: u64,
-    block_size: usize,
 ) -> Result<()> {
     /*
      * First, print out the Generation number, the flush ID,
@@ -208,12 +205,7 @@ fn show_extent(
          * Build a Vector to hold our data buffers, one for each
          * region we are comparing.
          */
-        let mut dvec: Vec<BytesMut> = Vec::new();
-        for dir_index in 0..dir_count {
-            let mut data = BytesMut::with_capacity(block_size);
-            data.resize(block_size, 1);
-            dvec.insert(dir_index, data);
-        }
+        let mut dvec: Vec<BytesMut> = Vec::with_capacity(dir_count);
 
         /*
          * Read the requested block in from the extent.  Store it
@@ -222,11 +214,14 @@ fn show_extent(
         for (index, dir) in region_dir.iter().enumerate() {
             let region = Region::open(&dir, Default::default(), false)?;
 
-            region.region_read(
-                cmp_extent as u64,
-                Block::new_with_ddef(block, &region.def()),
-                &mut dvec[index],
-            )?;
+            dvec.insert(
+                index,
+                region.single_block_region_read(ReadRequest {
+                    eid: cmp_extent as u64,
+                    offset: Block::new_with_ddef(block, &region.def()),
+                    num_blocks: 1,
+                })?,
+            );
         }
 
         /*
