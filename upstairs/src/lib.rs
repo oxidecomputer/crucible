@@ -4283,17 +4283,37 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                         offset.value,
                         *num_blocks as usize,
                     );
+
+                    for cid in 0..3 {
+                        let state = job.state.get(&cid);
+                        match state {
+                            Some(state) => {
+                                print!("{} ", state);
+                                iosc.incr(state, cid);
+                            }
+                            _x => {
+                                print!("???? ");
+                            }
+                        }
+                    }
+
+                    println!();
                 }
                 IOop::Write {
                     dependencies: _dependencies,
                     writes,
                 } => {
                     let job_type = "Write".to_string();
+                    let mut first_line = true;
 
                     for write in writes {
                         print!(
-                            " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                            job.guest_id,
+                            " {}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
+                            if first_line {
+                                format!("{:4}", job.guest_id)
+                            } else {
+                                "   |".to_string()
+                            },
                             ack,
                             id,
                             job_type,
@@ -4301,6 +4321,22 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                             write.offset.value,
                             write.data.len() / (1 << write.offset.shift),
                         );
+                        first_line = false;
+
+                        for cid in 0..3 {
+                            let state = job.state.get(&cid);
+                            match state {
+                                Some(state) => {
+                                    print!("{} ", state);
+                                    iosc.incr(state, cid);
+                                }
+                                _x => {
+                                    print!("???? ");
+                                }
+                            }
+                        }
+
+                        println!();
                     }
                 }
                 IOop::Flush {
@@ -4313,22 +4349,24 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                         " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
                         job.guest_id, ack, id, job_type, 0, 0, 0,
                     );
+
+                    for cid in 0..3 {
+                        let state = job.state.get(&cid);
+                        match state {
+                            Some(state) => {
+                                print!("{} ", state);
+                                iosc.incr(state, cid);
+                            }
+                            _x => {
+                                print!("???? ");
+                            }
+                        }
+                    }
+
+                    println!();
                 }
             };
 
-            for cid in 0..3 {
-                let state = job.state.get(&cid);
-                match state {
-                    Some(state) => {
-                        print!("{} ", state);
-                        iosc.incr(state, cid);
-                    }
-                    _x => {
-                        print!("???? ");
-                    }
-                }
-            }
-            println!();
         }
         iosc.show_all();
         print!("Last Flush: ");
