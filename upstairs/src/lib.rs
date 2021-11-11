@@ -841,27 +841,23 @@ async fn cmd_loop(
         let up_coms_c = up_coms.clone();
 
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    x = rx.recv() => {
-                        match x {
-                            Some(m) => {
-                                /*
-                                 * TODO: Add a check here to make sure we are
-                                 * connected and in the proper state before we
-                                 * accept any commands.
-                                 */
-                                let _result =
-                                    process_message(
-                                        &up_c,
-                                        &m,
-                                        up_coms_c.clone()
-                                    ).await;
-                            }
-                            None => {
-                                break;
-                            }
-                        }
+            while let Some(x) = rx.recv().await {
+                match x {
+                    Some(m) => {
+                        /*
+                         * TODO: Add a check here to make sure we are
+                         * connected and in the proper state before we
+                         * accept any commands.
+                         */
+                        let _result =
+                            process_message(
+                                &up_c,
+                                &m,
+                                up_coms_c.clone()
+                            ).await;
+                    }
+                    None => {
+                        break;
                     }
                 }
             }
