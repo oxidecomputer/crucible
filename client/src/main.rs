@@ -1151,11 +1151,13 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         }
 
         guest.show_work()?;
-        if random() && random() {
-            println!("Loop:{} send a final flush and wait", my_count);
-            let mut flush_waiter = guest.flush()?;
-            flush_waiter.block_wait()?;
-        }
+
+        // The final flush is to help prevent the pause that we get when the
+        // last command is a write or read and we have to wait x seconds for the
+        // flush check to trigger.
+        println!("Loop:{} send a final flush and wait", my_count);
+        let mut flush_waiter = guest.flush()?;
+        flush_waiter.block_wait()?;
 
         println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
         for wa in waiterlist.iter_mut() {
