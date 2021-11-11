@@ -834,32 +834,21 @@ async fn cmd_loop(
     let mut ping_interval = deadline_secs(10);
     let mut timeout_deadline = deadline_secs(50);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, mut rx) = mpsc::channel::<Message>(100);
 
     {
         let up_c = up.clone();
         let up_coms_c = up_coms.clone();
 
         tokio::spawn(async move {
-            while let Some(x) = rx.recv().await {
-                match x {
-                    Some(m) => {
-                        /*
-                         * TODO: Add a check here to make sure we are
-                         * connected and in the proper state before we
-                         * accept any commands.
-                         */
-                        let _result =
-                            process_message(
-                                &up_c,
-                                &m,
-                                up_coms_c.clone()
-                            ).await;
-                    }
-                    None => {
-                        break;
-                    }
-                }
+            while let Some(m) = rx.recv().await {
+                /*
+                 * TODO: Add a check here to make sure we are
+                 * connected and in the proper state before we
+                 * accept any commands.
+                 */
+                let _result =
+                    process_message(&up_c, &m, up_coms_c.clone()).await;
             }
         });
     }
