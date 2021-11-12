@@ -282,11 +282,19 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          */
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
-        for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
+        for (eid, offset, len) in
+            extent_from_offset(rm, offset, nblocks, false)?
+        {
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
             buffer.copy_from_slice(data);
-            region.single_block_region_write(eid, offset, buffer.freeze())?;
+            region.single_block_region_write(
+                eid,
+                offset,
+                buffer.freeze(),
+                None,
+                None,
+            )?;
 
             pos.advance(len);
         }
@@ -1339,48 +1347,22 @@ impl Work {
                 requests,
             } => {
                 /*
-                 * XXX Some thought will need to be given to where the read
-                 * data buffer is created, both on this side and the remote.
-                 * Also, we (I) need to figure out how to read data into an
-                 * uninitialized buffer. Until then, we have this workaround.
-                 */
-                let (bs, _, _) = ds.region.region_def();
-
-                let mut responses: Vec<(ReadRequest, BytesMut)> =
-                    Vec::with_capacity(requests.len());
-
-                for request in requests {
-                    let sz = request.num_blocks as usize * bs as usize;
-                    let mut data = BytesMut::with_capacity(sz);
-                    data.resize(sz, 1);
-                    responses.push((*request, data));
-                }
-
-                /*
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let result = if ds.return_errors && random() && random() {
+                let responses = if ds.return_errors && random() && random() {
                     println!("returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !ds.is_active(job.upstairs_uuid) {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_read(&mut responses)
+                    ds.region.region_read(requests)
                 };
-
-                let mut frozen_responses: Vec<(ReadRequest, Bytes)> =
-                    Vec::with_capacity(responses.len());
-
-                for (request, data) in responses {
-                    frozen_responses.push((request, data.freeze()));
-                }
 
                 Ok(Some(Message::ReadResponse(
                     job.upstairs_uuid,
                     job.ds_id,
-                    frozen_responses,
-                    result,
+                    responses,
                 )))
             }
             IOop::Write {

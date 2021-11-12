@@ -14,13 +14,63 @@ pub struct Write {
     pub eid: u64,
     pub offset: Block,
     pub data: bytes::Bytes,
+    pub nonce: Option<Vec<u8>>,
+    pub tag: Option<Vec<u8>>,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
     pub eid: u64,
     pub offset: Block,
     pub num_blocks: u64,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ReadResponse {
+    pub eid: u64,
+    pub offset: Block,
+    pub num_blocks: u64,
+
+    pub data: bytes::BytesMut,
+    pub nonce: Option<Vec<u8>>,
+    pub tag: Option<Vec<u8>>,
+}
+
+impl ReadResponse {
+    pub fn from_request(request: &ReadRequest, bs: usize) -> ReadResponse {
+        /*
+         * XXX Some thought will need to be given to where the read
+         * data buffer is created, both on this side and the remote.
+         * Also, we (I) need to figure out how to read data into an
+         * uninitialized buffer. Until then, we have this workaround.
+         */
+        let sz = request.num_blocks as usize * bs;
+        let mut data = BytesMut::with_capacity(sz);
+        data.resize(sz, 1);
+
+        ReadResponse {
+            eid: request.eid,
+            offset: request.offset,
+            num_blocks: request.num_blocks,
+            data,
+            nonce: None,
+            tag: None,
+        }
+    }
+
+    pub fn from_request_with_data(
+        request: &ReadRequest,
+        data: &[u8],
+    ) -> ReadResponse {
+        ReadResponse {
+            eid: request.eid,
+            offset: request.offset,
+            num_blocks: request.num_blocks,
+            data: BytesMut::from(data),
+            nonce: None,
+            tag: None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -75,15 +125,10 @@ pub enum Message {
 
     /*
      * ReadRequest: Uuid, job id, dependencies, [ReadRequest]
-     * ReadResponse: Uuid, job id, [(ReadRequest, block)], result
+     * ReadResponse: Uuid, job id, Result<[ReadRequest]>
      */
     ReadRequest(Uuid, u64, Vec<u64>, Vec<ReadRequest>),
-    ReadResponse(
-        Uuid,
-        u64,
-        Vec<(ReadRequest, bytes::Bytes)>,
-        Result<(), CrucibleError>,
-    ),
+    ReadResponse(Uuid, u64, Result<Vec<ReadResponse>, CrucibleError>),
 
     Unknown(u32, BytesMut),
 }
