@@ -137,7 +137,7 @@ fn get_region_info(
      * Limit the max IO size (in blocks) to be 1M or the size
      * of the volume, whichever is smaller
      */
-    const MAX_IO_BYTES: usize = 1 * 1024 * 1024;
+    const MAX_IO_BYTES: usize = 1024 * 1024;
     let mut max_block_io = MAX_IO_BYTES / block_size as usize;
     if total_blocks < max_block_io as usize {
         max_block_io = total_blocks as usize;
