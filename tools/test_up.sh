@@ -5,6 +5,7 @@
 # move to some common test framework, or be thrown away.
 
 set -o pipefail
+SECONDS=0
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -57,7 +58,7 @@ for tt in ${test_list}; do
     echo "Running test: $tt"
     echo cargo run -p crucible-client -- -q -w "$tt" "${args[@]}"
     if ! cargo run -p crucible-client -- -q -w "$tt" "${args[@]}"; then
-        res=1
+        (( res += 1 ))
         echo ""
         echo "Failed crucible-client $tt test"
         echo ""
@@ -67,27 +68,27 @@ for tt in ${test_list}; do
 done
 
 echo "Running hammer"
-#if ! time cargo run -p crucible-hammer -- \
-#  "${args[@]}" \
-#  --key "$(openssl rand -base64 32)"; then
-#
-#	echo "Failed hammer test"
-#    res=1
-#fi
+if ! time cargo run -p crucible-hammer -- \
+    "${args[@]}" \
+    --key "$(openssl rand -base64 32)"; then
+
+	echo "Failed hammer test"
+    (( res += 1 ))
+fi
 
 echo ""
 echo "Running verify test: $tt"
 vfile="${testdir}/verify"
 echo cargo run -p crucible-client -- -q -w rand --verify-out "$vfile" "${args[@]}"
 if ! cargo run -p crucible-client -- -q -w rand --verify-out "$vfile" "${args[@]}"; then
-    res=1
+    (( res += 1 ))
     echo ""
     echo "Failed crucible-client rand verify test"
     echo ""
 else
     echo cargo run -p crucible-client -- -q -w rand --verify-in "$vfile" "${args[@]}"
     if ! cargo run -p crucible-client -- -q -w rand --verify-in "$vfile" "${args[@]}"; then
-        res=1
+        (( res += 1 ))
         echo ""
         echo "Failed crucible-client rand verify part 2 test"
         echo ""
@@ -104,7 +105,7 @@ for (( i = 0; i < 3; i++ )); do
 done
 echo cargo run -p crucible-downstairs -- dump "${args[@]}"
 if ! cargo run -p crucible-downstairs -- dump "${args[@]}"; then
-    res=1
+    (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test"
     echo ""
@@ -115,7 +116,7 @@ fi
 args+=( -e 1 )
 echo cargo run -p crucible-downstairs -- dump "${args[@]}"
 if ! cargo run -p crucible-downstairs -- dump "${args[@]}"; then
-    res=1
+    (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test 2"
     echo ""
@@ -131,8 +132,11 @@ done
 
 echo ""
 if [[ $res != 0 ]]; then
-    echo "Tests have failed"
+    echo "$res Tests have failed"
 else
     echo "All Tests have passed"
 fi
-exit $res
+duration=$SECONDS
+printf "%d:%2d Test duration\n" $((duration / 60)) $((duration % 60))
+
+exit "$res"

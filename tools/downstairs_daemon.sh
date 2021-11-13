@@ -92,6 +92,22 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
+run_on_start=0
+while getopts 'u' opt; do
+    case "$opt" in
+        u)  run_on_start=1
+			echo "Run on start"
+			;;
+        *)  echo "Usage: $0 [-u]" >&2
+			echo "u: Don't restart downstairs initially"
+            exit 1
+		    ;;
+    esac
+done
+
+# Remove all options passed by getopts options
+shift $((OPTIND-1))
+
 if pgrep -fl target/debug/crucible-downstairs; then
     echo 'Some downstairs already running?' >&2
     exit 1
@@ -130,7 +146,7 @@ dsd_pid[2]=$!
 
 echo "Downstairs have been started"
 
-if [[ $1 -eq "-u" ]]; then
+if [[ $run_on_start -eq 1 ]]; then
     echo "Downstairs will remain up until /tmp/ds_test/up is removed"
     touch ${testdir}/up
 fi
@@ -154,7 +170,7 @@ while :; do
     done
     if [[ -f ${testdir}/stop ]]; then
         echo "Stopping loop"
-        break;
+        break
     fi
     sleep 10
 done
