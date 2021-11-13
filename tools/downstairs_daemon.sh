@@ -24,7 +24,7 @@ function ctrl_c() {
 # This loop will sleep some random time, then kill a downstairs.
 # We currently pick
 downstairs_restart() {
-    echo "Kill and restart loop for the downstairs"
+    echo "Begin loop to Kill and restart loop for the downstairs"
     while :; do
         if [[ -f ${testdir}/up ]]; then
             sleep 5
@@ -129,6 +129,11 @@ downstairs_daemon 3803 2>/dev/null &
 dsd_pid[2]=$!
 
 echo "Downstairs have been started"
+
+if [[ $1 -eq "-u" ]]; then
+    echo "Downstairs will remain up until /tmp/ds_test/up is removed"
+    touch ${testdir}/up
+fi
 sleep 1
 
 downstairs_restart &

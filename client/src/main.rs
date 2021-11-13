@@ -273,9 +273,7 @@ fn main() -> Result<()> {
             big_workload(&guest, &mut region_info)?;
         }
         Workload::Burst => {
-            println!("Run burst test (demo in a loop) in 5 seconds...");
-            std::thread::sleep(std::time::Duration::from_secs(5));
-
+            println!("Run burst test (demo in a loop)");
             runtime.block_on(burst_workload(
                 &guest,
                 60,

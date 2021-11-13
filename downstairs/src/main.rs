@@ -769,29 +769,50 @@ async fn resp_loop(
     let (_job_channel_tx, job_channel_rx) = channel(200);
     let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
 
+    /*
+     * Create tasks for:
+     *  Doing the work then sending the ACK
+     *  Pulling work off the socket and putting on the work queue.
+     *
+     * These tasks and this function must be able to handle the
+     * Upstairs connection going away at any time, as well as a forced
+     * migration where a new Upstairs connects and the old (current from
+     * this threads point of view) work is discarded.
+     * As migration or upstairs failure can happen at any time, this
+     * function must watch for tasks going away and handle that
+     * gracefully.  By exiting the loop here, we allow the calling
+     * function to take over and handle a reconnect or a new upstairs
+     * takeover.
+     */
+    let dw_task;
     {
         let mut adc = ads.clone();
         let mut fwc = fw.clone();
-        tokio::spawn(async move {
+        dw_task = tokio::spawn(async move {
             do_work_task(&mut adc, job_channel_rx, &mut fwc).await
         });
     }
 
     let (message_channel_tx, mut message_channel_rx) = channel(200);
-
+    let pf_task;
     {
         let mut adc = ads.clone();
         let tx = job_channel_tx.clone();
         let mut fwc = fw.clone();
-        tokio::spawn(async move {
+        pf_task = tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
-                proc_frame(upstairs_uuid, &mut adc, &m, &mut fwc, &tx)
-                    .await
-                    .unwrap();
+                if let Err(e) =
+                    proc_frame(upstairs_uuid, &mut adc, &m, &mut fwc, &tx).await
+                {
+                    bail!("Proc frame returns error: {}", e);
+                }
             }
+            Ok(())
         });
     }
 
+    tokio::pin!(dw_task);
+    tokio::pin!(pf_task);
     loop {
         tokio::select! {
             /*
@@ -800,6 +821,12 @@ async fn resp_loop(
              * and finish up. If lossy is not set, then this should only
              * trigger once then never again.
              */
+            _ = &mut dw_task => {
+                bail!("do_work_task task has ended");
+            }
+            _ = &mut pf_task => {
+                bail!("pf task ended");
+            }
             _ = sleep_until(lossy_interval) => {
                 let lossy = {
                     let ds = ads.lock().await;
@@ -943,7 +970,7 @@ impl Downstairs {
                 Ok(self.work.lock().await)
             }
         } else {
-            panic!("cannot grab work lock, nothing is active!");
+            bail!("cannot grab work lock, nothing is active!");
         }
     }
 
@@ -1275,7 +1302,13 @@ impl Work {
                 None
             }
         } else {
-            panic!("This ID is no longer a valid job id");
+            /*
+             * XXX If another upstairs took over, a job ID could be
+             * invalid.  Check here to verify that this set of
+             * downstairs tasks is no longer active.
+             */
+            println!("This ID is no longer a valid job id");
+            None
         }
     }
 

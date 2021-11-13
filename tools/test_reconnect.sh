@@ -8,6 +8,16 @@ total=0
 pass_total=0
 SECONDS=0
 
+# Control-C to cleanup.
+trap ctrl_c INT
+function ctrl_c() {
+    echo "Stopping at your request"
+    touch /tmp/ds_test/stop
+    if [[ -n "$dsd_pid" ]]; then
+        kill "$dsd_pid"
+    fi
+}
+
 loop_log=/tmp/reconnect.log
 test_log=/tmp/reconnect_test.log
 echo "" > ${loop_log}
