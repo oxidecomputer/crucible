@@ -2,6 +2,9 @@
 
 Various scripts used for Crucible
 
+## create-generic-sd.sh
+A simple script to create three downstairs regions at var/380[1-3]
+
 ## downstairs_daemon.sh
 A highly custom script that starts three downstairs in a loop and will
 keep them restarted when they are killed.  A bunch of assumptions are made
@@ -36,6 +39,12 @@ alan@cat:crucible$ pfexec dtrace -s tools/ds_state.d
 ["Active","Active","Active"] Upstairs:   1 Downstairs:   6
 ["Active","Active","Active"] Upstairs:   1 Downstairs:   6
 ```
+
+## hammer-loop.sh
+A loop test that runs the crucible-hammer test in a loop.  It is expected
+that you already have downstairs running on port 380[1-3].
+The test will check for panic or assert in the output and stop if it
+detects them or a test exits with an error.
 
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
@@ -104,6 +113,13 @@ dtrace: script 'tools/perfgw.d' matched 6 probes
         67108864 |@@@@@@@@@@@@@@@@@@@@@@@@@@               647
        134217728 |
 ```
+
+## test_reconnect.sh
+A stress test of the reconnect code path.
+Start up the "downstairs_daemon" script that will start three downstairs, then
+in a loop kill and restart one at random.
+Then, run in a loop the client "one" test which tries to start the upstairs
+and do one IO, wait for the result, then exit.
 
 ## test_up.sh
 A simple script that will start three downstairs, then run through some tests in
