@@ -2783,16 +2783,17 @@ pub enum AckStatus {
 
 impl fmt::Display for AckStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Make sure to right-align output on 8 characters
+        // Make sure to right-align output on 8 characters to match with
+        // show_all_work
         match self {
             AckStatus::NotAcked => {
-                write!(f, "NotAcked")
+                write!(f, "{0:>8}", "NotAcked")
             }
             AckStatus::AckReady => {
-                write!(f, "AckReady")
+                write!(f, "{0:>8}", "AckReady")
             }
             AckStatus::Acked => {
-                write!(f, "   Acked")
+                write!(f, "{0:>8}", "Acked")
             }
         }
     }
@@ -4229,122 +4230,73 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     } else {
         println!(
-            "GW_ID      ACK   DSID   TYPE   ExtID BL_OFF BL_LEN \
-            DS:0 DS:1 DS:2"
+            "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7} {5:>5} {6:>5} {7:>5}",
+            "GW_ID", "ACK", "DSID", "TYPE", "BLOCKS", "DS:0", "DS:1", "DS:2",
         );
+
         kvec.sort_unstable();
         for id in kvec.iter() {
             let job = work.active.get(id).unwrap();
             let ack = job.ack_status;
 
-            match &job.work {
+            let (job_type, num_blocks): (String, usize) = match &job.work {
                 IOop::Read {
                     dependencies: _dependencies,
                     requests,
                 } => {
-                    let job_type = "Read ".to_string();
-                    let mut first_line = true;
+                    let job_type = "Read".to_string();
+                    let mut num_blocks = 0;
 
                     for request in requests {
-                        print!(
-                            " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                            if first_line {
-                                format!("{:4}", job.guest_id)
-                            } else {
-                                "   |".to_string()
-                            },
-                            ack,
-                            id,
-                            job_type,
-                            request.eid,
-                            request.offset.value,
-                            1,
-                        );
-                        first_line = false;
-
-                        for cid in 0..3 {
-                            let state = job.state.get(&cid);
-                            match state {
-                                Some(state) => {
-                                    print!("{} ", state);
-                                    iosc.incr(state, cid);
-                                }
-                                _x => {
-                                    print!("???? ");
-                                }
-                            }
-                        }
-
-                        println!();
+                        num_blocks += request.num_blocks as usize;
                     }
+
+                    (job_type, num_blocks)
                 }
                 IOop::Write {
                     dependencies: _dependencies,
                     writes,
                 } => {
                     let job_type = "Write".to_string();
-                    let mut first_line = true;
+                    let mut num_blocks = 0;
 
                     for write in writes {
-                        print!(
-                            " {}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                            if first_line {
-                                format!("{:4}", job.guest_id)
-                            } else {
-                                "   |".to_string()
-                            },
-                            ack,
-                            id,
-                            job_type,
-                            write.eid,
-                            write.offset.value,
-                            write.data.len() / (1 << write.offset.shift),
-                        );
-                        first_line = false;
-
-                        for cid in 0..3 {
-                            let state = job.state.get(&cid);
-                            match state {
-                                Some(state) => {
-                                    print!("{} ", state);
-                                    iosc.incr(state, cid);
-                                }
-                                _x => {
-                                    print!("???? ");
-                                }
-                            }
-                        }
-
-                        println!();
+                        let block_size = write.offset.block_size_in_bytes();
+                        num_blocks += write.data.len() / block_size as usize;
                     }
+
+                    (job_type, num_blocks)
                 }
                 IOop::Flush {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
                 } => {
                     let job_type = "Flush".to_string();
-
-                    print!(
-                        " {:4}  {:8}  {:4}   {}   {:4}   {:4}   {:4} ",
-                        job.guest_id, ack, id, job_type, 0, 0, 0,
-                    );
-
-                    for cid in 0..3 {
-                        let state = job.state.get(&cid);
-                        match state {
-                            Some(state) => {
-                                print!("{} ", state);
-                                iosc.incr(state, cid);
-                            }
-                            _x => {
-                                print!("???? ");
-                            }
-                        }
-                    }
-
-                    println!();
+                    (job_type, 0)
                 }
             };
+
+            print!(
+                "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7}",
+                job.guest_id, ack, id, job_type, num_blocks
+            );
+
+            for cid in 0..3 {
+                let state = job.state.get(&cid);
+                match state {
+                    Some(state) => {
+                        // XX I have no idea why this is two spaces instead of
+                        // one...
+                        print!("  {0:>5}", state);
+                        iosc.incr(state, cid);
+                    }
+                    _x => {
+                        print!("  {0:>5}", "????");
+                    }
+                }
+            }
+
+            println!("");
         }
         iosc.show_all();
         print!("Last Flush: ");
