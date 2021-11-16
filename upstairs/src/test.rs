@@ -351,6 +351,7 @@ mod test {
     #[test]
     fn work_flush_three_ok() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -383,6 +384,7 @@ mod test {
     #[test]
     fn work_flush_one_error_then_ok() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -424,6 +426,7 @@ mod test {
     #[test]
     fn work_flush_two_errors_equals_fail() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -474,6 +477,7 @@ mod test {
     #[test]
     fn work_read_one_ok() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -518,6 +522,7 @@ mod test {
     #[test]
     fn work_read_one_bad_two_ok() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -572,6 +577,7 @@ mod test {
     #[test]
     fn work_read_two_bad_one_ok() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -635,6 +641,7 @@ mod test {
     #[test]
     fn work_read_three_bad() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -706,6 +713,7 @@ mod test {
     #[test]
     fn work_read_two_ok_one_bad() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
 
         let request = ReadRequest {
             eid: 0,
@@ -776,6 +784,7 @@ mod test {
     #[test]
     fn work_assert_no_transfer_of_bad_read() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -837,6 +846,7 @@ mod test {
     #[test]
     fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -923,6 +933,7 @@ mod test {
     #[test]
     fn work_assert_reads_do_not_cause_failure_state_transition() {
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -1049,6 +1060,7 @@ mod test {
         // Verify that a read remains on the active queue until a flush
         // comes through and clears it.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build our read, put it into the work queue
@@ -1132,6 +1144,7 @@ mod test {
         // 2/3 for each IO.  We later come back and finish the 3rd IO
         // and the flush, which then allows the work to be completed.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create two writes, put them on the work queue
@@ -1236,6 +1249,7 @@ mod test {
         // Verify that a write remains on the active queue until a flush
         // comes through and clears it.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build our write IO.
@@ -1304,6 +1318,7 @@ mod test {
         // and the flush, which then allows the work to be completed.
         // Also, we mix up which client finishes which job first.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build two writes, put them on the work queue.
@@ -1406,6 +1421,7 @@ mod test {
     fn work_completed_read_replay() {
         // Verify that a single read will replay and move back from AckReady
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build our read IO and submit it to the work queue.
@@ -1446,6 +1462,7 @@ mod test {
         // Verify that a read will replay and move not back from AckReady if
         // there is more than one done read.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build a read and put it on the work queue.
@@ -1500,6 +1517,7 @@ mod test {
         // Verify that a read we Acked will still replay if that downstairs
         // goes away. Make sure everything still finishes ok.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create the read and put it on the work queue.
@@ -1559,6 +1577,7 @@ mod test {
         // change state from AckReady back to NotAcked.
         // If we then redo the work, it should go back to AckReady.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create the write and put it on the work queue.
@@ -1608,6 +1627,7 @@ mod test {
         // Verify that a replay when we have acked a write will not
         // undo that ack.
         let upstairs = Upstairs::default();
+        upstairs.set_active();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create the write and put it on the work queue.

@@ -92,8 +92,8 @@ async fn process_message(
         Message::WriteAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
                 println!(
-                    "u.uuid {:?} != job uuid {:?} on WriteAck",
-                    u.uuid, *uuid
+                    "[{}] u.uuid {:?} != job uuid {:?} on WriteAck",
+                    up_coms.client_id, u.uuid, *uuid
                 );
                 return Err(CrucibleError::UuidMismatch.into());
             }
@@ -111,8 +111,8 @@ async fn process_message(
         Message::FlushAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
                 println!(
-                    "u.uuid {:?} != job uuid {:?} on FlushAck",
-                    u.uuid, *uuid
+                    "[{}] u.uuid {:?} != job uuid {:?} on FlushAck",
+                    up_coms.client_id, u.uuid, *uuid
                 );
                 return Err(CrucibleError::UuidMismatch.into());
             }
@@ -130,8 +130,8 @@ async fn process_message(
         Message::ReadResponse(uuid, ds_id, responses, result) => {
             if u.uuid != *uuid {
                 println!(
-                    "u.uuid {:?} != job uuid {:?} on ReadResponse",
-                    u.uuid, *uuid
+                    "[{}] u.uuid {:?} != job uuid {:?} on ReadResponse",
+                    up_coms.client_id, u.uuid, *uuid
                 );
                 return Err(CrucibleError::UuidMismatch.into());
             }
@@ -364,6 +364,15 @@ async fn io_send(
      * flow control.
      */
     let mut new_work = u.downstairs.lock().unwrap().new_work(client_id);
+    if !u.is_active() {
+        /*
+         * If we are not active, then some other upstairs
+         * has taken over control from us.  Kick this
+         * downstairs to New state and exit the loop.
+         */
+        u.ds_transition(client_id, DsState::New);
+        bail!("[{}] {} io_send while not active", client_id, u.uuid,);
+    }
 
     /*
      * Now we have a list of all the job IDs that are new for our client id.
@@ -461,22 +470,38 @@ async fn proc(
     let mut fr = FramedRead::new(r, CrucibleDecoder::new());
     let mut fw = FramedWrite::new(w, CrucibleEncoder::new());
 
-    up.ds_state_show();
-    let my_state = {
-        let state = &up.downstairs.lock().unwrap().ds_state;
-        state[up_coms.client_id as usize]
-    };
-    println!("Proc runs for {} in state {:?}", target, my_state);
-    if my_state != DsState::New
-        && my_state != DsState::Disconnected
-        && my_state != DsState::Failed
-        && my_state != DsState::Offline
     {
-        panic!(
-            "[{}] failed proc with state {:?}",
-            up_coms.client_id, my_state
+        let mut ds = up.downstairs.lock().unwrap();
+        let my_state = ds.ds_state[up_coms.client_id as usize];
+        println!(
+            "[{}] Proc runs for {} in state {:?}",
+            up_coms.client_id, target, my_state
         );
+        // XXX Move this all to some state check place?
+        if my_state != DsState::New
+            && my_state != DsState::Disconnected
+            && my_state != DsState::Failed
+            && my_state != DsState::Offline
+        {
+            panic!(
+                "[{}] failed proc with state {:?}",
+                up_coms.client_id, my_state
+            );
+        }
+
+        /*
+         * This is only applicable for a downstairs that is returning
+         * from being disconnected.  Mark any in progress jobs since the
+         * last good flush back to New, as we have reconnected to this
+         * downstairs and will need to replay any work that we were
+         * holding that we did not flush.
+         */
+        if my_state == DsState::Offline {
+            ds.re_new(up_coms.client_id);
+        }
     }
+
+    let mut self_promotion = false;
     /*
      * As the "client", we must begin the negotiation.
      */
@@ -567,7 +592,9 @@ async fn proc(
                 fw.send(Message::Ruok).await?;
                 ping_interval = deadline_secs(5);
             }
-            r = up_coms.ds_active_rx.changed(), if negotiated == 1 => {
+            r = up_coms.ds_active_rx.changed(),
+                if negotiated == 1 && !self_promotion =>
+            {
                 /*
                  * The activating guest sends us the generation number.
                  * TODO: Update the promote to active message to send
@@ -586,12 +613,19 @@ async fn proc(
                     }
                 }
                 /*
+                 * Promote self to active when message arrives from the Guest.
+                 *
                  * This check must only be done when the proper
                  * negotiation step is reached.  If we check too soon, then
-                 * we can be out of order.
-                 *
-                 * Promote self to active when message arrives from the Guest.
+                 * we can be out of order.  We also might have self promoted
+                 * if the upstairs has already received the request to
+                 * activate and this downstairs was not connected at that
+                 * time.
                  */
+                println!("[{}] client got ds_active_rx, promote!",
+                    up_coms.client_id
+                );
+                self_promotion = true;
                 fw.send(Message::PromoteToActive(up.uuid)).await?;
             }
             f = fr.next() => {
@@ -601,10 +635,14 @@ async fn proc(
 
                 match f.transpose()? {
                     None => {
-                        // hung up
+                        println!(
+                            "[{}] client hung up",
+                            up_coms.client_id
+                        );
                         up.ds_missing(up_coms.client_id);
                         return Ok(())
                     }
+                    Some(Message::Imok) => {}
                     Some(Message::YesItsMe(version)) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
@@ -622,40 +660,80 @@ async fn proc(
                             );
                             bail!("expected version 1, got {}", version);
                         }
-
                         negotiated = 1;
+                        /*
+                         * We only set is_active after all three downstairs
+                         * have gone active, which means the upstairs did
+                         * received a request to go active. Since we won't be
+                         * getting another request, we can self promote.
+                         */
                         if up.is_active() {
                             /*
-                             * On a downstairs reconnect, we are not going
-                             * to receive another PromoteToActive from the
-                             * guest, so send one ourselves.
+                             * This could be either a reconnect, or a
+                             * downstairs that totally failed and now has to
+                             * start over and reconcile again.
                              */
-                            fw.send(Message::PromoteToActive(up.uuid)).await?;
-                        }
-                    }
-                    Some(Message::Imok) => {
-                        if negotiated == 1 {
                             println!(
-                                "{} client {} is waiting for promotion \
-                                to active, received ping response.",
-                                up.uuid, up_coms.client_id
+                                "[{}] upstairs is_active=TRUE, promote!",
+                                up_coms.client_id
                             );
+                            self_promotion = true;
+                            fw.send(Message::PromoteToActive(up.uuid)).await?;
+                        } else {
+                            /*
+                             * Transition this Downstairs to WaitActive
+                             */
+                            up.ds_transition(
+                                up_coms.client_id,
+                                DsState::WaitActive,
+                            );
+
+                            /*
+                             * If the guest already requested activate, but
+                             * the downstairs went away and then came back, we
+                             * can resend the activate ourselves.  We set a
+                             * local self_promote so we don't send the
+                             * promote to active twice.
+                             */
+                            if up.is_active_requested() {
+                                println!(
+                                    "[{}] client is_active_req TRUE, promote!",
+                                    up_coms.client_id
+                                );
+                                println!(
+                                    "[{}] flush active_rx!",
+                                    up_coms.client_id
+                                );
+                                {
+                                    up_coms.ds_active_rx.borrow_and_update();
+                                }
+                                self_promotion = true;
+                                fw.send(
+                                    Message::PromoteToActive(up.uuid)
+                                ).await?;
+                            }
                         }
                     }
                     Some(Message::YouAreNowActive(uuid)) => {
                         if up.uuid != uuid {
+                            println!(
+                                "[{}] {} client message to self deactivate!",
+                                up.uuid,
+                                up_coms.client_id
+                            );
+                            up.set_inactive();
                             return Err(CrucibleError::UuidMismatch.into());
                         }
 
                         if negotiated != 1 {
-                            bail!("Received YouAreNowActive out of order!");
+                            bail!(
+                                "Received YouAreNowActive out of order! {}",
+                                negotiated
+                            );
                         }
-
-                        /*
-                         * Get region info.
-                         */
                         negotiated = 2;
                         fw.send(Message::RegionInfoPlease).await?;
+
                     }
                     Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
                         if up.uuid != new_active_uuid {
@@ -666,46 +744,56 @@ async fn proc(
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
                         }
-                        up.add_downstairs(up_coms.client_id, region_def)?;
+                        up.add_ds_region(up_coms.client_id, region_def)?;
 
-                        /*
-                         * If we are coming from state Offline, then it means
-                         * the downstairs has departed then came back in
-                         * short enough time that it does not have to go into
-                         * full recovery/repair mode.  If we have verified
-                         * that the UUID and region info is the same, we
-                         * can reconnect and let any outstanding work
-                         * be replayed to catch us up.  We do need to tell
-                         * the downstairs the last flush ID it ACKd to us.
-                         */
                         let my_state = {
                             let state = &up.downstairs.lock().unwrap().ds_state;
                             state[up_coms.client_id as usize]
                         };
                         if my_state == DsState::Offline {
+
+                            /*
+                             * If we are coming from state Offline, then it
+                             * means the downstairs has departed then came
+                             * back in short enough time that it does not
+                             * have to go into full recovery/repair mode.
+                             * If we have verified that the UUID and region
+                             * info is the same, we can reconnect and let
+                             * any outstanding work be replayed to catch
+                             * us up.  We do need to tell the downstairs
+                             * the last flush ID it had ACKd to us.
+                             */
                             let lf = up.last_flush_id(up_coms.client_id);
                             println!("[{}] send last flush ID to this DS: {}",
                                 up_coms.client_id, lf);
                             negotiated = 3;
                             fw.send(Message::LastFlush(lf)).await?;
-                        } else {
-                            if my_state != DsState::New &&
-                                my_state != DsState::Failed &&
-                                my_state != DsState::Disconnected
-                            {
-                                panic!("[{}] Negotiation failed, in state {:?}",
-                                    up_coms.client_id,
-                                    my_state,
-                                );
-                            }
+
+                        } else if my_state == DsState::WaitActive {
                             /*
                              * Ask for the current version of all extents.
                              */
                             negotiated = 4;
                             fw.send(Message::ExtentVersionsPlease).await?;
+
+                        } else {
+                            /*
+                             * TODO: This is the case where a downstairs
+                             * failed and was removed and has re-joined
+                             * (Hopefully fixed now).  To bring this back,
+                             * we need to write code to support combining
+                             * a "new" downstairs with two running downstairs
+                             * while those downstairs are still taking IO.
+                             * Good luck!
+                             */
+                            panic!("[{}] Write more code. join from state {:?}",
+                                up_coms.client_id,
+                                my_state,
+                            );
                         }
                         up.ds_state_show();
-                    },
+
+                    }
                     Some(Message::LastFlushAck(last_flush)) => {
                         if negotiated != 3 {
                             bail!("Received LastFlushAck out of order!");
@@ -739,7 +827,7 @@ async fn proc(
                             let state = &up.downstairs.lock().unwrap().ds_state;
                             state[up_coms.client_id as usize]
                         };
-                        assert_eq!(my_state, DsState::New);
+                        assert_eq!(my_state, DsState::WaitActive);
                         /*
                          * XXX This logic may move to a different location
                          * when we actually get the code written to handle
@@ -755,30 +843,36 @@ async fn proc(
                         up.ds_transition(
                             up_coms.client_id, DsState::WaitQuorum
                         );
-                        up.ds_state_show();
+                        //up.ds_state_show();
 
-                        /*
-                         * If we get here, we are ready to receive IO
-                         */
                         *connected = true;
-                        up_coms.ds_status_tx.send(Condition {
-                            target: *target,
-                            connected: true,
-                        }).await
-                        .unwrap();
                     }
                     Some(Message::UuidMismatch(expected_uuid)) => {
+                        /*
+                         * XXX If our downstairs
+                         * is returning a different UUID then we have, is that
+                         * a cause to disable ourselves, or just drop this work
+                         * on the ground?  Can this happen in a case where
+                         * we (the upstairs) should continue to accept work?
+                         */
+                        println!(
+                            "[{}] {} received UuidMismatch, expecting {:?}!",
+                            up_coms.client_id, up.uuid, expected_uuid
+                        );
                         up.set_inactive();
+                        up.ds_transition(
+                            up_coms.client_id, DsState::New
+                        );
                         bail!(
-                            "{} received UuidMismatch during negotiation, \
-                            expecting {:?}!",
-                            up.uuid, expected_uuid,
+                            "[{}] {} received UuidMismatch, expecting {:?}!",
+                            up_coms.client_id, up.uuid, expected_uuid
                         );
                     }
                     Some(m) => {
                         bail!(
-                            "unexpected command {:?} received in state {:?}",
-                            m, up.ds_state(up_coms.client_id)
+                            "[{}] unexpected command {:?} \
+                            received in state {:?}",
+                            up_coms.client_id, m, up.ds_state(up_coms.client_id)
                         );
                     }
                 }
@@ -786,12 +880,32 @@ async fn proc(
         }
     }
     /*
+     * If we get here, we are ready to receive IO.  Tell up_listen that
+     * a downstairs has transitioned. This can fail if we are shutting
+     * down and the ds_status_rx task as ended.
+     */
+    if let Err(e) = up_coms
+        .ds_status_tx
+        .send(Condition {
+            target: *target,
+            connected: true,
+            client_id: up_coms.client_id,
+        })
+        .await
+    {
+        bail!(
+            "[{}] Failed to send status to main task {:?}",
+            up_coms.client_id,
+            e
+        );
+    }
+
+    /*
      * This check is just to make sure we have completed negotiation.
      * But, XXX, this will go away when we redo the state transition code
      * for a downstairs connection.
      */
     assert_eq!(negotiated, 5);
-    println!("[{}] Client completed negotiation", up_coms.client_id);
     cmd_loop(up, fr, fw, up_coms, lossy).await
 }
 
@@ -882,6 +996,7 @@ async fn cmd_loop(
 
                 match f.transpose()? {
                     None => {
+                        println!("[{}] None response", up_coms.client_id);
                         return Ok(())
                     },
                     Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
@@ -890,10 +1005,19 @@ async fn cmd_loop(
                         }
                     }
                     Some(Message::UuidMismatch(expected_uuid)) => {
+                        /*
+                         * For now, when we get the wrong UUID back from
+                         * the downstairs, take ourselves out.
+                         * XXX Can we handle the case of a corrupted
+                         * UUID?
+                         * XXX Can a bad downstairs sending us a bad
+                         * UUID be used as a denial of service?
+                         */
                         up.set_inactive();
+                        up.ds_transition(up_coms.client_id, DsState::New);
                         bail!(
-                            "{} received UuidMismatch, expecting {:?}!",
-                            up.uuid, expected_uuid
+                            "[{}] received UuidMismatch, expecting {:?}!",
+                            up_coms.client_id, expected_uuid
                         );
                     }
                     Some(m) => {
@@ -939,8 +1063,6 @@ async fn cmd_loop(
             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
-             * XXX Timeouts, timeouts: always wrong!  Some too short and
-             * some too long.
              * TODO: 50 is too long, but what is the correct value?
              */
             _ = sleep_until(timeout_deadline) => {
@@ -948,10 +1070,15 @@ async fn cmd_loop(
                  * XXX What should happen here?  At the moment we just
                  * ignore it..
                  */
-                println!("[{}] proc 2 Deadline ignored", up_coms.client_id);
-                timeout_deadline = deadline_secs(50);
+                println!("[{}] Downstairs not responding, take offline",
+                    up_coms.client_id);
+                return Ok(());
             }
             _ = sleep_until(ping_interval) => {
+                /*
+                 * To keep things alive, initiate a ping any time we have
+                 * been idle for (TBD) seconds.
+                 */
                 fw.send(Message::Ruok).await?;
 
                 if lossy {
@@ -1031,10 +1158,12 @@ async fn looper(
         /*
          * Set a connect timeout, and connect to the target:
          */
+        /*
         println!(
             "{0}[{1}] looper connecting to {0}",
             target, up_coms.client_id
         );
+        */
         let deadline = tokio::time::sleep_until(deadline_secs(10));
         tokio::pin!(deadline);
         let tcp = sock.connect(target.into());
@@ -1049,14 +1178,17 @@ async fn looper(
                 tcp = &mut tcp => {
                     match tcp {
                         Ok(tcp) => {
-                            println!("{0}[{1}] looper ok, connected to {0}",
-                                target,
-                                up_coms.client_id);
+                            println!("[{}] {} {} looper connected",
+                                up_coms.client_id,
+                                up.uuid,
+                                target);
                             break tcp;
                         }
-                        Err(e) => {
+                        Err(_e) => {
+                            /*
                             println!("{0} looper connect to {0} failure: {1:?}",
                                 target, e);
+                            */
                             continue 'outer;
                         }
                     }
@@ -1077,27 +1209,26 @@ async fn looper(
         }
 
         /*
-         * Do not attempt to reconnect if we were marked inactive.
-         */
-        if !up.is_active() {
-            drop(up_coms.ds_status_tx);
-            drop(up_coms.ds_done_tx);
-            return;
-        }
-
-        /*
          * If the connection goes down here, we need to know what state we
          * were in to decide what state to transition to.  The ds_missing
          * method will do that for us.
          */
         up.ds_missing(up_coms.client_id);
-        up.ds_state_show();
 
         println!(
-            "{0}[{1}] connection to {0} closed",
-            target, up_coms.client_id
+            "[{}] {} connection to {} closed",
+            up_coms.client_id, up.uuid, target
         );
         connected = false;
+        up_coms
+            .ds_status_tx
+            .send(Condition {
+                target,
+                connected: false,
+                client_id: up_coms.client_id,
+            })
+            .await
+            .unwrap();
     }
 }
 
@@ -1198,7 +1329,7 @@ impl Downstairs {
     }
 
     /**
-     * We have disconnected from a downstairs. Move every job since the
+     * We have reconnected to a downstairs. Move every job since the
      * last flush for this client_id back to New, even if we already have
      * an ACK back from the downstairs for this job. We must replay
      * everything since the last flush to guarantee persistence.
@@ -1219,7 +1350,12 @@ impl Downstairs {
             self.active.keys().cloned().collect::<Vec<u64>>();
         kvec.sort_unstable();
 
-        println!("{} client re-new all jobs since flush {}", client_id, lf);
+        println!(
+            "[{}] client re-new {} jobs since flush {}",
+            client_id,
+            kvec.len(),
+            lf
+        );
         for ds_id in kvec.iter() {
             let is_read = self.is_read(*ds_id).unwrap();
             let wc = self.state_count(*ds_id).unwrap();
@@ -1269,7 +1405,6 @@ impl Downstairs {
                     }
                 }
             }
-            println!("{} job goes back to IOState::New", ds_id);
             job.state.insert(client_id, IOState::New);
         }
     }
@@ -1479,8 +1614,16 @@ impl Downstairs {
         };
 
         let oldstate = job.state.insert(client_id, newstate.clone()).unwrap();
-        // we shouldn't be transitioning to our current state
-        assert_eq!(oldstate, IOState::InProgress);
+        /*
+         * Verify the job was InProgress
+         */
+        if oldstate != IOState::InProgress {
+            bail!(
+                "[{}] job completed while not InProgress: {}",
+                client_id,
+                oldstate
+            );
+        }
 
         if matches!(newstate, IOState::Error(_)) {
             // Mark this downstairs as bad if this was a write or flush
@@ -1736,6 +1879,20 @@ impl EncryptionContext {
     }
 }
 
+#[derive(Debug)]
+struct Active {
+    active: bool,
+    active_request: bool,
+}
+
+impl Active {
+    pub fn default() -> Self {
+        Active {
+            active: false,
+            active_request: false,
+        }
+    }
+}
 /*
  * XXX Track scheduled storage work in the central structure. Have the
  * target management task check for work to do here by changing the value in
@@ -1748,7 +1905,7 @@ pub struct Upstairs {
     /*
      * Is this Upstairs active, or just attaching inactive?
      */
-    active: Mutex<bool>,
+    active: Mutex<Active>,
 
     /*
      * Upstairs UUID
@@ -1862,7 +2019,7 @@ impl Upstairs {
         });
 
         Arc::new(Upstairs {
-            active: Mutex::new(false),
+            active: Mutex::new(Active::default()),
             uuid: Uuid::new_v4(), // XXX get from Nexus?
             _generation: 0,       // XXX Also get from Nexus?
             guest,
@@ -1874,18 +2031,59 @@ impl Upstairs {
         })
     }
 
+    /*
+     * Setting active means the upstairs has contacted all the necessary
+     * downstairs, verified they are consistent (or made them so)
+     * and is now ready to receive IO.  Going forward a downstairs
+     * that is disconnected can have a slightly different path to
+     * re-join than the original compare all downstairs to each other
+     * that happens on initial startup. This is because the running
+     * upstairs has some state it can use to re-verify a downstairs.
+     */
     fn set_active(&self) {
         let mut active = self.active.lock().unwrap();
-        *active = true;
+        active.active = true;
+        active.active_request = false;
+        println!("{} set active", self.uuid);
     }
 
     fn set_inactive(&self) {
         let mut active = self.active.lock().unwrap();
-        *active = false;
+        active.active = false;
+        active.active_request = false;
+        println!("{} set inactive", self.uuid);
     }
 
     fn is_active(&self) -> bool {
-        *self.active.lock().unwrap()
+        self.active.lock().unwrap().active
+    }
+
+    /*
+     * The guest has requested this upstairs go active.
+     */
+    fn set_active_request(&self) {
+        println!("{} active request set", self.uuid);
+        let mut active = self.active.lock().unwrap();
+        if !active.active {
+            active.active_request = true;
+        } else {
+            println!("Request to activate upstairs already active");
+        }
+    }
+
+    /*
+     * The request to go active is not longer true
+     */
+    fn _clear_active_request(&self) {
+        let mut active = self.active.lock().unwrap();
+        active.active_request = false;
+    }
+
+    /*
+     * Has the guest asked this upstairs to go active
+     */
+    fn is_active_requested(&self) -> bool {
+        self.active.lock().unwrap().active_request
     }
 
     /*
@@ -2227,13 +2425,6 @@ impl Upstairs {
             client_id, current, new_state,
         );
         ds.ds_state[client_id as usize] = new_state;
-
-        /*
-         * Mark any in progress jobs since the last good flush back to New,
-         * as we are now disconnected from this downstairs and will need to
-         * replay (or eventually discard) any work that it still needs to do.
-         */
-        ds.re_new(client_id);
     }
 
     /*
@@ -2257,9 +2448,56 @@ impl Upstairs {
      */
     fn ds_transition(&self, client_id: u8, new_state: DsState) {
         let mut ds = self.downstairs.lock().unwrap();
-        if ds.ds_state[client_id as usize] != new_state {
+        println!(
+            "[{}] {} {:?} {:?} {:?} ds_transition to {:?}",
+            client_id,
+            self.uuid,
+            ds.ds_state[0],
+            ds.ds_state[1],
+            ds.ds_state[2],
+            new_state
+        );
+
+        let old_state = ds.ds_state[client_id as usize];
+
+        /*
+         * Check that this is a valid transition
+         */
+        match new_state {
+            DsState::WaitActive => {
+                if old_state == DsState::Offline {
+                    if self.is_active() {
+                        panic!(
+                            "[{}] {} Bad state change when active {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state,
+                        );
+                    }
+                } else if old_state != DsState::New
+                    && old_state != DsState::Failed
+                    && old_state != DsState::Disconnected
+                {
+                    panic!(
+                        "[{}] {} {} Negotiation failed, {:?} -> {:?}",
+                        client_id,
+                        self.uuid,
+                        self.is_active(),
+                        old_state,
+                        new_state,
+                    );
+                }
+            }
+            DsState::WaitQuorum => {
+                assert_eq!(old_state, DsState::WaitActive);
+            }
+            DsState::Replay => {
+                assert_eq!(old_state, DsState::Offline);
+            }
+            _ => (),
+        }
+
+        if old_state != new_state {
             println!(
-                "Transition [{}] from {:?} to {:?}",
+                "[{}] Transition from {:?} to {:?}",
                 client_id, ds.ds_state[client_id as usize], new_state,
             );
             ds.ds_state[client_id as usize] = new_state;
@@ -2273,15 +2511,60 @@ impl Upstairs {
         ds.ds_state[client_id as usize]
     }
 
-    fn all_ds_state_match(&self, state: DsState) -> bool {
-        let ds = self.downstairs.lock().unwrap();
+    /**
+     * Check and see if it is time for reconciliation between the
+     * different downstairs.  If all are in the proper state, then
+     * move forward and start the process.
+     *
+     * Return false if we are not ready, or if things failed.
+     * If we failed, then we will update the DsState for what failed.
+     */
+    fn ds_reconciliation(&self) -> bool {
+        let mut ds = self.downstairs.lock().unwrap();
 
-        for (_, dst) in ds.ds_state.iter().enumerate() {
-            if *dst != state {
-                return false;
-            }
+        /*
+         * Make sure all downstairs are in the correct state before we
+         * proceed.
+         */
+        let not_ready = ds
+            .ds_state
+            .iter()
+            .filter(|dst| **dst != DsState::WaitQuorum)
+            .count();
+        if not_ready > 0 {
+            println!("Waiting for {} more clients to be ready", not_ready);
+            return false;
         }
 
+        /*
+         * This is where the actual code would take place.
+         */
+        println!("Fake reconciliation has finished!!!");
+
+        /*
+         * XXX TODO:
+         * To make things work on a disconnected then reconnected
+         * upstairs, you have to write more code to deal with any
+         * outstanding IOs that may have been left behind.  Also
+         * clear out the completed work as well.
+         */
+        assert_eq!(ds.active.len(), 0);
+
+        /*
+         * Now that we have completed reconciliation, we move all
+         * the downstairs to the next state.
+         */
+        ds.ds_state.iter_mut().for_each(|ds_state| {
+            println!("Transition from {:?} to Active", *ds_state);
+            assert_eq!(*ds_state, DsState::WaitQuorum);
+            *ds_state = DsState::Active;
+        });
+
+        /*
+         * As a final step, set the upstairs active, which should
+         * allow incoming IO
+         */
+        self.set_active();
         true
     }
 
@@ -2311,15 +2594,18 @@ impl Upstairs {
 
     fn ds_state_show(&self) {
         let ds = self.downstairs.lock().unwrap();
-        for (index, dst) in ds.ds_state.iter().enumerate() {
-            println!("[{}] State {:?}", index, dst);
+        print!("{}", self.uuid);
+        for state in ds.ds_state.iter() {
+            print!(" {:?}", state);
         }
+        println!();
     }
 
     /*
      * Move all downstairs to this new state.
+     * XXX This may just go away if we don't need it.
      */
-    fn ds_transition_all(&self, new_state: DsState) {
+    fn _ds_transition_all(&self, new_state: DsState) {
         let mut ds = self.downstairs.lock().unwrap();
 
         ds.ds_state.iter_mut().for_each(|ds_state| {
@@ -2343,11 +2629,11 @@ impl Upstairs {
     }
 
     /*
-     * Check the region information for a downstairs and decide if we should
-     * allow this downstairs to be added.
-     * TODO: Still a bunch to do here around reconnecting.
+     * TODO: This should just store the region info for a downstairs at
+     * some place we can later look at and compare.  For now, we do some
+     * of that work now.
      */
-    fn add_downstairs(
+    fn add_ds_region(
         &self,
         client_id: u8,
         client_ddef: RegionDefinition,
@@ -2425,6 +2711,30 @@ impl Upstairs {
         result: Result<(), CrucibleError>,
     ) -> Result<bool> {
         let mut work = self.downstairs.lock().unwrap();
+
+        if !self.is_active() {
+            bail!(
+                "[{}] {} for job {} is complete while not active",
+                client_id,
+                self.uuid,
+                ds_id
+            );
+        }
+
+        /*
+         * We can finish the job if the downstairs has gone away, but
+         * not if it has gone away then come back, because when it comes
+         * back, it will have to replay everything.
+         * While the downstairs is away, it's OK to act on the result that
+         * we already received, because it may never come back.
+         */
+        let ds_state = work.ds_state[client_id as usize];
+        if ds_state != DsState::Active {
+            println!(
+                "[{}] {} WARNING finish job {} when downstairs state:{:?}",
+                client_id, self.uuid, ds_id, ds_state
+            );
+        }
 
         // Mark this ds_id for the client_id as completed.
         let notify_guest =
@@ -2511,6 +2821,10 @@ enum DsState {
      * Incompatible software version reported.
      */
     BadVersion,
+    /*
+     * Waiting for activation signal.
+     */
+    WaitActive,
     /*
      * Waiting for the minimum number of downstairs to be present.
      */
@@ -3470,15 +3784,16 @@ impl Guest {
 
     pub fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
         let mut waiter = self.send(BlockOp::GoActive { gen });
+        println!("The guest is requesting activation");
         waiter.block_wait()?;
 
-        // XXX Is this the right number of retries? The right delay between
-        // retries?
+        /*
+         * XXX Figure out how long to wait for this.  The time to go active
+         * will include the time to reconcile all three downstairs.
+         */
         for _ in 0..10 {
             if self.query_is_active()? {
-                println!(
-                    "Upstairs is active, returning from activate function"
-                );
+                println!("This guest Upstairs is now active");
                 self.set_active();
                 return Ok(());
             } else {
@@ -3566,7 +3881,9 @@ impl Guest {
      */
     pub fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         if !self.is_active() {
-            return Err(CrucibleError::UpstairsInactive);
+            println!("Request for work from inactive upstairs");
+            // XXX Test access is allowed for now, but not forever.
+            //return Err(CrucibleError::UpstairsInactive);
         }
 
         let wc = WQCounts {
@@ -3599,7 +3916,6 @@ impl Default for Guest {
 }
 
 pub struct Target {
-    #[allow(dead_code)]
     target: SocketAddrV4,
     ds_work_tx: watch::Sender<u64>,
     ds_active_tx: watch::Sender<u64>,
@@ -3609,6 +3925,7 @@ pub struct Target {
 struct Condition {
     target: SocketAddrV4,
     connected: bool,
+    client_id: u8,
 }
 
 /**
@@ -3617,12 +3934,11 @@ struct Condition {
  */
 fn send_work(t: &[Target], val: u64) {
     for d_client in t.iter() {
-        // println!("#### send to client {:?}", d_client.target);
         let res = d_client.ds_work_tx.send(val);
         if let Err(e) = res {
             println!(
-                "#### error {:#?} Failed to notify {:?} of new work",
-                e, d_client.target
+                "ERROR {:#?} Failed to notify {:?} of work {}",
+                e, d_client.target, val,
             );
         }
     }
@@ -3636,7 +3952,6 @@ fn send_active(t: &[Target], gen: u64) {
     for d_client in t.iter() {
         // println!("#### send to client {:?}", d_client.target);
         let res = d_client.ds_active_tx.send(gen);
-        println!("res: {:?}", res);
         if let Err(e) = res {
             println!(
                 "#### error {:#?} Failed 'active' notification to {:?}",
@@ -3657,7 +3972,14 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
      * Accept _any_ ds_done message, but work on the whole list of ackable
      * work.
      */
-    while let Some(_ds_id) = ds_done_rx.recv().await {
+    while let Some(ds_id) = ds_done_rx.recv().await {
+        if !up.is_active() {
+            println!(
+                "up_ds_listen: ignoring ds_id:{}  Upstairs is not active",
+                ds_id
+            );
+            continue;
+        }
         /*
          * XXX Do we need to hold the lock while we process all the
          * completed jobs?  We should be continuing to send message over
@@ -3679,6 +4001,13 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let mut work = up.downstairs.lock().unwrap();
 
             let done = work.active.get_mut(ds_id_done).unwrap();
+            if !up.is_active() {
+                println!(
+                    "up_ds_listen ignoring ds_id:{}  Upstairs not active",
+                    ds_id
+                );
+                continue;
+            }
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -3713,6 +4042,10 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
  * the single IO into multiple IOs to the downstairs. Once we have built
  * the work and updated the upstairs and downstairs work queues, we signal
  * to all the downstairs tasks there is new work for them to do.
+ *
+ * This function can be called before the upstairs is active, so any
+ * operation that requires the upstairs to be active should check that
+ * and report an error.
  */
 async fn process_new_io(
     up: &Arc<Upstairs>,
@@ -3725,6 +4058,27 @@ async fn process_new_io(
      * return an error.  These are reported to the Guest.
      */
     match req.op {
+        /*
+         * These three options can be handled by this task directly,
+         * and don't require the upstairs to be fully online.
+         */
+        BlockOp::GoActive { gen } => {
+            up.set_active_request();
+            send_active(dst, gen);
+            let _ = req.send.send(Ok(()));
+        }
+        BlockOp::QueryUpstairsActive { data } => {
+            *data.lock().unwrap() = up.is_active();
+            let _ = req.send.send(Ok(()));
+        }
+        BlockOp::QueryUpstairsUuid { data } => {
+            *data.lock().unwrap() = up.uuid;
+            let _ = req.send.send(Ok(()));
+        }
+        /*
+         * These options are only functional once the upstairs is
+         * active and should not be accepted if we are not active.
+         */
         BlockOp::Read { offset, data } => {
             if let Err(e) = up.submit_read(offset, data, req.send.clone()) {
                 let _ = req.send.send(Err(e));
@@ -3749,30 +4103,33 @@ async fn process_new_io(
             send_work(dst, *lastcast);
             *lastcast += 1;
         }
-        BlockOp::GoActive { gen } => {
-            send_active(dst, gen);
-            let _ = req.send.send(Ok(()));
-        }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
+            if !up.is_active() {
+                println!("Can't request block size, upstairs is not active");
+                let _ = req.send.send(Err(CrucibleError::UpstairsInactive));
+                return;
+            }
             *data.lock().unwrap() = up.ddef.lock().unwrap().block_size();
             let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryTotalSize { data } => {
+            if !up.is_active() {
+                println!("Can't request total size, upstairs is not active");
+                let _ = req.send.send(Err(CrucibleError::UpstairsInactive));
+                return;
+            }
             *data.lock().unwrap() = up.ddef.lock().unwrap().total_size();
-            let _ = req.send.send(Ok(()));
-        }
-        BlockOp::QueryUpstairsActive { data } => {
-            *data.lock().unwrap() = up.is_active();
-            let _ = req.send.send(Ok(()));
-        }
-        BlockOp::QueryUpstairsUuid { data } => {
-            *data.lock().unwrap() = up.uuid;
             let _ = req.send.send(Ok(()));
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
+            if !up.is_active() {
+                println!("Can't request extent size, upstairs is not active");
+                let _ = req.send.send(Err(CrucibleError::UpstairsInactive));
+                return;
+            }
             *data.lock().unwrap() = up.ddef.lock().unwrap().extent_size();
             let _ = req.send.send(Ok(()));
         }
@@ -3786,13 +4143,17 @@ async fn process_new_io(
             let _ = req.send.send(Ok(()));
         }
         BlockOp::Commit => {
+            if !up.is_active() {
+                let _ = req.send.send(Err(CrucibleError::UpstairsInactive));
+                return;
+            }
             send_work(dst, *lastcast);
             *lastcast += 1;
         }
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Arg {
     up_count: u32,
     ds_count: u32,
@@ -3830,93 +4191,50 @@ async fn up_listen(
     mut ds_status_rx: mpsc::Receiver<Condition>,
 ) {
     println!("Wait for all three downstairs to come online");
-    let mut ds_count = 0u32;
     let mut lastcast = 1;
 
     stat_update(up, "start");
-
     loop {
         /*
-         * For now, we need all three connections to proceed.
+         * Wait for all three downstairs to connect (for each region set).
+         * Once we have all three, try to reconcile them.
+         * Once all downstairs are reconciled, we can start taking IO.
          */
         loop {
             tokio::select! {
                 c = ds_status_rx.recv() => {
                     if let Some(c) = c {
-                        if c.connected {
-                            ds_count += 1;
-                            println!(
-                                "#### {:?} #### CONNECTED ######## {}/??",
-                                c.target, ds_count,
-                            );
-
-                            if ds_count == 3 {
-                                break;
-                            }
-                        } else {
-                            println!(
-                                "#### {:?} #### DISCONNECTED! ####",
-                                c.target
-                            );
-                            ds_count -= 1;
+                        println!(
+                            "[{}] {:?} connection:{:?}",
+                            c.client_id, c.target, c.connected,
+                        );
+                        /*
+                         * If this just connected, see if the
+                         * reconciliation can now pass.
+                         */
+                        if c.connected && up.ds_reconciliation() {
+                            break;
                         }
                     } else {
                         println!("#### ? #### DISCONNECTED due to None! ####");
-                        ds_count -= 1;
                     }
                 }
                 req = up.guest.recv() => {
-                    // Wait for the pre-activate related messages
-                    if matches!(req.op,
-                        BlockOp::GoActive { gen: _ } |
-                        BlockOp::QueryUpstairsActive { data: _ } |
-                        BlockOp::QueryUpstairsUuid { data: _ }
-                    ) {
-                        process_new_io(up, &dst, req, &mut lastcast).await;
-                    } else {
-                        println!(
-                            "{} ignoring {:?}, not all \
-                            downstairs are connected",
-                            up.uuid, req.op
-                        );
-                    }
+                    /*
+                     * There are a few commands we will accept before we
+                     * have all downstairs online. Other commands should
+                     * return an error.  process_new_io should be able
+                     * to handle the difference.
+                     */
+                    process_new_io(up, &dst, req, &mut lastcast).await;
                 }
             }
         }
+
         stat_update(up, "loop end");
+        println!("All downstairs online, Now accepting IO requests",);
 
-        println!("All expected targets are online, Now accepting IO requests");
-        /*
-         * XXX The real check to transition from WaitQuorum to Active can
-         * happen now, as all three are connected and ready. Right now this
-         * happens in process_downstairs() and in the wrong way.
-         */
-
-        /*
-         * Consider how the DsState::Failed is handled here, if necessary
-         *
-         * TODO: This logic does not cover the case where downstairs are
-         * going up and down after the initial connection state.
-         * Eventually the check here needs to verify that all downstairs
-         * are still connected, and the actual work of making sure all
-         * downstairs are in sync is done only with all downstairs
-         * connected.
-         */
-        if !up.all_ds_state_match(DsState::WaitQuorum) {
-            up.ds_state_show();
-            panic!(
-                "{} about to set all to active but not \
-                all state is WaitQuorum!!",
-                up.uuid
-            );
-        }
-
-        up.ds_transition_all(DsState::Active);
         up.ds_state_show();
-
-        up.set_active();
-
-        stat_update(up, "active");
         /*
          * We have three connections, so we can now start listening for
          * more IO to come in. We also need to make sure our downstairs
@@ -3943,9 +4261,9 @@ async fn up_listen(
                     // sure exactly how the FC will work.
                     if let Some(c) = &c {
                         if !c.connected {
-                            println!("{} offline, pause IO ", c.target);
+                            println!("[{}] offline {} ", c.client_id, c.target);
                         } else {
-                            println!("{} online", c.target);
+                            println!("[{}] online {}", c.client_id, c.target);
                         }
                     } else {
                         /*
@@ -3953,7 +4271,7 @@ async fn up_listen(
                          * means we should exit gracefully.
                          */
                         println!(
-                            "Saw None in up_listen, draining in-flight IO"
+                            "Saw None in up_listen, draining in-flight IO",
                         );
                         show_all_work(up);
 
@@ -3974,9 +4292,13 @@ async fn up_listen(
                                         "Timed out for up.guest.recv drain, \
                                         returning gracefully"
                                     );
-                                    return;
                                 }
                             }
+                            // XXX Do we break here?
+                            // what do I do?  Exit?
+                            // Maybe all current downstairs need to go back
+                            // to NEW?
+                            panic!("Write more code");
                         }
                     }
                 }
@@ -4015,10 +4337,9 @@ async fn up_listen(
 
 /*
  * This is the main upstairs task that starts all the other async
- * tasks.
- *
- * XXX At the moment, this function is only half complete, and will
- * probably need a re-write.
+ * tasks.  The final step is to call up_listen() which will coordinate
+ * the connection to the downstairs and start listening for incoming
+ * IO from the guest when the time is ready.
  */
 pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     match register_probes() {
@@ -4071,7 +4392,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
              * Create the channel that we will use to request that the loop
              * check for work to do in the central structure.
              */
-            let (ds_work_tx, ds_work_rx) = watch::channel(100);
+            let (ds_work_tx, ds_work_rx) = watch::channel(1);
 
             // Notify when it's time to go active.
             let (ds_active_tx, ds_active_rx) = watch::channel(0);
@@ -4220,9 +4541,10 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         "----------------------------------------------------------------"
     );
     println!(
-        "     Crucible work queues:  Upstairs:{}  downstairs:{}",
+        " Crucible (Active:{}) work queues:  Upstairs:{}  downstairs:{}",
+        up.is_active(),
         up_count,
-        kvec.len()
+        kvec.len(),
     );
     if kvec.is_empty() {
         if up_count != 0 {

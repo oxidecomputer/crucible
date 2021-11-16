@@ -137,7 +137,7 @@ fn get_region_info(
      * Limit the max IO size (in blocks) to be 1M or the size
      * of the volume, whichever is smaller
      */
-    const MAX_IO_BYTES: usize = 1 * 1024 * 1024;
+    const MAX_IO_BYTES: usize = 1024 * 1024;
     let mut max_block_io = MAX_IO_BYTES / block_size as usize;
     if total_blocks < max_block_io as usize {
         max_block_io = total_blocks as usize;
@@ -273,9 +273,7 @@ fn main() -> Result<()> {
             big_workload(&guest, &mut region_info)?;
         }
         Workload::Burst => {
-            println!("Run burst test (demo in a loop) in 5 seconds...");
-            std::thread::sleep(std::time::Duration::from_secs(5));
-
+            println!("Run burst test (demo in a loop)");
             runtime.block_on(burst_workload(
                 &guest,
                 60,
