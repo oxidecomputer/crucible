@@ -4285,7 +4285,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                 let state = job.state.get(&cid);
                 match state {
                     Some(state) => {
-                        // XX I have no idea why this is two spaces instead of
+                        // XXX I have no idea why this is two spaces instead of
                         // one...
                         print!("  {0:>5}", state);
                         iosc.incr(state, cid);
