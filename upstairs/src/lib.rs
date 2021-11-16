@@ -2159,13 +2159,6 @@ impl Upstairs {
         let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
 
         for (eid, bo, num_blocks) in nwo {
-            /*
-             * When multiple operations are needed to satisfy a read, The
-             * offset and length will be divided across two downstairs
-             * requests. It is required (for re-assembly on the other side)
-             * that the lower offset corresponds to the lower next_id.
-             * The ID's don't need to be sequential.
-             */
             requests.push(ReadRequest {
                 eid,
                 offset: bo,
