@@ -1072,7 +1072,8 @@ async fn looper(
             proc(&target, up, tcp, &mut connected, &mut up_coms, lossy).await
         {
             eprintln!("ERROR: {}: proc: {:?}", target, e);
-            panic!("{:?}", e);
+            // XXX proc can return fatal and non-fatal errors, figure out what
+            // to do here
         }
 
         /*
