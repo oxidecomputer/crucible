@@ -8,7 +8,7 @@ import math
 # time (msec), value, data direction, block size (bytes), offset (bytes)
 
 for fi in sys.argv[1:]:
-    bins = 500
+    bins = 200
     min_v = 0
     max_v = 0
 
