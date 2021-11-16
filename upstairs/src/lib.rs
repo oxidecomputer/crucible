@@ -91,12 +91,14 @@ async fn process_message(
         Message::Imok => Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
-                println!(
-                    "u.uuid {:?} != job uuid {:?} on WriteAck",
-                    u.uuid, *uuid
+                panic!(
+                    "[{}] u.uuid {:?} != job uuid {:?} on WriteAck",
+                    up_coms.client_id, u.uuid, *uuid
                 );
+                /*
                 u.set_inactive();
                 return Err(CrucibleError::UuidMismatch.into());
+                */
             }
 
             Ok(io_completed(
@@ -111,12 +113,14 @@ async fn process_message(
         }
         Message::FlushAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
-                println!(
-                    "u.uuid {:?} != job uuid {:?} on FlushAck",
-                    u.uuid, *uuid
+                panic!(
+                    "[{}] u.uuid {:?} != job uuid {:?} on FlushAck",
+                    up_coms.client_id, u.uuid, *uuid
                 );
+                /*
                 u.set_inactive();
                 return Err(CrucibleError::UuidMismatch.into());
+                */
             }
 
             Ok(io_completed(
@@ -131,12 +135,14 @@ async fn process_message(
         }
         Message::ReadResponse(uuid, ds_id, data, result) => {
             if u.uuid != *uuid {
-                println!(
-                    "u.uuid {:?} != job uuid {:?} on ReadResponse",
-                    u.uuid, *uuid
+                panic!(
+                    "[{}] u.uuid {:?} != job uuid {:?} on ReadResponse",
+                    up_coms.client_id, u.uuid, *uuid
                 );
+                /*
                 u.set_inactive();
                 return Err(CrucibleError::UuidMismatch.into());
+                */
             }
 
             Ok(io_completed(
@@ -647,24 +653,13 @@ async fn proc(
                 match f.transpose()? {
                     None => {
                         println!(
-                            "[{}] client got null message",
+                            "[{}] client hung up",
                             up_coms.client_id
                         );
                         up.ds_missing(up_coms.client_id);
                         return Ok(())
                     }
-                    Some(Message::Imok) => {
-                        // This is a ping ack.
-                        /*
-                        if negotiated == 1 {
-                            println!(
-                                "[{}] client is waiting for promotion \
-                                to active, received ping response.",
-                                up_coms.client_id
-                            );
-                        }
-                        */
-                    }
+                    Some(Message::Imok) => {}
                     Some(Message::YesItsMe(version)) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
@@ -1224,7 +1219,6 @@ async fn looper(
          * method will do that for us.
          */
         up.ds_missing(up_coms.client_id);
-        //up.ds_state_show();
 
         println!(
             "[{}] {} connection to {} closed",
@@ -1416,7 +1410,6 @@ impl Downstairs {
                     }
                 }
             }
-            // println!("{} job goes back to IOState::New", ds_id);
             job.state.insert(client_id, IOState::New);
         }
     }
@@ -1787,7 +1780,6 @@ impl Downstairs {
             for id in kvec.iter() {
                 assert!(*id <= ds_id);
                 let wc = self.state_count(*id).unwrap();
-                // ZZZ
                 assert_eq!(wc.active, 0);
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(id));
@@ -3846,21 +3838,24 @@ impl Guest {
         println!("The guest is requesting activation");
         waiter.block_wait()?;
 
-        // XXX This currently blocks forever, but perhaps it should
-        // give up after some time?
-        loop {
+        /*
+         * XXX Figure out how long to wait for this.  The time to go active
+         * will include the time to reconcile all three downstairs.
+         */
+        for _ in 0..10 {
             if self.query_is_active()? {
                 println!("This guest Upstairs is now active");
                 self.set_active();
                 return Ok(());
             } else {
-                // println!(
-                //     "Upstairs is not yet active, waiting in activate
-                // function" );
+                println!(
+                    "Upstairs is not yet active, waiting in activate function"
+                );
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
-        // Err(CrucibleError::UpstairsInactive)
+
+        Err(CrucibleError::UpstairsInactive)
     }
 
     pub fn query_is_active(&self) -> Result<bool, CrucibleError> {

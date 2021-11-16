@@ -784,22 +784,20 @@ async fn resp_loop(
      * function to take over and handle a reconnect or a new upstairs
      * takeover.
      */
-    let dw_task;
-    {
+    let dw_task = {
         let mut adc = ads.clone();
         let mut fwc = fw.clone();
-        dw_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             do_work_task(&mut adc, job_channel_rx, &mut fwc).await
-        });
-    }
+        })
+    };
 
     let (message_channel_tx, mut message_channel_rx) = channel(200);
-    let pf_task;
-    {
+    let pf_task = {
         let mut adc = ads.clone();
         let tx = job_channel_tx.clone();
         let mut fwc = fw.clone();
-        pf_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
                 if let Err(e) =
                     proc_frame(upstairs_uuid, &mut adc, &m, &mut fwc, &tx).await
@@ -808,8 +806,8 @@ async fn resp_loop(
                 }
             }
             Ok(())
-        });
-    }
+        })
+    };
 
     tokio::pin!(dw_task);
     tokio::pin!(pf_task);
