@@ -4296,7 +4296,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                 }
             }
 
-            println!("");
+            println!();
         }
         iosc.show_all();
         print!("Last Flush: ");
