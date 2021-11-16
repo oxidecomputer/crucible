@@ -70,7 +70,7 @@ pub enum Message {
     Write(Uuid, u64, Vec<u64>, Vec<Write>),
     WriteAck(Uuid, u64, Result<(), CrucibleError>),
 
-    Flush(Uuid, u64, Vec<u64>, u64),
+    Flush(Uuid, u64, Vec<u64>, u64, u64),
     FlushAck(Uuid, u64, Result<(), CrucibleError>),
 
     /*

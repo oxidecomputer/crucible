@@ -43,16 +43,6 @@ impl Inner {
         Ok(gen_number_values[0])
     }
 
-    fn _set_gen_number(&self, new_gen: u64) -> Result<()> {
-        let mut stmt = self
-            .metadb
-            .prepare("UPDATE metadata SET value=?1 WHERE name='gen_number'")?;
-
-        let _rows_affected = stmt.execute(params![new_gen])?;
-
-        Ok(())
-    }
-
     pub fn flush_number(&self) -> Result<u64> {
         let mut stmt = self
             .metadb
@@ -69,12 +59,21 @@ impl Inner {
         Ok(flush_number_values[0])
     }
 
-    fn set_flush_number(&self, new_flush: u64) -> Result<()> {
+    /*
+     * The flush and generation numbers will be updated at the same time.
+     */
+    fn set_flush_number(&self, new_flush: u64, new_gen: u64) -> Result<()> {
         let mut stmt = self.metadb.prepare(
             "UPDATE metadata SET value=?1 WHERE name='flush_number'",
         )?;
 
         let _rows_affected = stmt.execute(params![new_flush])?;
+
+        let mut stmt = self
+            .metadb
+            .prepare("UPDATE metadata SET value=?1 WHERE name='gen_number'")?;
+
+        let _rows_affected = stmt.execute(params![new_gen])?;
 
         /*
          * When we write out the new flush number, the dirty bit should be
@@ -397,7 +396,11 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn flush_block(&self, new_flush: u64) -> Result<(), CrucibleError> {
+    pub fn flush_block(
+        &self,
+        new_flush: u64,
+        new_gen: u64,
+    ) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
         if !inner.dirty()? {
@@ -427,7 +430,7 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        inner.set_flush_number(new_flush)?;
+        inner.set_flush_number(new_flush, new_gen)?;
 
         Ok(())
     }
@@ -605,6 +608,7 @@ impl Region {
             .map(|e| e.inner().gen_number())
             .collect::<Result<Vec<_>>>()
     }
+
     pub fn dirty(&self) -> Result<Vec<bool>> {
         self.extents
             .iter()
@@ -670,11 +674,15 @@ impl Region {
      * what an extent should use if a flush is required.
      */
     #[instrument]
-    pub fn region_flush(&self, flush_number: u64) -> Result<(), CrucibleError> {
+    pub fn region_flush(
+        &self,
+        flush_number: u64,
+        gen_number: u64,
+    ) -> Result<(), CrucibleError> {
         // XXX How to we convert between usize and u32 correctly?
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number)?;
+            extent.flush_block(flush_number, gen_number)?;
         }
         Ok(())
     }

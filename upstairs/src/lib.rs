@@ -428,12 +428,14 @@ async fn io_send(
             IOop::Flush {
                 dependencies,
                 flush_number,
+                gen_number,
             } => {
                 fw.send(Message::Flush(
                     u.uuid,
                     *new_id,
                     dependencies.clone(),
                     flush_number,
+                    gen_number,
                 ))
                 .await?
             }
@@ -700,10 +702,11 @@ async fn proc(
                                     "[{}] client is_active_req TRUE, promote!",
                                     up_coms.client_id
                                 );
-                                println!(
-                                    "[{}] flush active_rx!",
-                                    up_coms.client_id
-                                );
+                                /*
+                                 * If there is anything in the ds_active_rx
+                                 * channel, clear it out so we don't later
+                                 * check it and confuse it for a new request
+                                 */
                                 {
                                     up_coms.ds_active_rx.borrow_and_update();
                                 }
@@ -1524,6 +1527,7 @@ impl Downstairs {
             IOop::Flush {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
+                gen_number: _gen_number,
             } => wc.error >= 2,
         };
 
@@ -1564,6 +1568,7 @@ impl Downstairs {
             IOop::Flush {
                 dependencies: _,
                 flush_number: _,
+                gen_number: _,
             } => {
                 cdt::gw_flush_end!(|| (gw_id));
             }
@@ -1636,7 +1641,8 @@ impl Downstairs {
                     writes: _,
                 } | IOop::Flush {
                     dependencies: _,
-                    flush_number: _
+                    flush_number: _,
+                    gen_number: _
                 }
             ) {
                 let errors: u64 = match self.downstairs_errors.get(&client_id) {
@@ -1656,6 +1662,7 @@ impl Downstairs {
             if let IOop::Flush {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
+                gen_number: _gen_number,
             } = &job.work
             {
                 self.ds_last_flush[client_id as usize] = ds_id;
@@ -1694,6 +1701,7 @@ impl Downstairs {
                 IOop::Flush {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
+                    gen_number: _gen_number,
                 } => {
                     assert!(read_data.is_none());
                     if jobs_completed_ok == 2 {
@@ -1785,6 +1793,7 @@ impl Downstairs {
             IOop::Flush {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
+                gen_number: _gen_number,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -1916,7 +1925,7 @@ pub struct Upstairs {
      * Upstairs Generation number.
      * Will always increase each time an Upstairs starts.
      */
-    _generation: u64,
+    generation: Mutex<u64>,
 
     /*
      * The guest struct keeps track of jobs accepted from the Guest as they
@@ -2020,8 +2029,8 @@ impl Upstairs {
 
         Arc::new(Upstairs {
             active: Mutex::new(Active::default()),
-            uuid: Uuid::new_v4(), // XXX get from Nexus?
-            _generation: 0,       // XXX Also get from Nexus?
+            uuid: Uuid::new_v4(),      // XXX get from Nexus?
+            generation: Mutex::new(0), // XXX Also get from Nexus?
             guest,
             downstairs: Mutex::new(Downstairs::default()),
             flush_info: Mutex::new(FlushInfo::new()),
@@ -2029,6 +2038,15 @@ impl Upstairs {
             encryption_context,
             need_flush: Mutex::new(false),
         })
+    }
+
+    fn set_generation(&self, new_gen: u64) {
+        let mut gen = self.generation.lock().unwrap();
+        *gen = new_gen;
+        println!("Set generation to :{}", *gen);
+    }
+    fn get_generation(&self) -> u64 {
+        *self.generation.lock().unwrap()
     }
 
     /*
@@ -2166,7 +2184,13 @@ impl Upstairs {
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
          */
-        let fl = create_flush(next_id, dep, next_flush, gw_id);
+        let fl = create_flush(
+            next_id,
+            dep,
+            next_flush,
+            gw_id,
+            self.get_generation(),
+        );
 
         let mut sub = HashMap::new();
         sub.insert(next_id, 0);
@@ -2764,7 +2788,8 @@ impl Upstairs {
                         writes: _,
                     } | IOop::Flush {
                         dependencies: _,
-                        flush_number: _
+                        flush_number: _,
+                        gen_number: _
                     }
                 ) {
                     self.ds_transition(client_id, DsState::Failed);
@@ -2938,6 +2963,7 @@ pub enum IOop {
     Flush {
         dependencies: Vec<u64>, // Jobs that must finish before this
         flush_number: u64,
+        gen_number: u64,
     },
 }
 
@@ -2951,6 +2977,7 @@ impl IOop {
             IOop::Flush {
                 dependencies,
                 flush_number: _flush_number,
+                gen_number: _,
             } => dependencies,
             IOop::Read {
                 dependencies,
@@ -3784,7 +3811,7 @@ impl Guest {
 
     pub fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
         let mut waiter = self.send(BlockOp::GoActive { gen });
-        println!("The guest is requesting activation");
+        println!("The guest is requesting activation with gen:{}", gen);
         waiter.block_wait()?;
 
         /*
@@ -4064,6 +4091,13 @@ async fn process_new_io(
          */
         BlockOp::GoActive { gen } => {
             up.set_active_request();
+            /*
+             * We may redo how the generation number works as more parts
+             * that use it are built.  In the failed migration case an
+             * upstairs will have to recover and either self update the
+             * generation number, or get the new one from propolis.
+             */
+            up.set_generation(gen);
             send_active(dst, gen);
             let _ = req.send.send(Ok(()));
         }
@@ -4507,10 +4541,12 @@ fn create_flush(
     dependencies: Vec<u64>,
     flush_number: u64,
     guest_id: u64,
+    gen_number: u64,
 ) -> DownstairsIO {
     let flush = IOop::Flush {
         dependencies,
         flush_number,
+        gen_number,
     };
 
     let mut state = HashMap::new();
@@ -4541,7 +4577,8 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         "----------------------------------------------------------------"
     );
     println!(
-        " Crucible (Active:{}) work queues:  Upstairs:{}  downstairs:{}",
+        " Crucible gen:{} (Active:{}) work queues:  Upstairs:{}  downstairs:{}",
+        up.get_generation(),
         up.is_active(),
         up_count,
         kvec.len(),
@@ -4592,6 +4629,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                 IOop::Flush {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
+                    gen_number: _gen_number,
                 } => {
                     let job_type = "Flush".to_string();
                     (job_type, 0)

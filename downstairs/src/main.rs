@@ -347,6 +347,7 @@ async fn _show_work(ds: &Downstairs) {
                 IOop::Flush {
                     dependencies,
                     flush_number: _flush_number,
+                    gen_number: _gen_number,
                 } => {
                     dsw_type = "Flush".to_string();
                     dep_list = dependencies.to_vec();
@@ -399,7 +400,7 @@ async fn proc_frame(
             d.add_work(*uuid, *ds_id, new_write).await?;
             new_ds_id = Some(*ds_id);
         }
-        Message::Flush(uuid, ds_id, dependencies, flush_number) => {
+        Message::Flush(uuid, ds_id, dependencies, flush_number, gen_number) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
@@ -409,6 +410,7 @@ async fn proc_frame(
             let new_flush = IOop::Flush {
                 dependencies: dependencies.to_vec(),
                 flush_number: *flush_number,
+                gen_number: *gen_number,
             };
 
             let d = ad.lock().await;
@@ -1240,6 +1242,7 @@ impl Work {
                                 IOop::Flush {
                                     dependencies: _,
                                     flush_number: _flush_number,
+                                    gen_number: _gen_number,
                                 } => "Flush",
                                 IOop::Read {
                                     dependencies: _,
@@ -1405,6 +1408,7 @@ impl Work {
             IOop::Flush {
                 dependencies: _dependencies,
                 flush_number,
+                gen_number,
             } => {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on flush!");
@@ -1412,7 +1416,7 @@ impl Work {
                 } else if !ds.is_active(job.upstairs_uuid) {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_flush(*flush_number)
+                    ds.region.region_flush(*flush_number, *gen_number)
                 };
 
                 Ok(Some(Message::FlushAck(
@@ -1499,7 +1503,7 @@ async fn main() -> Result<()> {
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1)?;
+                region.region_flush(1, 0)?;
             }
 
             println!("UUID: {:?}", region.def().uuid());
@@ -1626,6 +1630,7 @@ mod test {
                     IOop::Flush {
                         dependencies: deps,
                         flush_number: 10,
+                        gen_number: 0,
                     }
                 } else {
                     IOop::Read {
@@ -1659,7 +1664,8 @@ mod test {
                 job.work,
                 IOop::Flush {
                     dependencies: _,
-                    flush_number: _
+                    flush_number: _,
+                    gen_number: _,
                 }
             )
         };
