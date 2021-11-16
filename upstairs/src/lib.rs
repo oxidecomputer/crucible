@@ -91,14 +91,11 @@ async fn process_message(
         Message::Imok => Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
-                panic!(
+                println!(
                     "[{}] u.uuid {:?} != job uuid {:?} on WriteAck",
                     up_coms.client_id, u.uuid, *uuid
                 );
-                /*
-                u.set_inactive();
                 return Err(CrucibleError::UuidMismatch.into());
-                */
             }
 
             Ok(io_completed(
@@ -113,14 +110,11 @@ async fn process_message(
         }
         Message::FlushAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
-                panic!(
+                println!(
                     "[{}] u.uuid {:?} != job uuid {:?} on FlushAck",
                     up_coms.client_id, u.uuid, *uuid
                 );
-                /*
-                u.set_inactive();
                 return Err(CrucibleError::UuidMismatch.into());
-                */
             }
 
             Ok(io_completed(
@@ -135,14 +129,11 @@ async fn process_message(
         }
         Message::ReadResponse(uuid, ds_id, data, result) => {
             if u.uuid != *uuid {
-                panic!(
+                println!(
                     "[{}] u.uuid {:?} != job uuid {:?} on ReadResponse",
                     up_coms.client_id, u.uuid, *uuid
                 );
-                /*
-                u.set_inactive();
                 return Err(CrucibleError::UuidMismatch.into());
-                */
             }
 
             Ok(io_completed(
