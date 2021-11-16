@@ -160,9 +160,6 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
         start_block, count
     );
 
-    let mut data = BytesMut::with_capacity(block_size as usize);
-    data.resize(block_size as usize, 0);
-
     let mut out_file = File::create(export_path)?;
     let mut blocks_copied = 0;
 
@@ -171,15 +168,14 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
         for block_offset in 0..extent_size.value {
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
-                region
-                    .region_read(
-                        eid as u64,
-                        Block::new_with_ddef(block_offset, &region.def()),
-                        &mut data,
-                    )
-                    .unwrap();
+
+                let data = region.single_block_region_read(ReadRequest {
+                    eid: eid as u64,
+                    offset: Block::new_with_ddef(block_offset, &region.def()),
+                    num_blocks: 1,
+                })?;
+
                 out_file.write_all(&data).unwrap();
-                data.resize(block_size as usize, 0);
 
                 if blocks_copied >= count {
                     break 'eid_loop;
@@ -241,11 +237,10 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
      */
     const CHUNK_SIZE: usize = 32 * 1024 * 1024;
     assert_eq!(CHUNK_SIZE % MAX_BLOCK_SIZE, 0);
-    let mut buffer = vec![0; CHUNK_SIZE];
 
     let mut offset = Block::new_with_ddef(0, &region.def());
     loop {
-        buffer.resize(CHUNK_SIZE, 0);
+        let mut buffer = vec![0; CHUNK_SIZE];
 
         /*
          * Read data into the buffer until it is full, or we hit EOF.
@@ -282,16 +277,20 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         /*
-         * Use the same function upsairs uses to decide where to put the
+         * Use the same function upstairs uses to decide where to put the
          * data based on the LBA offset.
          */
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
         for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
-            region.region_write(eid, offset, data)?;
+            let mut buffer = BytesMut::with_capacity(data.len());
+            buffer.copy_from_slice(data);
+            region.single_block_region_write(eid, offset, buffer.freeze())?;
+
             pos.advance(len);
         }
+
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
         offset.advance(nblocks);
@@ -333,18 +332,14 @@ async fn _show_work(ds: &Downstairs) {
             match &dsw.work {
                 IOop::Read {
                     dependencies,
-                    eid: _eid,
-                    offset: _offset,
-                    num_blocks: _num_blocks,
+                    requests: _,
                 } => {
                     dsw_type = "Read ".to_string();
                     dep_list = dependencies.to_vec();
                 }
                 IOop::Write {
                     dependencies,
-                    eid: _eid,
-                    offset: _offset,
-                    data: _data,
+                    writes: _,
                 } => {
                     dsw_type = "Write".to_string();
                     dep_list = dependencies.to_vec();
@@ -388,7 +383,7 @@ async fn proc_frame(
             fw.send(Message::Imok).await?;
         }
         // Regular work path
-        Message::Write(uuid, ds_id, eid, dependencies, offset, data) => {
+        Message::Write(uuid, ds_id, dependencies, writes) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
@@ -397,9 +392,7 @@ async fn proc_frame(
 
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
-                eid: *eid,
-                offset: *offset,
-                data: data.clone(),
+                writes: writes.to_vec(),
             };
 
             let d = ad.lock().await;
@@ -422,14 +415,7 @@ async fn proc_frame(
             d.add_work(*uuid, *ds_id, new_flush).await?;
             new_ds_id = Some(*ds_id);
         }
-        Message::ReadRequest(
-            uuid,
-            ds_id,
-            dependencies,
-            eid,
-            offset,
-            num_blocks,
-        ) => {
+        Message::ReadRequest(uuid, ds_id, dependencies, requests) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
@@ -438,9 +424,7 @@ async fn proc_frame(
 
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
-                eid: *eid,
-                offset: *offset,
-                num_blocks: *num_blocks,
+                requests: requests.to_vec(),
             };
 
             let d = ad.lock().await;
@@ -595,7 +579,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                     ds.active_upstairs().unwrap()
                 };
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(active_upstairs)).await?;
+                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
 
                 return Ok(());
             }
@@ -840,7 +824,7 @@ async fn resp_loop(
                 };
 
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(active_upstairs)).await?;
+                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
 
                 return Ok(());
             }
@@ -1226,9 +1210,7 @@ impl Work {
                             match &job.work {
                                 IOop::Write {
                                     dependencies: _,
-                                    eid: _eid,
-                                    offset: _offset,
-                                    data: _data,
+                                    writes: _,
                                 } => "Write",
                                 IOop::Flush {
                                     dependencies: _,
@@ -1236,9 +1218,7 @@ impl Work {
                                 } => "Flush",
                                 IOop::Read {
                                     dependencies: _,
-                                    eid: _eid,
-                                    offset: _offset,
-                                    num_blocks: _num_blocks,
+                                    requests: _,
                                 } => "Read",
                             },
                             job.upstairs_uuid,
@@ -1325,9 +1305,7 @@ impl Work {
         match &job.work {
             IOop::Read {
                 dependencies: _dependencies,
-                eid,
-                offset,
-                num_blocks,
+                requests,
             } => {
                 /*
                  * XXX Some thought will need to be given to where the read
@@ -1336,9 +1314,16 @@ impl Work {
                  * uninitialized buffer. Until then, we have this workaround.
                  */
                 let (bs, _, _) = ds.region.region_def();
-                let sz = *num_blocks as usize * bs as usize;
-                let mut data = BytesMut::with_capacity(sz);
-                data.resize(sz, 1);
+
+                let mut responses: Vec<(ReadRequest, BytesMut)> =
+                    Vec::with_capacity(requests.len());
+
+                for request in requests {
+                    let sz = request.num_blocks as usize * bs as usize;
+                    let mut data = BytesMut::with_capacity(sz);
+                    data.resize(sz, 1);
+                    responses.push((*request, data));
+                }
 
                 /*
                  * Any error from an IO should be intercepted here and passed
@@ -1350,21 +1335,26 @@ impl Work {
                 } else if !ds.is_active(job.upstairs_uuid) {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_read(*eid, *offset, &mut data)
+                    ds.region.region_read(&mut responses)
                 };
+
+                let mut frozen_responses: Vec<(ReadRequest, Bytes)> =
+                    Vec::with_capacity(responses.len());
+
+                for (request, data) in responses {
+                    frozen_responses.push((request, data.freeze()));
+                }
 
                 Ok(Some(Message::ReadResponse(
                     job.upstairs_uuid,
                     job.ds_id,
-                    data.freeze(),
+                    frozen_responses,
                     result,
                 )))
             }
             IOop::Write {
                 dependencies: _dependencies,
-                eid,
-                offset,
-                data,
+                writes,
             } => {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on write!");
@@ -1372,7 +1362,7 @@ impl Work {
                 } else if !ds.is_active(job.upstairs_uuid) {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_write(*eid, *offset, data)
+                    ds.region.region_write(writes)
                 };
 
                 Ok(Some(Message::WriteAck(
@@ -1609,9 +1599,11 @@ mod test {
                 } else {
                     IOop::Read {
                         dependencies: deps,
-                        eid: 1,
-                        offset: Block::new_512(1),
-                        num_blocks: 1,
+                        requests: vec![ReadRequest {
+                            eid: 1,
+                            offset: Block::new_512(1),
+                            num_blocks: 1,
+                        }],
                     }
                 },
                 state: WorkState::New,

@@ -613,26 +613,55 @@ impl Region {
     }
 
     #[instrument]
-    pub fn region_write(
+    pub fn single_block_region_write(
         &self,
         eid: u64,
         offset: Block,
-        data: &[u8],
+        data: bytes::Bytes,
     ) -> Result<(), CrucibleError> {
-        let extent = &self.extents[eid as usize];
-        extent.write(offset, data)?;
+        self.region_write(&[crucible_protocol::Write { eid, offset, data }])
+    }
+
+    #[instrument]
+    pub fn region_write(
+        &self,
+        writes: &[crucible_protocol::Write],
+    ) -> Result<(), CrucibleError> {
+        for write in writes {
+            let extent = &self.extents[write.eid as usize];
+            extent.write(write.offset, &write.data)?;
+        }
         Ok(())
+    }
+
+    #[instrument]
+    pub fn single_block_region_read(
+        &self,
+        request: crucible_protocol::ReadRequest,
+    ) -> Result<BytesMut, CrucibleError> {
+        let block_size = self.def.block_size() as usize;
+
+        let mut data = BytesMut::with_capacity(block_size);
+        data.resize(block_size, 1);
+
+        let mut responses = vec![(request, data)];
+        self.region_read(&mut responses)?;
+
+        let (_, data) = responses.pop().unwrap();
+        drop(responses);
+
+        Ok(data)
     }
 
     #[instrument]
     pub fn region_read(
         &self,
-        eid: u64,
-        offset: Block,
-        data: &mut BytesMut,
+        responses: &mut Vec<(crucible_protocol::ReadRequest, BytesMut)>,
     ) -> Result<(), CrucibleError> {
-        let extent = &self.extents[eid as usize];
-        extent.read(offset, data)?;
+        for (request, data) in responses {
+            let extent = &self.extents[request.eid as usize];
+            extent.read(request.offset, data)?;
+        }
         Ok(())
     }
 

@@ -10,7 +10,24 @@ const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 use crucible_common::{Block, CrucibleError, RegionDefinition};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct Write {
+    pub eid: u64,
+    pub offset: Block,
+    pub data: bytes::Bytes,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+pub struct ReadRequest {
+    pub eid: u64,
+    pub offset: Block,
+    pub num_blocks: u64,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
+    /*
+     * Initial negotiation
+     */
     HereIAm(u32, Uuid),
     YesItsMe(u32),
 
@@ -22,6 +39,7 @@ pub enum Message {
      */
     PromoteToActive(Uuid),
     YouAreNowActive(Uuid),
+    YouAreNoLongerActive(Uuid), // UUID of new active Upstairs
 
     /*
      * If downstairs sees a UUID that doesn't match what was negotiated, it
@@ -29,9 +47,15 @@ pub enum Message {
      */
     UuidMismatch(Uuid),
 
+    /*
+     * Ping related
+     */
     Ruok,
     Imok,
 
+    /*
+     * Metadata exchange
+     */
     RegionInfoPlease,
     RegionInfo(RegionDefinition),
     ExtentVersionsPlease,
@@ -39,12 +63,28 @@ pub enum Message {
     LastFlushAck(u64),
     ExtentVersions(Vec<u64>, Vec<u64>, Vec<bool>),
 
-    Write(Uuid, u64, u64, Vec<u64>, Block, bytes::Bytes),
+    /*
+     * Write: Uuid, job id, dependencies, [Write]
+     * WriteAck: Uuid, job id, result
+     */
+    Write(Uuid, u64, Vec<u64>, Vec<Write>),
     WriteAck(Uuid, u64, Result<(), CrucibleError>),
+
     Flush(Uuid, u64, Vec<u64>, u64),
     FlushAck(Uuid, u64, Result<(), CrucibleError>),
-    ReadRequest(Uuid, u64, Vec<u64>, u64, Block, u64),
-    ReadResponse(Uuid, u64, bytes::Bytes, Result<(), CrucibleError>),
+
+    /*
+     * ReadRequest: Uuid, job id, dependencies, [ReadRequest]
+     * ReadResponse: Uuid, job id, [(ReadRequest, block)], result
+     */
+    ReadRequest(Uuid, u64, Vec<u64>, Vec<ReadRequest>),
+    ReadResponse(
+        Uuid,
+        u64,
+        Vec<(ReadRequest, bytes::Bytes)>,
+        Result<(), CrucibleError>,
+    ),
+
     Unknown(u32, BytesMut),
 }
 
