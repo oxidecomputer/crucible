@@ -41,6 +41,12 @@ pub struct Opt {
 
     #[structopt(short, long, default_value = "0")]
     gen: u64,
+
+    /*
+     * Number of upstairs to sequentially activate and handoff to
+     */
+    #[structopt(short, long, default_value = "5")]
+    num_upstairs: usize,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -56,6 +62,11 @@ pub fn opts() -> Result<Opt> {
 
 fn main() -> Result<()> {
     let opt = opts()?;
+
+    if opt.num_upstairs == 0 {
+        bail!("Must have non-zero number of upstairs");
+    }
+
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: false,
@@ -102,10 +113,11 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }));
 
-    // Create 5 CruciblePseudoFiles to test activation handoff.
-    let mut cpfs: Vec<crucible::CruciblePseudoFile> = Vec::with_capacity(5);
+    // Create N CruciblePseudoFiles to test activation handoff.
+    let mut cpfs: Vec<crucible::CruciblePseudoFile> =
+        Vec::with_capacity(opt.num_upstairs);
 
-    for _ in 0..5 {
+    for _ in 0..opt.num_upstairs {
         /*
          * The structure we use to send work from outside crucible into the
          * Upstairs main task.
@@ -124,7 +136,7 @@ fn main() -> Result<()> {
     let mut rng = rand::thread_rng();
 
     let rounds = 1500;
-    let handoff_amount = rounds / 5;
+    let handoff_amount = rounds / opt.num_upstairs;
     let mut cpf_idx = 0;
 
     println!("Handing off to CPF {}", cpf_idx);
@@ -249,13 +261,13 @@ fn main() -> Result<()> {
     println!("Done ok, waiting on show_work");
 
     loop {
-        let cpf = &mut cpfs[4];
+        let cpf = &mut cpfs[cpf_idx];
         let wc = cpf.show_work()?;
         println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(5));
     }
 
     Ok(())
