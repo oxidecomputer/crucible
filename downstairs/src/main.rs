@@ -252,7 +252,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                 break;
             }
 
-            let n = f.read(&mut buffer[total..(CHUNK_SIZE - total)])?;
+            let n = f.read(&mut buffer[..])?;
 
             if n == 0 {
                 /*
@@ -285,6 +285,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         for (eid, offset, len) in extent_from_offset(rm, offset, nblocks)? {
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
+            buffer.resize(data.len(), 0);
             buffer.copy_from_slice(data);
             region.single_block_region_write(eid, offset, buffer.freeze())?;
 
