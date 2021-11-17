@@ -62,6 +62,11 @@ pub fn opts() -> Result<Opt> {
 
 fn main() -> Result<()> {
     let opt = opts()?;
+
+    if opt.num_upstairs == 0 {
+        bail!("Must have non-zero number of upstairs");
+    }
+
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: false,
