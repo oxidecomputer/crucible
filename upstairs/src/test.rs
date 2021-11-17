@@ -356,7 +356,7 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_flush(next_id, vec![], 10, 0);
+        let op = create_flush(next_id, vec![], 10, 0, 0);
 
         work.enqueue(op);
 
@@ -389,7 +389,7 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_flush(next_id, vec![], 10, 0);
+        let op = create_flush(next_id, vec![], 10, 0, 0);
 
         work.enqueue(op);
 
@@ -431,7 +431,7 @@ mod test {
 
         let next_id = work.next_id();
 
-        let op = create_flush(next_id, vec![], 10, 0);
+        let op = create_flush(next_id, vec![], 10, 0, 0);
 
         work.enqueue(op);
 
@@ -1110,7 +1110,7 @@ mod test {
         // A flush is required to move work to completed
         // Create the flush then send it to all downstairs.
         let next_id = work.next_id();
-        let op = create_flush(next_id, vec![], 10, 0);
+        let op = create_flush(next_id, vec![], 10, 0, 0);
 
         work.enqueue(op);
 
@@ -1197,7 +1197,7 @@ mod test {
 
         // Create the flush, put on the work queue
         let flush_id = work.next_id();
-        let op = create_flush(flush_id, vec![], 10, 0);
+        let op = create_flush(flush_id, vec![], 10, 0, 0);
         work.enqueue(op);
 
         // Simulate sending the flush to downstairs 0 and 1
@@ -1287,7 +1287,7 @@ mod test {
 
         // Create the flush IO
         let next_id = work.next_id();
-        let op = create_flush(next_id, vec![], 10, 0);
+        let op = create_flush(next_id, vec![], 10, 0, 0);
         work.enqueue(op);
 
         // Submit the flush to all three downstairs.
@@ -1371,7 +1371,7 @@ mod test {
 
         // Create and enqueue the flush.
         let flush_id = work.next_id();
-        let op = create_flush(flush_id, vec![], 10, 0);
+        let op = create_flush(flush_id, vec![], 10, 0, 0);
         work.enqueue(op);
 
         // Send the flush to two downstairs.
