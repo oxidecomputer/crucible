@@ -1615,8 +1615,8 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use tempfile::{tempdir};
     use rand_chacha::ChaCha20Rng;
+    use tempfile::tempdir;
 
     fn add_work(
         work: &mut Work,
@@ -2188,7 +2188,12 @@ mod test {
         // export region to another file
 
         let export_path = tempdir.path().join("exported_data");
-        downstairs_export(&mut region, &export_path, 0, total_bytes / block_size)?;
+        downstairs_export(
+            &mut region,
+            &export_path,
+            0,
+            total_bytes / block_size,
+        )?;
 
         // compare files
 
@@ -2253,7 +2258,12 @@ mod test {
 
         let export_path = tempdir.path().join("exported_data");
         let region_size = region.def().total_size();
-        downstairs_export(&mut region, &export_path, 0, region_size / block_size)?;
+        downstairs_export(
+            &mut region,
+            &export_path,
+            0,
+            region_size / block_size,
+        )?;
 
         // compare files
 
@@ -2331,7 +2341,12 @@ mod test {
         assert_eq!(region.def().extent_count(), 11);
 
         let export_path = tempdir.path().join("exported_data");
-        downstairs_export(&mut region, &export_path, 0, total_bytes / block_size + 1)?;
+        downstairs_export(
+            &mut region,
+            &export_path,
+            0,
+            total_bytes / block_size + 1,
+        )?;
 
         // compare files
 
