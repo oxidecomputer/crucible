@@ -88,64 +88,16 @@ async fn process_message(
     m: &Message,
     up_coms: UpComs,
 ) -> Result<()> {
-    match m {
-        Message::Imok => Ok(()),
+    let (uuid, ds_id, result) = match m {
+        Message::Imok => return Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
-            if u.uuid != *uuid {
-                println!(
-                    "[{}] u.uuid {:?} != job uuid {:?} on WriteAck",
-                    up_coms.client_id, u.uuid, *uuid
-                );
-                return Err(CrucibleError::UuidMismatch.into());
-            }
-
-            let result = if result.is_ok() {
-                Ok(Vec::new())
-            } else {
-                Err(result.as_ref().err().unwrap().clone())
-            };
-
-            if u.complete(*ds_id, up_coms.client_id, result)? {
-                up_coms.ds_done_tx.send(*ds_id).await?;
-            }
-
-            Ok(())
+            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::FlushAck(uuid, ds_id, result) => {
-            if u.uuid != *uuid {
-                println!(
-                    "[{}] u.uuid {:?} != job uuid {:?} on FlushAck",
-                    up_coms.client_id, u.uuid, *uuid
-                );
-                return Err(CrucibleError::UuidMismatch.into());
-            }
-
-            let result = if result.is_ok() {
-                Ok(Vec::new())
-            } else {
-                Err(result.as_ref().err().unwrap().clone())
-            };
-
-            if u.complete(*ds_id, up_coms.client_id, result)? {
-                up_coms.ds_done_tx.send(*ds_id).await?;
-            }
-
-            Ok(())
+            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::ReadResponse(uuid, ds_id, responses) => {
-            if u.uuid != *uuid {
-                println!(
-                    "[{}] u.uuid {:?} != job uuid {:?} on ReadResponse",
-                    up_coms.client_id, u.uuid, *uuid
-                );
-                return Err(CrucibleError::UuidMismatch.into());
-            }
-
-            if u.complete(*ds_id, up_coms.client_id, responses.clone())? {
-                up_coms.ds_done_tx.send(*ds_id).await?;
-            }
-
-            Ok(())
+            (*uuid, *ds_id, responses.clone())
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -153,9 +105,23 @@ async fn process_message(
          */
         x => {
             println!("{} unexpected frame {:?}, IGNORED", up_coms.client_id, x);
-            Ok(())
+            return Ok(());
         }
+    };
+
+    if u.uuid != uuid {
+        println!(
+            "[{}] u.uuid {:?} != job {} uuid {:?}!",
+            up_coms.client_id, u.uuid, ds_id, uuid
+        );
+        return Err(CrucibleError::UuidMismatch.into());
     }
+
+    if u.complete(ds_id, up_coms.client_id, result)? {
+        up_coms.ds_done_tx.send(ds_id).await?;
+    }
+
+    Ok(())
 }
 
 /*
