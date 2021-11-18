@@ -82,69 +82,22 @@ pub fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
+#[instrument]
 async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
     up_coms: UpComs,
 ) -> Result<()> {
-    match m {
-        Message::Imok => Ok(()),
+    let (uuid, ds_id, result) = match m {
+        Message::Imok => return Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
-            if u.uuid != *uuid {
-                println!(
-                    "[{}] u.uuid {:?} != job uuid {:?} on WriteAck",
-                    up_coms.client_id, u.uuid, *uuid
-                );
-                return Err(CrucibleError::UuidMismatch.into());
-            }
-
-            Ok(io_completed(
-                u,
-                *ds_id,
-                up_coms.client_id,
-                None,
-                up_coms.ds_done_tx,
-                result.clone(),
-            )
-            .await?)
+            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::FlushAck(uuid, ds_id, result) => {
-            if u.uuid != *uuid {
-                println!(
-                    "[{}] u.uuid {:?} != job uuid {:?} on FlushAck",
-                    up_coms.client_id, u.uuid, *uuid
-                );
-                return Err(CrucibleError::UuidMismatch.into());
-            }
-
-            Ok(io_completed(
-                u,
-                *ds_id,
-                up_coms.client_id,
-                None,
-                up_coms.ds_done_tx,
-                result.clone(),
-            )
-            .await?)
+            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
-        Message::ReadResponse(uuid, ds_id, responses, result) => {
-            if u.uuid != *uuid {
-                println!(
-                    "[{}] u.uuid {:?} != job uuid {:?} on ReadResponse",
-                    up_coms.client_id, u.uuid, *uuid
-                );
-                return Err(CrucibleError::UuidMismatch.into());
-            }
-
-            Ok(io_completed(
-                u,
-                *ds_id,
-                up_coms.client_id,
-                Some(responses.clone()),
-                up_coms.ds_done_tx,
-                result.clone(),
-            )
-            .await?)
+        Message::ReadResponse(uuid, ds_id, responses) => {
+            (*uuid, *ds_id, responses.clone())
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -152,9 +105,23 @@ async fn process_message(
          */
         x => {
             println!("{} unexpected frame {:?}, IGNORED", up_coms.client_id, x);
-            Ok(())
+            return Ok(());
         }
+    };
+
+    if u.uuid != uuid {
+        println!(
+            "[{}] u.uuid {:?} != job {} uuid {:?}!",
+            up_coms.client_id, u.uuid, ds_id, uuid
+        );
+        return Err(CrucibleError::UuidMismatch.into());
     }
+
+    if u.complete(ds_id, up_coms.client_id, result)? {
+        up_coms.ds_done_tx.send(ds_id).await?;
+    }
+
+    Ok(())
 }
 
 /*
@@ -162,12 +129,17 @@ async fn process_message(
  *
  *     Extent number (EID), Block offset, Length in Blocks
  *
- * - length in blocks can be up to the region size
+ * Note: length in blocks can be up to the region size
+ *
+ * If performing authenticated encryption, nonce and tags must be sent per
+ * block. This means extent_from_offset must return a list of single blocks
+ * only, hence the boolean argument `single_blocks_only`.
  */
 pub fn extent_from_offset(
     ddef: RegionDefinition,
     offset: Block,
     num_blocks: Block,
+    single_blocks_only: bool,
 ) -> Result<Vec<(u64, Block, Block)>> {
     assert!(num_blocks.value > 0);
     assert!(
@@ -200,10 +172,15 @@ pub fn extent_from_offset(
         assert!((eid as u32) < ddef.extent_count());
 
         let extent_offset: u64 = o % ddef.extent_size().value;
-        let mut sz: u64 = ddef.extent_size().value - extent_offset;
-        if blocks_left < sz {
-            sz = blocks_left;
-        }
+        let sz: u64 = if single_blocks_only {
+            1
+        } else {
+            let mut sz = ddef.extent_size().value - extent_offset;
+            if blocks_left < sz {
+                sz = blocks_left;
+            }
+            sz
+        };
 
         result.push((
             eid,
@@ -303,27 +280,6 @@ fn process_downstairs(
             // XXX Recovery process should start here
             println!("{} Ignoring this downstairs version info", target);
         }
-    }
-
-    Ok(())
-}
-
-/*
- * This function is called when the upstairs task is notified that
- * a downstairs operation has completed. We add the read buffer to the
- * IOop struct for later processing if required.
- */
-#[instrument]
-async fn io_completed(
-    up: &Arc<Upstairs>,
-    ds_id: u64,
-    client_id: u8,
-    responses: Option<Vec<(ReadRequest, bytes::Bytes)>>,
-    ds_done_tx: mpsc::Sender<u64>,
-    result: Result<(), CrucibleError>,
-) -> Result<()> {
-    if up.complete(ds_id, client_id, responses, result)? {
-        ds_done_tx.send(ds_id).await?
     }
 
     Ok(())
@@ -1104,7 +1060,7 @@ async fn cmd_loop(
  * Things that allow the various tasks of Upstairs to communicate
  * with each other.
  */
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct UpComs {
     /**
      * The client ID who will be using these channels.
@@ -1588,8 +1544,7 @@ impl Downstairs {
         &mut self,
         ds_id: u64,
         client_id: u8,
-        read_data: Option<Vec<(ReadRequest, Bytes)>>,
-        result: Result<(), CrucibleError>,
+        read_data: &Result<Vec<ReadResponse>, CrucibleError>,
     ) -> Result<bool> {
         /*
          * Assume we don't have enough completed jobs, and only change
@@ -1611,8 +1566,8 @@ impl Downstairs {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let newstate = if let Err(e) = result {
-            IOState::Error(e)
+        let newstate = if let Err(ref e) = read_data {
+            IOState::Error(e.clone())
         } else {
             jobs_completed_ok += 1;
             IOState::Done
@@ -1670,6 +1625,9 @@ impl Downstairs {
         } else {
             assert_eq!(newstate, IOState::Done);
             assert_ne!(job.ack_status, AckStatus::Acked);
+
+            let read_data = read_data.as_ref().unwrap();
+
             /*
              * Transition this job from Done to AckReady if enough have
              * returned ok.
@@ -1679,10 +1637,10 @@ impl Downstairs {
                     dependencies: _dependencies,
                     requests: _,
                 } => {
-                    assert!(read_data.is_some());
+                    assert!(!read_data.is_empty());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        job.data = read_data;
+                        job.data = Some(read_data.to_vec());
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
@@ -1692,7 +1650,7 @@ impl Downstairs {
                     dependencies: _,
                     writes: _,
                 } => {
-                    assert!(read_data.is_none());
+                    assert!(read_data.is_empty());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -1703,7 +1661,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                 } => {
-                    assert!(read_data.is_none());
+                    assert!(read_data.is_empty());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -1971,7 +1929,7 @@ pub struct Upstairs {
      * Optional encryption context - Some if a key was supplied in
      * the CrucibleOpts
      */
-    encryption_context: Option<EncryptionContext>,
+    encryption_context: Option<Arc<EncryptionContext>>,
 
     /*
      * Upstairs keeps all IOs in memory until a flush is ACK'd back from
@@ -2012,7 +1970,7 @@ impl Upstairs {
 
         // create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
-            EncryptionContext::new(
+            Arc::new(EncryptionContext::new(
                 key,
                 /*
                  * XXX: It would be good to do BlockOp::QueryBlockSize here,
@@ -2024,7 +1982,7 @@ impl Upstairs {
                  * reported in.
                  */
                 512,
-            )
+            ))
         });
 
         Arc::new(Upstairs {
@@ -2241,6 +2199,7 @@ impl Upstairs {
             *ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
+            self.encryption_context.is_some(),
         )?;
 
         /*
@@ -2287,6 +2246,8 @@ impl Upstairs {
                 eid,
                 offset: bo,
                 data: sub_data,
+                nonce: None,
+                tag: None,
             });
 
             cur_offset += byte_len;
@@ -2355,6 +2316,7 @@ impl Upstairs {
             *ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
+            self.encryption_context.is_some(),
         )?;
 
         /*
@@ -2731,8 +2693,7 @@ impl Upstairs {
         &self,
         ds_id: u64,
         client_id: u8,
-        read_data: Option<Vec<(ReadRequest, Bytes)>>,
-        result: Result<(), CrucibleError>,
+        read_data: Result<Vec<ReadResponse>, CrucibleError>,
     ) -> Result<bool> {
         let mut work = self.downstairs.lock().unwrap();
 
@@ -2761,11 +2722,10 @@ impl Upstairs {
         }
 
         // Mark this ds_id for the client_id as completed.
-        let notify_guest =
-            work.complete(ds_id, client_id, read_data, result.clone())?;
+        let notify_guest = work.complete(ds_id, client_id, &read_data)?;
 
         // Mark this downstairs as bad if this was a write or flush
-        if let Some(err) = result.err() {
+        if let Some(err) = read_data.err() {
             if err == CrucibleError::UpstairsInactive {
                 drop(work);
 
@@ -2927,7 +2887,7 @@ struct DownstairsIO {
     /*
      * If the operation is a Read, this holds the resulting buffer
      */
-    data: Option<Vec<(ReadRequest, Bytes)>>,
+    data: Option<Vec<ReadResponse>>,
 }
 
 impl DownstairsIO {
@@ -3290,7 +3250,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, Vec<(ReadRequest, Bytes)>>,
+    downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -3307,7 +3267,7 @@ struct GtoS {
      * Optional encryption context - Some if the corresponding Upstairs is
      * Some.
      */
-    encryption_context: Option<EncryptionContext>,
+    encryption_context: Option<Arc<EncryptionContext>>,
 }
 
 impl GtoS {
@@ -3315,9 +3275,9 @@ impl GtoS {
         submitted: HashMap<u64, u64>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, Vec<(ReadRequest, Bytes)>>,
+        downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
-        encryption_context: Option<EncryptionContext>,
+        encryption_context: Option<Arc<EncryptionContext>>,
     ) -> GtoS {
         GtoS {
             submitted,
@@ -3342,17 +3302,17 @@ impl GtoS {
 
             let mut offset = 0;
             for ds_id in self.completed.iter() {
-                let data = self.downstairs_buffer.remove(ds_id).unwrap();
+                let responses = self.downstairs_buffer.remove(ds_id).unwrap();
 
-                for (request, ds_vec) in data {
-                    let mut ds_vec = ds_vec.to_vec();
+                for response in responses {
+                    let mut ds_vec = response.data.to_vec();
 
                     // if there's an encryption context, decrypt the
                     // downstairs buffer.
                     if let Some(context) = &self.encryption_context {
                         context.decrypt_in_place(
                             &mut ds_vec[..],
-                            request.offset.value as u128,
+                            response.offset.value as u128,
                         );
                     }
 
@@ -3461,7 +3421,7 @@ impl GuestWork {
         &mut self,
         gw_id: u64,
         ds_id: u64,
-        data: Option<Vec<(ReadRequest, Bytes)>>,
+        data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
     ) {
         /*

@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use bytes::BytesMut;
 use crucible_common::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -106,6 +105,57 @@ impl Inner {
         let _rows_affected = self
             .metadb
             .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])?;
+        Ok(())
+    }
+
+    fn get_encryption_context(
+        &self,
+        block: u64,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut stmt = self.metadb.prepare(
+            &[
+                "SELECT nonce, tag FROM encryption_context",
+                "where block=?1",
+            ]
+            .join(" "),
+        )?;
+
+        let stmt_iter = stmt.query_map(params![block], |row| {
+            Ok(Some((row.get(0)?, row.get(1)?)))
+        })?;
+
+        let mut results = Vec::new();
+
+        for row in stmt_iter {
+            results.push(row);
+        }
+
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            assert_eq!(results.len(), 1);
+            let result = results.pop().unwrap();
+            drop(results);
+            result.map_err(anyhow::Error::new)
+        }
+    }
+
+    fn set_encryption_context(
+        &self,
+        block: u64,
+        nonce: &[u8],
+        tag: &[u8],
+    ) -> Result<()> {
+        let mut stmt = self.metadb.prepare(
+            &[
+                "INSERT OR REPLACE INTO encryption_context",
+                "(block, nonce, tag) values (?1, ?2, ?3)",
+            ]
+            .join(" "),
+        )?;
+
+        let _rows_affected = stmt.execute(params![block, nonce, tag])?;
+
         Ok(())
     }
 }
@@ -298,6 +348,15 @@ impl Extent {
             params!["dirty", meta.dirty],
         )?;
 
+        metadb.execute(
+            "CREATE TABLE encryption_context (
+                block INTEGER PRIMARY KEY,
+                nonce BLOB NOT NULL,
+                tag BLOB NOT NULL
+            )",
+            [],
+        )?;
+
         /*
          * Complete the construction of our new extent
          */
@@ -320,12 +379,16 @@ impl Extent {
     #[instrument]
     pub fn read(
         &self,
-        offset: Block,
-        data: &mut BytesMut,
-    ) -> Result<(), CrucibleError> {
-        self.check_input(offset, data)?;
+        request: &crucible_protocol::ReadRequest,
+    ) -> Result<crucible_protocol::ReadResponse, CrucibleError> {
+        let mut response = crucible_protocol::ReadResponse::from_request(
+            request,
+            self.block_size as usize,
+        );
 
-        let byte_offset = offset.value * self.block_size;
+        self.check_input(request.offset, &response.data)?;
+
+        let byte_offset = request.offset.value * self.block_size;
 
         let mut inner = self.inner.lock().unwrap();
         inner.file.seek(SeekFrom::Start(byte_offset))?;
@@ -335,9 +398,15 @@ impl Extent {
          * with data ahead of time.  If we want to use an uninitialized
          * buffer, then we need a different read or type for the destination
          */
-        inner.file.read_exact(data)?;
+        inner.file.read_exact(&mut response.data)?;
 
-        Ok(())
+        let ctx = inner.get_encryption_context(request.offset.value)?;
+        if let Some((nonce, tag)) = ctx {
+            response.nonce = Some(nonce);
+            response.tag = Some(tag);
+        }
+
+        Ok(response)
     }
 
     /**
@@ -377,20 +446,26 @@ impl Extent {
     #[instrument]
     pub fn write(
         &self,
-        offset: Block,
-        data: &[u8],
+        write: &crucible_protocol::Write,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
-        self.check_input(offset, data)?;
+        self.check_input(write.offset, &write.data)?;
 
         inner.set_dirty()?;
 
-        let byte_offset = offset.value * self.block_size;
+        let byte_offset = write.offset.value * self.block_size;
 
         inner.file.seek(SeekFrom::Start(byte_offset))?;
-        inner.file.write_all(data)?;
-        inner.file.flush()?;
+        inner.file.write_all(&write.data)?;
+
+        if write.nonce.is_some() && write.tag.is_some() {
+            inner.set_encryption_context(
+                write.offset.value,
+                write.nonce.as_ref().unwrap(),
+                write.tag.as_ref().unwrap(),
+            )?;
+        }
 
         Ok(())
     }
@@ -622,8 +697,16 @@ impl Region {
         eid: u64,
         offset: Block,
         data: bytes::Bytes,
+        nonce: Option<Vec<u8>>,
+        tag: Option<Vec<u8>>,
     ) -> Result<(), CrucibleError> {
-        self.region_write(&[crucible_protocol::Write { eid, offset, data }])
+        self.region_write(&[crucible_protocol::Write {
+            eid,
+            offset,
+            data,
+            nonce,
+            tag,
+        }])
     }
 
     #[instrument]
@@ -633,7 +716,7 @@ impl Region {
     ) -> Result<(), CrucibleError> {
         for write in writes {
             let extent = &self.extents[write.eid as usize];
-            extent.write(write.offset, &write.data)?;
+            extent.write(write)?;
         }
         Ok(())
     }
@@ -642,31 +725,26 @@ impl Region {
     pub fn single_block_region_read(
         &self,
         request: crucible_protocol::ReadRequest,
-    ) -> Result<BytesMut, CrucibleError> {
-        let block_size = self.def.block_size() as usize;
-
-        let mut data = BytesMut::with_capacity(block_size);
-        data.resize(block_size, 1);
-
-        let mut responses = vec![(request, data)];
-        self.region_read(&mut responses)?;
-
-        let (_, data) = responses.pop().unwrap();
+    ) -> Result<crucible_protocol::ReadResponse, CrucibleError> {
+        let mut responses = self.region_read(&[request])?;
+        let response = responses.pop().unwrap();
         drop(responses);
-
-        Ok(data)
+        Ok(response)
     }
 
     #[instrument]
     pub fn region_read(
         &self,
-        responses: &mut Vec<(crucible_protocol::ReadRequest, BytesMut)>,
-    ) -> Result<(), CrucibleError> {
-        for (request, data) in responses {
+        requests: &[crucible_protocol::ReadRequest],
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        let mut responses = Vec::with_capacity(requests.len());
+
+        for request in requests {
             let extent = &self.extents[request.eid as usize];
-            extent.read(request.offset, data)?;
+            responses.push(extent.read(request)?);
         }
-        Ok(())
+
+        Ok(responses)
     }
 
     /*
@@ -690,10 +768,10 @@ impl Region {
 
 #[cfg(test)]
 mod test {
-    use super::extent_path;
     use super::*;
     use crate::dump::dump_region;
-    use bytes::BufMut;
+    use bytes::{BufMut, BytesMut};
+    use rand::Rng;
     use std::path::PathBuf;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -968,6 +1046,48 @@ mod test {
          * Dump the region
          */
         dump_region(dvec, Some(2))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_context() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let ext = &region.extents[0];
+        let inner = ext.inner();
+
+        // Encryption context for blocks 0 and 1 should start blank
+
+        assert!(inner.get_encryption_context(0)?.is_none());
+        assert!(inner.get_encryption_context(1)?.is_none());
+
+        // Set and verify block 0's context
+
+        inner.set_encryption_context(0, &[1, 2, 3], &[4, 5, 6, 7])?;
+
+        let ctx = inner.get_encryption_context(0)?.unwrap();
+
+        assert_eq!(ctx.0, vec![1, 2, 3]);
+        assert_eq!(ctx.1, vec![4, 5, 6, 7]);
+
+        // Block 1 should still be blank
+
+        assert!(inner.get_encryption_context(1)?.is_none());
+
+        // Set and verify a new context for block 0
+
+        let blob1 = rand::thread_rng().gen::<[u8; 32]>();
+        let blob2 = rand::thread_rng().gen::<[u8; 32]>();
+
+        inner.set_encryption_context(0, &blob1, &blob2)?;
+
+        let ctx = inner.get_encryption_context(0)?.unwrap();
+
+        assert_eq!(ctx.0, blob1);
+        assert_eq!(ctx.1, blob2);
 
         Ok(())
     }

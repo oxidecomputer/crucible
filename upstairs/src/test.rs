@@ -22,29 +22,49 @@ mod test {
 
         // Test block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), Block::new_512(1))
-                .unwrap(),
+            extent_from_offset(
+                ddef,
+                Block::new_512(0),
+                Block::new_512(1),
+                false
+            )
+            .unwrap(),
             vec![extent_tuple(0, 0, 1)],
         );
 
         // Test greater than block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), Block::new_512(2))
-                .unwrap(),
+            extent_from_offset(
+                ddef,
+                Block::new_512(0),
+                Block::new_512(2),
+                false
+            )
+            .unwrap(),
             vec![extent_tuple(0, 0, 2)],
         );
 
         // Test greater than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), Block::new_512(4))
-                .unwrap(),
+            extent_from_offset(
+                ddef,
+                Block::new_512(0),
+                Block::new_512(4),
+                false
+            )
+            .unwrap(),
             vec![extent_tuple(0, 0, 2), extent_tuple(1, 0, 2)],
         );
 
         // Test offsets
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(1), Block::new_512(4))
-                .unwrap(),
+            extent_from_offset(
+                ddef,
+                Block::new_512(1),
+                Block::new_512(4),
+                false
+            )
+            .unwrap(),
             vec![
                 extent_tuple(0, 1, 1),
                 extent_tuple(1, 0, 2),
@@ -53,14 +73,24 @@ mod test {
         );
 
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(2), Block::new_512(4))
-                .unwrap(),
+            extent_from_offset(
+                ddef,
+                Block::new_512(2),
+                Block::new_512(4),
+                false
+            )
+            .unwrap(),
             vec![extent_tuple(1, 0, 2), extent_tuple(2, 0, 2)],
         );
 
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(2), Block::new_512(16))
-                .unwrap(),
+            extent_from_offset(
+                ddef,
+                Block::new_512(2),
+                Block::new_512(16),
+                false
+            )
+            .unwrap(),
             vec![
                 extent_tuple(1, 0, 2),
                 extent_tuple(2, 0, 2),
@@ -166,7 +196,7 @@ mod test {
     ) -> Result<Vec<(u64, Block, Block)>> {
         let ddef = up.ddef.lock().unwrap();
         let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
-        extent_from_offset(*ddef, offset, num_blocks)
+        extent_from_offset(*ddef, offset, num_blocks, false)
     }
 
     #[test]
@@ -364,11 +394,11 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 0, &Ok(vec![])).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 1, &Ok(vec![])).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -376,7 +406,7 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         work.ack(next_id);
 
-        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 2, &Ok(vec![])).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 1);
     }
@@ -401,8 +431,7 @@ mod test {
             work.complete(
                 next_id,
                 0,
-                None,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -410,11 +439,11 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &Ok(vec![])).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &Ok(vec![])).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
 
         work.ack(next_id);
@@ -443,8 +472,7 @@ mod test {
             work.complete(
                 next_id,
                 0,
-                None,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -452,7 +480,7 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &Ok(vec![])).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
@@ -460,8 +488,7 @@ mod test {
             work.complete(
                 next_id,
                 2,
-                None,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             true
@@ -487,7 +514,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -495,9 +522,12 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
 
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -505,15 +535,11 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         work.ack(next_id);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
-        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &response).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
-        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
         assert_eq!(work.completed.len(), 0);
@@ -532,7 +558,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -540,14 +566,16 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -555,9 +583,7 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
-        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 1, &response).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -565,9 +591,7 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         work.ack(next_id);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
-        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
         // That this is still zero is part of the test
@@ -587,7 +611,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -595,29 +619,28 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
-
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -625,9 +648,7 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
-        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
 
         work.ack(next_id);
@@ -651,7 +672,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -659,29 +680,23 @@ mod test {
         work.in_progress(next_id, 1);
         work.in_progress(next_id, 2);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
-
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -689,14 +704,11 @@ mod test {
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-
         assert_eq!(
             work.complete(
                 next_id,
                 2,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             true
@@ -726,7 +738,8 @@ mod test {
 
             let next_id = work.next_id();
 
-            let op = create_read_eob(next_id, vec![], 10, vec![request]);
+            let op =
+                create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
             work.enqueue(op);
 
@@ -737,17 +750,17 @@ mod test {
             next_id
         };
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+
         assert_eq!(
-            upstairs.complete(next_id, 2, response, Ok(())).unwrap(),
+            upstairs.complete(next_id, 2, response.clone()).unwrap(),
             true
         );
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(
-            upstairs.complete(next_id, 0, response, Ok(())).unwrap(),
-            false
-        );
+        assert_eq!(upstairs.complete(next_id, 0, response).unwrap(), false);
 
         {
             // emulated run in up_ds_listen
@@ -760,13 +773,11 @@ mod test {
             work.retire_check(next_id);
         }
 
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
         assert_eq!(
             upstairs
                 .complete(
                     next_id,
                     1,
-                    response,
                     Err(CrucibleError::GenericError(format!("bad")))
                 )
                 .unwrap(),
@@ -779,68 +790,6 @@ mod test {
             // Work won't be completed until we get a flush.
             assert_eq!(work.completed.len(), 0);
         }
-    }
-
-    #[test]
-    fn work_assert_no_transfer_of_bad_read() {
-        let upstairs = Upstairs::default();
-        upstairs.set_active();
-        let mut work = upstairs.downstairs.lock().unwrap();
-
-        let next_id = work.next_id();
-
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-            num_blocks: 2,
-        };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
-
-        work.enqueue(op);
-
-        work.in_progress(next_id, 0);
-        work.in_progress(next_id, 1);
-        work.in_progress(next_id, 2);
-
-        let response = Some(vec![(request, Bytes::from(vec![1]))]);
-
-        assert_eq!(
-            work.complete(
-                next_id,
-                0,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
-            )
-            .unwrap(),
-            false
-        );
-
-        assert!(work.active.get(&next_id).unwrap().data.is_none());
-
-        let response = Some(vec![(request, Bytes::from(vec![2]))]);
-
-        assert_eq!(
-            work.complete(
-                next_id,
-                1,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
-            )
-            .unwrap(),
-            false
-        );
-
-        assert!(work.active.get(&next_id).unwrap().data.is_none());
-
-        let response = Some(vec![(request, Bytes::from(vec![3]))]);
-
-        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
-
-        assert!(work.active.get(&next_id).unwrap().data.is_some());
-        assert_eq!(
-            work.active.get(&next_id).unwrap().data,
-            Some(vec![(request, Bytes::from(vec![3]))])
-        );
     }
 
     #[test]
@@ -861,6 +810,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
 
@@ -874,8 +825,7 @@ mod test {
             work.complete(
                 next_id,
                 0,
-                None,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -887,8 +837,7 @@ mod test {
             work.complete(
                 next_id,
                 1,
-                None,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -896,7 +845,9 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        assert_eq!(work.complete(next_id, 2, None, Ok(()),).unwrap(), true);
+        let response = Ok(vec![]);
+
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), true);
 
         assert!(work.downstairs_errors.get(&0).is_some());
         assert!(work.downstairs_errors.get(&1).is_some());
@@ -911,7 +862,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -919,14 +870,20 @@ mod test {
         assert!(work.in_progress(next_id, 1).is_none());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let response = Some(vec![(request, Bytes::from(vec![3]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![3],
+        )]);
 
-        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(vec![(request, Bytes::from(vec![3]))])
+            Some(vec![ReadResponse::from_request_with_data(
+                &request,
+                &vec![3]
+            )]),
         );
     }
 
@@ -945,7 +902,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -953,29 +910,23 @@ mod test {
         assert!(work.in_progress(next_id, 1).is_some());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let response = Some(vec![(request, Bytes::from(vec![1]))]);
-
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
         );
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
-
-        let response = Some(vec![(request, Bytes::from(vec![2]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false
@@ -983,14 +934,20 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let response = Some(vec![(request, Bytes::from(vec![3]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![3],
+        )]);
 
-        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(vec![(request, Bytes::from(vec![3]))])
+            Some(vec![ReadResponse::from_request_with_data(
+                &request,
+                &vec![3]
+            )]),
         );
 
         assert!(work.downstairs_errors.get(&0).is_none());
@@ -1006,7 +963,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -1014,29 +971,23 @@ mod test {
         assert!(work.in_progress(next_id, 1).is_some());
         assert!(work.in_progress(next_id, 2).is_some());
 
-        let response = Some(vec![(request, Bytes::from(vec![4]))]);
-
         assert_eq!(
             work.complete(
                 next_id,
                 0,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false,
         );
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
-
-        let response = Some(vec![(request, Bytes::from(vec![5]))]);
 
         assert_eq!(
             work.complete(
                 next_id,
                 1,
-                response,
-                Err(CrucibleError::GenericError(format!("bad")))
+                &Err(CrucibleError::GenericError(format!("bad")))
             )
             .unwrap(),
             false,
@@ -1044,14 +995,20 @@ mod test {
 
         assert!(work.active.get(&next_id).unwrap().data.is_none());
 
-        let response = Some(vec![(request, Bytes::from(vec![6]))]);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![6],
+        )]);
 
-        assert_eq!(work.complete(next_id, 2, response, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), true);
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
             work.active.get(&next_id).unwrap().data,
-            Some(vec![(request, Bytes::from(vec![6]))])
+            Some(vec![ReadResponse::from_request_with_data(
+                &request,
+                &vec![6]
+            )])
         );
     }
 
@@ -1071,7 +1028,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
         work.enqueue(op);
 
@@ -1081,17 +1038,18 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Downstairs 0 now has completed this work.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), true);
 
         // One completion of a read means we can ACK
         assert_eq!(work.ackable_work().len(), 1);
 
         // Complete downstairs 1 and 2
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), false);
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 2, response, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &response).unwrap(), false);
+        assert_eq!(work.complete(next_id, 2, &response).unwrap(), false);
 
         // Make sure the job is still active
         assert_eq!(work.completed.len(), 0);
@@ -1119,10 +1077,10 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the Flush at each downstairs.
-        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 0, &Ok(vec![])).unwrap(), false);
         // Two completed means we return true (ack ready now)
-        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
-        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &Ok(vec![])).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &Ok(vec![])).unwrap(), false);
 
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1159,6 +1117,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         work.enqueue(op);
@@ -1171,6 +1131,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         work.enqueue(op);
@@ -1181,11 +1143,11 @@ mod test {
         assert!(work.in_progress(id2, 0).is_some());
         assert!(work.in_progress(id2, 1).is_some());
 
-        // Simulate completing  both writes to downstairs 0 and 1
-        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
-        assert_eq!(work.complete(id2, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id2, 1, None, Ok(()),).unwrap(), true);
+        // Simulate completing both writes to downstairs 0 and 1
+        assert_eq!(work.complete(id1, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, &Ok(vec![])).unwrap(), true);
+        assert_eq!(work.complete(id2, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id2, 1, &Ok(vec![])).unwrap(), true);
 
         // Both writes can now ACK to the guest.
         work.ack(id1);
@@ -1205,8 +1167,8 @@ mod test {
         work.in_progress(flush_id, 1);
 
         // Simulate completing the flush to downstairs 0 and 1
-        assert_eq!(work.complete(flush_id, 0, None, Ok(())).unwrap(), false);
-        assert_eq!(work.complete(flush_id, 1, None, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(flush_id, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(flush_id, 1, &Ok(vec![])).unwrap(), true);
 
         // Ack the flush back to the guest
         work.ack(flush_id);
@@ -1228,15 +1190,15 @@ mod test {
         // Now, finish the writes to downstairs 2
         assert!(work.in_progress(id1, 2).is_some());
         assert!(work.in_progress(id2, 2).is_some());
-        assert_eq!(work.complete(id1, 2, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id2, 2, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 2, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id2, 2, &Ok(vec![])).unwrap(), false);
 
         // The job should not move to completed until the flush goes as well.
         assert_eq!(work.completed.len(), 0);
 
         // Complete the flush on downstairs 2.
         work.in_progress(flush_id, 2);
-        assert_eq!(work.complete(flush_id, 2, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(flush_id, 2, &Ok(vec![])).unwrap(), false);
 
         // All three jobs should now move to completed
         assert_eq!(work.completed.len(), 3);
@@ -1263,6 +1225,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         // Put the write on the queue.
@@ -1274,9 +1238,9 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the write on all three downstairs.
-        assert_eq!(work.complete(next_id, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(next_id, 1, None, Ok(()),).unwrap(), true);
-        assert_eq!(work.complete(next_id, 2, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(next_id, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &Ok(vec![])).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &Ok(vec![])).unwrap(), false);
 
         // Ack the write to the guest
         work.ack(next_id);
@@ -1296,9 +1260,9 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the flush on all three downstairs.
-        assert_eq!(work.complete(next_id, 0, None, Ok(())).unwrap(), false);
-        assert_eq!(work.complete(next_id, 1, None, Ok(())).unwrap(), true);
-        assert_eq!(work.complete(next_id, 2, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &Ok(vec![])).unwrap(), true);
+        assert_eq!(work.complete(next_id, 2, &Ok(vec![])).unwrap(), false);
 
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1333,6 +1297,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         work.enqueue(op);
@@ -1345,6 +1311,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         work.enqueue(op);
@@ -1356,10 +1324,10 @@ mod test {
         assert!(work.in_progress(id2, 2).is_some());
 
         // Complete the writes that we sent to the 2 downstairs.
-        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
-        assert_eq!(work.complete(id2, 1, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id2, 2, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(id1, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, &Ok(vec![])).unwrap(), true);
+        assert_eq!(work.complete(id2, 1, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id2, 2, &Ok(vec![])).unwrap(), true);
 
         // Ack the writes to the guest.
         work.ack(id1);
@@ -1379,8 +1347,8 @@ mod test {
         work.in_progress(flush_id, 2);
 
         // Complete the flush on those downstairs.
-        assert_eq!(work.complete(flush_id, 0, None, Ok(())).unwrap(), false);
-        assert_eq!(work.complete(flush_id, 2, None, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(flush_id, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(flush_id, 2, &Ok(vec![])).unwrap(), true);
 
         // Ack the flush
         work.ack(flush_id);
@@ -1400,15 +1368,15 @@ mod test {
         // Now, finish sending and completing the writes
         assert!(work.in_progress(id1, 2).is_some());
         assert!(work.in_progress(id2, 0).is_some());
-        assert_eq!(work.complete(id1, 2, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id2, 0, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 2, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id2, 0, &Ok(vec![])).unwrap(), false);
 
         // Completed work won't happen till the last flush is done
         assert_eq!(work.completed.len(), 0);
 
         // Send and complete the flush
         work.in_progress(flush_id, 1);
-        assert_eq!(work.complete(flush_id, 1, None, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(flush_id, 1, &Ok(vec![])).unwrap(), false);
 
         // Now, all three jobs (w,w,f) will move to completed.
         assert_eq!(work.completed.len(), 3);
@@ -1431,7 +1399,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         work.enqueue(op);
 
         // Submit the read to all three downstairs
@@ -1440,8 +1408,11 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the read on one downstairs.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), true);
 
         // One completion should allow for an ACK
         assert_eq!(work.ackable_work().len(), 1);
@@ -1472,7 +1443,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         work.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -1481,15 +1452,17 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the read on one downstairs, verify it is ack ready.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Complete the read on a 2nd downstairs.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 1, response, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 1, &response).unwrap(), false);
 
         // Now, take the first downstairs offline.
         work.re_new(0);
@@ -1504,9 +1477,8 @@ mod test {
         assert_eq!(state, AckStatus::NotAcked);
 
         // Redo the read on DS 0, IO should go back to ackable.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
         work.in_progress(next_id, 0);
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), true);
         assert_eq!(work.ackable_work().len(), 1);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1527,7 +1499,7 @@ mod test {
             offset: Block::new_512(7),
             num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         work.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -1536,8 +1508,11 @@ mod test {
         work.in_progress(next_id, 2);
 
         // Complete the read on one downstairs.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), true);
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), true);
 
         // Verify the read is now AckReady
         assert_eq!(work.ackable_work().len(), 1);
@@ -1563,9 +1538,8 @@ mod test {
         assert_eq!(state, AckStatus::Acked);
 
         // Redo on DS 0, IO should remain acked.
-        let response = Some(vec![(request, Bytes::from(vec![]))]);
         work.in_progress(next_id, 0);
-        assert_eq!(work.complete(next_id, 0, response, Ok(())).unwrap(), false);
+        assert_eq!(work.complete(next_id, 0, &response).unwrap(), false);
         assert_eq!(work.ackable_work().len(), 0);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
@@ -1590,6 +1564,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         work.enqueue(op);
@@ -1599,8 +1575,8 @@ mod test {
         assert!(work.in_progress(id1, 1).is_some());
 
         // Complete the write on two downstairs.
-        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(id1, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, &Ok(vec![])).unwrap(), true);
 
         // Verify AckReady
         let state = work.active.get_mut(&id1).unwrap().ack_status;
@@ -1615,7 +1591,7 @@ mod test {
 
         // Re-submit and complete the write
         assert!(work.in_progress(id1, 1).is_some());
-        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(id1, 1, &Ok(vec![])).unwrap(), true);
 
         // State should go back to acked.
         let state = work.active.get_mut(&id1).unwrap().ack_status;
@@ -1640,6 +1616,8 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
+                nonce: None,
+                tag: None,
             }],
         );
         work.enqueue(op);
@@ -1649,8 +1627,8 @@ mod test {
         assert!(work.in_progress(id1, 1).is_some());
 
         // Complete the write on two downstairs.
-        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id1, 1, None, Ok(()),).unwrap(), true);
+        assert_eq!(work.complete(id1, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id1, 1, &Ok(vec![])).unwrap(), true);
 
         // Verify it is ackable..
         assert_eq!(work.ackable_work().len(), 1);
@@ -1672,7 +1650,7 @@ mod test {
         assert!(work.in_progress(id1, 0).is_some());
         assert!(work.in_progress(id1, 2).is_some());
 
-        assert_eq!(work.complete(id1, 0, None, Ok(()),).unwrap(), false);
-        assert_eq!(work.complete(id1, 2, None, Ok(()),).unwrap(), false);
+        assert_eq!(work.complete(id1, 0, &Ok(vec![])).unwrap(), false);
+        assert_eq!(work.complete(id1, 2, &Ok(vec![])).unwrap(), false);
     }
 }

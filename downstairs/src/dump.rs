@@ -105,7 +105,7 @@ pub fn dump_region(
     let mut ext_num = all_extents.keys().collect::<Vec<&u32>>();
     ext_num.sort_unstable();
 
-    print!("  N");
+    print!("EXT");
     for _ in 0..dir_count {
         print!("      GEN FLUSH_ID D");
     }
@@ -193,19 +193,33 @@ fn show_extent(
         }
     }
     println!();
+    println!();
+
+    print!("{0:10}", "");
+    for (index, _) in region_dir.iter().enumerate() {
+        print!(" {0:^11}", format!("Data {}", index));
+    }
+    for (index, _) in region_dir.iter().enumerate() {
+        print!(" {0:^11}", format!("Nonce {}", index));
+    }
+    for (index, _) in region_dir.iter().enumerate() {
+        print!(" {0:^11}", format!("Tag {}", index));
+    }
+    print!(" {0:^7}", "DIFF");
+    println!();
 
     /*
      * Compare the data from each block.
      * Print a letter representing the data for each block.
      */
     for block in 0..blocks_per_extent {
-        print!("Block {:3}", block);
+        print!("Block {:4}", block);
 
         /*
-         * Build a Vector to hold our data buffers, one for each
+         * Build a Vector to hold our responses, one for each
          * region we are comparing.
          */
-        let mut dvec: Vec<BytesMut> = Vec::with_capacity(dir_count);
+        let mut dvec: Vec<ReadResponse> = Vec::with_capacity(dir_count);
 
         /*
          * Read the requested block in from the extent.  Store it
@@ -225,35 +239,127 @@ fn show_extent(
         }
 
         /*
-         * Compare all the data buffers to each other.
-         * A,B,C all represent unique values in a block.  If blocks match,
+         * Compare all the responses to each other.
+         *
+         * A,B,C all represent unique values in a block. If blocks match,
          * they will share the same letter.
+         *
          * Each row is a new block and the values are unrelated to the
-         * data in the previous block.
+         * previous block.
          */
-        if dvec[0] == dvec[1] {
-            print!("{0:>8} {0:>8} ", "A".to_string());
+
+        let mut diff_found = false;
+
+        // first compare data
+        let mut status_letters = vec![String::new(); 3];
+
+        if dvec[0].data == dvec[1].data {
+            status_letters[0] += "A";
+            status_letters[1] += "A";
 
             if dir_count > 2 {
-                if dvec[0] == dvec[2] {
-                    print!("{:>8}", "A".to_string());
+                if dvec[0].data == dvec[2].data {
+                    status_letters[2] += "A";
                 } else {
-                    print!("{:>8}", "C".to_string());
+                    status_letters[2] += "C";
+                    diff_found = true;
                 }
             }
         } else {
-            print!("{:>8} {:>8} ", "A".to_string(), "B".to_string());
+            diff_found = true;
+            status_letters[0] += "A";
+            status_letters[1] += "B";
 
             if dir_count > 2 {
-                if dvec[0] == dvec[2] {
-                    print!("{:>8}", "A".to_string());
-                } else if dvec[1] == dvec[2] {
-                    print!("{:>8}", "B".to_string());
+                if dvec[0].data == dvec[2].data {
+                    status_letters[2] += "A";
+                } else if dvec[1].data == dvec[2].data {
+                    status_letters[2] += "B";
                 } else {
-                    print!("{:>8}", "C".to_string());
+                    status_letters[2] += "C";
                 }
             }
         }
+
+        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
+        if dir_count > 2 {
+            print!("{0:^11} ", status_letters[2]);
+        }
+
+        // then, compare nonces
+        let mut status_letters = vec![String::new(); 3];
+
+        if dvec[0].nonce == dvec[1].nonce {
+            status_letters[0] += "A";
+            status_letters[1] += "A";
+
+            if dir_count > 2 {
+                if dvec[0].nonce == dvec[2].nonce {
+                    status_letters[2] += "A";
+                } else {
+                    status_letters[2] += "C";
+                    diff_found = true;
+                }
+            }
+        } else {
+            diff_found = true;
+            status_letters[0] += "A";
+            status_letters[1] += "B";
+
+            if dir_count > 2 {
+                if dvec[0].nonce == dvec[2].nonce {
+                    status_letters[2] += "A";
+                } else if dvec[1].nonce == dvec[2].nonce {
+                    status_letters[2] += "B";
+                } else {
+                    status_letters[2] += "C";
+                }
+            }
+        }
+
+        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
+        if dir_count > 2 {
+            print!("{0:^11} ", status_letters[2]);
+        }
+
+        // then, compare tags
+        let mut status_letters = vec![String::new(); 3];
+
+        if dvec[0].tag == dvec[1].tag {
+            status_letters[0] += "A";
+            status_letters[1] += "A";
+
+            if dir_count > 2 {
+                if dvec[0].tag == dvec[2].tag {
+                    status_letters[2] += "A";
+                } else {
+                    status_letters[2] += "C";
+                    diff_found = true;
+                }
+            }
+        } else {
+            diff_found = true;
+            status_letters[0] += "A";
+            status_letters[1] += "B";
+
+            if dir_count > 2 {
+                if dvec[0].tag == dvec[2].tag {
+                    status_letters[2] += "A";
+                } else if dvec[1].tag == dvec[2].tag {
+                    status_letters[2] += "B";
+                } else {
+                    status_letters[2] += "C";
+                }
+            }
+        }
+
+        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
+        if dir_count > 2 {
+            print!("{0:^11} ", status_letters[2]);
+        }
+
+        print!("{0:^7}", if diff_found { "<-------" } else { "" });
+
         println!();
     }
 
