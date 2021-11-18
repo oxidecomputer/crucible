@@ -760,10 +760,9 @@ impl Region {
 
 #[cfg(test)]
 mod test {
-    use super::extent_path;
     use super::*;
     use crate::dump::dump_region;
-    use bytes::BufMut;
+    use bytes::{BufMut, BytesMut};
     use rand::Rng;
     use std::path::PathBuf;
     use tempfile::tempdir;

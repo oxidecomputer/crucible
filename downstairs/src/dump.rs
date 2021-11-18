@@ -244,8 +244,8 @@ fn show_extent(
          * A,B,C all represent unique values in a block. If blocks match,
          * they will share the same letter.
          *
-         * Each row is a new block and the values are unrelated to the previous
-         * block.
+         * Each row is a new block and the values are unrelated to the
+         * previous block.
          */
 
         let mut diff_found = false;
@@ -281,10 +281,7 @@ fn show_extent(
             }
         }
 
-        print!("{0:^11} {1:^11} ",
-            status_letters[0],
-            status_letters[1],
-        );
+        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
         if dir_count > 2 {
             print!("{0:^11} ", status_letters[2]);
         }
@@ -320,10 +317,7 @@ fn show_extent(
             }
         }
 
-        print!("{0:^11} {1:^11} ",
-            status_letters[0],
-            status_letters[1],
-        );
+        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
         if dir_count > 2 {
             print!("{0:^11} ", status_letters[2]);
         }
@@ -359,10 +353,7 @@ fn show_extent(
             }
         }
 
-        print!("{0:^11} {1:^11} ",
-            status_letters[0],
-            status_letters[1],
-        );
+        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
         if dir_count > 2 {
             print!("{0:^11} ", status_letters[2]);
         }
