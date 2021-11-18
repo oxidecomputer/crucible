@@ -46,7 +46,7 @@ dd if=/dev/urandom of="$imp" bs=512 count=300
 echo "Import region"
 ${cds} create -i "$imp" -u $uuid -d "$dir"
 echo "Export region"
-${cds} export -d "$dir" -e "$exp" --count 280576
+${cds} export -d "$dir" -e "$exp" --count 300
 
 diff $imp $exp
 
