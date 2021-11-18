@@ -82,6 +82,7 @@ pub fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
+#[instrument]
 async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
@@ -104,14 +105,11 @@ async fn process_message(
                 Err(result.as_ref().err().unwrap().clone())
             };
 
-            Ok(io_completed(
-                u,
-                *ds_id,
-                up_coms.client_id,
-                result,
-                up_coms.ds_done_tx,
-            )
-            .await?)
+            if u.complete(*ds_id, up_coms.client_id, result)? {
+                up_coms.ds_done_tx.send(*ds_id).await?;
+            }
+
+            Ok(())
         }
         Message::FlushAck(uuid, ds_id, result) => {
             if u.uuid != *uuid {
@@ -128,14 +126,11 @@ async fn process_message(
                 Err(result.as_ref().err().unwrap().clone())
             };
 
-            Ok(io_completed(
-                u,
-                *ds_id,
-                up_coms.client_id,
-                result,
-                up_coms.ds_done_tx,
-            )
-            .await?)
+            if u.complete(*ds_id, up_coms.client_id, result)? {
+                up_coms.ds_done_tx.send(*ds_id).await?;
+            }
+
+            Ok(())
         }
         Message::ReadResponse(uuid, ds_id, responses) => {
             if u.uuid != *uuid {
@@ -146,14 +141,11 @@ async fn process_message(
                 return Err(CrucibleError::UuidMismatch.into());
             }
 
-            Ok(io_completed(
-                u,
-                *ds_id,
-                up_coms.client_id,
-                responses.clone(),
-                up_coms.ds_done_tx,
-            )
-            .await?)
+            if u.complete(*ds_id, up_coms.client_id, responses.clone())? {
+                up_coms.ds_done_tx.send(*ds_id).await?;
+            }
+
+            Ok(())
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -322,26 +314,6 @@ fn process_downstairs(
             // XXX Recovery process should start here
             println!("{} Ignoring this downstairs version info", target);
         }
-    }
-
-    Ok(())
-}
-
-/*
- * This function is called when the upstairs task is notified that
- * a downstairs operation has completed. We add the read buffer to the
- * IOop struct for later processing if required.
- */
-#[instrument]
-async fn io_completed(
-    up: &Arc<Upstairs>,
-    ds_id: u64,
-    client_id: u8,
-    responses: Result<Vec<ReadResponse>, CrucibleError>,
-    ds_done_tx: mpsc::Sender<u64>,
-) -> Result<()> {
-    if up.complete(ds_id, client_id, responses)? {
-        ds_done_tx.send(ds_id).await?
     }
 
     Ok(())
@@ -1119,7 +1091,7 @@ async fn cmd_loop(
  * Things that allow the various tasks of Upstairs to communicate
  * with each other.
  */
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct UpComs {
     /**
      * The client ID who will be using these channels.
