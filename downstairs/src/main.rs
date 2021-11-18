@@ -2175,7 +2175,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1)?;
+        region.region_flush(1, 1)?;
 
         // export region to another file
 
@@ -2243,7 +2243,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1)?;
+        region.region_flush(1, 1)?;
 
         // export region to another file (note: 100 fewer bytes imported than
         // region size still means the whole region is exported)
@@ -2325,7 +2325,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1)?;
+        region.region_flush(1, 1)?;
 
         // export region to another file (note: 100 more bytes will have caused
         // 10 more extents to be added, but someone running the export command
