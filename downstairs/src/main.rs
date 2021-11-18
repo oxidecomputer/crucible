@@ -252,7 +252,12 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                 break;
             }
 
-            let n = f.read(&mut buffer[..])?;
+            /*
+             * Rust's read guarantees that if it returns Ok(n) then
+             * `0 <= n <= buffer.len()`. We have to repeatedly read until our
+             * buffer is full.
+             */
+            let n = f.read(&mut buffer[total..])?;
 
             if n == 0 {
                 /*
