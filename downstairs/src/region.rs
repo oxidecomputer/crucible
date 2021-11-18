@@ -460,7 +460,6 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(byte_offset))?;
         inner.file.write_all(&write.data)?;
-        inner.file.flush()?;
 
         if write.nonce.is_some() && write.tag.is_some() {
             inner.set_encryption_context(
