@@ -256,7 +256,12 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                 break;
             }
 
-            let n = f.read(&mut buffer[total..(CHUNK_SIZE - total)])?;
+            /*
+             * Rust's read guarantees that if it returns Ok(n) then
+             * `0 <= n <= buffer.len()`. We have to repeatedly read until our
+             * buffer is full.
+             */
+            let n = f.read(&mut buffer[total..])?;
 
             if n == 0 {
                 /*
@@ -291,6 +296,7 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         {
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
+            buffer.resize(data.len(), 0);
             buffer.copy_from_slice(data);
             region.single_block_region_write(
                 eid,
@@ -1599,6 +1605,8 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use rand_chacha::ChaCha20Rng;
+    use tempfile::tempdir;
 
     fn add_work(
         work: &mut Work,
@@ -2118,5 +2126,238 @@ mod test {
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000, 1001, 1002, 1003]);
+    }
+
+    #[test]
+    fn import_test_basic() -> Result<()> {
+        /*
+         * import + export test where data matches region size
+         */
+
+        let block_size: u64 = 512;
+        let extent_size = 10;
+
+        // create region
+
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(10)?;
+
+        // create random file
+
+        let total_bytes = region.def().total_size();
+        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        random_data.resize(total_bytes as usize, 0);
+
+        let mut rng = ChaCha20Rng::from_entropy();
+        rng.fill_bytes(&mut random_data);
+
+        // write random_data to file
+
+        let tempdir = tempdir()?;
+        mkdir_for_file(tempdir.path())?;
+
+        let random_file_path = tempdir.path().join("random_data");
+        let mut random_file = File::create(&random_file_path)?;
+        random_file.write_all(&random_data[..])?;
+
+        // import random_data to the region
+
+        downstairs_import(&mut region, &random_file_path)?;
+        region.region_flush(1)?;
+
+        // export region to another file
+
+        let export_path = tempdir.path().join("exported_data");
+        downstairs_export(
+            &mut region,
+            &export_path,
+            0,
+            total_bytes / block_size,
+        )?;
+
+        // compare files
+
+        let expected = std::fs::read(random_file_path)?;
+        let actual = std::fs::read(export_path)?;
+
+        assert_eq!(expected, actual);
+
+        Ok(())
+    }
+
+    #[test]
+    fn import_test_too_small() -> Result<()> {
+        /*
+         * import + export test where data is smaller than region size
+         */
+        let block_size: u64 = 512;
+        let extent_size = 10;
+
+        // create region
+
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(10)?;
+
+        // create random file (100 fewer bytes than region size)
+
+        let total_bytes = region.def().total_size() - 100;
+        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        random_data.resize(total_bytes as usize, 0);
+
+        let mut rng = ChaCha20Rng::from_entropy();
+        rng.fill_bytes(&mut random_data);
+
+        // write random_data to file
+
+        let tempdir = tempdir()?;
+        mkdir_for_file(tempdir.path())?;
+
+        let random_file_path = tempdir.path().join("random_data");
+        let mut random_file = File::create(&random_file_path)?;
+        random_file.write_all(&random_data[..])?;
+
+        // import random_data to the region
+
+        downstairs_import(&mut region, &random_file_path)?;
+        region.region_flush(1)?;
+
+        // export region to another file (note: 100 fewer bytes imported than
+        // region size still means the whole region is exported)
+
+        let export_path = tempdir.path().join("exported_data");
+        let region_size = region.def().total_size();
+        downstairs_export(
+            &mut region,
+            &export_path,
+            0,
+            region_size / block_size,
+        )?;
+
+        // compare files
+
+        let expected = std::fs::read(random_file_path)?;
+        let actual = std::fs::read(export_path)?;
+
+        // assert what was imported is correct
+
+        let total_bytes = total_bytes as usize;
+        assert_eq!(expected, actual[0..total_bytes]);
+
+        // assert the rest is zero padded
+
+        let padding_size = actual.len() - total_bytes;
+        assert_eq!(padding_size, 100);
+
+        let mut padding = Vec::with_capacity(padding_size);
+        padding.resize(padding_size, 0);
+        assert_eq!(actual[total_bytes..], padding);
+
+        Ok(())
+    }
+
+    #[test]
+    fn import_test_too_large() -> Result<()> {
+        /*
+         * import + export test where data is larger than region size
+         */
+        let block_size: u64 = 512;
+        let extent_size = 10;
+
+        // create region
+
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(10)?;
+
+        // create random file (100 more bytes than region size)
+
+        let total_bytes = region.def().total_size() + 100;
+        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        random_data.resize(total_bytes as usize, 0);
+
+        let mut rng = ChaCha20Rng::from_entropy();
+        rng.fill_bytes(&mut random_data);
+
+        // write random_data to file
+
+        let tempdir = tempdir()?;
+        mkdir_for_file(tempdir.path())?;
+
+        let random_file_path = tempdir.path().join("random_data");
+        let mut random_file = File::create(&random_file_path)?;
+        random_file.write_all(&random_data[..])?;
+
+        // import random_data to the region
+
+        downstairs_import(&mut region, &random_file_path)?;
+        region.region_flush(1)?;
+
+        // export region to another file (note: 100 more bytes will have caused
+        // 10 more extents to be added, but someone running the export command
+        // will use the number of blocks copied by the import command)
+        assert_eq!(region.def().extent_count(), 11);
+
+        let export_path = tempdir.path().join("exported_data");
+        downstairs_export(
+            &mut region,
+            &export_path,
+            0,
+            total_bytes / block_size + 1,
+        )?;
+
+        // compare files
+
+        let expected = std::fs::read(random_file_path)?;
+        let actual = std::fs::read(export_path)?;
+
+        // assert what was imported is correct
+
+        let total_bytes = total_bytes as usize;
+        assert_eq!(expected, actual[0..total_bytes]);
+
+        // assert the rest is zero padded
+        // the export only exported the extra block, not the extra extent
+        let padding_in_extra_block: usize = 512 - 100;
+
+        let mut padding = Vec::with_capacity(padding_in_extra_block);
+        padding.resize(padding_in_extra_block, 0);
+        assert_eq!(actual[total_bytes..], padding);
+
+        Ok(())
     }
 }
