@@ -171,7 +171,11 @@ async fn process_message(
  *
  *     Extent number (EID), Block offset, Length in Blocks
  *
- * - length in blocks can be up to the region size
+ * Note: length in blocks can be up to the region size
+ *
+ * If performing authenticated encryption, nonce and tags must be sent per
+ * block. This means extent_from_offset must return a list of single blocks
+ * only, hence the boolean argument `single_blocks_only`.
  */
 pub fn extent_from_offset(
     ddef: RegionDefinition,
