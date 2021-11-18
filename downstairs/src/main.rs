@@ -169,13 +169,13 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
-                let data = region.single_block_region_read(ReadRequest {
+                let response = region.single_block_region_read(ReadRequest {
                     eid: eid as u64,
                     offset: Block::new_with_ddef(block_offset, &region.def()),
                     num_blocks: 1,
                 })?;
 
-                out_file.write_all(&data).unwrap();
+                out_file.write_all(&response.data).unwrap();
 
                 if blocks_copied >= count {
                     break 'eid_loop;

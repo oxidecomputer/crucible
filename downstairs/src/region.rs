@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use bytes::BytesMut;
 use crucible_common::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -722,11 +721,11 @@ impl Region {
     pub fn single_block_region_read(
         &self,
         request: crucible_protocol::ReadRequest,
-    ) -> Result<BytesMut, CrucibleError> {
+    ) -> Result<crucible_protocol::ReadResponse, CrucibleError> {
         let mut responses = self.region_read(&[request])?;
         let response = responses.pop().unwrap();
         drop(responses);
-        Ok(response.data)
+        Ok(response)
     }
 
     #[instrument]
