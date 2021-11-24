@@ -2813,7 +2813,8 @@ impl Upstairs {
                 );
 
                 // XXX reconciliation needs to occur, but do we trust that
-                // Downstairs anymore? once could imagine:
+                // Downstairs anymore? One could imagine setting that untrusted
+                // here:
                 //
                 // self.ds_transition(client_id, DsState::Untrusted);
             }
