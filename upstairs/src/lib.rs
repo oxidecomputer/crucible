@@ -30,9 +30,9 @@ use tracing::{instrument, span, Level};
 use usdt::register_probes;
 use uuid::Uuid;
 
-use aes::cipher::generic_array::GenericArray;
-use aes::{Aes128, NewBlockCipher};
-use xts_mode::{get_tweak_default, Xts128};
+use aes_gcm_siv::aead::{AeadInPlace, NewAead};
+use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
+use rand_chacha::ChaCha20Rng;
 
 mod pseudo_file;
 mod test;
@@ -1544,7 +1544,8 @@ impl Downstairs {
         &mut self,
         ds_id: u64,
         client_id: u8,
-        read_data: &Result<Vec<ReadResponse>, CrucibleError>,
+        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        encryption_context: &Option<Arc<EncryptionContext>>,
     ) -> Result<bool> {
         /*
          * Assume we don't have enough completed jobs, and only change
@@ -1566,6 +1567,52 @@ impl Downstairs {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
+        // With AE, responses can come back that are invalid given an encryption
+        // context. Test this here. It will allow us to determine if the
+        // decryption is bad and set the job result to error accordingly.
+        let read_data: Result<Vec<ReadResponse>, CrucibleError> =
+            if let Some(context) = &encryption_context {
+                if let Ok(mut responses) = responses {
+                    let mut decryption_error = None;
+
+                    for response in &mut responses {
+                        // XXX if we haven't encrypted it yet, is this an
+                        // attack?  block generation number would tell us
+                        if response.nonce.is_some() && response.tag.is_some() {
+                            let _nonce = response.nonce.as_ref().unwrap();
+                            let nonce = Nonce::from_slice(_nonce);
+
+                            let _tag = response.tag.as_ref().unwrap();
+                            let tag = Tag::from_slice(_tag);
+
+                            let decryption_result = context.decrypt_in_place(
+                                &mut response.data[..],
+                                nonce,
+                                tag,
+                            );
+
+                            if decryption_result.is_err() {
+                                decryption_error =
+                                    Some(Err(CrucibleError::DecryptionError));
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(decryption_error) = decryption_error {
+                        decryption_error
+                    } else {
+                        Ok(responses)
+                    }
+                } else {
+                    // bad responses
+                    responses
+                }
+            } else {
+                // no encryption context
+                responses
+            };
+
         let newstate = if let Err(ref e) = read_data {
             IOState::Error(e.clone())
         } else {
@@ -1574,6 +1621,7 @@ impl Downstairs {
         };
 
         let oldstate = job.state.insert(client_id, newstate.clone()).unwrap();
+
         /*
          * Verify the job was InProgress
          */
@@ -1626,7 +1674,12 @@ impl Downstairs {
             assert_eq!(newstate, IOState::Done);
             assert_ne!(job.ack_status, AckStatus::Acked);
 
-            let read_data = read_data.as_ref().unwrap();
+            let read_data: Vec<ReadResponse> = read_data.unwrap();
+
+            let mut bytes: Vec<Bytes> = Vec::with_capacity(read_data.len());
+            for response in read_data {
+                bytes.push(response.data.freeze());
+            }
 
             /*
              * Transition this job from Done to AckReady if enough have
@@ -1637,10 +1690,10 @@ impl Downstairs {
                     dependencies: _dependencies,
                     requests: _,
                 } => {
-                    assert!(!read_data.is_empty());
+                    assert!(!bytes.is_empty());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        job.data = Some(read_data.to_vec());
+                        job.data = Some(bytes);
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
@@ -1650,7 +1703,7 @@ impl Downstairs {
                     dependencies: _,
                     writes: _,
                 } => {
-                    assert!(read_data.is_empty());
+                    assert!(bytes.is_empty());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -1661,7 +1714,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                 } => {
-                    assert!(read_data.is_empty());
+                    assert!(bytes.is_empty());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -1774,14 +1827,33 @@ impl Downstairs {
             _ => Ok(false),
         }
     }
+
+    fn client_error(
+        &self,
+        ds_id: u64,
+        client_id: u8,
+    ) -> Result<(), CrucibleError> {
+        let job = self
+            .active
+            .get(&ds_id)
+            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+        let state = job
+            .state
+            .get(&client_id)
+            .ok_or_else(|| anyhow!("state for client {} missing", client_id))?;
+
+        if let IOState::Error(e) = state {
+            Err(e.clone())
+        } else {
+            Ok(())
+        }
+    }
 }
 
-/// Implement XTS encryption
-/// See: https://en.wikipedia.org/wiki/Disk_encryption_theory#XEX-based_\
-/// tweaked-codebook_mode_with_ciphertext_stealing_(XTS)
+/// Implement AES-GCM-SIV encryption
 pub struct EncryptionContext {
-    xts: Xts128<Aes128>,
-    key: Vec<u8>,
+    cipher: Aes256GcmSiv,
     block_size: usize,
 }
 
@@ -1793,56 +1865,55 @@ impl Debug for EncryptionContext {
     }
 }
 
-impl Clone for EncryptionContext {
-    fn clone(&self) -> Self {
-        EncryptionContext::new(self.key.clone(), self.block_size)
-    }
-
-    fn clone_from(&mut self, source: &Self) {
-        *self = EncryptionContext::new(source.key.clone(), source.block_size);
-    }
-}
-
 impl EncryptionContext {
     pub fn new(key: Vec<u8>, block_size: usize) -> EncryptionContext {
         assert!(key.len() == 32);
+        let key = Key::from_slice(&key[..]);
+        let cipher = Aes256GcmSiv::new(key);
 
-        let cipher_1 = Aes128::new(GenericArray::from_slice(&key[..16]));
-        let cipher_2 = Aes128::new(GenericArray::from_slice(&key[16..]));
-
-        let xts = Xts128::<Aes128>::new(cipher_1, cipher_2);
-
-        EncryptionContext {
-            xts,
-            key,
-            block_size,
-        }
-    }
-
-    pub fn key(&self) -> &Vec<u8> {
-        &self.key
+        EncryptionContext { cipher, block_size }
     }
 
     pub fn block_size(&self) -> usize {
         self.block_size
     }
 
-    pub fn encrypt_in_place(&self, data: &mut [u8], sector_index: u128) {
-        self.xts.encrypt_area(
-            data,
-            self.block_size,
-            sector_index,
-            get_tweak_default,
-        );
+    pub fn get_random_nonce(&self) -> Nonce {
+        let mut rng = ChaCha20Rng::from_entropy();
+
+        let mut random_iv = Vec::<u8>::with_capacity(12);
+        random_iv.resize(12, 1);
+        rng.fill_bytes(&mut random_iv);
+
+        Nonce::clone_from_slice(&random_iv)
     }
 
-    pub fn decrypt_in_place(&self, data: &mut [u8], sector_index: u128) {
-        self.xts.decrypt_area(
-            data,
-            self.block_size,
-            sector_index,
-            get_tweak_default,
-        );
+    pub fn encrypt_in_place(&self, data: &mut [u8]) -> Result<(Nonce, Tag)> {
+        let nonce = self.get_random_nonce();
+
+        let tag = self.cipher.encrypt_in_place_detached(&nonce, b"", data);
+
+        if tag.is_err() {
+            bail!("Could not encrypt! {:?}", tag.err());
+        }
+
+        Ok((nonce, tag.unwrap()))
+    }
+
+    pub fn decrypt_in_place(
+        &self,
+        data: &mut [u8],
+        nonce: &Nonce,
+        tag: &Tag,
+    ) -> Result<()> {
+        let result =
+            self.cipher.decrypt_in_place_detached(nonce, b"", data, tag);
+
+        if result.is_err() {
+            bail!("Could not decrypt! {:?}", result.err().unwrap());
+        }
+
+        Ok(())
     }
 }
 
@@ -2153,8 +2224,7 @@ impl Upstairs {
         let mut sub = HashMap::new();
         sub.insert(next_id, 0);
 
-        let new_gtos =
-            GtoS::new(sub, Vec::new(), None, HashMap::new(), sender, None);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         gw.active.insert(gw_id, new_gtos);
         cdt::gw_flush_start!(|| (gw_id));
 
@@ -2231,23 +2301,26 @@ impl Upstairs {
             let byte_len: usize =
                 num_blocks.value as usize * ddef.block_size() as usize;
 
-            let sub_data = if let Some(context) = &self.encryption_context {
+            let (sub_data, nonce, tag) = if let Some(context) =
+                &self.encryption_context
+            {
                 // Encrypt here
                 let mut mut_data =
                     data.slice(cur_offset..(cur_offset + byte_len)).to_vec();
-                context.encrypt_in_place(&mut mut_data[..], bo.value as u128);
-                Bytes::copy_from_slice(&mut_data)
+                let (nonce, tag) =
+                    context.encrypt_in_place(&mut mut_data[..])?;
+                (Bytes::copy_from_slice(&mut_data), Some(nonce), Some(tag))
             } else {
                 // Unencrypted
-                data.slice(cur_offset..(cur_offset + byte_len))
+                (data.slice(cur_offset..(cur_offset + byte_len)), None, None)
             };
 
             writes.push(crucible_protocol::Write {
                 eid,
                 offset: bo,
                 data: sub_data,
-                nonce: None,
-                tag: None,
+                nonce: nonce.map(|v| Vec::from(v.as_slice())),
+                tag: tag.map(|v| Vec::from(v.as_slice())),
             });
 
             cur_offset += byte_len;
@@ -2261,14 +2334,8 @@ impl Upstairs {
         /*
          * New work created, add to the guest_work HM
          */
-        let new_gtos = GtoS::new(
-            sub,
-            Vec::new(),
-            None,
-            HashMap::new(),
-            Some(sender),
-            None,
-        );
+        let new_gtos =
+            GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(sender));
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -2368,7 +2435,6 @@ impl Upstairs {
             Some(data),
             HashMap::new(),
             Some(sender),
-            self.encryption_context.clone(),
         );
         {
             gw.active.insert(gw_id, new_gtos);
@@ -2722,10 +2788,15 @@ impl Upstairs {
         }
 
         // Mark this ds_id for the client_id as completed.
-        let notify_guest = work.complete(ds_id, client_id, &read_data)?;
+        let notify_guest = work.complete(
+            ds_id,
+            client_id,
+            read_data,
+            &self.encryption_context,
+        )?;
 
         // Mark this downstairs as bad if this was a write or flush
-        if let Some(err) = read_data.err() {
+        if let Err(err) = work.client_error(ds_id, client_id) {
             if err == CrucibleError::UpstairsInactive {
                 drop(work);
 
@@ -2735,6 +2806,17 @@ impl Upstairs {
                 );
                 self.ds_transition(client_id, DsState::Deactivated);
                 self.set_inactive();
+            } else if err == CrucibleError::DecryptionError {
+                println!(
+                    "Authenticated decryption failed from client id {}!",
+                    client_id
+                );
+
+                // XXX reconciliation needs to occur, but do we trust that
+                // Downstairs anymore? One could imagine setting that untrusted
+                // here:
+                //
+                // self.ds_transition(client_id, DsState::Untrusted);
             }
             /*
              * After work.complete, it's possible that the job is gone
@@ -2887,7 +2969,7 @@ struct DownstairsIO {
     /*
      * If the operation is a Read, this holds the resulting buffer
      */
-    data: Option<Vec<ReadResponse>>,
+    data: Option<Vec<Bytes>>,
 }
 
 impl DownstairsIO {
@@ -3250,7 +3332,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
+    downstairs_buffer: HashMap<u64, Vec<Bytes>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -3262,12 +3344,6 @@ struct GtoS {
      * we don't have to ACK it to anyone.
      */
     sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
-
-    /*
-     * Optional encryption context - Some if the corresponding Upstairs is
-     * Some.
-     */
-    encryption_context: Option<Arc<EncryptionContext>>,
 }
 
 impl GtoS {
@@ -3275,9 +3351,8 @@ impl GtoS {
         submitted: HashMap<u64, u64>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
+        downstairs_buffer: HashMap<u64, Vec<Bytes>>,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
-        encryption_context: Option<Arc<EncryptionContext>>,
     ) -> GtoS {
         GtoS {
             submitted,
@@ -3285,7 +3360,6 @@ impl GtoS {
             guest_buffer,
             downstairs_buffer,
             sender,
-            encryption_context,
         }
     }
 
@@ -3302,27 +3376,16 @@ impl GtoS {
 
             let mut offset = 0;
             for ds_id in self.completed.iter() {
-                let responses = self.downstairs_buffer.remove(ds_id).unwrap();
+                let data_vec = self.downstairs_buffer.remove(ds_id).unwrap();
 
-                for response in responses {
-                    let mut ds_vec = response.data.to_vec();
-
-                    // if there's an encryption context, decrypt the
-                    // downstairs buffer.
-                    if let Some(context) = &self.encryption_context {
-                        context.decrypt_in_place(
-                            &mut ds_vec[..],
-                            response.offset.value as u128,
-                        );
-                    }
-
+                for data in data_vec {
                     // Copy over into guest memory.
                     {
                         let _ignored =
                             span!(Level::TRACE, "copy to guest buffer")
                                 .entered();
                         let mut vec = guest_buffer.as_vec();
-                        for i in &ds_vec {
+                        for i in &data {
                             vec[offset] = *i;
                             offset += 1;
                         }
@@ -3421,7 +3484,7 @@ impl GuestWork {
         &mut self,
         gw_id: u64,
         ds_id: u64,
-        data: Option<Vec<ReadResponse>>,
+        data: Option<Vec<Bytes>>,
         result: Result<(), CrucibleError>,
     ) {
         /*

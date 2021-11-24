@@ -54,6 +54,9 @@ pub enum CrucibleError {
 
     #[error("Saw a UUID that wasn't ours!")]
     UuidMismatch,
+
+    #[error("Decryption failed!")]
+    DecryptionError,
 }
 
 impl From<std::io::Error> for CrucibleError {
