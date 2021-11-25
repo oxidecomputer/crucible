@@ -1,5 +1,7 @@
 // Copyright 2021 Oxide Computer Company
+#![feature(asm)]
 use futures::lock::{Mutex, MutexGuard};
+use futures::executor;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -30,8 +32,10 @@ use uuid::Uuid;
 
 mod dump;
 mod region;
+mod stats;
 use dump::dump_region;
 use region::Region;
+use stats::*;
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "disk-side storage component")]
@@ -105,6 +109,15 @@ enum Args {
          */
         #[structopt(long)]
         lossy: bool,
+
+        /*
+         * With this flag set, downstairs will attempt to connect to
+         * oximeter and send stats.
+         * TODO: Currently the default is hard coded, this should grow
+         * to include the destination address.
+         */
+        #[structopt(long)]
+        oximeter: bool,
 
         #[structopt(short, long, default_value = "9000")]
         port: u16,
@@ -525,6 +538,7 @@ async fn do_work_task(
                 let m = ads.lock().await.do_work(job_id).await?;
 
                 if let Some(m) = m {
+                    ads.lock().await.complete_work_stat(&m).await?;
                     // Notify the upstairs before completing work
                     let mut fw = fw.lock().await;
                     fw.send(&m).await?;
@@ -892,6 +906,15 @@ async fn resp_loop(
                         return Ok(());
                     }
                     Some(msg) => {
+                        match msg {
+                            Message::Ruok => {
+                                println!("[RR] I could answer a ping now");
+                                // let mut fw = fw.lock().await;
+                                // fw.send(Message::Imok).await?;
+                                // println!("Answered ping");
+                            }
+                            _ => {}
+                        }
                         message_channel_tx.send(msg).await?;
                     }
                 }
@@ -899,6 +922,7 @@ async fn resp_loop(
         }
     }
 }
+
 
 /*
  * Overall structure for things the downstairs is tracking.
@@ -912,16 +936,23 @@ struct Downstairs {
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
     active_upstairs: Option<(Uuid, Arc<Sender<u64>>)>,
+    dss: DsStatOuter,
 }
 
 impl Downstairs {
     fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
+
+        let dss = DsStatOuter {
+            ds_stat_wrap:
+                Arc::new(Mutex::new(DsCountStat::new(region.def().uuid()))),
+        };
         Downstairs {
             region,
             work: Mutex::new(Work::default()),
             lossy,
             return_errors,
             active_upstairs: None,
+		    dss,
         }
     }
 
@@ -1049,6 +1080,27 @@ impl Downstairs {
             work.completed = Vec::with_capacity(32);
         } else {
             work.completed.push(ds_id);
+        }
+
+        Ok(())
+    }
+
+    /*
+     * After we complete a read/write/flush on a region, update the
+     * Oximeter counter for the operation.
+     */
+    async fn complete_work_stat(&mut self, m: &Message) -> Result<()> {
+        match m {
+            Message::FlushAck(_, _, _) => {
+                self.dss.add_flush().await;
+            },
+            Message::WriteAck(_, _, _) => {
+                self.dss.add_write().await;
+            },
+            Message::ReadResponse(_, _, _) => {
+                self.dss.add_read().await;
+            },
+            _ => (),
         }
 
         Ok(())
@@ -1524,6 +1576,7 @@ async fn main() -> Result<()> {
         Args::Run {
             address,
             data,
+            oximeter,
             lossy,
             port,
             return_errors,
@@ -1570,6 +1623,20 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
+
+            if oximeter {
+                let dssw = d.lock().await;
+                let dss = dssw.dss.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = stats::ox_stats(dss).await {
+                            println!("ERROR: oximeter failed: {:?}", e);
+                        } else {
+                            println!("OK: oximeter all done");
+                        }
+                    });
+            }
+
             /*
              * Establish a listen server on the port.
              */
@@ -1587,6 +1654,14 @@ async fn main() -> Result<()> {
                 let (sock, raddr) = listener.accept().await?;
 
                 println!("connection from {:?}", raddr);
+                {
+                    /*
+                     * Add one to the counter every time we have a connection
+                     * from an upstairs
+                     */
+                    let mut ds = d.lock().await;
+                    ds.dss.add_connection().await;
+                }
 
                 let mut dd = d.clone();
 

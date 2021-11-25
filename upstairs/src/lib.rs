@@ -1038,6 +1038,7 @@ async fn cmd_loop(
                  * To keep things alive, initiate a ping any time we have
                  * been idle for (TBD) seconds.
                  */
+                println!("[{}] send ping", up_coms.client_id);
                 fw.send(Message::Ruok).await?;
 
                 if lossy {
