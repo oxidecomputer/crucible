@@ -46,6 +46,12 @@ that you already have downstairs running on port 380[1-3].
 The test will check for panic or assert in the output and stop if it
 detects them or a test exits with an error.
 
+## show_ox_stats.sh
+A sample script that uses `oxdb` and `jq` to dump some oximeter stats
+produced from running downstairs with the `--oximeter` option.  This script
+is hard coded with a downstairs UUID and is intended to provide a sample to
+build off of.
+
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
 crucible from the guest.

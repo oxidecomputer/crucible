@@ -13,25 +13,30 @@ use oximeter_producer::{Config, Server};
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
 pub struct DsStat {
-        pub ds_uuid: Uuid,
+    // The UUID of the downstairs
+    pub ds_uuid: Uuid,
 }
 #[derive(Debug, Copy, Clone, Metric)]
 pub struct DsConnect {
+    // Count of times this downstairs has started a connection to an upstairs
     #[datum]
     pub count: Cumulative<i64>,
 }
 #[derive(Debug, Copy, Clone, Metric)]
 pub struct DsWrite {
+    // Count of region writes this downstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
 }
 #[derive(Debug, Copy, Clone, Metric)]
 pub struct DsRead {
+    // Count of region reads this downstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
 }
 #[derive(Debug, Copy, Clone, Metric)]
 pub struct DsFlush {
+    // Count of region flushes this downstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
 }
