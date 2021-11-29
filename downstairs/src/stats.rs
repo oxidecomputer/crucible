@@ -9,7 +9,6 @@ use oximeter::{
 };
 use oximeter_producer::{Config, Server};
 
-
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
 pub struct DsStat {
@@ -52,14 +51,22 @@ pub struct DsCountStat {
 }
 
 impl DsCountStat {
-	pub fn new(ds_uuid: Uuid) -> Self {
-		DsCountStat {
-			stat_name: DsStat { ds_uuid, },
-			up_connect_count: vec![DsConnect { count: Cumulative::default() }],
-			write_count: vec![DsWrite { count: Cumulative::default() }],
-			read_count: vec![DsRead { count: Cumulative::default() }],
-			flush_count: vec![DsFlush { count: Cumulative::default() }],
-		}
+    pub fn new(ds_uuid: Uuid) -> Self {
+        DsCountStat {
+            stat_name: DsStat { ds_uuid },
+            up_connect_count: vec![DsConnect {
+                count: Cumulative::default(),
+            }],
+            write_count: vec![DsWrite {
+                count: Cumulative::default(),
+            }],
+            read_count: vec![DsRead {
+                count: Cumulative::default(),
+            }],
+            flush_count: vec![DsFlush {
+                count: Cumulative::default(),
+            }],
+        }
     }
 }
 
@@ -147,12 +154,14 @@ impl Producer for DsStatOuter {
  *
  */
 pub async fn ox_stats(dss: DsStatOuter) -> Result<()> {
-
     let address = "[::1]:0".parse().unwrap();
-    let dropshot_config =
-        ConfigDropshot { bind_address: address, request_body_max_bytes: 2048 };
-    let logging_config =
-        ConfigLogging::StderrTerminal { level: ConfigLoggingLevel::Error };
+    let dropshot_config = ConfigDropshot {
+        bind_address: address,
+        request_body_max_bytes: 2048,
+    };
+    let logging_config = ConfigLogging::StderrTerminal {
+        level: ConfigLoggingLevel::Error,
+    };
 
     let server_info = ProducerEndpoint {
         id: Uuid::new_v4().into(),
@@ -177,7 +186,7 @@ pub async fn ox_stats(dss: DsStatOuter) -> Result<()> {
                 server.registry().register_producer(dss.clone()).unwrap();
                 println!("Oximeter producer registered, now serve_forever");
                 server.serve_forever().await.unwrap();
-            },
+            }
             Err(e) => {
                 println!("Can't connect to oximeter server:\n{}", e);
                 tokio::time::sleep(Duration::from_secs(10)).await;

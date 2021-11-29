@@ -145,8 +145,12 @@ fn get_region_info(
 
     println!(
         "Region: es:{:?}  bs:{}  ts:{}  tb:{}  max_io:{} or {}",
-        extent_size.value, block_size, total_size, total_blocks,
-        max_block_io, (max_block_io as u64 * block_size),
+        extent_size.value,
+        block_size,
+        total_size,
+        total_blocks,
+        max_block_io,
+        (max_block_io as u64 * block_size),
     );
 
     /*

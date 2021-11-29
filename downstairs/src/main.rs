@@ -1,7 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 #![feature(asm)]
-use futures::lock::{Mutex, MutexGuard};
 use futures::executor;
+use futures::lock::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -923,7 +923,6 @@ async fn resp_loop(
     }
 }
 
-
 /*
  * Overall structure for things the downstairs is tracking.
  * This includes the extents and their status as well as the
@@ -941,10 +940,10 @@ struct Downstairs {
 
 impl Downstairs {
     fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
-
         let dss = DsStatOuter {
-            ds_stat_wrap:
-                Arc::new(Mutex::new(DsCountStat::new(region.def().uuid()))),
+            ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
+                region.def().uuid(),
+            ))),
         };
         Downstairs {
             region,
@@ -952,7 +951,7 @@ impl Downstairs {
             lossy,
             return_errors,
             active_upstairs: None,
-		    dss,
+            dss,
         }
     }
 
@@ -1093,13 +1092,13 @@ impl Downstairs {
         match m {
             Message::FlushAck(_, _, _) => {
                 self.dss.add_flush().await;
-            },
+            }
             Message::WriteAck(_, _, _) => {
                 self.dss.add_write().await;
-            },
+            }
             Message::ReadResponse(_, _, _) => {
                 self.dss.add_read().await;
-            },
+            }
             _ => (),
         }
 
@@ -1623,18 +1622,17 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
-
             if oximeter {
                 let dssw = d.lock().await;
                 let dss = dssw.dss.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = stats::ox_stats(dss).await {
-                            println!("ERROR: oximeter failed: {:?}", e);
-                        } else {
-                            println!("OK: oximeter all done");
-                        }
-                    });
+                        println!("ERROR: oximeter failed: {:?}", e);
+                    } else {
+                        println!("OK: oximeter all done");
+                    }
+                });
             }
 
             /*
