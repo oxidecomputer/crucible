@@ -171,7 +171,9 @@ impl CrucibleEncoder {
      * Binary search to find the maximum number of blocks we can send.
      *
      * Attempts at deterministically computing the number of blocks
-     * repeatedly failed, so binary search instead.
+     * repeatedly failed, so binary search instead. Note that this computes the
+     * maximum size that this Tokio encoding / decoding supports given our
+     * constant MAX_FRM_LEN.
      */
     pub fn max_io_blocks(bs: usize) -> Result<usize, anyhow::Error> {
         let size_of_write_message =
