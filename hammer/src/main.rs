@@ -1,5 +1,4 @@
 // Copyright 2021 Oxide Computer Company
-#![feature(with_options)]
 
 use std::net::SocketAddrV4;
 use std::sync::Arc;
