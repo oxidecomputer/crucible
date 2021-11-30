@@ -21,6 +21,7 @@ arg_enum! {
     enum Workload {
         Balloon,
         Big,
+        Biggest,
         Burst,
         Demo,
         Dep,
@@ -271,6 +272,10 @@ fn main() -> Result<()> {
         Workload::Big => {
             println!("Run big test");
             big_workload(&guest, &mut region_info)?;
+        }
+        Workload::Biggest => {
+            println!("Run biggest IO test");
+            biggest_io_workload(&guest, &mut region_info)?;
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
@@ -1089,6 +1094,35 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     println!("All IOs sent");
     guest.show_work()?;
+
+    Ok(())
+}
+
+fn biggest_io_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    /*
+     * Based on our protocol, send the biggest IO we can.
+     */
+    let biggest_io_in_blocks =
+        crucible_protocol::CrucibleEncoder::max_io_blocks(
+            ri.block_size as usize,
+        )?;
+
+    for block_index in 0..(ri.total_blocks - biggest_io_in_blocks) {
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+        let sz = biggest_io_in_blocks * (ri.block_size as usize);
+        let mut data = Vec::with_capacity(sz);
+        data.resize(sz, 1);
+
+        println!(
+            "IO at block:{}  size in blocks:{}",
+            block_index, biggest_io_in_blocks
+        );
+
+        let mut waiter = guest.write(offset, Bytes::from(data))?;
+        waiter.block_wait()?;
+    }
 
     Ok(())
 }

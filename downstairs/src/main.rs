@@ -395,13 +395,7 @@ async fn proc_frame(
     fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
     job_channel_tx: &Arc<Mutex<Sender<u64>>>,
 ) -> Result<()> {
-    let mut new_ds_id = None;
-    match m {
-        Message::Ruok => {
-            let mut fw = fw.lock().await;
-            fw.send(Message::Imok).await?;
-        }
-        // Regular work path
+    let new_ds_id = match m {
         Message::Write(uuid, ds_id, dependencies, writes) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
@@ -416,7 +410,7 @@ async fn proc_frame(
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_write).await?;
-            new_ds_id = Some(*ds_id);
+            Some(*ds_id)
         }
         Message::Flush(uuid, ds_id, dependencies, flush_number, gen_number) => {
             if upstairs_uuid != *uuid {
@@ -433,7 +427,7 @@ async fn proc_frame(
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_flush).await?;
-            new_ds_id = Some(*ds_id);
+            Some(*ds_id)
         }
         Message::ReadRequest(uuid, ds_id, dependencies, requests) => {
             if upstairs_uuid != *uuid {
@@ -449,10 +443,10 @@ async fn proc_frame(
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_read).await?;
-            new_ds_id = Some(*ds_id);
+            Some(*ds_id)
         }
         x => bail!("unexpected frame {:?}", x),
-    }
+    };
 
     /*
      * If we added work, tell the work task to get busy.
@@ -813,31 +807,30 @@ async fn resp_loop(
         })
     };
 
+    let lossy = {
+        let ds = ads.lock().await;
+        ds.lossy
+    };
+
     tokio::pin!(dw_task);
     tokio::pin!(pf_task);
     loop {
         tokio::select! {
-            /*
-             * If we have set "lossy", then we need to check every now and
-             * then that there were not skipped jobs that we need to go back
-             * and finish up. If lossy is not set, then this should only
-             * trigger once then never again.
-             */
             _ = &mut dw_task => {
                 bail!("do_work_task task has ended");
             }
             _ = &mut pf_task => {
                 bail!("pf task ended");
             }
-            _ = sleep_until(lossy_interval) => {
-                let lossy = {
-                    let ds = ads.lock().await;
-                    //_show_work(&ds).await;
-                    ds.lossy
-                };
-                if lossy {
-                    job_channel_tx.lock().await.send(0).await?;
-                }
+            /*
+             * If we have set "lossy", then we need to check every now and
+             * then that there were not skipped jobs that we need to go back
+             * and finish up. If lossy is not set, then this should only
+             * trigger once then never again.
+             */
+            _ = sleep_until(lossy_interval), if lossy => {
+                //_show_work(&ds).await;
+                job_channel_tx.lock().await.send(0).await?;
                 lossy_interval = deadline_secs(5);
             }
             /*
@@ -892,7 +885,13 @@ async fn resp_loop(
                         return Ok(());
                     }
                     Some(msg) => {
-                        message_channel_tx.send(msg).await?;
+                        if matches!(msg, Message::Ruok) {
+                            // Respond instantly to pings, don't wait.
+                            let mut fw = fw.lock().await;
+                            fw.send(Message::Imok).await?;
+                        } else {
+                            message_channel_tx.send(msg).await?;
+                        }
                     }
                 }
             }

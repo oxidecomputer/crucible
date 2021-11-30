@@ -1,4 +1,6 @@
 // Copyright 2021 Oxide Computer Company
+use std::cmp::Ordering;
+
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -140,6 +142,124 @@ impl CrucibleEncoder {
     pub fn new() -> Self {
         CrucibleEncoder {}
     }
+
+    fn serialized_size<T: serde::Serialize>(
+        m: T,
+    ) -> Result<usize, anyhow::Error> {
+        let serialized_len: usize = bincode::serialized_size(&m)? as usize;
+        let len = serialized_len + 4;
+
+        Ok(len)
+    }
+
+    fn a_write(bs: usize) -> Write {
+        Write {
+            eid: 1,
+            offset: Block::new(1, bs.trailing_zeros()),
+            data: {
+                let sz = bs;
+                let mut data = Vec::with_capacity(sz);
+                data.resize(sz, 1);
+                bytes::Bytes::from(data)
+            },
+            nonce: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            tag: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        }
+    }
+
+    /*
+     * Binary search to find the maximum number of blocks we can send.
+     *
+     * Attempts at deterministically computing the number of blocks
+     * repeatedly failed, so binary search instead. Note that this computes the
+     * maximum size that this Tokio encoding / decoding supports given our
+     * constant MAX_FRM_LEN.
+     */
+    pub fn max_io_blocks(bs: usize) -> Result<usize, anyhow::Error> {
+        let size_of_write_message =
+            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write(bs))?;
+
+        // Maximum frame length divided by a write of one block is the lower
+        // bound.
+        let lower_size_write_message = Message::Write(
+            Uuid::new_v4(),
+            1,
+            vec![1],
+            (0..(MAX_FRM_LEN / size_of_write_message))
+                .map(|_| CrucibleEncoder::a_write(bs))
+                .collect(),
+        );
+
+        assert!(
+            CrucibleEncoder::serialized_size(&lower_size_write_message)?
+                < MAX_FRM_LEN
+        );
+
+        // The upper bound is the maximum frame length divided by the block
+        // size.
+        let upper_size_write_message = Message::Write(
+            Uuid::new_v4(),
+            1,
+            vec![1],
+            (0..(MAX_FRM_LEN / bs))
+                .map(|_| CrucibleEncoder::a_write(bs))
+                .collect(),
+        );
+
+        assert!(
+            CrucibleEncoder::serialized_size(&upper_size_write_message)?
+                > MAX_FRM_LEN
+        );
+
+        // Binary search for the number of blocks that represents the largest IO
+        // given MAX_FRM_LEN.
+
+        let mut lower = match lower_size_write_message {
+            Message::Write(_, _, _, vec) => vec.len(),
+            _ => {
+                bail!("wat");
+            }
+        };
+
+        let mut upper = match upper_size_write_message {
+            Message::Write(_, _, _, vec) => vec.len(),
+            _ => {
+                bail!("wat");
+            }
+        };
+
+        let mut mid = (lower + upper) / 2;
+
+        loop {
+            if (mid + 1) == upper {
+                return Ok(mid);
+            }
+
+            let mid_size_write_message = Message::Write(
+                Uuid::new_v4(),
+                1,
+                vec![1],
+                (0..mid).map(|_| CrucibleEncoder::a_write(bs)).collect(),
+            );
+
+            let mid_size =
+                CrucibleEncoder::serialized_size(&mid_size_write_message)?;
+
+            match mid_size.cmp(&MAX_FRM_LEN) {
+                Ordering::Greater => {
+                    upper = mid;
+                }
+                Ordering::Equal => {
+                    return Ok(mid);
+                }
+                Ordering::Less => {
+                    lower = mid;
+                }
+            }
+
+            mid = (lower + upper) / 2;
+        }
+    }
 }
 
 impl Default for CrucibleEncoder {
@@ -160,8 +280,7 @@ impl Encoder<Message> for CrucibleEncoder {
         m: Message,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        let serialized_len: usize = bincode::serialized_size(&m)? as usize;
-        let len = serialized_len + 4;
+        let len = CrucibleEncoder::serialized_size(&m)?;
 
         dst.reserve(len);
         dst.put_u32_le(len as u32);
@@ -179,8 +298,7 @@ impl Encoder<&Message> for CrucibleEncoder {
         m: &Message,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        let serialized_len: usize = bincode::serialized_size(&m)? as usize;
-        let len = serialized_len + 4;
+        let len = CrucibleEncoder::serialized_size(&m)?;
 
         dst.reserve(len);
         dst.put_u32_le(len as u32);
