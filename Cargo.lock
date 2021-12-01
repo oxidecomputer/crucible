@@ -85,7 +85,7 @@ checksum = "ecc78c299ae753905840c5d3ba036c51f61ce5a98a83f98d9c9d29dffd427f71"
 [[package]]
 name = "api_identity"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#8757ec542ea4ffbadd6f26094ed4ba357715d70d"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -149,7 +149,7 @@ checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 [[package]]
 name = "bhyve_api"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b56e473#b56e47369caa9e1484e69d34c0b855d376fe4664"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "bitflags",
  "libc",
@@ -405,7 +405,7 @@ dependencies = [
 [[package]]
 name = "crucible"
 version = "0.0.1"
-source = "git+https://github.com/oxidecomputer/crucible?branch=main#6e1f3f0f3ef2f63bd3c37f2c6833639fa9bb26a9"
+source = "git+https://github.com/oxidecomputer/crucible?branch=main#4c8cf92a542be24e2d0e81108f33718e69e1f878"
 dependencies = [
  "aes",
  "aes-gcm-siv",
@@ -471,7 +471,7 @@ dependencies = [
 [[package]]
 name = "crucible-common"
 version = "0.0.0"
-source = "git+https://github.com/oxidecomputer/crucible?branch=main#6e1f3f0f3ef2f63bd3c37f2c6833639fa9bb26a9"
+source = "git+https://github.com/oxidecomputer/crucible?branch=main#4c8cf92a542be24e2d0e81108f33718e69e1f878"
 dependencies = [
  "anyhow",
  "serde",
@@ -572,7 +572,7 @@ dependencies = [
 [[package]]
 name = "crucible-protocol"
 version = "0.0.0"
-source = "git+https://github.com/oxidecomputer/crucible?branch=main#6e1f3f0f3ef2f63bd3c37f2c6833639fa9bb26a9"
+source = "git+https://github.com/oxidecomputer/crucible?branch=main#4c8cf92a542be24e2d0e81108f33718e69e1f878"
 dependencies = [
  "anyhow",
  "bincode",
@@ -600,7 +600,7 @@ dependencies = [
 [[package]]
 name = "crucible-scope"
 version = "0.0.0"
-source = "git+https://github.com/oxidecomputer/crucible?branch=main#6e1f3f0f3ef2f63bd3c37f2c6833639fa9bb26a9"
+source = "git+https://github.com/oxidecomputer/crucible?branch=main#4c8cf92a542be24e2d0e81108f33718e69e1f878"
 dependencies = [
  "anyhow",
  "futures",
@@ -719,7 +719,7 @@ dependencies = [
 [[package]]
 name = "dladm"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b56e473#b56e47369caa9e1484e69d34c0b855d376fe4664"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "libc",
  "num_enum",
@@ -738,7 +738,7 @@ dependencies = [
 [[package]]
 name = "dropshot"
 version = "0.6.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#fb3c17e9c4dc036c9527134f0cc6e82cd37c99e8"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#a2928e5f144db66c8a156015a501455d9b9063e2"
 dependencies = [
  "async-trait",
  "base64",
@@ -773,7 +773,7 @@ dependencies = [
 [[package]]
 name = "dropshot_endpoint"
 version = "0.6.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#fb3c17e9c4dc036c9527134f0cc6e82cd37c99e8"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#a2928e5f144db66c8a156015a501455d9b9063e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1163,17 +1163,15 @@ dependencies = [
 
 [[package]]
 name = "hyper-rustls"
-version = "0.22.1"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f9f7a97316d44c0af9b0301e65010573a853a9fc97046d7331d7f6bc0fd5a64"
+checksum = "d87c48c02e0dc5e3b849a2041db3029fd066650f8f717c07bf8ed78ccb895cac"
 dependencies = [
- "futures-util",
+ "http",
  "hyper",
- "log",
  "rustls",
  "tokio",
  "tokio-rustls",
- "webpki",
 ]
 
 [[package]]
@@ -1443,7 +1441,7 @@ dependencies = [
 [[package]]
 name = "nexus-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#8757ec542ea4ffbadd6f26094ed4ba357715d70d"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1452,6 +1450,7 @@ dependencies = [
  "progenitor",
  "reqwest",
  "serde",
+ "serde_json",
  "slog",
  "uuid",
 ]
@@ -1519,7 +1518,7 @@ dependencies = [
 [[package]]
 name = "omicron-common"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#8757ec542ea4ffbadd6f26094ed4ba357715d70d"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "anyhow",
  "api_identity",
@@ -1663,17 +1662,14 @@ dependencies = [
 [[package]]
 name = "oximeter"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#8757ec542ea4ffbadd6f26094ed4ba357715d70d"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "bytes",
  "chrono",
  "num-traits",
- "omicron-common",
  "oximeter-macro-impl",
- "reqwest",
  "schemars",
  "serde",
- "slog",
  "thiserror",
  "uuid",
 ]
@@ -1681,7 +1677,7 @@ dependencies = [
 [[package]]
 name = "oximeter-macro-impl"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#8757ec542ea4ffbadd6f26094ed4ba357715d70d"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "bytes",
  "proc-macro2",
@@ -1692,7 +1688,7 @@ dependencies = [
 [[package]]
 name = "oximeter-producer"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#8757ec542ea4ffbadd6f26094ed4ba357715d70d"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "chrono",
  "dropshot",
@@ -2023,7 +2019,7 @@ dependencies = [
 [[package]]
 name = "propolis"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b56e473#b56e47369caa9e1484e69d34c0b855d376fe4664"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "anyhow",
  "bhyve_api",
@@ -2038,6 +2034,7 @@ dependencies = [
  "libc",
  "num_enum",
  "serde",
+ "serde_arrays",
  "slog",
  "thiserror",
  "tokio",
@@ -2048,7 +2045,7 @@ dependencies = [
 [[package]]
 name = "propolis-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b56e473#b56e47369caa9e1484e69d34c0b855d376fe4664"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "reqwest",
  "ring",
@@ -2064,7 +2061,7 @@ dependencies = [
 [[package]]
 name = "propolis-server"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b56e473#b56e47369caa9e1484e69d34c0b855d376fe4664"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "anyhow",
  "dropshot",
@@ -2213,9 +2210,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.11.6"
+version = "0.11.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66d2927ca2f685faf0fc620ac4834690d29e7abb153add10f5812eef20b5e280"
+checksum = "07bea77bc708afa10e59905c3d4af7c8fd43c9214251673095ff8b14345fcbc5"
 dependencies = [
  "base64",
  "bytes",
@@ -2236,6 +2233,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2311,15 +2309,23 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.19.1"
+version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35edb675feee39aec9c99fa5ff985081995a06d594114ae14cbe797ad7b7a6d7"
+checksum = "d37e5e2290f3e040b594b1a9e04377c2c671f1a1cfd9bfdef82106ac1c113f84"
 dependencies = [
- "base64",
  "log",
  "ring",
  "sct",
- "webpki",
+ "webpki 0.22.0",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eebeaeb360c87bfb72e84abdb3447159c0eaececf1bef2aecd65a8be949d1c9"
+dependencies = [
+ "base64",
 ]
 
 [[package]]
@@ -2388,9 +2394,9 @@ checksum = "d29ab0c6d3fc0ee92fe66e2d99f700eab17a8d57d1c1d3b748380fb20baa78cd"
 
 [[package]]
 name = "sct"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b362b83898e0e69f38515b82ee15aa80636befe47c3b6d3d89a911e78fc228ce"
+checksum = "d53dcdb7c9f8158937a7981b48accfd39a43af418591a5d008c7b22b5e1b7ca4"
 dependencies = [
  "ring",
  "untrusted",
@@ -2450,6 +2456,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f12d06de37cf59146fbdecab66aa99f9fe4f78722e3607577a5375d66bd0c913"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde_arrays"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38636132857f68ec3d5f3eb121166d2af33cb55174c4d5ff645db6165cbef0fd"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -3008,13 +3023,13 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.22.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc6844de72e57df1980054b38be3a9f4702aba4858be64dd700181a8a6d0e1b6"
+checksum = "4baa378e417d780beff82bf54ceb0d195193ea6a00c14e22359e7f39456b5689"
 dependencies = [
  "rustls",
  "tokio",
- "webpki",
+ "webpki 0.22.0",
 ]
 
 [[package]]
@@ -3394,7 +3409,7 @@ checksum = "5fecdca9a5291cc2b8dcf7dc02453fee791a280f3743cb0905f8822ae463b3fe"
 [[package]]
 name = "viona_api"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?rev=b56e473#b56e47369caa9e1484e69d34c0b855d376fe4664"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 
 [[package]]
 name = "walkdir"
@@ -3510,12 +3525,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f095d78192e208183081cc07bc5515ef55216397af48b873e5edcd72637fa1bd"
+dependencies = [
+ "ring",
+ "untrusted",
+]
+
+[[package]]
 name = "webpki-roots"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aabe153544e473b775453675851ecc86863d2a81d786d741f6b76778f2a48940"
 dependencies = [
- "webpki",
+ "webpki 0.21.4",
 ]
 
 [[package]]
