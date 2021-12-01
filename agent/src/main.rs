@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
-use slog::{error, warn, info, o, Logger};
+use slog::{error, info, o, warn, Logger};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -121,35 +121,6 @@ async fn main() -> Result<()> {
             std::thread::spawn(|| {
                 worker(log0, df0, datapath, downstairs_program, prefix)
             });
-
-            if let Some(nexus) = nexus {
-                use omicron_common::api::internal::nexus;
-
-                let log0 = log.new(o!("component" => "nexus"));
-                let listen0 = listen.clone();
-                tokio::spawn(async move {
-                    let log = log0.clone();
-                    let c = omicron_common::NexusClient::new(nexus, log0);
-
-                    loop {
-                        let casi = nexus::CrucibleAgentStartupInfo {
-                            address: listen0.clone(),
-                        };
-                        let r =
-                            c.notify_crucible_agent_online(uuid, casi).await;
-
-                        let dur = if let Err(e) = r {
-                            error!(log, "notify nexus failed: {:?}", e);
-                            std::time::Duration::from_secs(5)
-                        } else {
-                            info!(log, "notify nexus ok");
-                            std::time::Duration::from_secs(30)
-                        };
-
-                        tokio::time::sleep(dur).await;
-                    }
-                });
-            }
 
             server::run_server(&log, listen, df).await
         }

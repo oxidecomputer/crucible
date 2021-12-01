@@ -433,6 +433,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-agent"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crucible-common 0.0.0",
+ "crucible-smf",
+ "dropshot",
+ "futures",
+ "http",
+ "hyper",
+ "omicron-common",
+ "schemars",
+ "serde",
+ "serde_json",
+ "slog",
+ "structopt",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "crucible-client"
 version = "0.1.0"
 dependencies = [
@@ -610,6 +632,16 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+]
+
+[[package]]
+name = "crucible-smf"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "num-derive",
+ "num-traits",
+ "thiserror",
 ]
 
 [[package]]
@@ -1462,6 +1494,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f6bb902e437b6d86e03cce10a7e2af662292c5dfef23b65899ea3ac9354ad44"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
