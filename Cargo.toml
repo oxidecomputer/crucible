@@ -8,5 +8,6 @@ members = [
 	"nbd_server",
 	"protocol",
 	"scope",
+	"smf",
 	"upstairs",
 ]
