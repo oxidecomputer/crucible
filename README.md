@@ -191,16 +191,16 @@ To display the stats, you can use the oxdb command from omicron/oximeter
 along with `jq` to make it pretty.
 
 Replace the UUID below with the UUID for the downstairs you wish to view.
-The available stats are: ds_connect, ds_flush, ds_read, ds_write.
+The available stats are: connect, flush, read, write.
 
 ```
-cargo run --bin oxdb -- query ds_stat:ds_flush ds_uuid=12345678-3801-3801-3801-000000003801 | jq
+cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid=12345678-3801-3801-3801-000000003801 | jq
 ```
 
-Here is a deeper example, to just print the latest count for ds_flush:
+Here is a deeper example, to just print the latest count for flush:
 ```
-LAST_FLUSH=$(cargo run --bin oxdb -- query ds_stat:ds_flush ds_uuid=12345678-3801-3801-3801-000000003801 | jq '.[].measurements[].timestamp '| sort -n | tail -1)
-cargo run --bin oxdb -- query ds_stat:ds_flush ds_uuid=12345678-3801-3801-3801-000000003801 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
+LAST_FLUSH=$(cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid=12345678-3801-3801-3801-000000003801 | jq '.[].measurements[].timestamp '| sort -n | tail -1)
+cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid=12345678-3801-3801-3801-000000003801 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
 ```
 
 ## License

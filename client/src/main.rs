@@ -88,7 +88,6 @@ pub struct Opt {
 
 pub fn opts() -> Result<Opt> {
     let opt: Opt = Opt::from_args();
-    println!("raw options: {:?}", opt);
 
     if opt.target.is_empty() {
         bail!("must specify at least one --target");
@@ -678,14 +677,6 @@ async fn generic_workload(
                 }
             }
         }
-    }
-
-    if let Err(e) = verify_volume(guest, ri) {
-        bail!("Final volume verify failed: {:?}", e)
-    }
-
-    if count >= 10 {
-        print_write_count(ri);
     }
 
     Ok(())

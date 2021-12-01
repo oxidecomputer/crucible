@@ -11,30 +11,30 @@ use oximeter_producer::{Config, Server};
 
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
-pub struct DsStat {
+pub struct CrucibleDownstairs {
     // The UUID of the downstairs
-    pub ds_uuid: Uuid,
+    pub downstairs_uuid: Uuid,
 }
-#[derive(Debug, Copy, Clone, Metric)]
-pub struct DsConnect {
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct Connect {
     // Count of times this downstairs has started a connection to an upstairs
     #[datum]
     pub count: Cumulative<i64>,
 }
-#[derive(Debug, Copy, Clone, Metric)]
-pub struct DsWrite {
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct Write {
     // Count of region writes this downstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
 }
-#[derive(Debug, Copy, Clone, Metric)]
-pub struct DsRead {
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct Read {
     // Count of region reads this downstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
 }
-#[derive(Debug, Copy, Clone, Metric)]
-pub struct DsFlush {
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct Flush {
     // Count of region flushes this downstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
@@ -43,29 +43,21 @@ pub struct DsFlush {
 // All the counter stats in one struct.
 #[derive(Clone, Debug)]
 pub struct DsCountStat {
-    stat_name: DsStat,
-    up_connect_count: Vec<DsConnect>,
-    write_count: Vec<DsWrite>,
-    read_count: Vec<DsRead>,
-    flush_count: Vec<DsFlush>,
+    stat_name: CrucibleDownstairs,
+    up_connect_count: Connect,
+    write_count: Write,
+    read_count: Read,
+    flush_count: Flush,
 }
 
 impl DsCountStat {
-    pub fn new(ds_uuid: Uuid) -> Self {
+    pub fn new(downstairs_uuid: Uuid) -> Self {
         DsCountStat {
-            stat_name: DsStat { ds_uuid },
-            up_connect_count: vec![DsConnect {
-                count: Cumulative::default(),
-            }],
-            write_count: vec![DsWrite {
-                count: Cumulative::default(),
-            }],
-            read_count: vec![DsRead {
-                count: Cumulative::default(),
-            }],
-            flush_count: vec![DsFlush {
-                count: Cumulative::default(),
-            }],
+            stat_name: CrucibleDownstairs { downstairs_uuid },
+            up_connect_count: Default::default(),
+            write_count: Default::default(),
+            read_count: Default::default(),
+            flush_count: Default::default(),
         }
     }
 }
@@ -85,26 +77,22 @@ impl DsStatOuter {
      */
     pub async fn add_connection(&mut self) {
         let mut dss = self.ds_stat_wrap.lock().await;
-        let dsc = dss.up_connect_count.get_mut(0).unwrap();
-        let datum = dsc.datum_mut();
+        let datum = dss.up_connect_count.datum_mut();
         *datum += 1;
     }
     pub async fn add_write(&mut self) {
         let mut dss = self.ds_stat_wrap.lock().await;
-        let dsc = dss.write_count.get_mut(0).unwrap();
-        let datum = dsc.datum_mut();
+        let datum = dss.write_count.datum_mut();
         *datum += 1;
     }
     pub async fn add_read(&mut self) {
         let mut dss = self.ds_stat_wrap.lock().await;
-        let dsc = dss.read_count.get_mut(0).unwrap();
-        let datum = dsc.datum_mut();
+        let datum = dss.read_count.datum_mut();
         *datum += 1;
     }
     pub async fn add_flush(&mut self) {
         let mut dss = self.ds_stat_wrap.lock().await;
-        let dsc = dss.flush_count.get_mut(0).unwrap();
-        let datum = dsc.datum_mut();
+        let datum = dss.flush_count.datum_mut();
         *datum += 1;
     }
 }
@@ -118,27 +106,16 @@ impl Producer for DsStatOuter {
     fn produce(
         &mut self,
     ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, Error> {
-        let mut dss = executor::block_on(self.ds_stat_wrap.lock());
-        let len = dss.up_connect_count.len()
-            + dss.write_count.len()
-            + dss.read_count.len()
-            + dss.flush_count.len();
+        let dss = executor::block_on(self.ds_stat_wrap.lock());
 
-        let mut data = Vec::with_capacity(len);
+        let mut data = Vec::with_capacity(4);
         let name = dss.stat_name;
 
-        for counter in dss.up_connect_count.iter_mut() {
-            data.push(Sample::new(&name, counter));
-        }
-        for counter in dss.flush_count.iter_mut() {
-            data.push(Sample::new(&name, counter));
-        }
-        for counter in dss.write_count.iter_mut() {
-            data.push(Sample::new(&name, counter));
-        }
-        for counter in dss.read_count.iter_mut() {
-            data.push(Sample::new(&name, counter));
-        }
+        data.push(Sample::new(&name, &dss.up_connect_count));
+        data.push(Sample::new(&name, &dss.flush_count));
+        data.push(Sample::new(&name, &dss.write_count));
+        data.push(Sample::new(&name, &dss.read_count));
+
         // Yield the available samples.
         Ok(Box::new(data.into_iter()))
     }
@@ -164,7 +141,7 @@ pub async fn ox_stats(dss: DsStatOuter) -> Result<()> {
     };
 
     let server_info = ProducerEndpoint {
-        id: Uuid::new_v4().into(),
+        id: Uuid::new_v4(),
         address,
         base_route: "/collect".to_string(),
         interval: Duration::from_secs(10),

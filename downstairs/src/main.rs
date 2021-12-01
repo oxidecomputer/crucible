@@ -906,15 +906,6 @@ async fn resp_loop(
                         return Ok(());
                     }
                     Some(msg) => {
-                        match msg {
-                            Message::Ruok => {
-                                println!("[RR] I could answer a ping now");
-                                // let mut fw = fw.lock().await;
-                                // fw.send(Message::Imok).await?;
-                                // println!("Answered ping");
-                            }
-                            _ => {}
-                        }
                         message_channel_tx.send(msg).await?;
                     }
                 }

@@ -19,7 +19,6 @@ futures-core = "0.3"
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-proc-macro2 = "1.0.32"
 rand = "0.8.4"
 ringbuffer = "0.8"
 serde = { version = "1", features = ["derive"] }
