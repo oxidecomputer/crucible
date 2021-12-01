@@ -185,7 +185,9 @@ Then, go to `http://localhost:16686` to see the Jaeger UI.
 Some basic stats have been added to the downstairs that can be sent to Oximeter.
 Currently, only a locally running Oximeter server is supported, and only at
 the default port. To enable stats when running a downstairs, add the
-`--oximeter` option.
+`--oximeter <IP:Port>` option.  If running locally, the oixmeter IP:Port is
+127.0.0.1:12221
+
 
 To display the stats, you can use the oxdb command from omicron/oximeter
 along with `jq` to make it pretty.

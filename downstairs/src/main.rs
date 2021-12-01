@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,13 +111,11 @@ enum Args {
         lossy: bool,
 
         /*
-         * With this flag set, downstairs will attempt to connect to
-         * oximeter and send stats.
-         * TODO: Currently the default is hard coded, this should grow
-         * to include the destination address.
+         * If this option is provided along with the address:port of the
+         * oximeter server, the downstairs will publish stats.
          */
         #[structopt(long)]
-        oximeter: bool,
+        oximeter: Option<SocketAddr>,
 
         #[structopt(short, long, default_value = "9000")]
         port: u16,
@@ -1613,12 +1611,12 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
-            if oximeter {
+            if let Some(oximeter) = oximeter {
                 let dssw = d.lock().await;
                 let dss = dssw.dss.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = stats::ox_stats(dss).await {
+                    if let Err(e) = stats::ox_stats(dss, oximeter).await {
                         println!("ERROR: oximeter failed: {:?}", e);
                     } else {
                         println!("OK: oximeter all done");

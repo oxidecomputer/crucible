@@ -130,7 +130,10 @@ impl Producer for DsStatOuter {
  * connect to.
  *
  */
-pub async fn ox_stats(dss: DsStatOuter) -> Result<()> {
+pub async fn ox_stats(
+    dss: DsStatOuter,
+    registration_address: SocketAddr,
+) -> Result<()> {
     let address = "[::1]:0".parse().unwrap();
     let dropshot_config = ConfigDropshot {
         bind_address: address,
@@ -149,7 +152,8 @@ pub async fn ox_stats(dss: DsStatOuter) -> Result<()> {
 
     let config = Config {
         server_info,
-        registration_address: "127.0.0.1:12221".parse().unwrap(),
+        // registration_address: "127.0.0.1:12221".parse().unwrap(),
+        registration_address,
         dropshot_config,
         logging_config,
     };
