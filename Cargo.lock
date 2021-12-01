@@ -50,6 +50,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "0.7.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e37cfd5e7657ada45f742d6e99ca5788580b5c529dc78faf11ece6dc702656f"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "ansi_term"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee49baf6cb617b853aa8d93bf420db2383fab46d314482ca2803b40d5fde979b"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -60,13 +78,14 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.51"
+version = "1.0.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b26702f315f53b6071259e15dd9d64528213b44d61de1ec926eca7715d62203"
+checksum = "ecc78c299ae753905840c5d3ba036c51f61ce5a98a83f98d9c9d29dffd427f71"
 
 [[package]]
 name = "api_identity"
 version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -130,8 +149,9 @@ checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 [[package]]
 name = "bhyve_api"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#4b8c6b82fa5f588b3fb7b28b92ba654ecb4d28bc"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
+ "bitflags",
  "libc",
  "num_enum",
 ]
@@ -150,6 +170,26 @@ name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
+
+[[package]]
+name = "bitstruct"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1b10c3912af09af44ea1dafe307edb5ed374b2a32658eb610e372270c9017b4"
+dependencies = [
+ "bitstruct_derive",
+]
+
+[[package]]
+name = "bitstruct_derive"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35fd19022c2b750d14eb9724c204d08ab7544570105b3b466d8a9f2f3feded27"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "block-buffer"
@@ -245,18 +285,40 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "2.34.0"
+version = "2.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0610544180c38b88101fecf2dd634b174a62eef6946f84dfc6a7127512b381c"
+checksum = "37e58ac78573c40708d45522f0d80fa2f01cc4f9b4e2bf749807255454312002"
 dependencies = [
- "ansi_term",
+ "ansi_term 0.11.0",
  "atty",
  "bitflags",
- "strsim",
+ "strsim 0.8.0",
  "textwrap",
  "unicode-width",
  "vec_map",
 ]
+
+[[package]]
+name = "convert_case"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
+
+[[package]]
+name = "core-foundation"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6888e10551bb93e424d8df1d07f1a8b4fceb0001a3a4b048bfc47554946f47b3"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation-sys"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5827cebf4670468b8772dd191856768aedcb1b0278a04f989f7766351917b9dc"
 
 [[package]]
 name = "cpufeatures"
@@ -335,7 +397,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "usdt 0.2.1",
+ "usdt",
  "uuid",
  "xts-mode",
 ]
@@ -365,31 +427,9 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "usdt 0.2.1",
+ "usdt",
  "uuid",
  "xts-mode",
-]
-
-[[package]]
-name = "crucible-agent"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "crucible-common 0.0.0",
- "crucible-smf",
- "dropshot",
- "futures",
- "http",
- "hyper",
- "omicron-common",
- "schemars",
- "serde",
- "serde_json",
- "slog",
- "structopt",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -449,13 +489,18 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytes",
+ "chrono",
  "crucible 0.0.1",
  "crucible-common 0.0.0",
  "crucible-protocol 0.0.0",
+ "dropshot",
  "futures",
  "futures-core",
+ "omicron-common",
  "opentelemetry",
  "opentelemetry-jaeger",
+ "oximeter",
+ "oximeter-producer",
  "rand",
  "rand_chacha",
  "ringbuffer",
@@ -568,16 +613,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crucible-smf"
-version = "0.0.0"
-dependencies = [
- "libc",
- "num-derive",
- "num-traits",
- "thiserror",
-]
-
-[[package]]
 name = "crypto-mac"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -597,35 +632,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "derivative"
-version = "2.2.0"
+name = "darling"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
+checksum = "757c0ded2af11d8e739c4daea1ac623dd1624b06c844cf3f5a39f1bdbd99bb12"
 dependencies = [
+ "darling_core",
+ "darling_macro",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c34d8efb62d0c2d7f60ece80f75e5c63c1588ba68032740494b0b9a996466e3"
+dependencies = [
+ "fnv",
+ "ident_case",
  "proc-macro2",
+ "quote",
+ "strsim 0.10.0",
+ "syn",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ade7bff147130fe5e6d39f089c6bd49ec0250f35d70b2eebf72afdfc919f15cc"
+dependencies = [
+ "darling_core",
  "quote",
  "syn",
 ]
 
 [[package]]
-name = "diesel"
-version = "2.0.0"
-source = "git+https://github.com/diesel-rs/diesel?rev=a39dd2e#a39dd2ebc5acccb8cde73d40b0d81dde3e073170"
-dependencies = [
- "bitflags",
- "byteorder",
- "chrono",
- "diesel_derives",
- "itoa",
- "pq-sys",
- "r2d2",
- "uuid",
-]
-
-[[package]]
-name = "diesel_derives"
-version = "2.0.0"
-source = "git+https://github.com/diesel-rs/diesel?rev=a39dd2e#a39dd2ebc5acccb8cde73d40b0d81dde3e073170"
+name = "derivative"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -674,7 +719,7 @@ dependencies = [
 [[package]]
 name = "dladm"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#4b8c6b82fa5f588b3fb7b28b92ba654ecb4d28bc"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "libc",
  "num_enum",
@@ -693,7 +738,7 @@ dependencies = [
 [[package]]
 name = "dropshot"
 version = "0.6.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#ff33033ad3d7fcf32caa352d76fc243bd20db176"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#a2928e5f144db66c8a156015a501455d9b9063e2"
 dependencies = [
  "async-trait",
  "base64",
@@ -721,14 +766,14 @@ dependencies = [
  "syn",
  "tokio",
  "toml",
- "usdt 0.2.1",
+ "usdt",
  "uuid",
 ]
 
 [[package]]
 name = "dropshot_endpoint"
 version = "0.6.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#ff33033ad3d7fcf32caa352d76fc243bd20db176"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#a2928e5f144db66c8a156015a501455d9b9063e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -767,6 +812,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a74ea89a0a1b98f6332de42c95baff457ada66d1cb4030f9ff151b2041a1c746"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "erased-serde"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3de9ad4541d99dc22b59134e7ff8dc3d6c988c89ecd7324bf10a8362b07a2afa"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -810,6 +864,21 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
@@ -930,6 +999,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "getopts"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14dbbfd5c71d70241ecf9e6f13737f7b5ce823821063188d7e46c41d371eebd5"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1003,6 +1081,15 @@ checksum = "2a2a2320eb7ec0ebe8da8f744d7812d9fc4cb4d09344ac01898dbcb6a20ae69b"
 dependencies = [
  "crypto-mac",
  "digest 0.9.0",
+]
+
+[[package]]
+name = "home"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2456aef2e6b6a9784192ae780c0f15bc57df0e918585282325e8c8ac27737654"
+dependencies = [
+ "winapi",
 ]
 
 [[package]]
@@ -1088,6 +1175,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
+dependencies = [
+ "bytes",
+ "hyper",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+]
+
+[[package]]
+name = "ident_case"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
 name = "idna"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,6 +1244,15 @@ name = "ipnet"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68f2d64f2edebec4ce84ad108148e67e1064789bee435edc5b60ad398714a3a9"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ipnetwork"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4088d739b183546b239688ddbc79891831df421773df95e236daf7867866d355"
 dependencies = [
  "serde",
 ]
@@ -1288,6 +1403,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-tls"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48ba9f7719b5a0f42f338907614285fb5fd70e53858141f69898a1fb7203b24d"
+dependencies = [
+ "lazy_static",
+ "libc",
+ "log",
+ "openssl",
+ "openssl-probe",
+ "openssl-sys",
+ "schannel",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
+]
+
+[[package]]
 name = "nbd"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1306,23 +1439,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-client"
+version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "omicron-common",
+ "percent-encoding",
+ "progenitor",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "slog",
+ "uuid",
+]
+
+[[package]]
 name = "ntapi"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f6bb902e437b6d86e03cce10a7e2af662292c5dfef23b65899ea3ac9354ad44"
 dependencies = [
  "winapi",
-]
-
-[[package]]
-name = "num-derive"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -1379,21 +1518,23 @@ dependencies = [
 [[package]]
 name = "omicron-common"
 version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
 dependencies = [
  "anyhow",
  "api_identity",
  "async-trait",
  "backoff",
  "chrono",
- "diesel",
  "dropshot",
  "futures",
  "http",
  "hyper",
  "ipnet",
- "libc",
+ "ipnetwork",
  "macaddr",
- "postgres-protocol",
+ "parse-display",
+ "percent-encoding",
+ "progenitor",
  "propolis-server",
  "rayon",
  "reqwest",
@@ -1402,13 +1543,11 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "signal-hook",
- "signal-hook-tokio",
+ "serde_with",
  "slog",
  "smf",
  "steno",
  "structopt",
- "subprocess",
  "tar",
  "tempfile",
  "thiserror",
@@ -1446,6 +1585,39 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "openssl"
+version = "0.10.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c7ae222234c30df141154f159066c5093ff73b63204dcda7121eb082fc56a95"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "once_cell",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-probe"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28988d872ab76095a6e6ac88d99b54fd267702734fd7ffe610ca27f533ddb95a"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.71"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df13d165e607909b363a4757a6f133f8a818a74e9d3a98d09c6128e15fa4c73"
+dependencies = [
+ "autocfg",
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -1488,6 +1660,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "oximeter"
+version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
+dependencies = [
+ "bytes",
+ "chrono",
+ "num-traits",
+ "oximeter-macro-impl",
+ "schemars",
+ "serde",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "oximeter-macro-impl"
+version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
+dependencies = [
+ "bytes",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "oximeter-producer"
+version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#e5bfc81b516c05d4307c53b4d6b67cb35a045dbf"
+dependencies = [
+ "chrono",
+ "dropshot",
+ "nexus-client",
+ "omicron-common",
+ "oximeter",
+ "reqwest",
+ "schemars",
+ "serde",
+ "slog",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1510,6 +1727,32 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "winapi",
+]
+
+[[package]]
+name = "parse-display"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "898bf4c2a569dedbfd4e6c3f0bbd0ae825e5b6b0b69bae3e3c1000158689334a"
+dependencies = [
+ "once_cell",
+ "parse-display-derive",
+ "regex",
+]
+
+[[package]]
+name = "parse-display-derive"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1779d1e28ab04568223744c2af4aa4e642e67b92c76bdce0929a6d2c36267199"
+dependencies = [
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "regex-syntax",
+ "structmeta",
+ "syn",
 ]
 
 [[package]]
@@ -1683,15 +1926,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed0cfbc8191465bed66e1718596ee0b0b35d5ee1f41c5df2189d0fe8bde535ba"
 
 [[package]]
-name = "pq-sys"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ac25eee5a0582f45a67e837e350d784e7003bd29a5f460796772061ca49ffda"
-dependencies = [
- "vcpkg",
-]
-
-[[package]]
 name = "proc-macro-crate"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1735,29 +1969,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "progenitor"
+version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor#66b41ba301793b8d720770b2210bee8884446d3f"
+dependencies = [
+ "anyhow",
+ "getopts",
+ "openapiv3",
+ "progenitor-impl",
+ "progenitor-macro",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "progenitor-impl"
+version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor#66b41ba301793b8d720770b2210bee8884446d3f"
+dependencies = [
+ "anyhow",
+ "convert_case",
+ "getopts",
+ "indexmap",
+ "openapiv3",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustfmt-wrapper",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "typify",
+]
+
+[[package]]
+name = "progenitor-macro"
+version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor#66b41ba301793b8d720770b2210bee8884446d3f"
+dependencies = [
+ "openapiv3",
+ "proc-macro2",
+ "progenitor-impl",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
 name = "propolis"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#4b8c6b82fa5f588b3fb7b28b92ba654ecb4d28bc"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
+ "anyhow",
  "bhyve_api",
  "bitflags",
+ "bitstruct",
  "byteorder",
- "bytes",
  "crucible 0.0.1 (git+https://github.com/oxidecomputer/crucible?branch=main)",
  "dladm",
+ "erased-serde",
+ "futures",
  "lazy_static",
  "libc",
  "num_enum",
+ "serde",
+ "serde_arrays",
+ "slog",
  "thiserror",
  "tokio",
- "usdt 0.1.19",
+ "usdt",
  "viona_api",
 ]
 
 [[package]]
 name = "propolis-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#4b8c6b82fa5f588b3fb7b28b92ba654ecb4d28bc"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "reqwest",
  "ring",
@@ -1773,7 +2061,7 @@ dependencies = [
 [[package]]
 name = "propolis-server"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#4b8c6b82fa5f588b3fb7b28b92ba654ecb4d28bc"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 dependencies = [
  "anyhow",
  "dropshot",
@@ -1799,17 +2087,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bc8cc6a5f2e3655e0899c1b848643b2562f853f114bfec7be120678e3ace05"
 dependencies = [
  "proc-macro2",
-]
-
-[[package]]
-name = "r2d2"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "545c5bc2b880973c9c10e4067418407a0ccaa3091781d1671d46eb35107cb26f"
-dependencies = [
- "log",
- "parking_lot",
- "scheduled-thread-pool",
 ]
 
 [[package]]
@@ -1902,6 +2179,8 @@ version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d07a8629359eb56f1e2fb1652bb04212c072a87ba68546a04065d525673ac461"
 dependencies = [
+ "aho-corasick",
+ "memchr",
  "regex-syntax",
 ]
 
@@ -1944,11 +2223,13 @@ dependencies = [
  "http-body",
  "hyper",
  "hyper-rustls",
+ "hyper-tls",
  "ipnet",
  "js-sys",
  "lazy_static",
  "log",
  "mime",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "rustls",
@@ -1957,6 +2238,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls",
  "url",
  "wasm-bindgen",
@@ -2011,7 +2293,18 @@ version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5f5376ea5e30ce23c03eb77cbe4962b988deead10910c372b226388b594c084"
 dependencies = [
- "semver",
+ "semver 0.1.20",
+]
+
+[[package]]
+name = "rustfmt-wrapper"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7733577fb5b13c8b256232e7ca84aa424f915efae6ec980082d60a03f99da3f8"
+dependencies = [
+ "tempfile",
+ "thiserror",
+ "toolchain_find",
 ]
 
 [[package]]
@@ -2057,12 +2350,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "scheduled-thread-pool"
-version = "0.2.5"
+name = "schannel"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc6f74fd1204073fa02d5d5d68bec8021be4c38690b61264b2fdb48083d0e7d7"
+checksum = "8f05ba609c234e60bee0d547fe94a4c7e9da733d1c962cf6e59efa4cd9c8bc75"
 dependencies = [
- "parking_lot",
+ "lazy_static",
+ "winapi",
 ]
 
 [[package]]
@@ -2071,6 +2365,7 @@ version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6b5a3c80cea1ab61f4260238409510e814e38b4b563c06044edf91e7dc070e3"
 dependencies = [
+ "bytes",
  "chrono",
  "dyn-clone",
  "schemars_derive",
@@ -2108,10 +2403,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "security-framework"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525bc1abfda2e1998d152c45cf13e696f76d0a4972310b22fac1658b05df7c87"
+dependencies = [
+ "bitflags",
+ "core-foundation",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework-sys"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9dd14d83160b528b7bfd66439110573efcfbe281b17fc2ca9f39f550d619c7e"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "semver"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
+
+[[package]]
+name = "semver"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f301af10236f6df4160f7c3f04eec6dbc70ace82d23326abad5edee88801c6b6"
+dependencies = [
+ "semver-parser",
+]
+
+[[package]]
+name = "semver-parser"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0bef5b7f9e0df16536d3961cfb6e84331c065b4066afb39768d0e319411f7"
+dependencies = [
+ "pest",
+]
 
 [[package]]
 name = "serde"
@@ -2120,6 +2456,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f12d06de37cf59146fbdecab66aa99f9fe4f78722e3607577a5375d66bd0c913"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde_arrays"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38636132857f68ec3d5f3eb121166d2af33cb55174c4d5ff645db6165cbef0fd"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -2179,6 +2524,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_with"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad6056b4cb69b6e43e3a0f055def223380baecc99da683884f205bf347f7c4b3"
+dependencies = [
+ "rustversion",
+ "serde",
+ "serde_with_macros",
+]
+
+[[package]]
+name = "serde_with_macros"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e47be9471c72889ebafb5e14d5ff930d89ae7a67bbdb5f8abb564f845a927e"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "sha-1"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2226,34 +2594,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-hook"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c98891d737e271a2954825ef19e46bd16bdb98e2746f2eec4f7a4ef7946efd1"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "signal-hook-tokio"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6c5d32165ff8b94e68e7b3bdecb1b082e958c22434b363482cfb89dcd6f3ff8"
-dependencies = [
- "futures-core",
- "libc",
- "signal-hook",
- "tokio",
 ]
 
 [[package]]
@@ -2391,6 +2737,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 
 [[package]]
+name = "strsim"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
+
+[[package]]
+name = "structmeta"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59915b528a896f2e3bfa1a6ace65f7bb0ff9f9863de6213b0c01cb6fd3c3ac71"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "structmeta-derive",
+ "syn",
+]
+
+[[package]]
+name = "structmeta-derive"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b73800bcca56045d5ab138a48cd28a96093335335deaa916f22b5749c4150c79"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "structopt"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2412,16 +2787,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "subprocess"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "055cf3ebc2981ad8f0a5a17ef6652f652d87831f79fddcba2ac57bcb9a0aa407"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -2568,11 +2933,12 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.1.43"
+version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca8a50ef2360fbd1eeb0ecd46795a87a19024eb4b53c5dc916ca1fd95fe62438"
+checksum = "6db9e6914ab8b1ae1c260a4ae7a49b6c5611b40328a735b21862567685e73255"
 dependencies = [
  "libc",
+ "wasi",
  "winapi",
 ]
 
@@ -2620,6 +2986,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tokio-native-tls"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7d995660bd2b7f8c1568414c1126076c13fbb725c40112dc0120b78eb9b717b"
+dependencies = [
+ "native-tls",
+ "tokio",
 ]
 
 [[package]]
@@ -2690,6 +3066,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31142970826733df8241ef35dc040ef98c679ab14d7c3e54d827099b3acecaa"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "toolchain_find"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e85654a10e7a07a47c6f19d93818f3f343e22927f2fa280c84f7c8042743413"
+dependencies = [
+ "home",
+ "lazy_static",
+ "regex",
+ "semver 0.11.0",
+ "walkdir",
 ]
 
 [[package]]
@@ -2770,7 +3159,7 @@ version = "0.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e0d2eaa99c3c2e41547cfa109e910a68ea03823cccad4a0525dcbc9b01e8c71"
 dependencies = [
- "ansi_term",
+ "ansi_term 0.12.1",
  "chrono",
  "lazy_static",
  "matchers",
@@ -2817,6 +3206,43 @@ name = "typenum"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b63708a265f51345575b27fe43f9500ad611579e764c79edbc2037b1121959ec"
+
+[[package]]
+name = "typify"
+version = "0.0.6-dev"
+source = "git+https://github.com/oxidecomputer/typify#5132e748f91311aadd56011b97f51c4f32373985"
+dependencies = [
+ "typify-impl",
+ "typify-macro",
+]
+
+[[package]]
+name = "typify-impl"
+version = "0.0.6-dev"
+source = "git+https://github.com/oxidecomputer/typify#5132e748f91311aadd56011b97f51c4f32373985"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "rustfmt-wrapper",
+ "schemars",
+ "serde_json",
+ "syn",
+ "thiserror",
+]
+
+[[package]]
+name = "typify-macro"
+version = "0.0.6-dev"
+source = "git+https://github.com/oxidecomputer/typify#5132e748f91311aadd56011b97f51c4f32373985"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "schemars",
+ "serde_json",
+ "syn",
+ "typify-impl",
+]
 
 [[package]]
 name = "ucd-trie"
@@ -2887,20 +3313,6 @@ dependencies = [
 
 [[package]]
 name = "usdt"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9aba50f80946d1ef9b21f40e46b74dd211b9ff5e603ad028c0d58871835ada4f"
-dependencies = [
- "dof",
- "dtrace-parser",
- "serde",
- "usdt-attr-macro 0.1.5",
- "usdt-impl 0.1.14",
- "usdt-macro 0.1.15",
-]
-
-[[package]]
-name = "usdt"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ede7ff58821fee096f60fd731d56f61b56883a4808a290cac15df29baf1bc50"
@@ -2908,23 +3320,9 @@ dependencies = [
  "dof",
  "dtrace-parser",
  "serde",
- "usdt-attr-macro 0.2.1",
- "usdt-impl 0.2.1",
- "usdt-macro 0.2.1",
-]
-
-[[package]]
-name = "usdt-attr-macro"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd55281622053408612f20f3d92df0db533d4b15ec4842883e94c23b1e9351f2"
-dependencies = [
- "dtrace-parser",
- "proc-macro2",
- "quote",
- "serde_tokenstream",
- "syn",
- "usdt-impl 0.1.14",
+ "usdt-attr-macro",
+ "usdt-impl",
+ "usdt-macro",
 ]
 
 [[package]]
@@ -2938,26 +3336,7 @@ dependencies = [
  "quote",
  "serde_tokenstream",
  "syn",
- "usdt-impl 0.2.1",
-]
-
-[[package]]
-name = "usdt-impl"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e71989deee492038dec04ea3e5ad68bd876947b5ba35562d0bee04e784557f6a"
-dependencies = [
- "byteorder",
- "dof",
- "dtrace-parser",
- "libc",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn",
- "thiserror",
- "thread-id",
+ "usdt-impl",
 ]
 
 [[package]]
@@ -2981,20 +3360,6 @@ dependencies = [
 
 [[package]]
 name = "usdt-macro"
-version = "0.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95e4feae7fabf18bc31413acb5bdeb52581c093e2578e80ab7c2a8402ad4e039"
-dependencies = [
- "dtrace-parser",
- "proc-macro2",
- "quote",
- "serde_tokenstream",
- "syn",
- "usdt-impl 0.1.14",
-]
-
-[[package]]
-name = "usdt-macro"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af8dae3bb94dfc25189d8566b8da97ad05003fe24346b118c697c6671b4b7d10"
@@ -3004,7 +3369,7 @@ dependencies = [
  "quote",
  "serde_tokenstream",
  "syn",
- "usdt-impl 0.2.1",
+ "usdt-impl",
 ]
 
 [[package]]
@@ -3044,7 +3409,7 @@ checksum = "5fecdca9a5291cc2b8dcf7dc02453fee791a280f3743cb0905f8822ae463b3fe"
 [[package]]
 name = "viona_api"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=demo_m2#4b8c6b82fa5f588b3fb7b28b92ba654ecb4d28bc"
+source = "git+https://github.com/oxidecomputer/propolis?rev=00ec8cf18f6a2311b0907f0b16b0ff8a327944d1#00ec8cf18f6a2311b0907f0b16b0ff8a327944d1"
 
 [[package]]
 name = "walkdir"
@@ -3069,9 +3434,9 @@ dependencies = [
 
 [[package]]
 name = "wasi"
-version = "0.10.2+wasi-snapshot-preview1"
+version = "0.10.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6fbd9a79829dd1ad0cc20627bf1ed606756a7f77edff7b66b7064f9cb327c6"
+checksum = "1a143597ca7c7793eff794def352d41792a93c481eb1042423ff7ff72ba2c31f"
 
 [[package]]
 name = "wasm-bindgen"

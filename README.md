@@ -181,6 +181,30 @@ Pass an option to crucible-downstairs to send traces to Jaeger:
 
 Then, go to `http://localhost:16686` to see the Jaeger UI.
 
+# Oximeter #
+Some basic stats have been added to the downstairs that can be sent to Oximeter.
+Currently, only a locally running Oximeter server is supported, and only at
+the default port. To enable stats when running a downstairs, add the
+`--oximeter <IP:Port>` option.  If running locally, the oixmeter IP:Port is
+127.0.0.1:12221
+
+
+To display the stats, you can use the oxdb command from omicron/oximeter
+along with `jq` to make it pretty.
+
+Replace the UUID below with the UUID for the downstairs you wish to view.
+The available stats are: connect, flush, read, write.
+
+```
+cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid=12345678-3801-3801-3801-000000003801 | jq
+```
+
+Here is a deeper example, to just print the latest count for flush:
+```
+LAST_FLUSH=$(cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid=12345678-3801-3801-3801-000000003801 | jq '.[].measurements[].timestamp '| sort -n | tail -1)
+cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid=12345678-3801-3801-3801-000000003801 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
+```
+
 ## License
 
 Unless otherwise noted, all components are licensed under the [Mozilla Public License Version 2.0](LICENSE).

@@ -89,7 +89,6 @@ pub struct Opt {
 
 pub fn opts() -> Result<Opt> {
     let opt: Opt = Opt::from_args();
-    println!("raw options: {:?}", opt);
 
     if opt.target.is_empty() {
         bail!("must specify at least one --target");
@@ -145,8 +144,13 @@ fn get_region_info(
     }
 
     println!(
-        "Region has: es:{:?}  bs:{}  ts:{}  tb:{} max_io:{}",
-        extent_size.value, block_size, total_size, total_blocks, max_block_io,
+        "Region: es:{:?}  bs:{}  ts:{}  tb:{}  max_io:{} or {}",
+        extent_size.value,
+        block_size,
+        total_size,
+        total_blocks,
+        max_block_io,
+        (max_block_io as u64 * block_size),
     );
 
     /*
@@ -318,7 +322,7 @@ fn main() -> Result<()> {
         Workload::Generic => {
             runtime.block_on(generic_workload(
                 &guest,
-                5000,
+                500,
                 &mut region_info,
             ))?;
         }
@@ -329,7 +333,7 @@ fn main() -> Result<()> {
         }
         Workload::Rand => {
             println!("Run random test");
-            runtime.block_on(rand_workload(&guest, 5000, &mut region_info))?;
+            runtime.block_on(rand_workload(&guest, 1000, &mut region_info))?;
         }
         Workload::Span => {
             println!("Span test");
@@ -614,7 +618,7 @@ async fn generic_workload(
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            println!("{}/{} FLUSH", i, count);
+            println!("{:4}/{:4} FLUSH", i, count);
             let mut waiter = guest.flush()?;
             waiter.block_wait()?;
         } else {
@@ -644,7 +648,7 @@ async fn generic_workload(
                 let data = Bytes::from(vec);
 
                 println!(
-                    "{}/{} WRITE {}:{}",
+                    "{:4}/{:4} WRITE {}:{}",
                     i,
                     count,
                     offset.value,
@@ -658,7 +662,7 @@ async fn generic_workload(
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{}/{} READ  {}:{}",
+                    "{:4}/{:4} READ  {}:{}",
                     i,
                     count,
                     offset.value,
@@ -678,14 +682,6 @@ async fn generic_workload(
                 }
             }
         }
-    }
-
-    if let Err(e) = verify_volume(guest, ri) {
-        bail!("Final volume verify failed: {:?}", e)
-    }
-
-    if count >= 10 {
-        print_write_count(ri);
     }
 
     Ok(())
@@ -775,7 +771,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
     let data = Bytes::from(vec);
 
-    println!("IO at block {}, len:{}", offset.value, data.len());
+    println!("IO at block {:5}, len:{:7}", offset.value, data.len());
 
     let mut waiter = guest.write(offset, data)?;
     waiter.block_wait()?;
@@ -798,7 +794,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 }
 
 /*
- * Generate a random offset and length, and write to then read from
+ * Generate a random offset and length, and write, flush, then read from
  * that offset/length.  Verify the data is what we expect.
  */
 async fn rand_workload(
@@ -846,7 +842,7 @@ async fn rand_workload(
         let data = Bytes::from(vec);
 
         println!(
-            "{}/{} IO at block {}, len:{}",
+            "{:4}/{:4} IO at block {:5}, len:{:7}",
             c,
             count,
             offset.value,
