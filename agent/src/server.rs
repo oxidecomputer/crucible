@@ -2,8 +2,8 @@ use super::datafile::DataFile;
 use super::model;
 use anyhow::{anyhow, Result};
 use dropshot::{
-    endpoint, HttpError, HttpResponseOk, Path as TypedPath, RequestContext,
-    TypedBody,
+    endpoint, HttpError, HttpResponseDeleted, HttpResponseOk,
+    Path as TypedPath, RequestContext, TypedBody,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -82,11 +82,11 @@ async fn region_get(
 async fn region_delete(
     rc: Arc<RequestContext<Arc<DataFile>>>,
     path: TypedPath<RegionPath>,
-) -> SResult<HttpResponseOk<()>, HttpError> {
+) -> SResult<HttpResponseDeleted, HttpError> {
     let p = path.into_inner();
 
     match rc.context().destroy(&p.id) {
-        Ok(_) => Ok(HttpResponseOk(())),
+        Ok(_) => Ok(HttpResponseDeleted()),
         Err(e) => Err(HttpError::for_bad_request(None, e.to_string())),
     }
 }

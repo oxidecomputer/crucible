@@ -1,6 +1,7 @@
 [workspace]
 members = [
 	"agent",
+	"agent-client",
 	"client",
 	"common",
 	"downstairs",

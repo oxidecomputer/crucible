@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
 use slog::{error, info, o, warn, Logger};
 use std::collections::HashSet;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,9 +62,7 @@ async fn main() -> Result<()> {
                 .write(true)
                 .truncate(true)
                 .open(output)?;
-            let api = server::make_api()?;
-            api.openapi("Crucible Agent", "0.0.0").write(&mut f)?;
-            Ok(())
+            write_openapi(&mut f)
         }
         Args::Run {
             data_dir,
@@ -127,6 +126,12 @@ async fn main() -> Result<()> {
             server::run_server(&log, listen, df).await
         }
     }
+}
+
+fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
+    let api = server::make_api()?;
+    api.openapi("Crucible Agent", "0.0.0").write(f)?;
+    Ok(())
 }
 
 /**
@@ -448,4 +453,17 @@ fn worker_region_destroy(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::write_openapi;
+
+    #[test]
+    fn test_openapi() {
+        let mut raw = Vec::new();
+        write_openapi(&mut raw).unwrap();
+        let actual = String::from_utf8(raw).unwrap();
+        expectorate::assert_contents("../openapi/crucible-agent.json", &actual);
+    }
 }
