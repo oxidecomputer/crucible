@@ -133,10 +133,10 @@ impl Producer for DsStatOuter {
 pub async fn ox_stats(
     dss: DsStatOuter,
     registration_address: SocketAddr,
+    my_address: SocketAddr,
 ) -> Result<()> {
-    let address = "[::1]:0".parse().unwrap();
     let dropshot_config = ConfigDropshot {
-        bind_address: address,
+        bind_address: my_address,
         request_body_max_bytes: 2048,
     };
     let logging_config = ConfigLogging::StderrTerminal {
@@ -145,14 +145,13 @@ pub async fn ox_stats(
 
     let server_info = ProducerEndpoint {
         id: Uuid::new_v4(),
-        address,
+        address: my_address,
         base_route: "/collect".to_string(),
         interval: Duration::from_secs(10),
     };
 
     let config = Config {
         server_info,
-        // registration_address: "127.0.0.1:12221".parse().unwrap(),
         registration_address,
         dropshot_config,
         logging_config,

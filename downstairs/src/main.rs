@@ -1615,7 +1615,11 @@ async fn main() -> Result<()> {
                 let dss = dssw.dss.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = stats::ox_stats(dss, oximeter).await {
+                    let address =
+                        SocketAddr::new(std::net::IpAddr::V4(address), 0);
+                    if let Err(e) =
+                        stats::ox_stats(dss, oximeter, address).await
+                    {
                         println!("ERROR: oximeter failed: {:?}", e);
                     } else {
                         println!("OK: oximeter all done");
