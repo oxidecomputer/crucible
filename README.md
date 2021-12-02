@@ -26,18 +26,18 @@ different window) on the same machine.  Each should have a unique UUID, port,
 and directory where the region files will be.  Once each is created we will
 then `run` them.
 ```
-$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -p 3801 -d var/3801
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3801
 $ cargo run -q -p crucible-downstairs -- run -p 3801 -d var/3801
 ...
 ```
 
 ```
-$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -p 3802 -d var/3802
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3802
 $ cargo run -q -p crucible-downstairs -- run -p 3802 -d var/3802
 ```
 
 ```
-$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -p 3803 -d var/3803
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3803
 $ cargo run -q -p crucible-downstairs -- run -p 3803 -d var/3803
 ```
 
@@ -185,7 +185,7 @@ Then, go to `http://localhost:16686` to see the Jaeger UI.
 Some basic stats have been added to the downstairs that can be sent to Oximeter.
 Currently, only a locally running Oximeter server is supported, and only at
 the default port. To enable stats when running a downstairs, add the
-`--oximeter <IP:Port>` option.  If running locally, the oixmeter IP:Port is
+`--oximeter <IP:Port>` option.  If running locally, the oximeter IP:Port is
 127.0.0.1:12221
 
 
