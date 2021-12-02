@@ -107,8 +107,8 @@ impl<'a> Instance<'a> {
     }
 
     /**
-     * Get the current state and the next state (if any) of the instance from
-     * the restarter.
+     * Get the current state and the next state (if any) of the instance
+     * from the restarter.
      */
     pub fn states(&self) -> Result<(Option<State>, Option<State>)> {
         let restarter = self.get_pg("restarter")?.ok_or(ScfError::NotFound)?;

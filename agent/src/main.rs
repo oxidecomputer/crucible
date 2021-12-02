@@ -100,8 +100,9 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&datapath)?;
 
             /*
-             * Ensure that the SMF service we will use exists already.  If not,
-             * something is seriously wrong with this machine.
+             * Ensure that the SMF service we will use exists already.  If
+             * not, something is seriously wrong with this
+             * machine.
              */
             {
                 let scf = crucible_smf::Scf::new()?;
@@ -141,10 +142,10 @@ fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
  * downstairs data files, but SMF services are a bit different.
  *
  * If the zone is upgraded, we will likely start from a blank SMF repository
- * database and will need to set up all of our instances again.  As such, the
- * process of aligning SMF with the intent datastore is a separate idempotent
- * routine that we can call both at startup and after any changes to the intent
- * store.
+ * database and will need to set up all of our instances again.  As such,
+ * the process of aligning SMF with the intent datastore is a separate
+ * idempotent routine that we can call both at startup and after any changes
+ * to the intent store.
  */
 fn apply_smf(
     log: &Logger,
@@ -161,8 +162,8 @@ fn apply_smf(
         .ok_or(anyhow!("service missing"))?;
 
     /*
-     * First, check to see if there are any instances that we do not expect, and
-     * remove them.
+     * First, check to see if there are any instances that we do not expect,
+     * and remove them.
      */
     let expected_instances = all
         .iter()
@@ -252,8 +253,8 @@ fn apply_smf(
         } else {
             /*
              * No running snapshot means the service has never started.  Prod
-             * the restarter by disabling it, then we'll create everything from
-             * scratch.
+             * the restarter by disabling it, then we'll create everything
+             * from scratch.
              */
             inst.disable(false)?;
             true
@@ -382,8 +383,9 @@ fn worker_region_create(
     let log = log.new(o!("region" => region.id.0.to_string()));
 
     /*
-     * We may have crashed half way through a previous provision.  To make this
-     * idempotent, clean out the target data directory and try again.
+     * We may have crashed half way through a previous provision.  To make
+     * this idempotent, clean out the target data directory and try
+     * again.
      *
      * XXX This could obviously be improved.
      */

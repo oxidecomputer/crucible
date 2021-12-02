@@ -85,10 +85,10 @@ impl DataFile {
     }
 
     /**
-     * Nexus will request that we create a new region by telling us the ID it
-     * should have.  To make this idempotent, we will either create the region
-     * or return the current state of the region if it was already created in
-     * the past.
+     * Nexus will request that we create a new region by telling us the ID
+     * it should have.  To make this idempotent, we will either create
+     * the region or return the current state of the region if it was
+     * already created in the past.
      *
      * The actual heavy lifting is performed in a worker thread.
      */
@@ -125,8 +125,9 @@ impl DataFile {
                     .filter(|r| {
                         /*
                          * We can ignore any completely destroyed region.  We
-                         * choose not to ignore regions in the failed state for
-                         * now, as they may still prevent use of their assigned
+                         * choose not to ignore regions in the failed state
+                         * for now, as they may still
+                         * prevent use of their assigned
                          * port number.
                          */
                         r.state != State::Destroyed
@@ -288,19 +289,20 @@ impl DataFile {
     }
 
     /**
-     * The worker thread will request the first region that is in a particular
-     * state.  If there are no tasks in the provided state, we sleep waiting for
-     * work to do.
+     * The worker thread will request the first region that is in a
+     * particular state.  If there are no tasks in the provided state,
+     * we sleep waiting for work to do.
      */
     pub fn first_in_states(&self, states: &[State]) -> Region {
         let mut inner = self.inner.lock().unwrap();
 
         loop {
             /*
-             * States are provided in priority order.  We check for regions in
-             * the first requested state before we check for regions in the
-             * second provided state, etc.  This allows us to focus on
-             * destroying tombstoned regions ahead of creating new regions.
+             * States are provided in priority order.  We check for regions
+             * in the first requested state before we check for
+             * regions in the second provided state, etc.  This
+             * allows us to focus on destroying tombstoned
+             * regions ahead of creating new regions.
              */
             for s in states {
                 for r in inner.regions.values() {
@@ -311,8 +313,8 @@ impl DataFile {
             }
 
             /*
-             * If we did not find any regions in the specified state, sleep on
-             * the condvar.
+             * If we did not find any regions in the specified state, sleep
+             * on the condvar.
              */
             inner = self.bell.wait(inner).unwrap();
         }
