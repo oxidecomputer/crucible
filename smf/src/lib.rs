@@ -205,7 +205,7 @@ fn str_from(buf: &mut Vec<u8>, ret: libc::ssize_t) -> Result<String> {
 
 #[derive(Debug)]
 pub struct Iter<'a> {
-    scf: &'a Scf,
+    _scf: &'a Scf, // Prevent from being dropped
     iter: NonNull<scf_iter_t>,
 }
 
@@ -214,7 +214,7 @@ impl<'a> Iter<'a> {
         if let Some(iter) =
             NonNull::new(unsafe { scf_iter_create(scf.handle.as_ptr()) })
         {
-            Ok(Iter { scf, iter })
+            Ok(Iter { _scf: scf, iter })
         } else {
             Err(ScfError::last())
         }
@@ -232,7 +232,7 @@ impl Drop for Iter<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(target_os = "illumos", test))]
 mod tests {
     use super::{Iter, Scf, ScfError, Scope};
 

@@ -61,7 +61,7 @@ impl<'a> Property<'a> {
         match values.len() {
             0 => Ok(None),
             1 => Ok(values.pop()),
-            n => Err(ScfError::Internal),
+            _ => Err(ScfError::Internal),
         }
     }
 }

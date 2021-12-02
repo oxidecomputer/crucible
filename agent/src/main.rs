@@ -31,6 +31,7 @@ enum Args {
         #[structopt(short = "l", parse(try_from_str))]
         listen: SocketAddr,
 
+        #[allow(dead_code)]
         #[structopt(short = "i", parse(try_from_str))]
         uuid: uuid::Uuid,
 
@@ -43,6 +44,7 @@ enum Args {
         #[structopt(short = "p", parse(try_from_str))]
         prefix: String,
 
+        #[allow(dead_code)]
         #[structopt(short = "n", parse(try_from_str))]
         nexus: Option<SocketAddr>,
     },
@@ -66,8 +68,8 @@ async fn main() -> Result<()> {
         Args::Run {
             data_dir,
             listen,
-            uuid,
-            nexus,
+            uuid: _,
+            nexus: _,
             downstairs_program,
             lowport,
             prefix,
@@ -418,11 +420,13 @@ fn worker_region_create(
      * - create/enable SMF instance
      */
     let scf = crucible_smf::Scf::new()?;
-    let scope = scf.scope_local()?;
+    let _scope = scf.scope_local()?;
 
     /*
      * First, ensure that the service exists.
      */
+
+    // TODO this is where Josh stopped...
 
     Ok(())
 }

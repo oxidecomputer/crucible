@@ -1,12 +1,12 @@
 use super::datafile::DataFile;
 use super::model;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use dropshot::{
     endpoint, HttpError, HttpResponseOk, Path as TypedPath, RequestContext,
     TypedBody,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use slog::{o, Logger};
 use std::net::SocketAddr;
 use std::result::Result as SResult;

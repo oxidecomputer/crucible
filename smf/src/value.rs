@@ -8,7 +8,7 @@ use super::{buf_for, str_from, Iter, Property, Result, Scf, ScfError};
 
 #[derive(Debug)]
 pub struct Value<'a> {
-    pub(crate) scf: &'a Scf,
+    _scf: &'a Scf, // Prevent from being dropped
     pub(crate) value: NonNull<scf_value_t>,
 }
 
@@ -17,7 +17,7 @@ impl<'a> Value<'a> {
         if let Some(value) =
             NonNull::new(unsafe { scf_value_create(scf.handle.as_ptr()) })
         {
-            Ok(Value { scf, value })
+            Ok(Value { _scf: scf, value })
         } else {
             Err(ScfError::last())
         }

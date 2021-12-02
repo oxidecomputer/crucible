@@ -1,13 +1,8 @@
 use std::ffi::CString;
 use std::ptr::NonNull;
 
-use num_traits::cast::FromPrimitive;
-
 use super::scf_sys::*;
-use super::{
-    buf_for, str_from, Iter, Property, PropertyGroup, Result, Scf, ScfError,
-    Value,
-};
+use super::{PropertyGroup, Result, ScfError, Value};
 
 #[derive(Debug)]
 pub struct Transaction<'a> {
@@ -191,8 +186,8 @@ impl<'a> TransactionEntry<'a> {
 impl Drop for TransactionEntry<'_> {
     fn drop(&mut self) {
         /*
-         * First, reset any Values that might have been associated.  They'll get
-         * freed separately in their own drop actions.
+         * First, reset any Values that might have been associated.  They'll
+         * get freed separately in their own drop actions.
          */
         unsafe { scf_entry_reset(self.entry.as_ptr()) };
         unsafe { scf_entry_destroy(self.entry.as_ptr()) };

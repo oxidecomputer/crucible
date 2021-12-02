@@ -63,15 +63,17 @@ impl CreateRegion {
 }
 
 #[derive(
-    Serialize, Deserialize, JsonSchema, Debug, PartialEq, Eq, Clone, Ord,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    PartialOrd,
+    Ord,
 )]
 pub struct RegionId(pub String);
-
-impl PartialOrd for RegionId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(&other.0)
-    }
-}
 
 #[cfg(test)]
 mod test {
@@ -84,6 +86,9 @@ mod test {
             volume_id: "def".to_string(),
             port_number: 1701,
             state: State::Requested,
+            block_size: 4096,
+            extent_size: 4096,
+            extent_count: 100,
         };
 
         let s = serde_json::to_string(&r).expect("serialise");
