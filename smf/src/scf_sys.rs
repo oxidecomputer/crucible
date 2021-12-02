@@ -913,6 +913,7 @@ mod dummy {
     }
 }
 
+#[cfg(not(target_os = "illumos"))]
 pub use dummy::*;
 
 #[cfg(all(target_os = "illumos", test))]
