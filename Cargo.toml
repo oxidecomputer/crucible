@@ -1,5 +1,7 @@
 [workspace]
 members = [
+	"agent",
+	"agent-client",
 	"client",
 	"common",
 	"downstairs",
@@ -7,5 +9,6 @@ members = [
 	"nbd_server",
 	"protocol",
 	"scope",
+	"smf",
 	"upstairs",
 ]

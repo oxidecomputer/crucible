@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+
+<service_bundle type='manifest' name='oxide-crucible-agent'>
+
+<service name='oxide/crucible/agent' type='service' version='1'>
+  <create_default_instance enabled='false' />
+
+  <!-- Run once we hit multi-user, so that the network and file systems have
+    been set up. -->
+  <dependency name='multi-user' grouping='require_all' restart_on='none'
+    type='service'>
+    <service_fmri value='svc:/milestone/multi-user' />
+  </dependency>
+
+  <exec_method type='method' name='start'
+    exec='/opt/oxide/crucible/bin/agent run
+      -D /opt/oxide/crucible/bin/downstairs
+      -d %{config/datadir}
+      -l %{config/listen}
+      -i %{config/uuid}
+      -n %{config/nexus}
+      -P %{config/portbase}
+      -p %{config/prefix}'
+    timeout_seconds='30'
+    />
+
+  <exec_method type='method' name='stop' exec=':kill' timeout_seconds='30' />
+
+  <property_group name='startd' type='framework'>
+    <propval name='duration' type='astring' value='child' />
+  </property_group>
+
+  <property_group name='config' type='application'>
+    <propval name='datadir' type='astring' value='/data/crucible' />
+    <propval name='listen' type='astring' value='127.0.0.1:17000' />
+    <propval name='uuid' type='astring' value='' />
+    <propval name='nexus' type='astring' value='127.0.0.1:12221' />
+    <propval name='portbase' type='astring' value='19000' />
+    <propval name='prefix' type='astring' value='downstairs' />
+  </property_group>
+
+  <stability value='Unstable' />
+
+  <template>
+    <common_name>
+      <loctext xml:lang='C'>Oxide Crucible Downstairs</loctext>
+    </common_name>
+    <description>
+      <loctext xml:lang='C'>Disk-side storage component</loctext>
+    </description>
+  </template>
+</service>
+
+</service_bundle>
+<!-- vim: set ts=2 sts=2 sw=2 et: -->

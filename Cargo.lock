@@ -433,6 +433,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-agent"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crucible-common 0.0.0",
+ "crucible-smf",
+ "dropshot",
+ "expectorate",
+ "futures",
+ "http",
+ "hyper",
+ "omicron-common",
+ "openapiv3",
+ "schemars",
+ "serde",
+ "serde_json",
+ "slog",
+ "structopt",
+ "subprocess",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "crucible-agent-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "percent-encoding",
+ "progenitor",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "crucible-client"
 version = "0.1.0"
 dependencies = [
@@ -613,6 +650,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-smf"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "num-derive",
+ "num-traits",
+ "thiserror",
+]
+
+[[package]]
 name = "crypto-mac"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -678,6 +725,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "difference"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "524cbf6897b527295dff137cec09ecf3a05f4fddffd7dfcd1585403449e74198"
+
+[[package]]
 name = "digest"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -738,7 +791,7 @@ dependencies = [
 [[package]]
 name = "dropshot"
 version = "0.6.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#a2928e5f144db66c8a156015a501455d9b9063e2"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#e145e9bf23231edca18eb7005fff936998517fda"
 dependencies = [
  "async-trait",
  "base64",
@@ -773,7 +826,7 @@ dependencies = [
 [[package]]
 name = "dropshot_endpoint"
 version = "0.6.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#a2928e5f144db66c8a156015a501455d9b9063e2"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#e145e9bf23231edca18eb7005fff936998517fda"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -821,6 +874,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3de9ad4541d99dc22b59134e7ff8dc3d6c988c89ecd7324bf10a8362b07a2afa"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "expectorate"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "804d601ea8a13ddbecf5ab4b6cf75b5d6d0539479c6fb2aea1596e352a5ee27e"
+dependencies = [
+ "difference",
+ "newline-converter",
 ]
 
 [[package]]
@@ -1430,6 +1493,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "newline-converter"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f81c2b19eebbc4249b3ca6aff70ae05bf18d6a99b7cc63cf0248774e640565"
+
+[[package]]
 name = "newtype_derive"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1462,6 +1531,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f6bb902e437b6d86e03cce10a7e2af662292c5dfef23b65899ea3ac9354ad44"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2787,6 +2867,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "subprocess"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "055cf3ebc2981ad8f0a5a17ef6652f652d87831f79fddcba2ac57bcb9a0aa407"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
