@@ -1616,7 +1616,7 @@ async fn main() -> Result<()> {
 
                 tokio::spawn(async move {
                     let address =
-                        SocketAddr::new(std::net::IpAddr::V4(address), port);
+                        SocketAddr::new(std::net::IpAddr::V4(address), 0);
                     if let Err(e) =
                         stats::ox_stats(dss, oximeter, address).await
                     {
