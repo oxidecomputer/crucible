@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use anyhow::{anyhow, bail, Result};
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
 use slog::{error, info, o, warn, Logger};

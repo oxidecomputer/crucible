@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use std::ptr::NonNull;
 
 use super::scf_sys::*;

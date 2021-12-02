@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use crucible_smf::{PropertyGroups, Result};
 
 fn fil(n: usize, c: char) -> String {

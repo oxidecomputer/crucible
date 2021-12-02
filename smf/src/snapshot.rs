@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use std::ffi::CString;
 use std::ptr::NonNull;
 

@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use super::model::{CreateRegion, Region, RegionId, State};
 use anyhow::{anyhow, bail, Result};
 use crucible_common::write_json;

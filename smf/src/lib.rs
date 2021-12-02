@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use num_traits::FromPrimitive;
 use std::ffi::CStr;
 use std::ptr::NonNull;

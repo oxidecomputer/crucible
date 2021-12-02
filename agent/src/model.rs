@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,5 @@
+// Copyright 2021 Oxide Computer Company
+
 use super::datafile::DataFile;
 use super::model;
 use anyhow::{anyhow, Result};
