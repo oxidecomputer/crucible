@@ -484,13 +484,18 @@ mod test {
         work.in_progress(next_id, 2);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        assert_eq!(work.process_ds_completion(next_id, 1, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -499,7 +504,8 @@ mod test {
         work.ack(next_id);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
@@ -536,13 +542,18 @@ mod test {
         assert_eq!(work.completed.len(), 0);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
 
         work.ack(next_id);
@@ -581,7 +592,8 @@ mod test {
         assert_eq!(work.completed.len(), 0);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
@@ -631,7 +643,11 @@ mod test {
             &vec![],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -644,7 +660,11 @@ mod test {
             &vec![],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 1, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 1, response, &None)
+                .unwrap(),
+            false
+        );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
@@ -653,7 +673,11 @@ mod test {
             &vec![],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            false
+        );
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
         assert_eq!(work.completed.len(), 0);
@@ -698,7 +722,11 @@ mod test {
             &vec![],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 1, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 1, response, &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
         assert_eq!(work.completed.len(), 0);
 
@@ -711,7 +739,11 @@ mod test {
             &vec![],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            false
+        );
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
         // That this is still zero is part of the test
@@ -770,7 +802,11 @@ mod test {
             &vec![],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
 
         work.ack(next_id);
@@ -881,11 +917,16 @@ mod test {
         )]);
 
         assert_eq!(
-            upstairs.process_ds_operation(next_id, 2, response.clone()).unwrap(),
+            upstairs
+                .process_ds_operation(next_id, 2, response.clone())
+                .unwrap(),
             true
         );
 
-        assert_eq!(upstairs.process_ds_operation(next_id, 0, response).unwrap(), false);
+        assert_eq!(
+            upstairs.process_ds_operation(next_id, 0, response).unwrap(),
+            false
+        );
 
         {
             // emulated run in up_ds_listen
@@ -974,7 +1015,11 @@ mod test {
 
         let response = Ok(vec![]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            true
+        );
 
         assert!(work.downstairs_errors.get(&0).is_some());
         assert!(work.downstairs_errors.get(&1).is_some());
@@ -1002,7 +1047,11 @@ mod test {
             &vec![3],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            true
+        );
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
@@ -1065,7 +1114,11 @@ mod test {
             &vec![3],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            true
+        );
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
@@ -1125,7 +1178,11 @@ mod test {
             &vec![6],
         )]);
 
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            true
+        );
 
         assert!(work.active.get(&next_id).unwrap().data.is_some());
         assert_eq!(
@@ -1164,7 +1221,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            true
+        );
 
         // One completion of a read means we can ACK
         assert_eq!(work.ackable_work().len(), 1);
@@ -1174,13 +1235,21 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 1, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 1, response, &None)
+                .unwrap(),
+            false
+        );
 
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 2, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, response, &None)
+                .unwrap(),
+            false
+        );
 
         // Make sure the job is still active
         assert_eq!(work.completed.len(), 0);
@@ -1209,13 +1278,19 @@ mod test {
 
         // Complete the Flush at each downstairs.
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         // Two completed means we return true (ack ready now)
-        assert_eq!(work.process_ds_completion(next_id, 1, Ok(vec![]), &None).unwrap(), true);
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
 
@@ -1281,10 +1356,26 @@ mod test {
         assert!(work.in_progress(id2, 1).is_some());
 
         // Simulate completing both writes to downstairs 0 and 1
-        assert_eq!(work.process_ds_completion(id1, 0, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id1, 1, Ok(vec![]), &None).unwrap(), true);
-        assert_eq!(work.process_ds_completion(id2, 0, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id2, 1, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            work.process_ds_completion(id2, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id2, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
 
         // Both writes can now ACK to the guest.
         work.ack(id1);
@@ -1305,11 +1396,13 @@ mod test {
 
         // Simulate completing the flush to downstairs 0 and 1
         assert_eq!(
-            work.process_ds_completion(flush_id, 0, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(flush_id, 0, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(flush_id, 1, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(flush_id, 1, Ok(vec![]), &None)
+                .unwrap(),
             true
         );
 
@@ -1333,8 +1426,16 @@ mod test {
         // Now, finish the writes to downstairs 2
         assert!(work.in_progress(id1, 2).is_some());
         assert!(work.in_progress(id2, 2).is_some());
-        assert_eq!(work.process_ds_completion(id1, 2, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id2, 2, Ok(vec![]), &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(id1, 2, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id2, 2, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
 
         // The job should not move to completed until the flush goes as well.
         assert_eq!(work.completed.len(), 0);
@@ -1342,7 +1443,8 @@ mod test {
         // Complete the flush on downstairs 2.
         work.in_progress(flush_id, 2);
         assert_eq!(
-            work.process_ds_completion(flush_id, 2, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(flush_id, 2, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
 
@@ -1385,12 +1487,18 @@ mod test {
 
         // Complete the write on all three downstairs.
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
-        assert_eq!(work.process_ds_completion(next_id, 1, Ok(vec![]), &None).unwrap(), true);
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
 
@@ -1413,12 +1521,18 @@ mod test {
 
         // Complete the flush on all three downstairs.
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
-        assert_eq!(work.process_ds_completion(next_id, 1, Ok(vec![]), &None).unwrap(), true);
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
 
@@ -1482,10 +1596,26 @@ mod test {
         assert!(work.in_progress(id2, 2).is_some());
 
         // Complete the writes that we sent to the 2 downstairs.
-        assert_eq!(work.process_ds_completion(id1, 0, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id1, 1, Ok(vec![]), &None).unwrap(), true);
-        assert_eq!(work.process_ds_completion(id2, 1, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id2, 2, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            work.process_ds_completion(id2, 1, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id2, 2, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
 
         // Ack the writes to the guest.
         work.ack(id1);
@@ -1506,11 +1636,13 @@ mod test {
 
         // Complete the flush on those downstairs.
         assert_eq!(
-            work.process_ds_completion(flush_id, 0, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(flush_id, 0, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(flush_id, 2, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(flush_id, 2, Ok(vec![]), &None)
+                .unwrap(),
             true
         );
 
@@ -1532,8 +1664,16 @@ mod test {
         // Now, finish sending and completing the writes
         assert!(work.in_progress(id1, 2).is_some());
         assert!(work.in_progress(id2, 0).is_some());
-        assert_eq!(work.process_ds_completion(id1, 2, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id2, 0, Ok(vec![]), &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(id1, 2, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id2, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
 
         // Completed work won't happen till the last flush is done
         assert_eq!(work.completed.len(), 0);
@@ -1541,7 +1681,8 @@ mod test {
         // Send and complete the flush
         work.in_progress(flush_id, 1);
         assert_eq!(
-            work.process_ds_completion(flush_id, 1, Ok(vec![]), &None).unwrap(),
+            work.process_ds_completion(flush_id, 1, Ok(vec![]), &None)
+                .unwrap(),
             false
         );
 
@@ -1579,7 +1720,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            true
+        );
 
         // One completion should allow for an ACK
         assert_eq!(work.ackable_work().len(), 1);
@@ -1623,7 +1768,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1633,7 +1782,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 1, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 1, response, &None)
+                .unwrap(),
+            false
+        );
 
         // Now, take the first downstairs offline.
         work.re_new(0);
@@ -1654,7 +1807,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            true
+        );
         assert_eq!(work.ackable_work().len(), 1);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1688,7 +1845,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            true
+        );
 
         // Verify the read is now AckReady
         assert_eq!(work.ackable_work().len(), 1);
@@ -1719,7 +1880,11 @@ mod test {
             &request,
             &vec![],
         )]);
-        assert_eq!(work.process_ds_completion(next_id, 0, response, &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            false
+        );
         assert_eq!(work.ackable_work().len(), 0);
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
@@ -1755,8 +1920,16 @@ mod test {
         assert!(work.in_progress(id1, 1).is_some());
 
         // Complete the write on two downstairs.
-        assert_eq!(work.process_ds_completion(id1, 0, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id1, 1, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
 
         // Verify AckReady
         let state = work.active.get_mut(&id1).unwrap().ack_status;
@@ -1771,7 +1944,11 @@ mod test {
 
         // Re-submit and complete the write
         assert!(work.in_progress(id1, 1).is_some());
-        assert_eq!(work.process_ds_completion(id1, 1, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
 
         // State should go back to acked.
         let state = work.active.get_mut(&id1).unwrap().ack_status;
@@ -1807,8 +1984,16 @@ mod test {
         assert!(work.in_progress(id1, 1).is_some());
 
         // Complete the write on two downstairs.
-        assert_eq!(work.process_ds_completion(id1, 0, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id1, 1, Ok(vec![]), &None).unwrap(), true);
+        assert_eq!(
+            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
+                .unwrap(),
+            true
+        );
 
         // Verify it is ackable..
         assert_eq!(work.ackable_work().len(), 1);
@@ -1830,8 +2015,16 @@ mod test {
         assert!(work.in_progress(id1, 0).is_some());
         assert!(work.in_progress(id1, 2).is_some());
 
-        assert_eq!(work.process_ds_completion(id1, 0, Ok(vec![]), &None).unwrap(), false);
-        assert_eq!(work.process_ds_completion(id1, 2, Ok(vec![]), &None).unwrap(), false);
+        assert_eq!(
+            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            work.process_ds_completion(id1, 2, Ok(vec![]), &None)
+                .unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -1891,7 +2084,8 @@ mod test {
 
         // should not notify Guest
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &Some(context)).unwrap(),
+            work.process_ds_completion(next_id, 0, response, &Some(context))
+                .unwrap(),
             false
         );
 
