@@ -157,7 +157,7 @@ impl DataFile {
 
         self.store(inner);
 
-        return Ok(r);
+        Ok(r)
     }
 
     /**
