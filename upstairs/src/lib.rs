@@ -118,7 +118,7 @@ async fn process_message(
         return Err(CrucibleError::UuidMismatch.into());
     }
 
-    if u.complete(ds_id, up_coms.client_id, result)? {
+    if u.process_ds_operation(ds_id, up_coms.client_id, result)? {
         up_coms.ds_done_tx.send(ds_id).await?;
     }
 
@@ -1541,7 +1541,7 @@ impl Downstairs {
      * before setting the AckReady state on a ds_id, which another upstairs
      * task is looking for to then ACK back to the guest.
      */
-    fn complete(
+    fn process_ds_completion(
         &mut self,
         ds_id: u64,
         client_id: u8,
@@ -2149,8 +2149,8 @@ impl Upstairs {
     }
 
     fn last_flush_id(&self, client_id: u8) -> u64 {
-        let lf = self.downstairs.lock().unwrap();
-        lf.ds_last_flush[client_id as usize]
+        let ds = self.downstairs.lock().unwrap();
+        ds.ds_last_flush[client_id as usize]
     }
 
     fn set_flush_clear(&self) {
@@ -2752,17 +2752,20 @@ impl Upstairs {
     }
 
     /*
-     * Complete a downstairs operation.
+     * Process a downstairs operation.
+     * We have received a response to an IO operation.  Here we take the
+     * required action for the upstairs depending on what the operation
+     * was and the status it returned.
      *
      * Returns true if the guest should be notified.
      */
-    fn complete(
+    fn process_ds_operation(
         &self,
         ds_id: u64,
         client_id: u8,
         read_data: Result<Vec<ReadResponse>, CrucibleError>,
     ) -> Result<bool> {
-        let mut work = self.downstairs.lock().unwrap();
+        let mut ds = self.downstairs.lock().unwrap();
 
         if !self.is_active() {
             bail!(
@@ -2780,7 +2783,7 @@ impl Upstairs {
          * While the downstairs is away, it's OK to act on the result that
          * we already received, because it may never come back.
          */
-        let ds_state = work.ds_state[client_id as usize];
+        let ds_state = ds.ds_state[client_id as usize];
         if ds_state != DsState::Active {
             println!(
                 "[{}] {} WARNING finish job {} when downstairs state:{:?}",
@@ -2789,7 +2792,7 @@ impl Upstairs {
         }
 
         // Mark this ds_id for the client_id as completed.
-        let notify_guest = work.complete(
+        let notify_guest = ds.process_ds_completion(
             ds_id,
             client_id,
             read_data,
@@ -2797,9 +2800,9 @@ impl Upstairs {
         )?;
 
         // Mark this downstairs as bad if this was a write or flush
-        if let Err(err) = work.client_error(ds_id, client_id) {
+        if let Err(err) = ds.client_error(ds_id, client_id) {
             if err == CrucibleError::UpstairsInactive {
-                drop(work);
+                drop(ds);
 
                 println!(
                     "Saw CrucibleError::UpstairsInactive on client {}!",
@@ -2823,7 +2826,7 @@ impl Upstairs {
              * After work.complete, it's possible that the job is gone
              * due to a retire check
              */
-            else if let Some(job) = work.active.get_mut(&ds_id) {
+            else if let Some(job) = ds.active.get_mut(&ds_id) {
                 if matches!(
                     job.work,
                     IOop::Write {
@@ -3460,7 +3463,7 @@ impl GuestWork {
      * At this point we should have already sent the guest a message
      * saying their IO is done.
      */
-    fn complete(&mut self, gw_id: u64) {
+    fn gw_complete(&mut self, gw_id: u64) {
         let gtos_job = self.active.remove(&gw_id).unwrap();
         assert!(gtos_job.submitted.is_empty());
         self.completed.push(gw_id);
@@ -3481,7 +3484,7 @@ impl GuestWork {
      * This may include moving/decrypting data buffers from completed reads.
      */
     #[instrument]
-    fn ds_complete(
+    fn gw_ds_complete(
         &mut self,
         gw_id: u64,
         ds_id: u64,
@@ -3542,7 +3545,7 @@ impl GuestWork {
                 }
 
                 gtos_job.notify(result);
-                self.complete(gw_id);
+                self.gw_complete(gw_id);
             }
         } else {
             /*
@@ -4076,7 +4079,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             work.ack(ds_id);
 
-            gw.ds_complete(gw_id, ds_id, data, work.result(ds_id));
+            gw.gw_ds_complete(gw_id, ds_id, data, work.result(ds_id));
 
             work.cdt_gw_work_done(ds_id, gw_id);
 
