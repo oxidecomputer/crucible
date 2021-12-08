@@ -24,7 +24,6 @@ function ctrl_c() {
 # This loop will sleep some random time, then kill a downstairs.
 # We currently pick
 downstairs_restart() {
-    echo "Begin loop to Kill and restart loop for the downstairs"
     while :; do
         if [[ -f ${testdir}/up ]]; then
             sleep 5
@@ -118,10 +117,24 @@ if ! cargo build; then
     exit 1
 fi
 
-if [[ ! -d var/3801 ]] || [[ ! -d var/3802 ]] || [[ ! -d var/3803 ]]; then
-    echo "Missing var/380* directories"
-    echo "This test requires you to have created a region at var/380*"
-    exit 1
+# If this port base is different than default, then good luck..
+port_base=8801
+missing=0
+for (( i = 0; i < 3; i++ )); do
+    (( port = port_base + i ))
+    if [[ ! -d var/${port} ]]; then
+        echo "Missing var/${port} directory"
+        missing=1
+    fi
+done
+if [[ missing -eq 1 ]]; then
+    if ! ./tools/create-generic-ds.sh; then
+        echo "Failed to create region directories"
+        exit 1
+    fi
+    echo "Created NEW test region directories"
+else
+    echo "Using existing region directories"
 fi
 
 cds="./target/debug/crucible-downstairs"
@@ -131,23 +144,23 @@ if [[ ! -f ${cds} ]] || [[ ! -f ${cc} ]]; then
     exit 1
 fi
 
-testdir="/tmp/ds_test"
+testdir="/var/tmp/ds_test"
 if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
 mkdir -p ${testdir}
-downstairs_daemon 3801 2>/dev/null &
+downstairs_daemon 8801 2>/dev/null &
 dsd_pid[0]=$!
-downstairs_daemon 3802 2>/dev/null &
+downstairs_daemon 8802 2>/dev/null &
 dsd_pid[1]=$!
-downstairs_daemon 3803 2>/dev/null &
+downstairs_daemon 8803 2>/dev/null &
 dsd_pid[2]=$!
 
 echo "Downstairs have been started"
 
 if [[ $run_on_start -eq 1 ]]; then
-    echo "Downstairs will remain up until /tmp/ds_test/up is removed"
+    echo Downstairs will remain up until "$testdir"/up is removed
     touch ${testdir}/up
 fi
 sleep 1

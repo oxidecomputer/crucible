@@ -29,7 +29,7 @@ if [[ ! -f ${cds} ]] || [[ ! -f ${cc} ]]; then
     exit 1
 fi
 
-testdir="/tmp/ds_test"
+testdir="/var/tmp/test_up"
 if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
@@ -37,8 +37,9 @@ fi
 uuidprefix="12345678-1234-1234-1234-00000000"
 args=()
 downstairs=()
+port_base=8801
 for (( i = 0; i < 3; i++ )); do
-    (( port = 3801 + i ))
+    (( port = port_base + i ))
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
@@ -97,9 +98,10 @@ else
     fi
 fi
 
+# The dump args look different than other downstairs commands
 args=()
 for (( i = 0; i < 3; i++ )); do
-    (( port = 3801 + i ))
+    (( port = port_base + i ))
     dir="${testdir}/$port"
     args+=( -d "$dir" )
 done

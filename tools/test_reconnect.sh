@@ -24,7 +24,7 @@ echo "" > ${loop_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-./tools/downstairs_daemon.sh >> "test_log" 2>&1 &
+./tools/downstairs_daemon.sh >> "$test_log" 2>&1 &
 dsd_pid=$!
 
 # Sleep 5 to give the downstairs time to get going.
@@ -35,26 +35,33 @@ if ! ps -p $dsd_pid > /dev/null; then
     exit 1
 fi
 
+args=()
+port_base=8801
+for (( i = 0; i < 3; i++ )); do
+    (( port = port_base + i ))
+    args+=( -t "127.0.0.1:$port" )
+done
+
 # Initial seed for verify file
-if ! cargo run -q -p crucible-client -- -t 127.0.0.1:3801 -t 127.0.0.1:3802 \
-          -t  127.0.0.1:3803 -w one -q --verify-out alan >> "$test_log" 2>&1 ; then
+if ! cargo run -q -p crucible-client -- "${args[@]}" \
+          -w one -q --verify-out alan >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
-    touch /tmp/ds_test/stop
+    touch /var/tmp/ds_test/stop
     exit 1
 fi
 
 # Now run the quick client test in a loop
-for i in {1..100}
+for i in {1..10}
 do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    cargo run -q -p crucible-client -- -t 127.0.0.1:3801 -t 127.0.0.1:3802 \
-            -t  127.0.0.1:3803 -w one -q --verify-out alan \
+    cargo run -q -p crucible-client -- "${args[@]}" \
+            -w one -q --verify-out alan \
             --verify-in alan >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
-        touch /tmp/ds_test/up 2> /dev/null
+        touch /var/tmp/ds_test/up 2> /dev/null
         (( err += 1 ))
         duration=$SECONDS
         printf "[%03d] Error $result after %d:%02d\n" "$i" \
@@ -72,7 +79,7 @@ $((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
 "$err" $duration | tee -a ${loop_log}
 
 done
-touch /tmp/ds_test/stop
+touch /var/tmp/ds_test/stop
 echo "Final results:" | tee -a ${loop_log}
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
 exit "$err"
