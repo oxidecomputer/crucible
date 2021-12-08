@@ -23,6 +23,7 @@ arg_enum! {
         Big,
         Biggest,
         Burst,
+        Deactivate,
         Demo,
         Dep,
         Dirty,
@@ -241,10 +242,9 @@ fn main() -> Result<()> {
 
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
     guest.activate(opt.gen)?;
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
 
     println!("Wait for a show_work command to finish before sending IO");
     guest.show_work()?;
@@ -291,6 +291,14 @@ fn main() -> Result<()> {
                 &opt.verify_out,
             ))?;
         }
+        Workload::Deactivate => {
+            println!("Deactivate One test");
+            runtime.block_on(one_workload(&guest, &mut region_info))?;
+            guest.deactivate()?;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            println!("Attempt to do IO when not active");
+            runtime.block_on(one_workload(&guest, &mut region_info))?;
+        }
         Workload::Demo => {
             println!("Run Demo test");
             println!("Pause for 10 seconds, then start testing");
@@ -307,7 +315,6 @@ fn main() -> Result<()> {
             println!("Run dep test");
             runtime.block_on(dep_workload(&guest, &mut region_info))?;
         }
-
         Workload::Dirty => {
             println!("Run dirty test");
             runtime.block_on(dirty_workload(&guest, &mut region_info))?;

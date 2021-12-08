@@ -551,41 +551,41 @@ async fn proc(
                 fw.send(Message::Ruok).await?;
                 ping_interval = deadline_secs(5);
             }
-            r = up_coms.ds_active_rx.changed(),
-                if negotiated == 1 && !self_promotion =>
-            {
-                /*
-                 * The activating guest sends us the generation number.
-                 * TODO: Update the promote to active message to send
-                 * the generation number along with the UUID for the
-                 * downstairs to validate.
-                 */
+
+            r = up_coms.ds_active_rx.changed() => {
+                let mut requested_gen: Option<u64> = None;
                 match r {
                     Ok(_) => {
-                        let gen = up_coms.ds_active_rx.borrow();
-                        println!("[{}] received activate with gen {:?}",
-                            up_coms.client_id, *gen);
+                        let ad = up_coms.ds_active_rx.borrow();
+                        match *ad {
+                            ActiveNotify::Activate { gen } => {
+                                // We received an activate.  If we are currently
+                                // waiting for an activate, then use this
+                                // notification to continue moving this
+                                // client forward.
+                                println!("[{}] activate Got gen {}",
+                                    up_coms.client_id, gen);
+
+                                requested_gen = Some(gen);
+                            },
+                            ActiveNotify::Deactivate => {
+                                println!("Got deactivate");
+                                up.ds_transition(up_coms.client_id, DsState::New);
+                                bail!("[{}] disconnect from this", up_coms.client_id);
+                            }
+                        }
                     }
                     Err(e) => {
+                        // XXX Panic here?
                         println!("[{}] received activate error {:?}",
                             up_coms.client_id, e);
                     }
                 }
-                /*
-                 * Promote self to active when message arrives from the Guest.
-                 *
-                 * This check must only be done when the proper
-                 * negotiation step is reached.  If we check too soon, then
-                 * we can be out of order.  We also might have self promoted
-                 * if the upstairs has already received the request to
-                 * activate and this downstairs was not connected at that
-                 * time.
-                 */
-                println!("[{}] client got ds_active_rx, promote!",
-                    up_coms.client_id
-                );
-                self_promotion = true;
-                fw.send(Message::PromoteToActive(up.uuid)).await?;
+                if requested_gen.is_some() && negotiated == 1 && !self_promotion {
+                    println!("[{}] Promote to Active with gen {}",
+                        up_coms.client_id, requested_gen.unwrap());
+                    fw.send(Message::PromoteToActive(up.uuid)).await?;
+                }
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -659,14 +659,6 @@ async fn proc(
                                     "[{}] client is_active_req TRUE, promote!",
                                     up_coms.client_id
                                 );
-                                /*
-                                 * If there is anything in the ds_active_rx
-                                 * channel, clear it out so we don't later
-                                 * check it and confuse it for a new request
-                                 */
-                                {
-                                    up_coms.ds_active_rx.borrow_and_update();
-                                }
                                 self_promotion = true;
                                 fw.send(
                                     Message::PromoteToActive(up.uuid)
@@ -935,6 +927,9 @@ async fn cmd_loop(
                  * connected and in the proper state before we
                  * accept any commands.
                  */
+                // ZZZ maybe check is_active here?  If not, then bail?
+                // Also, if that rx.recv() closes, will we exit?  Maybe
+                // that is the way to shut this down/
                 let _result =
                     process_message(&up_c, &m, up_coms_c.clone()).await;
             }
@@ -962,6 +957,9 @@ async fn cmd_loop(
                     Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
                         if up.uuid != new_active_uuid {
                             up.set_inactive();
+                            // ZZZ
+                            // I believe this means we should bail! here and
+                            // set ourselves back to New
                         }
                     }
                     Some(Message::UuidMismatch(expected_uuid)) => {
@@ -1000,6 +998,33 @@ async fn cmd_loop(
 
                     more_work = true;
                     more_work_interval = deadline_secs(1);
+                }
+            }
+            r = up_coms.ds_active_rx.changed() => {
+                /*
+                 * We will be notified via this channel if the guest wishes
+                 * to disconnect.
+                 */
+                match r {
+                    Ok(_) => {
+                        let ad = up_coms.ds_active_rx.borrow();
+                        match *ad {
+                            ActiveNotify::Activate { gen } => {
+                                println!("[{}] Already active activate, gen {}",
+                                    up_coms.client_id, gen);
+                            },
+                            ActiveNotify::Deactivate => {
+                                up.ds_transition(up_coms.client_id, DsState::New);
+                                bail!("[{}] cmd_loop disconnect",
+                                    up_coms.client_id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // ZZZ Can we do better than panic???
+                        panic!("[{}] cmd_loop received activate error {:?}",
+                            up_coms.client_id, e);
+                    }
                 }
             }
             _ = sleep_until(more_work_interval), if more_work => {
@@ -1085,11 +1110,18 @@ struct UpComs {
     ds_done_tx: mpsc::Sender<u64>,
     /**
      * This channel is used to notify the proc task that it's time to
-     * promote this downstairs to active.
+     * promote this downstairs to active.  It contains the generation
+     * number of the connecting upstairs.
      */
-    ds_active_rx: watch::Receiver<u64>,
+    ds_active_rx: watch::Receiver<ActiveNotify>,
 }
 
+#[derive(Debug)]
+// ZZZ finish this comment
+enum ActiveNotify {
+    Activate { gen: u64 },
+    Deactivate,
+}
 /*
  * This task is responsible for the connection to a specific downstairs
  * instance.
@@ -3287,6 +3319,8 @@ enum BlockOp {
     Write { offset: Block, data: Bytes },
     Flush,
     GoActive { gen: u64 },
+    // Disconnect from all downstairs
+    Deactivate,
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
@@ -3836,6 +3870,13 @@ impl Guest {
         *active
     }
 
+    pub fn deactivate(&self) -> Result<(), CrucibleError> {
+        let mut waiter = self.send(BlockOp::Deactivate);
+        println!("The guest is requesting deactivation");
+        waiter.block_wait()?;
+        Ok(())
+    }
+
     pub fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
         let mut waiter = self.send(BlockOp::GoActive { gen });
         println!("The guest is requesting activation with gen:{}", gen);
@@ -3972,7 +4013,7 @@ impl Default for Guest {
 pub struct Target {
     target: SocketAddrV4,
     ds_work_tx: watch::Sender<u64>,
-    ds_active_tx: watch::Sender<u64>,
+    ds_active_tx: watch::Sender<ActiveNotify>,
 }
 
 #[derive(Debug)]
@@ -4004,11 +4045,30 @@ fn send_work(t: &[Target], val: u64) {
  */
 fn send_active(t: &[Target], gen: u64) {
     for d_client in t.iter() {
+        let gen = ActiveNotify::Activate { gen, };
         // println!("#### send to client {:?}", d_client.target);
         let res = d_client.ds_active_tx.send(gen);
         if let Err(e) = res {
             println!(
                 "#### error {:#?} Failed 'active' notification to {:?}",
+                e, d_client.target
+            );
+        }
+    }
+}
+
+/**
+ * Send deactive to all the targets.
+ * If a send fails, print an error.
+ */
+fn send_deactive(t: &[Target]) {
+    for d_client in t.iter() {
+        println!("#### send deactive to client {:?}", d_client.target);
+        let msg = ActiveNotify::Deactivate;
+        let res = d_client.ds_active_tx.send(msg);
+        if let Err(e) = res {
+            println!(
+                "#### error {:#?} Failed 'deactive' notification to {:?}",
                 e, d_client.target
             );
         }
@@ -4126,6 +4186,14 @@ async fn process_new_io(
              */
             up.set_generation(gen);
             send_active(dst, gen);
+            let _ = req.send.send(Ok(()));
+        }
+        BlockOp::Deactivate => {
+            /*
+             * Disconnect from all downstairs, flush all queues (if possible)
+             */
+            send_deactive(dst);
+            up.set_inactive();
             let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryUpstairsActive { data } => {
@@ -4365,6 +4433,11 @@ async fn up_listen(
                 }
                 req = up.guest.recv() => {
                     process_new_io(up, &dst, req, &mut lastcast).await;
+                    // ZZZ
+                    // If we get a disconnect, we should exit this outer
+                    // loop and go back to waiting for an activate after
+                    // clearing out IOs and stopping whatever other tasks
+                    // we have.
                 }
                 _ = sleep_until(flush_check) => {
                     /*
@@ -4456,7 +4529,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
             let (ds_work_tx, ds_work_rx) = watch::channel(1);
 
             // Notify when it's time to go active.
-            let (ds_active_tx, ds_active_rx) = watch::channel(0);
+            let (ds_active_tx, ds_active_rx) = watch::channel(ActiveNotify::Deactivate);
 
             let up = Arc::clone(&up);
             let t0 = *dst;
