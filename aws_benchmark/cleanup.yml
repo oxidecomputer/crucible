@@ -1,0 +1,19 @@
+---
+
+- hosts: downstairs
+  user: "{{ user }}"
+  tasks:
+    # don't hold on to ebs volumes, this prevents shutdown
+    - name: stop downstairs smf instances
+      become: yes
+      shell: |
+        svcadm disable -s 'svc:/oxide/crucible/downstairs*'
+        svccfg delete svc:/oxide/crucible/downstairs
+      when: os == "helios"
+
+    - name: export zpools (why doesn't shut down do this?)
+      become: yes
+      shell: |
+        zpool export data
+      when: os == "helios"
+

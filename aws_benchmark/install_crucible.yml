@@ -1,0 +1,141 @@
+---
+
+- hosts: all
+  user: "{{ user }}"
+  tasks:
+    - name: check that user data script ran ok | part 1
+      stat:
+        path: /var/booted_ok
+      register: user_data_file
+    - name: check that user data script ran ok | part 2
+      fail:
+        msg: "/var/booted_ok not found!"
+      when: not user_data_file.stat.exists
+
+    - name: prepare opt
+      become: yes
+      file:
+        path: /opt
+        owner: "{{ user }}"
+
+    - name: copy code
+      synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "/opt/crucible/"
+        rsync_opts:
+          - '--exclude=".git"'
+          - '--exclude="target"'
+
+    - name: build ubuntu pre-reqs
+      become: yes
+      apt:
+        name:
+          - build-essential
+          - libssl-dev
+          - pkg-config
+          - libsqlite3-dev
+        state: present
+      when: os == "ubuntu"
+
+    - name: install rust
+      shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rustup.sh
+        chmod u+x rustup.sh
+        ./rustup.sh -y
+      when: os == "ubuntu"
+
+    - name: build crucible
+      shell:
+        cmd: "/home/{{ user }}/.cargo/bin/cargo build --release"
+        chdir: /opt/crucible/
+        executable: /bin/bash
+      args:
+        creates: /opt/crucible/target/release/crucible-downstairs
+
+- hosts: upstairs
+  user: "{{ user }}"
+  tasks:
+    - template:
+        src: bench.sh
+        dest: /opt/crucible/bench.sh
+        mode: u+rwx
+
+- hosts: downstairs
+  user: "{{ user }}"
+  tasks:
+    - name: increase nofile
+      become: yes
+      pam_limits:
+        domain: "{{ user }}"
+        limit_type: soft
+        limit_item: nofile
+        value: 131072
+      when: os == "ubuntu"
+
+    - name: create downstairs zpool
+      become: yes
+      shell: |
+        zpool create data /dev/dsk/c1t7d0
+        chown -R '{{ user }}:staff' '/data'
+      when: os == "helios"
+
+    - file:
+        path: /data/disk
+        state: absent
+    - name: create 2G region (512b sectors)
+      shell:
+        cmd: |
+          /opt/crucible/target/release/crucible-downstairs \
+            create \
+              -u $(uuidgen) \
+              -d /data/disk/ \
+              --extent-count 204 \
+              --extent-size 20480 \
+              --block-size 512
+
+    - name: create downstairs systemd service
+      become: yes
+      template:
+        src: downstairs.service.j2
+        dest: /etc/systemd/system/downstairs.service
+      when: os == "ubuntu"
+    - name: start downstairs systemd service
+      become: yes
+      systemd:
+        daemon_reload: yes
+        name: downstairs
+        state: started
+        enabled: yes
+      when: os == "ubuntu"
+
+    - name: copy downstairs.xml and import it
+      become: yes
+      shell: |
+        svcadm disable -s 'svc:/oxide/crucible/downstairs*'
+        svccfg delete svc:/oxide/crucible/downstairs
+        cp /opt/crucible/aws_benchmark/downstairs.xml /var/svc/manifest/site/
+        svccfg import /var/svc/manifest/site/downstairs.xml
+      when: os == "helios"
+
+    - name: copy binary to /opt/oxide/crucible/bin/downstairs to match downstairs.xml
+      become: yes
+      shell: |
+        mkdir -p /opt/oxide/crucible/bin/
+        cp /opt/crucible/target/release/crucible-downstairs /opt/oxide/crucible/bin/downstairs
+        chmod a+x /opt/oxide/crucible/bin/downstairs
+      when: os == "helios"
+
+    - name: create downstairs smf instance
+      become: yes
+      shell: |
+        INSTANCE_ID=$(curl -sq http://169.254.169.254/latest/meta-data/instance-id)
+        svccfg -s oxide/crucible/downstairs add $INSTANCE_ID
+        svccfg -s oxide/crucible/downstairs:$INSTANCE_ID addpg config application
+        svccfg -s oxide/crucible/downstairs:$INSTANCE_ID setprop config/directory = "/data/disk/"
+        svccfg -s oxide/crucible/downstairs:$INSTANCE_ID setprop config/port = "3801"
+        svcadm refresh oxide/crucible/downstairs:$INSTANCE_ID
+        svcadm enable oxide/crucible/downstairs:$INSTANCE_ID
+        sleep 2
+        svcs "oxide/crucible/downstairs:$INSTANCE_ID"
+      when: os == "helios"
+

@@ -7,3 +7,7 @@ core
 /fio/*.log
 /fio/*.log.hist
 /fio/*.report
+/aws_benchmark/.terraform*
+/aws_benchmark/inventory
+/aws_benchmark/results.txt
+/aws_benchmark/terraform.tfstate*

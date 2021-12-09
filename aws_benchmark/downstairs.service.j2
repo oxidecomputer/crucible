@@ -1,0 +1,13 @@
+[Unit]
+Description="Crucible Downstairs"
+Requires=network.target
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/crucible/target/release/crucible-downstairs run -p "3801" -d /data/disk
+User=ubuntu
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
