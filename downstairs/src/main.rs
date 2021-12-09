@@ -1551,7 +1551,11 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Args::Dump { data, extent, only_show_differences } => {
+        Args::Dump {
+            data,
+            extent,
+            only_show_differences,
+        } => {
             dump_region(data, extent, only_show_differences)?;
             Ok(())
         }

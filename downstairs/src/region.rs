@@ -980,7 +980,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None)?;
+        dump_region(dvec, None, false)?;
 
         Ok(())
     }
@@ -1012,7 +1012,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None)?;
+        dump_region(dvec, None, false)?;
 
         Ok(())
     }
@@ -1045,7 +1045,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, Some(2))?;
+        dump_region(dvec, Some(2), false)?;
 
         Ok(())
     }

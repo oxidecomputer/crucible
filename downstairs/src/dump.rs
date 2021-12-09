@@ -95,7 +95,13 @@ pub fn dump_region(
             bail!("Need more than one region directory to compare data");
         }
         let en = all_extents.get(&ce).unwrap();
-        show_extent(region_dir, &en.ei_hm, ce, blocks_per_extent, only_show_differences)?;
+        show_extent(
+            region_dir,
+            &en.ei_hm,
+            ce,
+            blocks_per_extent,
+            only_show_differences,
+        )?;
 
         return Ok(());
     };
@@ -115,21 +121,24 @@ pub fn dump_region(
     let mut difference_found = false;
     for en in ext_num.iter() {
         if let Some(ei) = all_extents.get(en) {
-            let mut columns: [String; 3] = ["".to_string(), "".to_string(), "".to_string()];
+            let mut columns: [String; 3] =
+                ["".to_string(), "".to_string(), "".to_string()];
 
-            for dir_index in 0..dir_count {
+            for (dir_index, column) in
+                columns.iter_mut().enumerate().take(dir_count)
+            {
                 if let Some(em) = ei.ei_hm.get(&(dir_index as u32)) {
                     let dirty = if em.dirty {
                         "D".to_string()
                     } else {
                         " ".to_string()
                     };
-                    columns[dir_index] = format!(
+                    *column = format!(
                         "{:8} {:8} {} ",
                         em.gen_number, em.flush_number, dirty
                     );
                 } else {
-                    columns[dir_index] = format!("-");
+                    *column = "-".to_string();
                 }
             }
 
@@ -142,12 +151,12 @@ pub fn dump_region(
                 }
             }
 
-            if !only_show_differences || (only_show_differences && different) {
+            if !only_show_differences || different {
                 print!("{:3} ", en);
-                for dir_index in 0..dir_count {
-                    print!("{}", columns[dir_index]);
+                for column in columns.iter().take(dir_count) {
+                    print!("{}", column);
                 }
-                println!("");
+                println!();
             }
 
             difference_found |= different;
@@ -390,17 +399,17 @@ fn show_extent(
                 format!("{0:^11} ", status_letters[dir_index]);
         }
 
-        if !only_show_differences || (only_show_differences && different) {
+        if !only_show_differences || different {
             print!("Block {:4}", block);
 
-            for dir_index in 0..dir_count {
-                print!("{}", data_columns[dir_index]);
+            for column in data_columns.iter().take(dir_count) {
+                print!("{}", column);
             }
-            for dir_index in 0..dir_count {
-                print!("{}", nonce_columns[dir_index]);
+            for column in nonce_columns.iter().take(dir_count) {
+                print!("{}", column);
             }
-            for dir_index in 0..dir_count {
-                print!("{}", tag_columns[dir_index]);
+            for column in tag_columns.iter().take(dir_count) {
+                print!("{}", column);
             }
 
             print!("{0:^7}", if different { "<-------" } else { "" });
