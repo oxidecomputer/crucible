@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
@@ -54,7 +54,7 @@ mod cdt {
 
 #[derive(Debug, Clone)]
 pub struct CrucibleOpts {
-    pub target: Vec<SocketAddrV4>,
+    pub target: Vec<SocketAddr>,
     pub lossy: bool,
     pub key: Option<String>,
 }
@@ -221,7 +221,7 @@ pub fn extent_from_offset(
  * where we then decide what to do with each downstairs.
  */
 fn process_downstairs(
-    target: &SocketAddrV4,
+    target: &SocketAddr,
     u: &Arc<Upstairs>,
     gens: Vec<u64>,
     versions: Vec<u64>,
@@ -418,7 +418,7 @@ async fn io_send(
  * handles the initial negotiation.
  */
 async fn proc(
-    target: &SocketAddrV4,
+    target: &SocketAddr,
     up: &Arc<Upstairs>,
     mut sock: TcpStream,
     connected: &mut bool,
@@ -1095,7 +1095,7 @@ struct UpComs {
  * instance.
  */
 async fn looper(
-    target: SocketAddrV4,
+    target: SocketAddr,
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
     lossy: bool,
@@ -1113,20 +1113,22 @@ async fn looper(
         /*
          * Make connection to this downstairs.
          */
-        let sock = TcpSocket::new_v4().expect("v4 socket");
+        let sock = if target.is_ipv4() {
+            TcpSocket::new_v4().unwrap()
+        } else {
+            TcpSocket::new_v6().unwrap()
+        };
 
         /*
          * Set a connect timeout, and connect to the target:
          */
-        /*
         println!(
             "{0}[{1}] looper connecting to {0}",
             target, up_coms.client_id
         );
-        */
         let deadline = tokio::time::sleep_until(deadline_secs(10));
         tokio::pin!(deadline);
-        let tcp = sock.connect(target.into());
+        let tcp = sock.connect(target);
         tokio::pin!(tcp);
 
         let tcp: TcpStream = loop {
@@ -3970,14 +3972,14 @@ impl Default for Guest {
 }
 
 pub struct Target {
-    target: SocketAddrV4,
+    target: SocketAddr,
     ds_work_tx: watch::Sender<u64>,
     ds_active_tx: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
 struct Condition {
-    target: SocketAddrV4,
+    target: SocketAddr,
     connected: bool,
     client_id: u8,
 }

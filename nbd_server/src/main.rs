@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -34,7 +34,7 @@ fn handle_nbd_client(
 #[structopt(about = "volume-side storage component")]
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
-    target: Vec<SocketAddrV4>,
+    target: Vec<SocketAddr>,
 
     #[structopt(short, long)]
     key: Option<String>,
