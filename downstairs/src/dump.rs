@@ -15,6 +15,7 @@ struct ExtInfo {
 pub fn dump_region(
     region_dir: Vec<PathBuf>,
     cmp_extent: Option<u32>,
+    only_show_differences: bool,
 ) -> Result<()> {
     /*
      * We are building a two level hashmap.
@@ -94,7 +95,7 @@ pub fn dump_region(
             bail!("Need more than one region directory to compare data");
         }
         let en = all_extents.get(&ce).unwrap();
-        show_extent(region_dir, &en.ei_hm, ce, blocks_per_extent)?;
+        show_extent(region_dir, &en.ei_hm, ce, blocks_per_extent, only_show_differences)?;
 
         return Ok(());
     };
@@ -111,29 +112,53 @@ pub fn dump_region(
     }
     println!();
 
+    let mut difference_found = false;
     for en in ext_num.iter() {
-        print!("{:3} ", en);
         if let Some(ei) = all_extents.get(en) {
+            let mut columns: [String; 3] = ["".to_string(), "".to_string(), "".to_string()];
+
             for dir_index in 0..dir_count {
                 if let Some(em) = ei.ei_hm.get(&(dir_index as u32)) {
-                    let dirty;
-                    if em.dirty {
-                        dirty = "D".to_string();
+                    let dirty = if em.dirty {
+                        "D".to_string()
                     } else {
-                        dirty = " ".to_string();
-                    }
-                    print!(
+                        " ".to_string()
+                    };
+                    columns[dir_index] = format!(
                         "{:8} {:8} {} ",
                         em.gen_number, em.flush_number, dirty
                     );
                 } else {
-                    print!("-");
+                    columns[dir_index] = format!("-");
                 }
             }
+
+            let mut different = false;
+
+            for dir_index in 1..dir_count {
+                if columns[dir_index - 1] != columns[dir_index] {
+                    different = true;
+                    break;
+                }
+            }
+
+            if !only_show_differences || (only_show_differences && different) {
+                print!("{:3} ", en);
+                for dir_index in 0..dir_count {
+                    print!("{}", columns[dir_index]);
+                }
+                println!("");
+            }
+
+            difference_found |= different;
         } else {
+            print!("{:3} ", en);
             println!("No data for {}", en);
         }
-        println!();
+    }
+
+    if difference_found {
+        bail!("Difference found!");
     }
 
     Ok(())
@@ -148,6 +173,7 @@ fn show_extent(
     ei_hm: &HashMap<u32, ExtentMeta>,
     cmp_extent: u32,
     blocks_per_extent: u64,
+    only_show_differences: bool,
 ) -> Result<()> {
     /*
      * First, print out the Generation number, the flush ID,
@@ -212,8 +238,14 @@ fn show_extent(
      * Compare the data from each block.
      * Print a letter representing the data for each block.
      */
+    let mut difference_found = false;
     for block in 0..blocks_per_extent {
-        print!("Block {:4}", block);
+        let mut data_columns: [String; 3] =
+            ["".to_string(), "".to_string(), "".to_string()];
+        let mut nonce_columns: [String; 3] =
+            ["".to_string(), "".to_string(), "".to_string()];
+        let mut tag_columns: [String; 3] =
+            ["".to_string(), "".to_string(), "".to_string()];
 
         /*
          * Build a Vector to hold our responses, one for each
@@ -248,7 +280,7 @@ fn show_extent(
          * previous block.
          */
 
-        let mut diff_found = false;
+        let mut different = false;
 
         // first compare data
         let mut status_letters = vec![String::new(); 3];
@@ -262,11 +294,11 @@ fn show_extent(
                     status_letters[2] += "A";
                 } else {
                     status_letters[2] += "C";
-                    diff_found = true;
+                    different = true;
                 }
             }
         } else {
-            diff_found = true;
+            different = true;
             status_letters[0] += "A";
             status_letters[1] += "B";
 
@@ -281,9 +313,9 @@ fn show_extent(
             }
         }
 
-        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
-        if dir_count > 2 {
-            print!("{0:^11} ", status_letters[2]);
+        for dir_index in 0..dir_count {
+            data_columns[dir_index] =
+                format!("{0:^11} ", status_letters[dir_index]);
         }
 
         // then, compare nonces
@@ -298,11 +330,11 @@ fn show_extent(
                     status_letters[2] += "A";
                 } else {
                     status_letters[2] += "C";
-                    diff_found = true;
+                    different = true;
                 }
             }
         } else {
-            diff_found = true;
+            different = true;
             status_letters[0] += "A";
             status_letters[1] += "B";
 
@@ -317,9 +349,9 @@ fn show_extent(
             }
         }
 
-        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
-        if dir_count > 2 {
-            print!("{0:^11} ", status_letters[2]);
+        for dir_index in 0..dir_count {
+            nonce_columns[dir_index] =
+                format!("{0:^11} ", status_letters[dir_index]);
         }
 
         // then, compare tags
@@ -334,11 +366,11 @@ fn show_extent(
                     status_letters[2] += "A";
                 } else {
                     status_letters[2] += "C";
-                    diff_found = true;
+                    different = true;
                 }
             }
         } else {
-            diff_found = true;
+            different = true;
             status_letters[0] += "A";
             status_letters[1] += "B";
 
@@ -353,14 +385,34 @@ fn show_extent(
             }
         }
 
-        print!("{0:^11} {1:^11} ", status_letters[0], status_letters[1],);
-        if dir_count > 2 {
-            print!("{0:^11} ", status_letters[2]);
+        for dir_index in 0..dir_count {
+            tag_columns[dir_index] =
+                format!("{0:^11} ", status_letters[dir_index]);
         }
 
-        print!("{0:^7}", if diff_found { "<-------" } else { "" });
+        if !only_show_differences || (only_show_differences && different) {
+            print!("Block {:4}", block);
 
-        println!();
+            for dir_index in 0..dir_count {
+                print!("{}", data_columns[dir_index]);
+            }
+            for dir_index in 0..dir_count {
+                print!("{}", nonce_columns[dir_index]);
+            }
+            for dir_index in 0..dir_count {
+                print!("{}", tag_columns[dir_index]);
+            }
+
+            print!("{0:^7}", if different { "<-------" } else { "" });
+
+            println!();
+        }
+
+        difference_found |= different;
+    }
+
+    if difference_found {
+        bail!("Difference found!");
     }
 
     Ok(())
