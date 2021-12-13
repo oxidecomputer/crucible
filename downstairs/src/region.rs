@@ -145,23 +145,23 @@ impl Inner {
         &mut self,
         encryption_context_params: &[(u64, &[u8], &[u8])],
     ) -> Result<()> {
-        let stmt: Vec<String> =
-            vec![
-                "INSERT OR REPLACE INTO encryption_context".to_string(),
-                "(block, nonce, tag) values".to_string(),
-                encryption_context_params
-                    .iter()
-                    .map(|tuple| {
-                        let (block, nonce, tag) = tuple;
-                        format!("({}, X'{}', X'{}')",
-                            block,
-                            hex::encode(nonce),
-                            hex::encode(tag),
-                        )
-                    })
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ];
+        let stmt: Vec<String> = vec![
+            "INSERT OR REPLACE INTO encryption_context".to_string(),
+            "(block, nonce, tag) values".to_string(),
+            encryption_context_params
+                .iter()
+                .map(|tuple| {
+                    let (block, nonce, tag) = tuple;
+                    format!(
+                        "({}, X'{}', X'{}')",
+                        block,
+                        hex::encode(nonce),
+                        hex::encode(tag),
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join(","),
+        ];
 
         let _rows_affected = self.metadb.execute(&stmt.join(" "), [])?;
 
@@ -406,9 +406,10 @@ impl Extent {
             inner.file.seek(SeekFrom::Start(byte_offset))?;
 
             /*
-             * XXX This read_exact only works because we have filled our buffer
-             * with data ahead of time.  If we want to use an uninitialized
-             * buffer, then we need a different read or type for the destination
+             * XXX This read_exact only works because we have filled our
+             * buffer with data ahead of time.  If we want to use
+             * an uninitialized buffer, then we need a different
+             * read or type for the destination
              */
             inner.file.read_exact(&mut response.data)?;
 
@@ -471,8 +472,8 @@ impl Extent {
 
         inner.set_dirty()?;
 
-        let mut encryption_context_params: Vec<(u64, &[u8], &[u8])>
-            = Vec::with_capacity(writes.len());
+        let mut encryption_context_params: Vec<(u64, &[u8], &[u8])> =
+            Vec::with_capacity(writes.len());
 
         for write in writes {
             let byte_offset = write.offset.value * self.block_size;
@@ -481,13 +482,11 @@ impl Extent {
             inner.file.write_all(&write.data)?;
 
             if write.nonce.is_some() && write.tag.is_some() {
-                encryption_context_params.push(
-                    (
-                        write.offset.value,
-                        write.nonce.as_ref().unwrap(),
-                        write.tag.as_ref().unwrap(),
-                    )
-                );
+                encryption_context_params.push((
+                    write.offset.value,
+                    write.nonce.as_ref().unwrap(),
+                    write.tag.as_ref().unwrap(),
+                ));
             }
         }
 
@@ -746,7 +745,9 @@ impl Region {
             HashMap::new();
 
         for write in writes {
-            let extent_vec = batched_writes.entry(write.eid as usize).or_insert_with(Vec::new);
+            let extent_vec = batched_writes
+                .entry(write.eid as usize)
+                .or_insert_with(Vec::new);
             extent_vec.push(write);
         }
 
@@ -779,7 +780,8 @@ impl Region {
 
         // have to maintain order with reads! can't use hashmap
         let mut eid: Option<u64> = None;
-        let mut batched_reads: Vec<&crucible_protocol::ReadRequest> = Vec::with_capacity(requests.len());
+        let mut batched_reads: Vec<&crucible_protocol::ReadRequest> =
+            Vec::with_capacity(requests.len());
 
         for request in requests {
             if let Some(_eid) = eid {

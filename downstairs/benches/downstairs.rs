@@ -135,7 +135,6 @@ pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
             }
         })
     });
-
 }
 
 criterion_group!(benches, downstairs_rw_speed_benchmark);
