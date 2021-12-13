@@ -240,7 +240,9 @@ fn show_extent(
     for (index, _) in region_dir.iter().enumerate() {
         print!(" {0:^11}", format!("Tag {}", index));
     }
-    print!(" {0:^7}", "DIFF");
+    if !only_show_differences {
+        print!(" {0:^7}", "DIFF");
+    }
     println!();
 
     /*
@@ -412,7 +414,9 @@ fn show_extent(
                 print!("{}", column);
             }
 
-            print!("{0:^7}", if different { "<-------" } else { "" });
+            if !only_show_differences {
+                print!("{0:^7}", if different { "<-------" } else { "" });
+            }
 
             println!();
         }
