@@ -1,4 +1,5 @@
 // Copyright 2021 Oxide Computer Company
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
@@ -771,7 +772,7 @@ mod test {
     use super::*;
     use crate::dump::dump_region;
     use bytes::{BufMut, BytesMut};
-    use rand::Rng;
+    use rand::{Rng, RngCore};
     use std::path::PathBuf;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -1088,6 +1089,88 @@ mod test {
 
         assert_eq!(ctx.0, blob1);
         assert_eq!(ctx.1, blob2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_big_write() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        let ddef = region.def();
+        let total_size: usize = ddef.total_size() as usize;
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // use region_write to fill region
+
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                nonce: None,
+                tag: None,
+            });
+        }
+
+        region.region_write(&writes)?;
+
+        // read data into File, compare what was written to buffer
+
+        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+
+        for i in 0..ddef.extent_count() {
+            let path = extent_path(&dir, i);
+            let mut data = std::fs::read(path).expect("Unable to read file");
+
+            read_from_files.append(&mut data);
+        }
+
+        assert_eq!(buffer, read_from_files);
+
+        // read all using region_read
+
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+        }
+
+        assert_eq!(buffer, read_from_region);
 
         Ok(())
     }

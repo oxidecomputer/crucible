@@ -37,3 +37,8 @@ rusqlite = { version = "0.25" }
 [dev-dependencies]
 tempfile = "3"
 rand_chacha = "0.3.1"
+criterion = "0.3"
+
+[[bench]]
+name = "downstairs"
+harness = false
