@@ -16,19 +16,22 @@ if ! cargo build; then
     exit 1
 fi
 
-if [[ -d var/3801 ]] || [[ -d var/3802 ]] || [[ -d var/3803 ]]; then
-    echo " var/380* directories are already present"
+if [[ -d var/8801 ]] || [[ -d var/8802 ]] || [[ -d var/8803 ]]; then
+    echo " var/880* directories are already present"
     exit 1
 fi
 
 cds="./target/debug/crucible-downstairs"
 if [[ ! -f ${cds} ]]; then
-    echo "Can't find crucible binary at $cds"
-    exit 1
+    cds="./target/release/crucible-downstairs"
+    if [[ ! -f ${cds} ]]; then
+        echo "Can't find crucible binary at $cds"
+        exit 1
+    fi
 fi
 
 res=0
-for port in 3801 3802 3803; do
+for port in 8801 8802 8803; do
     if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count 20 --extent-size 100; then
         echo "Failed to create downstairs $port"
         res=1
