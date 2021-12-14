@@ -1,6 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -24,7 +24,7 @@ fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 #[structopt(about = "volume-side storage component")]
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
-    target: Vec<SocketAddrV4>,
+    target: Vec<SocketAddr>,
 
     /*
      * Verify that writes don't extend before or after the actual location.

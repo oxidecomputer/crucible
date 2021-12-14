@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -16,7 +16,7 @@ use crucible::*;
 #[structopt(about = "volume-side storage component")]
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
-    target: Vec<SocketAddrV4>,
+    target: Vec<SocketAddr>,
 
     #[structopt(short, long)]
     key: Option<String>,
@@ -58,7 +58,7 @@ impl Opt {
 #[cfg(test)]
 mod tests {
     use crate::Opt;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, SocketAddr};
 
     #[test]
     fn test_opt_from_string() {
@@ -71,11 +71,17 @@ mod tests {
 
         assert_eq!(
             opt.target[0],
-            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 3801)
+            SocketAddr::new(
+                std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                3801
+            )
         );
         assert_eq!(
             opt.target[1],
-            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 3801)
+            SocketAddr::new(
+                std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+                3801
+            )
         );
     }
 

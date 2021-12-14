@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,7 +103,7 @@ enum Args {
     },
     Run {
         #[structopt(short, long, default_value = "0.0.0.0")]
-        address: Ipv4Addr,
+        address: IpAddr,
 
         #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
         data: PathBuf,
@@ -1625,10 +1625,17 @@ async fn main() -> Result<()> {
                 let dss = dssw.dss.clone();
 
                 tokio::spawn(async move {
-                    let address =
-                        SocketAddr::new(std::net::IpAddr::V4(address), 0);
+                    let new_address = match address {
+                        IpAddr::V4(ipv4) => {
+                            SocketAddr::new(std::net::IpAddr::V4(ipv4), 0)
+                        }
+                        IpAddr::V6(ipv6) => {
+                            SocketAddr::new(std::net::IpAddr::V6(ipv6), 0)
+                        }
+                    };
+
                     if let Err(e) =
-                        stats::ox_stats(dss, oximeter, address).await
+                        stats::ox_stats(dss, oximeter, new_address).await
                     {
                         println!("ERROR: oximeter failed: {:?}", e);
                     } else {
@@ -1637,10 +1644,20 @@ async fn main() -> Result<()> {
                 });
             }
 
+            let listen_on = match address {
+                IpAddr::V4(ipv4) => {
+                    SocketAddr::new(std::net::IpAddr::V4(ipv4), port)
+                }
+                IpAddr::V6(ipv6) => {
+                    SocketAddr::new(std::net::IpAddr::V6(ipv6), port)
+                }
+            };
+
             /*
              * Establish a listen server on the port.
              */
-            let listen_on = SocketAddrV4::new(address, port);
+            // let listen_on = SocketAddrV4::new(address, port);
+            println!("Using address: {:?}", listen_on);
             let listener = TcpListener::bind(&listen_on).await?;
 
             /*

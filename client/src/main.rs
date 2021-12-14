@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crucible::*;
  * The various tests this program supports.
  */
 arg_enum! {
-    #[derive(Debug, PartialEq,  StructOpt)]
+    #[derive(Debug, PartialEq, StructOpt)]
     enum Workload {
         Balloon,
         Big,
@@ -38,7 +38,7 @@ arg_enum! {
 #[structopt(about = "crucible upstairs test client")]
 pub struct Opt {
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
-    target: Vec<SocketAddrV4>,
+    target: Vec<SocketAddr>,
 
     #[structopt(
         short,
