@@ -167,7 +167,7 @@ pub fn dump_region(
     }
 
     if difference_found {
-        bail!("Difference found!");
+        bail!("Difference in extent metadata found!");
     }
 
     Ok(())
@@ -230,18 +230,20 @@ fn show_extent(
     println!();
     println!();
 
-    print!("{0:10}", "");
+    print!("{0:5} ", "BLOCK");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^11}", format!("Data {}", index));
+        print!(" {0:^5}", format!("DATA{}", index));
     }
+    print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^11}", format!("Nonce {}", index));
+        print!(" {0:^6}", format!("NONCE{}", index));
     }
+    print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^11}", format!("Tag {}", index));
+        print!(" {0:^4}", format!("TAG{}", index));
     }
     if !only_show_differences {
-        print!(" {0:^7}", "DIFF");
+        print!(" {0:^5}", "DIFF");
     }
     println!();
 
@@ -324,9 +326,10 @@ fn show_extent(
             }
         }
 
+        // Print the data status letters
         for dir_index in 0..dir_count {
             data_columns[dir_index] =
-                format!("{0:^11} ", status_letters[dir_index]);
+                format!("{0:^5} ", status_letters[dir_index]);
         }
 
         // then, compare nonces
@@ -360,9 +363,10 @@ fn show_extent(
             }
         }
 
+        // Print nonce status letters
         for dir_index in 0..dir_count {
             nonce_columns[dir_index] =
-                format!("{0:^11} ", status_letters[dir_index]);
+                format!("{0:^6} ", status_letters[dir_index]);
         }
 
         // then, compare tags
@@ -398,24 +402,26 @@ fn show_extent(
 
         for dir_index in 0..dir_count {
             tag_columns[dir_index] =
-                format!("{0:^11} ", status_letters[dir_index]);
+                format!("{0:^4} ", status_letters[dir_index]);
         }
 
         if !only_show_differences || different {
-            print!("Block {:4}", block);
+            print!("{:5}  ", block);
 
             for column in data_columns.iter().take(dir_count) {
                 print!("{}", column);
             }
+            print!(" ");
             for column in nonce_columns.iter().take(dir_count) {
                 print!("{}", column);
             }
+            print!(" ");
             for column in tag_columns.iter().take(dir_count) {
                 print!("{}", column);
             }
 
             if !only_show_differences {
-                print!("{0:^7}", if different { "<-------" } else { "" });
+                print!("{0:^7}", if different { "<---" } else { "" });
             }
 
             println!();
