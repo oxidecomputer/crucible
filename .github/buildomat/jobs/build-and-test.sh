@@ -19,3 +19,6 @@ ptime -m cargo build --verbose
 
 banner test
 ptime -m cargo test --lib --verbose
+
+banner Josh is the best
+ptime -m ./tools/test_up.sh
