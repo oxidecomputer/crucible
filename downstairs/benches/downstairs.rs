@@ -7,9 +7,8 @@ use tempfile::tempdir;
 use crucible_common::Block;
 use crucible_downstairs::Region;
 
-fn new_region_options() -> crucible_common::RegionOptions {
+fn new_region_options(block_size: u64) -> crucible_common::RegionOptions {
     let mut region_options: crucible_common::RegionOptions = Default::default();
-    let block_size = 512;
     region_options.set_block_size(block_size);
     region_options.set_extent_size(Block::new(10, block_size.trailing_zeros()));
     region_options
@@ -17,9 +16,10 @@ fn new_region_options() -> crucible_common::RegionOptions {
     region_options
 }
 
-pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
+pub fn downstairs_rw_speed_benchmark<const BS: usize>(c: &mut Criterion) {
     let dir = tempdir().unwrap();
-    let mut region = Region::create(&dir, new_region_options()).unwrap();
+    let mut region =
+        Region::create(&dir, new_region_options(BS as u64)).unwrap();
     region.extend(1024).unwrap();
 
     let ddef = region.def();
@@ -27,7 +27,7 @@ pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
     let num_blocks: usize =
         ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
-    c.bench_function("region_write", |b| {
+    c.bench_function(format!("[{} sectors] region_write", BS).as_str(), |b| {
         b.iter_batched(
             || {
                 let mut rng = rand::thread_rng();
@@ -40,10 +40,13 @@ pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
 
                 for i in 0..num_blocks {
                     let eid: u64 = i as u64 / ddef.extent_size().value;
-                    let offset: Block =
-                        Block::new_512((i as u64) % ddef.extent_size().value);
+                    let offset: Block = Block::new(
+                        (i as u64) % ddef.extent_size().value,
+                        BS.trailing_zeros(),
+                    );
 
-                    let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+                    let data =
+                        BytesMut::from(&buffer[(i * BS)..((i + 1) * BS)]);
 
                     writes.push(crucible_protocol::Write {
                         eid,
@@ -63,7 +66,7 @@ pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
         );
     });
 
-    c.bench_function("region_read", |b| {
+    c.bench_function(format!("[{} sectors] region_read", BS).as_str(), |b| {
         b.iter_batched(
             || {
                 let mut requests: Vec<crucible_protocol::ReadRequest> =
@@ -71,8 +74,10 @@ pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
 
                 for i in 0..num_blocks {
                     let eid: u64 = i as u64 / ddef.extent_size().value;
-                    let offset: Block =
-                        Block::new_512((i as u64) % ddef.extent_size().value);
+                    let offset: Block = Block::new(
+                        (i as u64) % ddef.extent_size().value,
+                        BS.trailing_zeros(),
+                    );
 
                     requests.push(crucible_protocol::ReadRequest {
                         eid,
@@ -93,73 +98,88 @@ pub fn downstairs_rw_speed_benchmark(c: &mut Criterion) {
         );
     });
 
-    c.bench_function("region_write with nonce and tag", |b| {
-        b.iter_batched(
-            || {
-                let mut rng = rand::thread_rng();
-                let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-                buffer.resize(total_size, 0u8);
-                rng.fill_bytes(&mut buffer);
+    c.bench_function(
+        format!("[{} sectors] region_write with nonce and tag", BS).as_str(),
+        |b| {
+            b.iter_batched(
+                || {
+                    let mut rng = rand::thread_rng();
+                    let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+                    buffer.resize(total_size, 0u8);
+                    rng.fill_bytes(&mut buffer);
 
-                let mut writes: Vec<crucible_protocol::Write> =
-                    Vec::with_capacity(num_blocks);
+                    let mut writes: Vec<crucible_protocol::Write> =
+                        Vec::with_capacity(num_blocks);
 
-                for i in 0..num_blocks {
-                    let eid: u64 = i as u64 / ddef.extent_size().value;
-                    let offset: Block =
-                        Block::new_512((i as u64) % ddef.extent_size().value);
+                    for i in 0..num_blocks {
+                        let eid: u64 = i as u64 / ddef.extent_size().value;
+                        let offset: Block = Block::new(
+                            (i as u64) % ddef.extent_size().value,
+                            BS.trailing_zeros(),
+                        );
 
-                    let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+                        let data =
+                            BytesMut::from(&buffer[(i * BS)..((i + 1) * BS)]);
 
-                    writes.push(crucible_protocol::Write {
-                        eid,
-                        offset,
-                        data: data.freeze(),
-                        nonce: Some(Vec::from(rng.gen::<[u8; 12]>())),
-                        tag: Some(Vec::from(rng.gen::<[u8; 16]>())),
-                    });
-                }
+                        writes.push(crucible_protocol::Write {
+                            eid,
+                            offset,
+                            data: data.freeze(),
+                            nonce: Some(Vec::from(rng.gen::<[u8; 12]>())),
+                            tag: Some(Vec::from(rng.gen::<[u8; 16]>())),
+                        });
+                    }
 
-                writes
-            },
-            |writes| {
-                region.region_write(&writes).unwrap();
-            },
-            criterion::BatchSize::SmallInput,
-        );
-    });
+                    writes
+                },
+                |writes| {
+                    region.region_write(&writes).unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        },
+    );
 
-    c.bench_function("region_read with nonce and tag", |b| {
-        b.iter_batched(
-            || {
-                let mut requests: Vec<crucible_protocol::ReadRequest> =
-                    Vec::with_capacity(num_blocks);
+    c.bench_function(
+        format!("[{} sectors] region_read with nonce and tag", BS).as_str(),
+        |b| {
+            b.iter_batched(
+                || {
+                    let mut requests: Vec<crucible_protocol::ReadRequest> =
+                        Vec::with_capacity(num_blocks);
 
-                for i in 0..num_blocks {
-                    let eid: u64 = i as u64 / ddef.extent_size().value;
-                    let offset: Block =
-                        Block::new_512((i as u64) % ddef.extent_size().value);
+                    for i in 0..num_blocks {
+                        let eid: u64 = i as u64 / ddef.extent_size().value;
+                        let offset: Block = Block::new(
+                            (i as u64) % ddef.extent_size().value,
+                            BS.trailing_zeros(),
+                        );
 
-                    requests.push(crucible_protocol::ReadRequest {
-                        eid,
-                        offset,
-                        num_blocks: 1,
-                    });
-                }
+                        requests.push(crucible_protocol::ReadRequest {
+                            eid,
+                            offset,
+                            num_blocks: 1,
+                        });
+                    }
 
-                requests
-            },
-            |requests| {
-                let responses = region.region_read(&requests).unwrap();
-                for response in responses {
-                    assert!(response.nonce.is_some());
-                }
-            },
-            criterion::BatchSize::SmallInput,
-        );
-    });
+                    requests
+                },
+                |requests| {
+                    let responses = region.region_read(&requests).unwrap();
+                    for response in responses {
+                        assert!(response.nonce.is_some());
+                    }
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
-criterion_group!(benches, downstairs_rw_speed_benchmark);
+criterion_group!(
+    benches,
+    downstairs_rw_speed_benchmark<512>,
+    downstairs_rw_speed_benchmark<4096>,
+);
 
 criterion_main!(benches);

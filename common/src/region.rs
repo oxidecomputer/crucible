@@ -44,6 +44,10 @@ impl Block {
         Block::new(value, 9)
     }
 
+    pub fn new_4096(value: u64) -> Block {
+        Block::new(value, 12)
+    }
+
     pub fn new_with_ddef(value: u64, ddef: &RegionDefinition) -> Block {
         Block {
             value,
