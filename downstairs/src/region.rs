@@ -741,6 +741,10 @@ impl Region {
         &self,
         writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
+        /*
+         * Batch writes so they can all be sent to the appropriate extent
+         * together.
+         */
         let mut batched_writes: HashMap<usize, Vec<&crucible_protocol::Write>> =
             HashMap::new();
 
@@ -778,7 +782,14 @@ impl Region {
     ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
         let mut responses = Vec::with_capacity(requests.len());
 
-        // have to maintain order with reads! can't use hashmap
+        /*
+         * Batch reads so they can all be sent to the appropriate extent
+         * together.
+         *
+         * Note: Have to maintain order with reads! The Upstairs expects read
+         * responses to be in the same order as read requests, so we can't use
+         * a hashmap in the same way that batching writes can.
+         */
         let mut eid: Option<u64> = None;
         let mut batched_reads: Vec<&crucible_protocol::ReadRequest> =
             Vec::with_capacity(requests.len());
