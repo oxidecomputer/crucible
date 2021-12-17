@@ -25,7 +25,7 @@ fi
 
 cds="./target/debug/crucible-downstairs"
 if [[ ! -f ${cds} ]]; then
-    echo "Can't find crucible binary at $cds or $cc"
+    echo "Can't find crucible binary at $cds"
     exit 1
 fi
 

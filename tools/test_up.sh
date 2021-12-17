@@ -1,8 +1,9 @@
 #!/bin/bash
 #
 # Simple script to start three downstairs, then run through all the tests
-# that exist on the crucible client program.  This should eventually either
-# move to some common test framework, or be thrown away.
+# that exist on the crucible client program, as well as a few other tests.
+# This should eventually either move to some common test framework, or be
+# thrown away.
 
 set -o pipefail
 SECONDS=0
@@ -126,7 +127,7 @@ else
     echo "dump test 2 passed"
 fi
 
-echo "Tests have completed, stopping all downstairs"
+echo "Upstairs tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do
     kill $pid >/dev/null 2>&1
     wait $pid
