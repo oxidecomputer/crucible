@@ -19,3 +19,9 @@ ptime -m cargo build --verbose
 
 banner test
 ptime -m cargo test --lib --verbose
+
+banner test_up.sh
+ptime -m ./tools/test_up.sh
+
+banner test_ds.sh
+ptime -m ./tools/test_ds.sh
