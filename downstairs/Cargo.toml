@@ -33,7 +33,13 @@ tracing-subscriber = "0.2.19"
 tracing-opentelemetry = "0.14.0"
 uuid = { version = "0.8", features = [ "serde", "v4" ] }
 rusqlite = { version = "0.25" }
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
 rand_chacha = "0.3.1"
+criterion = "0.3"
+
+[[bench]]
+name = "downstairs"
+harness = false

@@ -1,4 +1,5 @@
 // Copyright 2021 Oxide Computer Company
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
@@ -141,20 +142,28 @@ impl Inner {
     }
 
     fn set_encryption_context(
-        &self,
-        block: u64,
-        nonce: &[u8],
-        tag: &[u8],
+        &mut self,
+        encryption_context_params: &[(u64, &[u8], &[u8])],
     ) -> Result<()> {
-        let mut stmt = self.metadb.prepare(
-            &[
-                "INSERT OR REPLACE INTO encryption_context",
-                "(block, nonce, tag) values (?1, ?2, ?3)",
-            ]
-            .join(" "),
-        )?;
+        let stmt: Vec<String> = vec![
+            "INSERT OR REPLACE INTO encryption_context".to_string(),
+            "(block, nonce, tag) values".to_string(),
+            encryption_context_params
+                .iter()
+                .map(|tuple| {
+                    let (block, nonce, tag) = tuple;
+                    format!(
+                        "({}, X'{}', X'{}')",
+                        block,
+                        hex::encode(nonce),
+                        hex::encode(tag),
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join(","),
+        ];
 
-        let _rows_affected = stmt.execute(params![block, nonce, tag])?;
+        let _rows_affected = self.metadb.execute(&stmt.join(" "), [])?;
 
         Ok(())
     }
@@ -379,34 +388,41 @@ impl Extent {
     #[instrument]
     pub fn read(
         &self,
-        request: &crucible_protocol::ReadRequest,
-    ) -> Result<crucible_protocol::ReadResponse, CrucibleError> {
-        let mut response = crucible_protocol::ReadResponse::from_request(
-            request,
-            self.block_size as usize,
-        );
-
-        self.check_input(request.offset, &response.data)?;
-
-        let byte_offset = request.offset.value * self.block_size;
-
+        requests: &[&crucible_protocol::ReadRequest],
+        responses: &mut Vec<crucible_protocol::ReadResponse>,
+    ) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.file.seek(SeekFrom::Start(byte_offset))?;
 
-        /*
-         * XXX This read_exact only works because we have filled our buffer
-         * with data ahead of time.  If we want to use an uninitialized
-         * buffer, then we need a different read or type for the destination
-         */
-        inner.file.read_exact(&mut response.data)?;
+        for request in requests {
+            let mut response = crucible_protocol::ReadResponse::from_request(
+                request,
+                self.block_size as usize,
+            );
 
-        let ctx = inner.get_encryption_context(request.offset.value)?;
-        if let Some((nonce, tag)) = ctx {
-            response.nonce = Some(nonce);
-            response.tag = Some(tag);
+            self.check_input(request.offset, &response.data)?;
+
+            let byte_offset = request.offset.value * self.block_size;
+
+            inner.file.seek(SeekFrom::Start(byte_offset))?;
+
+            /*
+             * XXX This read_exact only works because we have filled our
+             * buffer with data ahead of time.  If we want to use
+             * an uninitialized buffer, then we need a different
+             * read or type for the destination
+             */
+            inner.file.read_exact(&mut response.data)?;
+
+            let ctx = inner.get_encryption_context(request.offset.value)?;
+            if let Some((nonce, tag)) = ctx {
+                response.nonce = Some(nonce);
+                response.tag = Some(tag);
+            }
+
+            responses.push(response);
         }
 
-        Ok(response)
+        Ok(())
     }
 
     /**
@@ -446,25 +462,36 @@ impl Extent {
     #[instrument]
     pub fn write(
         &self,
-        write: &crucible_protocol::Write,
+        writes: &[&crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().unwrap();
 
-        self.check_input(write.offset, &write.data)?;
+        for write in writes {
+            self.check_input(write.offset, &write.data)?;
+        }
 
         inner.set_dirty()?;
 
-        let byte_offset = write.offset.value * self.block_size;
+        let mut encryption_context_params: Vec<(u64, &[u8], &[u8])> =
+            Vec::with_capacity(writes.len());
 
-        inner.file.seek(SeekFrom::Start(byte_offset))?;
-        inner.file.write_all(&write.data)?;
+        for write in writes {
+            let byte_offset = write.offset.value * self.block_size;
 
-        if write.nonce.is_some() && write.tag.is_some() {
-            inner.set_encryption_context(
-                write.offset.value,
-                write.nonce.as_ref().unwrap(),
-                write.tag.as_ref().unwrap(),
-            )?;
+            inner.file.seek(SeekFrom::Start(byte_offset))?;
+            inner.file.write_all(&write.data)?;
+
+            if write.nonce.is_some() && write.tag.is_some() {
+                encryption_context_params.push((
+                    write.offset.value,
+                    write.nonce.as_ref().unwrap(),
+                    write.tag.as_ref().unwrap(),
+                ));
+            }
+        }
+
+        if !encryption_context_params.is_empty() {
+            inner.set_encryption_context(&encryption_context_params)?;
         }
 
         Ok(())
@@ -714,10 +741,26 @@ impl Region {
         &self,
         writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
+        /*
+         * Batch writes so they can all be sent to the appropriate extent
+         * together.
+         */
+        let mut batched_writes: HashMap<usize, Vec<&crucible_protocol::Write>> =
+            HashMap::new();
+
         for write in writes {
-            let extent = &self.extents[write.eid as usize];
-            extent.write(write)?;
+            let extent_vec = batched_writes
+                .entry(write.eid as usize)
+                .or_insert_with(Vec::new);
+            extent_vec.push(write);
         }
+
+        for eid in batched_writes.keys() {
+            let extent = &self.extents[*eid];
+            let writes = batched_writes.get(eid).unwrap();
+            extent.write(&writes[..])?;
+        }
+
         Ok(())
     }
 
@@ -739,9 +782,40 @@ impl Region {
     ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
         let mut responses = Vec::with_capacity(requests.len());
 
+        /*
+         * Batch reads so they can all be sent to the appropriate extent
+         * together.
+         *
+         * Note: Have to maintain order with reads! The Upstairs expects read
+         * responses to be in the same order as read requests, so we can't
+         * use a hashmap in the same way that batching writes can.
+         */
+        let mut eid: Option<u64> = None;
+        let mut batched_reads: Vec<&crucible_protocol::ReadRequest> =
+            Vec::with_capacity(requests.len());
+
         for request in requests {
-            let extent = &self.extents[request.eid as usize];
-            responses.push(extent.read(request)?);
+            if let Some(_eid) = eid {
+                if request.eid == _eid {
+                    batched_reads.push(request);
+                } else {
+                    let extent = &self.extents[_eid as usize];
+                    extent.read(&batched_reads[..], &mut responses)?;
+
+                    eid = Some(request.eid);
+                    batched_reads.clear();
+                    batched_reads.push(request);
+                }
+            } else {
+                eid = Some(request.eid);
+                batched_reads.clear();
+                batched_reads.push(request);
+            }
+        }
+
+        if let Some(_eid) = eid {
+            let extent = &self.extents[_eid as usize];
+            extent.read(&batched_reads[..], &mut responses)?;
         }
 
         Ok(responses)
@@ -771,7 +845,7 @@ mod test {
     use super::*;
     use crate::dump::dump_region;
     use bytes::{BufMut, BytesMut};
-    use rand::Rng;
+    use rand::{Rng, RngCore};
     use std::path::PathBuf;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -1057,7 +1131,7 @@ mod test {
         region.extend(1)?;
 
         let ext = &region.extents[0];
-        let inner = ext.inner();
+        let mut inner = ext.inner();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1066,7 +1140,7 @@ mod test {
 
         // Set and verify block 0's context
 
-        inner.set_encryption_context(0, &[1, 2, 3], &[4, 5, 6, 7])?;
+        inner.set_encryption_context(&[(0, &[1, 2, 3], &[4, 5, 6, 7])])?;
 
         let ctx = inner.get_encryption_context(0)?.unwrap();
 
@@ -1082,12 +1156,94 @@ mod test {
         let blob1 = rand::thread_rng().gen::<[u8; 32]>();
         let blob2 = rand::thread_rng().gen::<[u8; 32]>();
 
-        inner.set_encryption_context(0, &blob1, &blob2)?;
+        inner.set_encryption_context(&[(0, &blob1, &blob2)])?;
 
         let ctx = inner.get_encryption_context(0)?.unwrap();
 
         assert_eq!(ctx.0, blob1);
         assert_eq!(ctx.1, blob2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_big_write() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        let ddef = region.def();
+        let total_size: usize = ddef.total_size() as usize;
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // use region_write to fill region
+
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                nonce: None,
+                tag: None,
+            });
+        }
+
+        region.region_write(&writes)?;
+
+        // read data into File, compare what was written to buffer
+
+        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+
+        for i in 0..ddef.extent_count() {
+            let path = extent_path(&dir, i);
+            let mut data = std::fs::read(path).expect("Unable to read file");
+
+            read_from_files.append(&mut data);
+        }
+
+        assert_eq!(buffer, read_from_files);
+
+        // read all using region_read
+
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+        }
+
+        assert_eq!(buffer, read_from_region);
 
         Ok(())
     }
