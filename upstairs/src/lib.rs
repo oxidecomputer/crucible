@@ -213,80 +213,6 @@ pub fn extent_from_offset(
 }
 
 /*
- * Decide what to do with a downstairs that has just connected and has
- * sent us information about its extents.
- *
- * XXX At the moment we are doing both wait quorum and verify consistency
- * in the same function. This will soon break out into two separate places
- * where we then decide what to do with each downstairs.
- */
-fn process_downstairs(
-    target: &SocketAddr,
-    u: &Arc<Upstairs>,
-    gens: Vec<u64>,
-    versions: Vec<u64>,
-    dirty: Vec<bool>,
-) -> Result<()> {
-    if versions.len() > 12 {
-        println!("{} versions[0..12]: {:?}", target, versions[0..12].to_vec());
-        println!("{} gens[0..12]: {:?}", target, gens[0..12].to_vec());
-        println!("{} dirty[0..12]: {:?}", target, dirty[0..12].to_vec());
-    } else {
-        println!("{}  versions: {:?}", target, versions);
-        println!("{}  gens: {:?}", target, gens);
-        println!("{}  dirty: {:?}", target, dirty);
-    }
-
-    let mut fi = u.flush_info.lock().unwrap();
-    if fi.flush_numbers.is_empty() {
-        /*
-         * This is the first version list we have, so
-         * we will make it the original and compare
-         * whatever comes next.
-         * XXX This is not the final way to do it, but works for now.
-         */
-        fi.flush_numbers = versions;
-        fi.next_flush = *fi.flush_numbers.iter().max().unwrap() + 1;
-        print!("Set initial Extent versions to");
-        if fi.flush_numbers.len() > 12 {
-            println!(" [0..12]{:?}", fi.flush_numbers[0..12].to_vec());
-        } else {
-            println!("{:?}", fi.flush_numbers);
-        }
-        println!("Next flush: {}", fi.next_flush);
-    } else if fi.flush_numbers.len() != versions.len() {
-        /*
-         * I don't think there is much we can do here, the expected number
-         * of flush numbers does not match. Possibly we have grown one but
-         * not the rest of the downstairs?
-         */
-        panic!(
-            "Expected downstairs version \
-              len:{:?} does not match new \
-              downstairs:{:?}",
-            fi.flush_numbers.len(),
-            versions.len()
-        );
-    } else {
-        /*
-         * We already have a list of versions to compare with. Make that
-         * comparison now against this new list
-         */
-        let ver_cmp = fi.flush_numbers.iter().eq(versions.iter());
-        if !ver_cmp {
-            println!(
-                "{} MISMATCH expected: {:?} != new: {:?}",
-                target, fi.flush_numbers, versions
-            );
-            // XXX Recovery process should start here
-            println!("{} Ignoring this downstairs version info", target);
-        }
-    }
-
-    Ok(())
-}
-
-/*
  * This function is called by a worker task after the main task has added
  * work to the hashmap and notified the worker tasks that new work is ready
  * to be serviced. The worker task will walk the hashmap and build a list
@@ -558,7 +484,9 @@ async fn proc(
                  * The activating guest sends us the generation number.
                  * TODO: Update the promote to active message to send
                  * the generation number along with the UUID for the
-                 * downstairs to validate.
+                 * downstairs to validate. Or, possibly not. The generation
+                 * number the upstairs has is what it should use going
+                 * forward.  What the downstairs has should not be higher.
                  */
                 match r {
                     Ok(_) => {
@@ -789,15 +717,21 @@ async fn proc(
                         };
                         assert_eq!(my_state, DsState::WaitActive);
                         /*
-                         * XXX This logic may move to a different location
-                         * when we actually get the code written to handle
-                         * mismatch between downstairs extent versions.
-                         * For comparing the region data, we need to collect
-                         * version and dirty bit info from all three
-                         * downstairs, and make the decision on which data is
-                         * correct once we have everything.
+                         * Record this downstairs region info for later
+                         * comparison with the other downstairs in this
+                         * region set.
                          */
-                        process_downstairs(target, up, gen, flush, dirty)?;
+                        let dsr = Reconcile {
+                            generation: gen,
+                            flush_numbers: flush.clone(),
+                            dirty,
+                        };
+
+                        up.downstairs
+                          .lock()
+                          .unwrap()
+                          .reconcile
+                          .insert(up_coms.client_id, dsr);
 
                         negotiated = 5;
                         up.ds_transition(
@@ -1212,15 +1146,28 @@ struct Downstairs {
      */
     ds_state: Vec<DsState>,
     /*
-     * The last flush ID that this downstairs has acked.
+     * The last flush ID that each downstairs has acked.
      */
     ds_last_flush: Vec<u64>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
     completed: AllocRingBuffer<u64>,
+    /*
+     * On Startup, we collect info from each downstairs region that we use
+     * to make sure that all three regions in a region set are the same, and
+     * if not the same, to decide which data we will consider valid and
+     * make the other downstairs contain that same data.
+     */
+    reconcile: HashMap<u8, Reconcile>,
 }
 
+#[derive(Debug, Clone)]
+struct Reconcile {
+    generation: Vec<u64>,
+    flush_numbers: Vec<u64>,
+    dirty: Vec<bool>,
+}
 /*
  * These counts describe the various states that a Downstairs IO can
  * be in.
@@ -1249,6 +1196,7 @@ impl Default for Downstairs {
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
             next_id: 1000,
+            reconcile: HashMap::new(),
         }
     }
 }
@@ -2147,7 +2095,7 @@ impl Upstairs {
      */
     fn next_flush_id(&self) -> u64 {
         let mut fi = self.flush_info.lock().unwrap();
-        fi.next_flush()
+        fi.get_next_flush()
     }
 
     fn last_flush_id(&self, client_id: u8) -> u64 {
@@ -2566,6 +2514,106 @@ impl Upstairs {
         ds.ds_state[client_id as usize]
     }
 
+    /*
+     * Build the list of extent indexes that don't match.
+     * The downstairs lock must be held when calling this.
+     */
+    fn mismatch_list(&self, ds: &Downstairs) -> Option<Vec<usize>> {
+        let c0_rec = ds.reconcile.get(&0).unwrap();
+        let c1_rec = ds.reconcile.get(&1).unwrap();
+        let c2_rec = ds.reconcile.get(&2).unwrap();
+
+        /*
+         * Check lengths are all the same
+         * XXX Make this.. better
+         */
+        if c0_rec.generation.len() != c1_rec.generation.len()
+            || c1_rec.generation.len() != c2_rec.generation.len()
+        {
+            panic!(
+                "Downstairs: vec len mismatch for generation: {} {} {}",
+                c0_rec.generation.len(),
+                c1_rec.generation.len(),
+                c2_rec.generation.len()
+            );
+        }
+
+        if c0_rec.flush_numbers.len() != c1_rec.flush_numbers.len()
+            || c1_rec.flush_numbers.len() != c2_rec.flush_numbers.len()
+        {
+            panic!(
+                "Downstairs: vec len mismatch for flush_number: {} {} {}",
+                c0_rec.flush_numbers.len(),
+                c1_rec.flush_numbers.len(),
+                c2_rec.flush_numbers.len()
+            );
+        }
+
+        if c0_rec.dirty.len() != c1_rec.dirty.len()
+            || c1_rec.dirty.len() != c2_rec.dirty.len()
+        {
+            panic!(
+                "Downstairs: vec len mismatch for dirty: {} {} {}",
+                c0_rec.dirty.len(),
+                c1_rec.dirty.len(),
+                c2_rec.dirty.len()
+            );
+        }
+
+        let mut to_fix = Vec::new();
+        let mut to_check = Vec::new();
+
+        /*
+         * Any dirty bit set means that extent needs action.
+         * If we find one, add that to our fix list.  If the index is okay,
+         * then add it to list to check for flush_numbers.
+         */
+        for (i, dirty0) in c0_rec.dirty.iter().enumerate() {
+            if *dirty0 || c1_rec.dirty[i] || c2_rec.dirty[i] {
+                println!("Extent {} dirty", i);
+                to_fix.push(i as usize);
+            } else {
+                to_check.push(i as usize);
+            }
+        }
+
+        /*
+         * Find the index for any flush numbers that don't agree and
+         * add that to our to fix list.  If an index is okay, then add
+         * it to the final check for generation number.
+         */
+        let mut second_check = Vec::new();
+        for i in to_check.iter() {
+            if c0_rec.flush_numbers[*i] != c1_rec.flush_numbers[*i]
+                || c1_rec.flush_numbers[*i] != c2_rec.flush_numbers[*i]
+            {
+                println!("flush number mismatch {}", i);
+                to_fix.push(*i);
+            } else {
+                second_check.push(*i);
+            }
+        }
+
+        /*
+         * Walk all remaining indexes and add to the to_fix list
+         * any that are not all the same.
+         */
+        for i in second_check.iter() {
+            if c0_rec.generation[*i] != c1_rec.generation[*i]
+                || c1_rec.generation[*i] != c2_rec.generation[*i]
+            {
+                println!("generation number mismatch {}", i);
+                to_fix.push(*i);
+            }
+        }
+
+        if !to_fix.is_empty() {
+            Some(to_fix)
+        } else {
+            None
+        }
+    }
+
     /**
      * Check and see if it is time for reconciliation between the
      * different downstairs.  If all are in the proper state, then
@@ -2573,6 +2621,11 @@ impl Upstairs {
      *
      * Return false if we are not ready, or if things failed.
      * If we failed, then we will update the DsState for what failed.
+     *
+     * XXX How do we make sure our current generation number is higher
+     * than what we received from the downstairs?  Think about that
+     * failure case where one downstairs got a higher gen number, can
+     * that exist?
      */
     fn ds_reconciliation(&self) -> bool {
         let mut ds = self.downstairs.lock().unwrap();
@@ -2592,8 +2645,55 @@ impl Upstairs {
         }
 
         /*
-         * This is where the actual code would take place.
+         * Show some (or all if small) of the info from each region.
+         * XXX This is load bearing, we use this loop to get the
+         * max flush number.  Eventually the max flush will come after
+         * we have done any repair we need to do.  Since we don't have
+         * that code yet, we are making use of this loop to find our
+         * max.
          */
+        let mut max_flush = 0;
+        for (cid, rec) in &ds.reconcile {
+            let mf = rec.flush_numbers.iter().max().unwrap() + 1;
+            if mf > max_flush {
+                max_flush = mf;
+            }
+            if rec.flush_numbers.len() > 12 {
+                println!(
+                    "[{}] flush_numbers[0..12]: {:?}",
+                    cid,
+                    rec.flush_numbers[0..12].to_vec()
+                );
+                println!(
+                    "[{}] generation[0..12]: {:?}",
+                    cid,
+                    rec.generation[0..12].to_vec()
+                );
+                println!(
+                    "[{}] dirty[0..12]: {:?}",
+                    cid,
+                    rec.dirty[0..12].to_vec()
+                );
+            } else {
+                println!("[{}]  flush_numbers: {:?}", cid, rec.flush_numbers);
+                println!("[{}]  generation: {:?}", cid, rec.generation);
+                println!("[{}]  dirty: {:?}", cid, rec.dirty);
+            }
+        }
+
+        if let Some(to_repair) = self.mismatch_list(&ds) {
+            println!("Found some extents to repair: {:?}", to_repair);
+            //return false;
+        } else {
+            println!("All extents match");
+        }
+
+        {
+            let mut fi = self.flush_info.lock().unwrap();
+            fi.next_flush = max_flush;
+        }
+        println!("Next flush: {}", max_flush);
+
         println!("Fake reconciliation has finished!!!");
 
         /*
@@ -2851,7 +2951,6 @@ impl Upstairs {
 
 #[derive(Debug)]
 struct FlushInfo {
-    flush_numbers: Vec<u64>,
     /*
      * The next flush number to use when a Flush is issued.
      */
@@ -2860,10 +2959,7 @@ struct FlushInfo {
 
 impl FlushInfo {
     pub fn new() -> FlushInfo {
-        FlushInfo {
-            flush_numbers: Vec::new(),
-            next_flush: 0,
-        }
+        FlushInfo { next_flush: 0 }
     }
     /*
      * Upstairs flush_info mutex must be held when calling this.
@@ -2872,7 +2968,7 @@ impl FlushInfo {
      * is given a downstairs request number higher than the request number
      * for the flush will happen after this flush, never before.
      */
-    fn next_flush(&mut self) -> u64 {
+    fn get_next_flush(&mut self) -> u64 {
         let id = self.next_flush;
         self.next_flush += 1;
         id

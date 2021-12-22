@@ -2028,6 +2028,496 @@ mod test {
     }
 
     #[test]
+    fn downstairs_transition_normal() {
+        // Verify the correct downstairs progression
+        // New -> WA -> WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    fn downstairs_transition_replay() {
+        // Verify offline goes to replay
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Offline);
+        up.ds_transition(0, DsState::Replay);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_bad_transition_wq() {
+        // Verify error when going straight to WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_replay() {
+        // Verify new goes to replay will fail
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::New);
+        up.ds_transition(0, DsState::Replay);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_offline() {
+        // Verify offline cannot go to WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Offline);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_active() {
+        // Verify offline cannot go to WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Active);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    fn reconcile_one() {
+        // Verify simple reconcile
+        let up = Upstairs::default();
+
+        {
+            // Shortcut direct to WaitQuorum
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state.iter_mut().for_each(|ds_state| {
+                *ds_state = DsState::WaitQuorum;
+            });
+
+            // Generate some reconciliation data
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0],
+                flush_numbers: vec![0, 0, 0],
+                dirty: vec![false, false, false],
+            };
+            ds.reconcile.insert(0, dsr.clone());
+            ds.reconcile.insert(1, dsr.clone());
+            ds.reconcile.insert(2, dsr.clone());
+        }
+
+        up.ds_reconciliation();
+    }
+    #[test]
+    #[should_panic]
+    fn reconcile_gen_length_bad() {
+        // Verify reconcile fails when generation vec length does
+        // not agree between downstairs.
+        let up = Upstairs::default();
+
+        {
+            // Shortcut direct to WaitQuorum
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state.iter_mut().for_each(|ds_state| {
+                *ds_state = DsState::WaitQuorum;
+            });
+
+            // Generate some reconciliation data
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0],
+                flush_numbers: vec![0, 0, 0],
+                dirty: vec![false, false, false],
+            };
+            ds.reconcile.insert(0, dsr.clone());
+            ds.reconcile.insert(1, dsr.clone());
+
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0, 1],
+                flush_numbers: vec![0, 0, 0],
+                dirty: vec![false, false, false],
+            };
+            ds.reconcile.insert(2, dsr.clone());
+        }
+
+        up.ds_reconciliation();
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_flush_length_bad() {
+        // Verify reconcile fails when flush vec length does not
+        // agree between downstairs.
+        let up = Upstairs::default();
+
+        {
+            // Shortcut direct to WaitQuorum
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state.iter_mut().for_each(|ds_state| {
+                *ds_state = DsState::WaitQuorum;
+            });
+
+            // Generate some reconciliation data
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0],
+                flush_numbers: vec![0, 0, 0],
+                dirty: vec![false, false, false],
+            };
+            ds.reconcile.insert(0, dsr.clone());
+
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0],
+                flush_numbers: vec![0, 0, 0, 0],
+                dirty: vec![false, false, false],
+            };
+            ds.reconcile.insert(1, dsr.clone());
+            ds.reconcile.insert(2, dsr.clone());
+        }
+
+        up.ds_reconciliation();
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_dirty_length_bad() {
+        // Verify reconcile fails when dirty vec length does not
+        // agree between downstairs.
+        let up = Upstairs::default();
+        {
+            // Shortcut direct to WaitQuorum
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state.iter_mut().for_each(|ds_state| {
+                *ds_state = DsState::WaitQuorum;
+            });
+
+            // Generate some reconciliation data
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0],
+                flush_numbers: vec![0, 0, 0],
+                dirty: vec![false, false, false],
+            };
+            ds.reconcile.insert(0, dsr.clone());
+            ds.reconcile.insert(1, dsr.clone());
+
+            let dsr = Reconcile {
+                generation: vec![0, 0, 0, 1],
+                flush_numbers: vec![0, 0, 0],
+                dirty: vec![false, false, false, false],
+            };
+            ds.reconcile.insert(2, dsr.clone());
+        }
+
+        up.ds_reconciliation();
+    }
+
+    #[test]
+    fn reconcile_to_repair() {
+        // Verify reconcile to_repair returns None when no mismatch
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![1, 2, 3, 0],
+            flush_numbers: vec![4, 5, 4, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(2, dsr.clone());
+        ds.reconcile.insert(1, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, None);
+    }
+
+    #[test]
+    fn reconcile_generation_mismatch_c0() {
+        // Verify reconcile reports a mismatch when the c0 generation
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 0],
+            flush_numbers: vec![0, 0, 0, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(1, dsr.clone());
+        ds.reconcile.insert(2, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![8, 8, 7, 0],
+            flush_numbers: vec![0, 0, 0, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![0]));
+    }
+
+    #[test]
+    fn reconcile_generation_mismatch_c1() {
+        // Verify reconcile reports a mismatch when the c1 generation
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![0, 0, 0, 0],
+            flush_numbers: vec![0, 0, 0, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(2, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![0, 0, 1, 0],
+            flush_numbers: vec![0, 0, 0, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(1, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![2]));
+    }
+
+    #[test]
+    fn reconcile_generation_mismatch_c2() {
+        // Verify reconcile reports a mismatch when the generation
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![0, 0, 0, 0],
+            flush_numbers: vec![0, 0, 0, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(1, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![0, 0, 0, 1],
+            flush_numbers: vec![0, 0, 0, 0],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(2, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![3]));
+    }
+
+    #[test]
+    fn reconcile_flush_mismatch_c0() {
+        // Verify reconcile reports a mismatch when the c0 flush
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![1, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(1, dsr.clone());
+        ds.reconcile.insert(2, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![0]));
+    }
+    #[test]
+    fn reconcile_flush_mismatch_c1() {
+        // Verify reconcile reports a mismatch when the c1 flush
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![1, 2, 1, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(2, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(1, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn reconcile_flush_mismatch_c2() {
+        // Verify reconcile reports a mismatch when the c2 flush
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![1, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(1, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 3],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(2, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![0, 3]));
+    }
+
+    #[test]
+    fn reconcile_dirty_mismatch() {
+        // Verify reconcile reports a mismatch when the dirty
+        // numbers do not agree.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(1, dsr.clone());
+
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, true, false, false],
+        };
+        ds.reconcile.insert(2, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![1]));
+    }
+
+    #[test]
+    fn reconcile_dirty_true() {
+        // Verify reconcile reports repair to do even if all three
+        // downstairs agree on true dirty bits.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, true, true],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        ds.reconcile.insert(1, dsr.clone());
+        ds.reconcile.insert(2, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![2, 3]));
+    }
+    #[test]
+    fn reconcile_one_of_each() {
+        // Verify reconcile reports all the correct work to do when
+        // there are multiple differences in multiple fieldsh.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, false, true],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        let dsr = Reconcile {
+            generation: vec![9, 7, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, true, true],
+        };
+        ds.reconcile.insert(1, dsr.clone());
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![true, false, true, true],
+        };
+        ds.reconcile.insert(2, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![0, 2, 3, 1]));
+    }
+
+    #[test]
+    fn reconcile_count_only_one() {
+        // Verify reconcile reports a single thing to fix even if the same
+        // index is bad in multiple fields.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        // Since we are calling mismatch_list() directly, we don't
+        // need to set each downstairs state, but you do!
+
+        // Generate some reconciliation data
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(0, dsr.clone());
+        let dsr = Reconcile {
+            generation: vec![9, 8, 9, 7],
+            flush_numbers: vec![2, 1, 2, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(1, dsr.clone());
+        let dsr = Reconcile {
+            generation: vec![9, 8, 7, 7],
+            flush_numbers: vec![2, 1, 3, 1],
+            dirty: vec![false, false, false, false],
+        };
+        ds.reconcile.insert(2, dsr.clone());
+
+        let to_repair = up.mismatch_list(&ds);
+        assert_eq!(to_repair, Some(vec![2]));
+    }
+
+    #[test]
     fn bad_decryption_means_read_error() {
         let upstairs = Upstairs::default();
         upstairs.set_active();
