@@ -35,9 +35,11 @@ use aes_gcm_siv::aead::{AeadInPlace, NewAead};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
+mod mend;
 mod pseudo_file;
 mod test;
 
+pub use mend::{DownstairsMend, Reconcile};
 pub use pseudo_file::CruciblePseudoFile;
 
 #[usdt::provider]
@@ -232,6 +234,25 @@ async fn io_send(
     lossy: bool,
 ) -> Result<bool> {
     /*
+     * Make sure we are either active, or in repair mode.  Otherwise, we
+     * should not be sending IO requests to the downstairs.
+     */
+    if !u.is_active() {
+        let my_state = {
+            let state = &u.downstairs.lock().unwrap().ds_state;
+            state[client_id as usize]
+        };
+        if my_state != DsState::Repair {
+            /*
+             * If we are not active or in repair, then some other upstairs
+             * has taken over control from us.  Kick this
+             * downstairs to New state and exit the loop.
+             */
+            u.ds_transition(client_id, DsState::New);
+            bail!("[{}] {} io_send while not active", client_id, u.uuid,);
+        }
+    }
+    /*
      * Build ourselves a list of all the jobs on the work hashmap that
      * have the job state for our client id in the IOState::New
      *
@@ -247,15 +268,6 @@ async fn io_send(
      * flow control.
      */
     let mut new_work = u.downstairs.lock().unwrap().new_work(client_id);
-    if !u.is_active() {
-        /*
-         * If we are not active, then some other upstairs
-         * has taken over control from us.  Kick this
-         * downstairs to New state and exit the loop.
-         */
-        u.ds_transition(client_id, DsState::New);
-        bail!("[{}] {} io_send while not active", client_id, u.uuid,);
-    }
 
     /*
      * Now we have a list of all the job IDs that are new for our client id.
@@ -875,7 +887,6 @@ async fn cmd_loop(
         });
     }
 
-    up.ds_state_show();
     loop {
         tokio::select! {
             /*
@@ -1162,12 +1173,6 @@ struct Downstairs {
     reconcile: HashMap<u8, Reconcile>,
 }
 
-#[derive(Debug, Clone)]
-struct Reconcile {
-    generation: Vec<u64>,
-    flush_numbers: Vec<u64>,
-    dirty: Vec<bool>,
-}
 /*
  * These counts describe the various states that a Downstairs IO can
  * be in.
@@ -2118,6 +2123,10 @@ impl Upstairs {
         *self.need_flush.lock().unwrap()
     }
 
+    /*
+     * If the sender is empty, it means this flush request came from
+     * the upstairs itself.  There is no real guest IO behind it.
+     */
     #[instrument]
     pub fn submit_flush(
         &self,
@@ -2195,7 +2204,7 @@ impl Upstairs {
         &self,
         offset: Block,
         data: Bytes,
-        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+        sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
     ) -> Result<(), CrucibleError> {
         if !self.is_active() {
             crucible_bail!(UpstairsInactive);
@@ -2238,7 +2247,6 @@ impl Upstairs {
          */
         let mut sub = HashMap::new();
         let next_id = downstairs.next_id();
-        let mut new_ds_work = Vec::new();
         let mut cur_offset: usize = 0;
 
         let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
@@ -2280,21 +2288,17 @@ impl Upstairs {
         let wr = create_write_eob(next_id, dep.clone(), gw_id, writes);
 
         sub.insert(next_id, 0); // XXX does value here matter?
-        new_ds_work.push(wr);
 
         /*
          * New work created, add to the guest_work HM
          */
-        let new_gtos =
-            GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(sender));
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         {
             gw.active.insert(gw_id, new_gtos);
         }
         cdt::gw_write_start!(|| (gw_id));
 
-        for wr in new_ds_work {
-            downstairs.enqueue(wr);
-        }
+        downstairs.enqueue(wr);
 
         Ok(())
     }
@@ -2310,7 +2314,7 @@ impl Upstairs {
         &self,
         offset: Block,
         data: Buffer,
-        sender: std_mpsc::Sender<Result<(), CrucibleError>>,
+        sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
     ) -> Result<(), CrucibleError> {
         if !self.is_active() {
             crucible_bail!(UpstairsInactive);
@@ -2349,7 +2353,6 @@ impl Upstairs {
          */
         let mut sub = HashMap::new();
         let next_id = downstairs.next_id();
-        let mut new_ds_work = Vec::new();
 
         /*
          * Now create a downstairs work job for each (eid, bo, len) returned
@@ -2371,7 +2374,6 @@ impl Upstairs {
         sub.insert(next_id, 0); // XXX does this value matter?
 
         let wr = create_read_eob(next_id, dep.clone(), gw_id, requests);
-        new_ds_work.push(wr);
 
         /*
          * New work created, add to the guest_work HM. New work must be put
@@ -2380,21 +2382,14 @@ impl Upstairs {
          * downstairs.
          */
         assert!(!sub.is_empty());
-        let new_gtos = GtoS::new(
-            sub,
-            Vec::new(),
-            Some(data),
-            HashMap::new(),
-            Some(sender),
-        );
+        let new_gtos =
+            GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), sender);
         {
             gw.active.insert(gw_id, new_gtos);
         }
         cdt::gw_read_start!(|| (gw_id));
 
-        for wr in new_ds_work {
-            downstairs.enqueue(wr);
-        }
+        downstairs.enqueue(wr);
 
         Ok(())
     }
@@ -2492,8 +2487,29 @@ impl Upstairs {
             DsState::WaitQuorum => {
                 assert_eq!(old_state, DsState::WaitActive);
             }
+            DsState::Repair => {
+                assert!(!self.is_active());
+                assert_eq!(old_state, DsState::WaitQuorum);
+            }
             DsState::Replay => {
                 assert_eq!(old_state, DsState::Offline);
+                assert!(self.is_active());
+            }
+            DsState::Active => {
+                if old_state != DsState::WaitQuorum
+                    && old_state != DsState::Repair
+                {
+                    panic!(
+                        "[{}] {} Invalid transition: {:?} -> {:?}",
+                        client_id, self.uuid, old_state, new_state
+                    );
+                }
+                /*
+                 * Make sure repair happens when offline
+                 */
+                if old_state == DsState::Repair {
+                    assert!(!self.is_active());
+                }
             }
             _ => (),
         }
@@ -2516,102 +2532,16 @@ impl Upstairs {
 
     /*
      * Build the list of extent indexes that don't match.
-     * The downstairs lock must be held when calling this.
+     * The downstairs lock must be held when calling this, as we don't
+     * want this information changing under us while we are looking
+     * at it.
      */
-    fn mismatch_list(&self, ds: &Downstairs) -> Option<Vec<usize>> {
+    fn mismatch_list(&self, ds: &Downstairs) -> Option<DownstairsMend> {
         let c0_rec = ds.reconcile.get(&0).unwrap();
         let c1_rec = ds.reconcile.get(&1).unwrap();
         let c2_rec = ds.reconcile.get(&2).unwrap();
 
-        /*
-         * Check lengths are all the same
-         * XXX Make this.. better
-         */
-        if c0_rec.generation.len() != c1_rec.generation.len()
-            || c1_rec.generation.len() != c2_rec.generation.len()
-        {
-            panic!(
-                "Downstairs: vec len mismatch for generation: {} {} {}",
-                c0_rec.generation.len(),
-                c1_rec.generation.len(),
-                c2_rec.generation.len()
-            );
-        }
-
-        if c0_rec.flush_numbers.len() != c1_rec.flush_numbers.len()
-            || c1_rec.flush_numbers.len() != c2_rec.flush_numbers.len()
-        {
-            panic!(
-                "Downstairs: vec len mismatch for flush_number: {} {} {}",
-                c0_rec.flush_numbers.len(),
-                c1_rec.flush_numbers.len(),
-                c2_rec.flush_numbers.len()
-            );
-        }
-
-        if c0_rec.dirty.len() != c1_rec.dirty.len()
-            || c1_rec.dirty.len() != c2_rec.dirty.len()
-        {
-            panic!(
-                "Downstairs: vec len mismatch for dirty: {} {} {}",
-                c0_rec.dirty.len(),
-                c1_rec.dirty.len(),
-                c2_rec.dirty.len()
-            );
-        }
-
-        let mut to_fix = Vec::new();
-        let mut to_check = Vec::new();
-
-        /*
-         * Any dirty bit set means that extent needs action.
-         * If we find one, add that to our fix list.  If the index is okay,
-         * then add it to list to check for flush_numbers.
-         */
-        for (i, dirty0) in c0_rec.dirty.iter().enumerate() {
-            if *dirty0 || c1_rec.dirty[i] || c2_rec.dirty[i] {
-                println!("Extent {} dirty", i);
-                to_fix.push(i as usize);
-            } else {
-                to_check.push(i as usize);
-            }
-        }
-
-        /*
-         * Find the index for any flush numbers that don't agree and
-         * add that to our to fix list.  If an index is okay, then add
-         * it to the final check for generation number.
-         */
-        let mut second_check = Vec::new();
-        for i in to_check.iter() {
-            if c0_rec.flush_numbers[*i] != c1_rec.flush_numbers[*i]
-                || c1_rec.flush_numbers[*i] != c2_rec.flush_numbers[*i]
-            {
-                println!("flush number mismatch {}", i);
-                to_fix.push(*i);
-            } else {
-                second_check.push(*i);
-            }
-        }
-
-        /*
-         * Walk all remaining indexes and add to the to_fix list
-         * any that are not all the same.
-         */
-        for i in second_check.iter() {
-            if c0_rec.generation[*i] != c1_rec.generation[*i]
-                || c1_rec.generation[*i] != c2_rec.generation[*i]
-            {
-                println!("generation number mismatch {}", i);
-                to_fix.push(*i);
-            }
-        }
-
-        if !to_fix.is_empty() {
-            Some(to_fix)
-        } else {
-            None
-        }
+        DownstairsMend::new(c0_rec, c1_rec, c2_rec)
     }
 
     /**
@@ -2626,10 +2556,13 @@ impl Upstairs {
      * than what we received from the downstairs?  Think about that
      * failure case where one downstairs got a higher gen number, can
      * that exist?
+     *
+     * XXX: dst and lastcast may be used when we repair the downstairs.
+     * If so, they lose the _  If not, then they will be removed.
      */
-    fn ds_reconciliation(&self) -> bool {
+    fn ds_reconciliation(&self, _dst: &[Target], _lastcast: &mut u64) -> bool {
         let mut ds = self.downstairs.lock().unwrap();
-
+        assert!(!self.is_active());
         /*
          * Make sure all downstairs are in the correct state before we
          * proceed.
@@ -2637,7 +2570,7 @@ impl Upstairs {
         let not_ready = ds
             .ds_state
             .iter()
-            .filter(|dst| **dst != DsState::WaitQuorum)
+            .filter(|state| **state != DsState::WaitQuorum)
             .count();
         if not_ready > 0 {
             println!("Waiting for {} more clients to be ready", not_ready);
@@ -2646,72 +2579,135 @@ impl Upstairs {
 
         /*
          * Show some (or all if small) of the info from each region.
-         * XXX This is load bearing, we use this loop to get the
+         *
+         * This loop is load bearing, we use this loop to get the
          * max flush number.  Eventually the max flush will come after
          * we have done any repair we need to do.  Since we don't have
          * that code yet, we are making use of this loop to find our
          * max.
          */
         let mut max_flush = 0;
+        let mut max_gen = 0;
         for (cid, rec) in &ds.reconcile {
             let mf = rec.flush_numbers.iter().max().unwrap() + 1;
             if mf > max_flush {
                 max_flush = mf;
             }
+            let mg = rec.generation.iter().max().unwrap() + 1;
+            if mg > max_gen {
+                max_gen = mg;
+            }
             if rec.flush_numbers.len() > 12 {
                 println!(
-                    "[{}] flush_numbers[0..12]: {:?}",
+                    "[{}]R flush_numbers[0..12]: {:?}",
                     cid,
                     rec.flush_numbers[0..12].to_vec()
                 );
                 println!(
-                    "[{}] generation[0..12]: {:?}",
+                    "[{}]R generation[0..12]: {:?}",
                     cid,
                     rec.generation[0..12].to_vec()
                 );
                 println!(
-                    "[{}] dirty[0..12]: {:?}",
+                    "[{}]R dirty[0..12]: {:?}",
                     cid,
                     rec.dirty[0..12].to_vec()
                 );
             } else {
-                println!("[{}]  flush_numbers: {:?}", cid, rec.flush_numbers);
-                println!("[{}]  generation: {:?}", cid, rec.generation);
-                println!("[{}]  dirty: {:?}", cid, rec.dirty);
+                println!("[{}]R  flush_numbers: {:?}", cid, rec.flush_numbers);
+                println!("[{}]R  generation: {:?}", cid, rec.generation);
+                println!("[{}]R  dirty: {:?}", cid, rec.dirty);
             }
         }
 
-        if let Some(to_repair) = self.mismatch_list(&ds) {
-            println!("Found some extents to repair: {:?}", to_repair);
-            //return false;
-        } else {
-            println!("All extents match");
+        /*
+         * XXX because the generation number is not plumbed up yet in
+         * nexus, we are manually increasing it here.  Whatever the highest
+         * number we find during our initial scan, we add one and use that.
+         * When we start receiving a gen from outside, then we need to
+         * take this out.  If the caller has requested a generation number,
+         * then we trust that and let things move forward with it.
+         */
+        let cur_max_gen = self.get_generation();
+        if cur_max_gen == 0 {
+            println!("XXX Manual generation setting to {}", max_gen);
+            self.set_generation(max_gen);
+        } else if cur_max_gen < max_gen {
+            /*
+             * This may eventually be a panic, or require some cleanup if
+             * generation numbers are higher than we expect. XXX
+             */
+            println!(
+                "Warning: found gen number {}, larger than requested: {}",
+                max_gen, cur_max_gen,
+            );
         }
 
+        /*
+         * Set the next flush ID so we have if we need to repair.
+         */
         {
             let mut fi = self.flush_info.lock().unwrap();
             fi.next_flush = max_flush;
         }
         println!("Next flush: {}", max_flush);
 
-        println!("Fake reconciliation has finished!!!");
+        if let Some(to_repair) = self.mismatch_list(&ds) {
+            println!("Found some extents to repair: {:?}", to_repair);
 
-        /*
-         * XXX TODO:
-         * To make things work on a disconnected then reconnected
-         * upstairs, you have to write more code to deal with any
-         * outstanding IOs that may have been left behind.  Also
-         * clear out the completed work as well.
-         */
+            /*
+             * TODO: Move the state transition logic an all this into
+             * something specific for the DsState type.
+             * Or, at least use the ds_transition() method here instead
+             * of manually doing it.  You will have to deal with locking
+             * correctly, so pay attention.
+             * (This is issue #153)
+             */
+            ds.ds_state.iter_mut().for_each(|ds_state| {
+                println!("Transition from {:?} to Repair", *ds_state);
+                assert_eq!(*ds_state, DsState::WaitQuorum);
+                *ds_state = DsState::Repair;
+            });
+
+            /*
+             * TODO: Next steps here are to take the mismatch list
+             * and go make the downstairs all agree.
+             *
+             * For now, we do nothing and continue, which means you
+             * can possibly get different data than you expect (if
+             * the downstairs don't agree with each other).
+             */
+        } else {
+            println!("All extents match");
+        }
+
+        println!("Fake reconciliation has finished!!!");
         assert_eq!(ds.active.len(), 0);
 
         /*
          * Now that we have completed reconciliation, we move all
-         * the downstairs to the next state.
+         * the downstairs to the next state.  If we fail here, it means
+         * something interrupted our repair and we have to start over.
+         *
+         * If repairing, then it still should be repairing.
+         * If not repairing then it should be WaitQuorum.
+         *
+         * Depending on how the repair is implemented, we may or may
+         * not expect a possible state change from a downstairs during
+         * the repair process.  If we release the downstairs lock, then
+         * we must recheck the states.
          */
         ds.ds_state.iter_mut().for_each(|ds_state| {
             println!("Transition from {:?} to Active", *ds_state);
-            assert_eq!(*ds_state, DsState::WaitQuorum);
+            if *ds_state != DsState::WaitQuorum && *ds_state != DsState::Repair
+            {
+                /*
+                 * Write more code */
+                panic!(
+                    "Invalid state transition {:?} -> DsState::Active",
+                    *ds_state
+                );
+            }
             *ds_state = DsState::Active;
         });
 
@@ -2767,6 +2763,7 @@ impl Upstairs {
             println!("Transition from {:?} to {:?}", *ds_state, new_state,);
             match new_state {
                 DsState::Active => {
+                    // XXX also possible from Repair
                     assert_eq!(*ds_state, DsState::WaitQuorum);
                     *ds_state = new_state;
                 }
@@ -2869,15 +2866,6 @@ impl Upstairs {
     ) -> Result<bool> {
         let mut ds = self.downstairs.lock().unwrap();
 
-        if !self.is_active() {
-            bail!(
-                "[{}] {} for job {} is complete while not active",
-                client_id,
-                self.uuid,
-                ds_id
-            );
-        }
-
         /*
          * We can finish the job if the downstairs has gone away, but
          * not if it has gone away then come back, because when it comes
@@ -2886,10 +2874,19 @@ impl Upstairs {
          * we already received, because it may never come back.
          */
         let ds_state = ds.ds_state[client_id as usize];
-        if ds_state != DsState::Active {
+        if ds_state != DsState::Active && ds_state != DsState::Repair {
             println!(
                 "[{}] {} WARNING finish job {} when downstairs state:{:?}",
                 client_id, self.uuid, ds_id, ds_state
+            );
+        }
+
+        if !self.is_active() && ds_state != DsState::Repair {
+            bail!(
+                "[{}] {} for job {} is complete while not active",
+                client_id,
+                self.uuid,
+                ds_id
             );
         }
 
@@ -3011,6 +3008,10 @@ enum DsState {
      * Comparing downstairs for consistency.
      */
     _Verifying,
+    /*
+     * Downstairs are repairing from each other.
+     */
+    Repair,
     /*
      * Failed when attempting to make consistent.
      */
@@ -3641,7 +3642,6 @@ impl GuestWork {
                 if result.is_ok() && gtos_job.guest_buffer.is_some() {
                     gtos_job.transfer();
                 }
-
                 gtos_job.notify(result);
                 self.gw_complete(gw_id);
             }
@@ -4239,7 +4239,8 @@ async fn process_new_io(
          * active and should not be accepted if we are not active.
          */
         BlockOp::Read { offset, data } => {
-            if let Err(e) = up.submit_read(offset, data, req.send.clone()) {
+            if let Err(e) = up.submit_read(offset, data, Some(req.send.clone()))
+            {
                 let _ = req.send.send(Err(e));
                 return;
             }
@@ -4247,7 +4248,9 @@ async fn process_new_io(
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
-            if let Err(e) = up.submit_write(offset, data, req.send.clone()) {
+            if let Err(e) =
+                up.submit_write(offset, data, Some(req.send.clone()))
+            {
                 let _ = req.send.send(Err(e));
                 return;
             }
@@ -4371,7 +4374,9 @@ async fn up_listen(
                          * If this just connected, see if the
                          * reconciliation can now pass.
                          */
-                        if c.connected && up.ds_reconciliation() {
+                        if c.connected
+                            && up.ds_reconciliation(&dst, &mut lastcast)
+                        {
                             break;
                         }
                     } else {
