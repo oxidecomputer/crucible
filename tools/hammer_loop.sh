@@ -20,8 +20,8 @@ do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    cargo run -q -p crucible-hammer -- -t 127.0.0.1:3801 -t 127.0.0.1:3802 \
-        -t 127.0.0.1:3803 >> "$test_log" 2>&1
+    cargo run -q -p crucible-hammer -- -t 127.0.0.1:8801 -t 127.0.0.1:8802 \
+        -t 127.0.0.1:8803 >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
         touch /tmp/ds_test/up 2> /dev/null
