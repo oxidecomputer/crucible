@@ -2031,22 +2031,70 @@ mod test {
     #[test]
     fn downstairs_transition_normal() {
         // Verify the correct downstairs progression
-        // New -> WA -> WQ
+        // New -> WA -> WQ -> Active
         let up = Upstairs::default();
         up.ds_transition(0, DsState::WaitActive);
         up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::Active);
     }
 
     #[test]
     fn downstairs_transition_replay() {
         // Verify offline goes to replay
         let up = Upstairs::default();
-        up.set_active();
         up.ds_transition(0, DsState::WaitActive);
         up.ds_transition(0, DsState::WaitQuorum);
+        up.set_active();
         up.ds_transition(0, DsState::Active);
         up.ds_transition(0, DsState::Offline);
         up.ds_transition(0, DsState::Replay);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_wa() {
+        // Verify we can't go to the same state we are in
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitActive);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_wq() {
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_active() {
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::Active);
+        up.ds_transition(0, DsState::Active);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_offline() {
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Offline);
+        up.ds_transition(0, DsState::Offline);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_backwards() {
+        // Verify state can't go backwards
+        // New -> WA -> WQ -> WA
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::WaitActive);
     }
 
     #[test]
@@ -2062,7 +2110,6 @@ mod test {
     fn downstairs_transition_bad_replay() {
         // Verify new goes to replay will fail
         let up = Upstairs::default();
-        up.ds_transition(0, DsState::New);
         up.ds_transition(0, DsState::Replay);
     }
 
