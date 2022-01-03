@@ -2505,7 +2505,7 @@ impl Upstairs {
                     );
                 }
                 /*
-                 * Make sure repair happens when offline
+                 * Make sure repair happened when the upstairs is inactive.
                  */
                 if old_state == DsState::Repair {
                     assert!(!self.is_active());
