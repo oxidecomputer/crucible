@@ -27,6 +27,7 @@ arg_enum! {
         Dep,
         Dirty,
         Generic,
+        Nothing,
         One,
         Rand,
         Span,
@@ -330,6 +331,9 @@ fn main() -> Result<()> {
         Workload::One => {
             println!("One test");
             runtime.block_on(one_workload(&guest, &mut region_info))?;
+        }
+        Workload::Nothing => {
+            println!("Do nothing test, just start");
         }
         Workload::Rand => {
             println!("Run random test");

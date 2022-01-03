@@ -8,6 +8,7 @@ mod test {
     use super::*;
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn extent_tuple(eid: u64, offset: u64, len: u64) -> (u64, Block, Block) {
         (eid, Block::new_512(offset), Block::new_512(len))
@@ -2025,6 +2026,133 @@ mod test {
                 .unwrap(),
             false
         );
+    }
+
+    #[test]
+    fn downstairs_transition_normal() {
+        // Verify the correct downstairs progression
+        // New -> WA -> WQ -> Active
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::Active);
+    }
+
+    #[test]
+    fn downstairs_transition_replay() {
+        // Verify offline goes to replay
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.set_active();
+        up.ds_transition(0, DsState::Active);
+        up.ds_transition(0, DsState::Offline);
+        up.ds_transition(0, DsState::Replay);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_wa() {
+        // Verify we can't go to the same state we are in
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitActive);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_wq() {
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_active() {
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::Active);
+        up.ds_transition(0, DsState::Active);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_offline() {
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Offline);
+        up.ds_transition(0, DsState::Offline);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_backwards() {
+        // Verify state can't go backwards
+        // New -> WA -> WQ -> WA
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::WaitActive);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_bad_transition_wq() {
+        // Verify error when going straight to WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_replay() {
+        // Verify new goes to replay will fail
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Replay);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_offline() {
+        // Verify offline cannot go to WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Offline);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_active() {
+        // Verify offline cannot go to WQ
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Active);
+        up.ds_transition(0, DsState::WaitQuorum);
+    }
+
+    #[test]
+    fn reconcile_not_ready() {
+        // Verify reconcile returns false when a downstairs is not ready/
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+
+        up.ds_transition(1, DsState::WaitActive);
+        up.ds_transition(1, DsState::WaitQuorum);
+
+        let (ds_work_tx, _) = watch::channel(1);
+        let (ds_active_tx, _) = watch::channel(1);
+        let t = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let dst = Target {
+            target: t,
+            ds_work_tx,
+            ds_active_tx,
+        };
+        let mut d = Vec::new();
+        d.push(dst);
+        let mut lastcast: u64 = 1;
+        assert_eq!(up.ds_reconciliation(&d, &mut lastcast), false);
     }
 
     #[test]
