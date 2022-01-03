@@ -222,13 +222,13 @@ impl RegionOptions {
         }
 
         let bs = self.extent_size.value.saturating_mul(self.block_size);
-        if bs > 10 * 1024 * 1024 {
+        if bs > 20 * 1024 * 1024 {
             /*
              * For now, make sure we don't accidentally try to use a gigantic
              * extent.
              */
             bail!(
-                "extent size {:?} x {} bytes = {}MB, bigger than 10MB",
+                "extent size {:?} x {} bytes = {}MB, bigger than 20MB",
                 self.extent_size,
                 self.block_size,
                 bs / 1024 / 1024

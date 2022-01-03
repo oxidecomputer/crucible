@@ -1557,6 +1557,9 @@ async fn main() -> Result<()> {
             extent,
             only_show_differences,
         } => {
+            if data.is_empty() {
+                bail!("Need at least one data directory to dump");
+            }
             dump_region(data, extent, only_show_differences)?;
             Ok(())
         }
