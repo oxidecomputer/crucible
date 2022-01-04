@@ -58,8 +58,8 @@ test_list="one big dep rand balloon"
 for tt in ${test_list}; do
     echo ""
     echo "Running test: $tt"
-    echo cargo run -p crucible-client -- -q -w "$tt" "${args[@]}"
-    if ! cargo run -p crucible-client -- -q -w "$tt" "${args[@]}"; then
+    echo "$cc" -q -w "$tt" "${args[@]}"
+    if ! "$cc" -q -w "$tt" "${args[@]}"; then
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client $tt test"
@@ -81,15 +81,15 @@ fi
 echo ""
 echo "Running verify test: $tt"
 vfile="${testdir}/verify"
-echo cargo run -p crucible-client -- -q -w rand --verify-out "$vfile" "${args[@]}"
-if ! cargo run -p crucible-client -- -q -w rand --verify-out "$vfile" "${args[@]}"; then
+echo "$cc" -q -w rand --verify-out "$vfile" "${args[@]}"
+if ! "$cc" -q -w rand --verify-out "$vfile" "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client rand verify test"
     echo ""
 else
-    echo cargo run -p crucible-client -- -q -w rand --verify-in "$vfile" "${args[@]}"
-    if ! cargo run -p crucible-client -- -q -w rand --verify-in "$vfile" "${args[@]}"; then
+    echo "$cc" -q -w rand --verify-in "$vfile" "${args[@]}"
+    if ! "$cc" -q -w rand --verify-in "$vfile" "${args[@]}"; then
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client rand verify part 2 test"
@@ -106,8 +106,8 @@ for (( i = 0; i < 3; i++ )); do
     dir="${testdir}/$port"
     args+=( -d "$dir" )
 done
-echo cargo run -p crucible-downstairs -- dump "${args[@]}"
-if ! cargo run -p crucible-downstairs -- dump "${args[@]}"; then
+echo "$cds" dump "${args[@]}"
+if ! "$cds" dump "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test"
@@ -117,8 +117,8 @@ else
 fi
 
 args+=( -e 1 )
-echo cargo run -p crucible-downstairs -- dump "${args[@]}"
-if ! cargo run -p crucible-downstairs -- dump "${args[@]}"; then
+echo "$cds" dump "${args[@]}"
+if ! "$cds" dump "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test 2"
