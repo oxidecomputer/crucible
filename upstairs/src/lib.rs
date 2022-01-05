@@ -52,6 +52,12 @@ mod cdt {
     fn gw_read_end(_: u64) {}
     fn gw_write_end(_: u64) {}
     fn gw_flush_end(_: u64) {}
+    fn gw_read_submit_start(_: u64, _: u64) {}
+    fn gw_write_submit_start(_: u64, _: u64) {}
+    fn gw_flush_submit_start(_: u64, _: u64) {}
+    fn gw_read_submit_end(_: u64, _: u64) {}
+    fn gw_write_submit_end(_: u64, _: u64) {}
+    fn gw_flush_submit_end(_: u64, _: u64) {}
 }
 
 #[derive(Debug, Clone)]
@@ -94,12 +100,15 @@ async fn process_message(
     let (uuid, ds_id, result) = match m {
         Message::Imok => return Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
+            cdt::gw_write_submit_end!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::FlushAck(uuid, ds_id, result) => {
+            cdt::gw_flush_submit_end!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::ReadResponse(uuid, ds_id, responses) => {
+            cdt::gw_read_submit_end!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, responses.clone())
         }
         /*
@@ -312,6 +321,7 @@ async fn io_send(
                 dependencies,
                 writes,
             } => {
+                cdt::gw_write_submit_start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Write(
                     u.uuid,
                     *new_id,
@@ -325,6 +335,7 @@ async fn io_send(
                 flush_number,
                 gen_number,
             } => {
+                cdt::gw_flush_submit_start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush(
                     u.uuid,
                     *new_id,
@@ -338,6 +349,7 @@ async fn io_send(
                 dependencies,
                 requests,
             } => {
+                cdt::gw_read_submit_start!(|| (*new_id, client_id as u64));
                 fw.send(Message::ReadRequest(
                     u.uuid,
                     *new_id,

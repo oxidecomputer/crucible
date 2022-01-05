@@ -75,7 +75,147 @@ dtrace: system integrity protection is on, some features will not be available
  flush_start:1000   flush_end:1000
 ```
 
-## tracegw.d
+## perfdw.d
+This is a simple dtrace script that measures latency times for when a r/w/f
+job is sent over the network to each downstairs to when the ACK for that job
+is returned to the upstairs. Jobs are sorted by type (r/w/f) and by each
+downstairs client ID.
+```
+sudo dtrace -s tools/perfdw.d
+```
+
+Here is an example of how it might look:
+```
+final:crucible alan$ sudo dtrace -Z -s tools/perfdw.d
+dtrace: system integrity protection is on, some features will not be available
+
+dtrace: script 'tools/perfdw.d' matched 0 probes
+^C
+
+  flush downstairs client 1
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |@                                        20
+         1048576 |@@@@@                                    121
+         2097152 |@@@@@@@@@@@@@                            325
+         4194304 |@@@@@@@@@@@@@@@@@@@@                     527
+         8388608 |@                                        27
+        16777216 |                                         8
+        33554432 |                                         1
+        67108864 |                                         0
+
+  flush downstairs client 0
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |@                                        20
+         1048576 |@@@@                                     115
+         2097152 |@@@@@@@@@@@@@                            331
+         4194304 |@@@@@@@@@@@@@@@@@@@@                     526
+         8388608 |@                                        28
+        16777216 |                                         6
+        33554432 |                                         2
+        67108864 |                                         1
+       134217728 |                                         0
+
+  flush downstairs client 2
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |@                                        21
+         1048576 |@@@@                                     115
+         2097152 |@@@@@@@@@@@@@                            334
+         4194304 |@@@@@@@@@@@@@@@@@@@@                     522
+         8388608 |@                                        28
+        16777216 |                                         6
+        33554432 |                                         1
+        67108864 |                                         1
+       134217728 |                                         1
+       268435456 |                                         0
+
+  write downstairs client 1
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |                                         10
+         1048576 |@                                        26
+         2097152 |@@@                                      63
+         4194304 |@@@@@                                    129
+         8388608 |@@@@@@@@@@                               244
+        16777216 |@@@@@@@@@@@@@@@@@@@                      483
+        33554432 |@@                                       43
+        67108864 |                                         2
+       134217728 |                                         0
+
+  write downstairs client 0
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |                                         8
+         1048576 |@                                        27
+         2097152 |@@@                                      63
+         4194304 |@@@@@                                    123
+         8388608 |@@@@@@@@@@                               249
+        16777216 |@@@@@@@@@@@@@@@@@@@                      482
+        33554432 |@@                                       46
+        67108864 |                                         2
+       134217728 |                                         0
+  write downstairs client 2
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |                                         9
+         1048576 |@                                        24
+         2097152 |@@@                                      64
+         4194304 |@@@@@                                    126
+         8388608 |@@@@@@@@@@                               245
+        16777216 |@@@@@@@@@@@@@@@@@@@                      483
+        33554432 |@@                                       47
+        67108864 |                                         2
+       134217728 |                                         0
+
+  read downstairs client 2
+           value  ------------- Distribution ------------- count
+          131072 |                                         0
+          262144 |@@                                       145
+          524288 |@@@@                                     316
+         1048576 |@@@                                      232
+         2097152 |@@@@@@                                   413
+         4194304 |@@@@@@@@                                 609
+         8388608 |@@@@@@@@@@                               719
+        16777216 |@@@@@@                                   458
+        33554432 |@                                        106
+        67108864 |                                         0
+       134217728 |                                         2
+       268435456 |                                         0
+
+  read downstairs client 0
+           value  ------------- Distribution ------------- count
+          131072 |                                         0
+          262144 |@@                                       143
+          524288 |@@@@                                     308
+         1048576 |@@@                                      237
+         2097152 |@@@@@                                    405
+         4194304 |@@@@@@@@                                 601
+         8388608 |@@@@@@@@@@                               733
+        16777216 |@@@@@@                                   468
+        33554432 |@                                        104
+        67108864 |                                         0
+       134217728 |                                         1
+       268435456 |                                         0
+
+  read downstairs client 1
+           value  ------------- Distribution ------------- count
+          131072 |                                         0
+          262144 |@@                                       158
+          524288 |@@@@                                     296
+         1048576 |@@@                                      245
+         2097152 |@@@@@                                    400
+         4194304 |@@@@@@@@                                 596
+         8388608 |@@@@@@@@@@                               719
+        16777216 |@@@@@@                                   477
+        33554432 |@                                        107
+        67108864 |                                         0
+       134217728 |                                         2
+       268435456 |                                         0
+```
+
+## perfgw.d
 This is a simple dtrace script that measures latency times for when a r/w/f
 job is submitted to the internal upstairs work queue, to when that job has
 completed and the notification was sent back to the guest.
