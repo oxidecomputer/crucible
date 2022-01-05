@@ -6,9 +6,9 @@
  * arg0 is the job ID number.
  * arg1 is the client ID
  */
-cdt*:::gw_read_submit_start,
-cdt*:::gw_write_submit_start,
-cdt*:::gw_flush_submit_start
+cdt*:::gw-read-submit-start,
+cdt*:::gw-write-submit-start,
+cdt*:::gw-flush-submit-start
 {
     start[arg0, arg1] = timestamp;
 }
@@ -16,7 +16,7 @@ cdt*:::gw_flush_submit_start
 /*
  * When a read ACK comes back, calculate the delta and store it
  */
-cdt*:::gw_read_submit_end
+cdt*:::gw-read-submit-end
 /start[arg0, arg1] != 0/
 {
     @time["read", arg1] = quantize(timestamp - start[arg0, arg1]);
@@ -26,7 +26,7 @@ cdt*:::gw_read_submit_end
 /*
  * When a write ACK comes back, calculate the delta and store it
  */
-cdt*:::gw_write_submit_end
+cdt*:::gw-write-submit-end
 /start[arg0, arg1] != 0/
 {
     @time["write", arg1] = quantize(timestamp - start[arg0, arg1]);
@@ -36,7 +36,7 @@ cdt*:::gw_write_submit_end
 /*
  * When a flush ACK comes back, calculate the delta and store it
  */
-cdt*:::gw_flush_submit_end
+cdt*:::gw-flush-submit-end
 /start[arg0, arg1] != 0/
 {
     @time["flush", arg1] = quantize(timestamp - start[arg0, arg1]);
