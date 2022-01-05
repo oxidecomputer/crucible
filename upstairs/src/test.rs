@@ -437,8 +437,17 @@ mod test {
 
         let nonce = context.get_random_nonce();
 
+        let block_before_failing_decrypt_in_place = block.clone();
+
         let result = context.decrypt_in_place(&mut block[..], &nonce, &tag);
         assert!(result.is_err());
+
+        /*
+         * Make sure encryption context does not overwrite data if it's given
+         * a bad nonce - we rely on this and do not make a copy when
+         * attempting to decrypt with multiple encryption contexts.
+         */
+        assert_eq!(block_before_failing_decrypt_in_place, block);
 
         Ok(())
     }
@@ -462,8 +471,17 @@ mod test {
 
         tag[2] += 1;
 
+        let block_before_failing_decrypt_in_place = block.clone();
+
         let result = context.decrypt_in_place(&mut block[..], &nonce, &tag);
         assert!(result.is_err());
+
+        /*
+         * Make sure encryption context does not overwrite data if it's given
+         * a bad tag - we rely on this and do not make a copy when attempting
+         * to decrypt with multiple encryption contexts.
+         */
+        assert_eq!(block_before_failing_decrypt_in_place, block);
 
         Ok(())
     }
@@ -977,8 +995,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
 
@@ -1330,8 +1347,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         work.enqueue(op);
@@ -1344,8 +1360,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         work.enqueue(op);
@@ -1474,8 +1489,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         // Put the write on the queue.
@@ -1570,8 +1584,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         work.enqueue(op);
@@ -1584,8 +1597,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         work.enqueue(op);
@@ -1910,8 +1922,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         work.enqueue(op);
@@ -1974,8 +1985,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             }],
         );
         work.enqueue(op);
@@ -2206,8 +2216,10 @@ mod test {
             num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
-            nonce: Some(nonce),
-            tag: Some(tag),
+            encryption_contexts: vec![crucible_protocol::EncryptionContext {
+                nonce,
+                tag,
+            }],
         }]);
 
         // should not notify Guest

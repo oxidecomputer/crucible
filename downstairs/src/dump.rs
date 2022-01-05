@@ -236,11 +236,7 @@ fn show_extent(
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^6}", format!("NONCE{}", index));
-    }
-    print!(" ");
-    for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^4}", format!("TAG{}", index));
+        print!(" {0:^6}", format!("ECTX{}", index));
     }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
@@ -255,9 +251,7 @@ fn show_extent(
     for block in 0..blocks_per_extent {
         let mut data_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
-        let mut nonce_columns: [String; 3] =
-            ["".to_string(), "".to_string(), "".to_string()];
-        let mut tag_columns: [String; 3] =
+        let mut encryption_context_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
 
         /*
@@ -332,15 +326,15 @@ fn show_extent(
                 format!("{0:^5} ", status_letters[dir_index]);
         }
 
-        // then, compare nonces
+        // then, compare encryption_context_columns
         let mut status_letters = vec![String::new(); 3];
 
-        if dvec[0].nonce == dvec[1].nonce {
+        if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
             status_letters[0] += "A";
             status_letters[1] += "A";
 
             if dir_count > 2 {
-                if dvec[0].nonce == dvec[2].nonce {
+                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
                     status_letters[2] += "A";
                 } else {
                     status_letters[2] += "C";
@@ -353,9 +347,11 @@ fn show_extent(
             status_letters[1] += "B";
 
             if dir_count > 2 {
-                if dvec[0].nonce == dvec[2].nonce {
+                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
                     status_letters[2] += "A";
-                } else if dvec[1].nonce == dvec[2].nonce {
+                } else if dvec[1].encryption_contexts
+                    == dvec[2].encryption_contexts
+                {
                     status_letters[2] += "B";
                 } else {
                     status_letters[2] += "C";
@@ -365,44 +361,8 @@ fn show_extent(
 
         // Print nonce status letters
         for dir_index in 0..dir_count {
-            nonce_columns[dir_index] =
+            encryption_context_columns[dir_index] =
                 format!("{0:^6} ", status_letters[dir_index]);
-        }
-
-        // then, compare tags
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].tag == dvec[1].tag {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].tag == dvec[2].tag {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].tag == dvec[2].tag {
-                    status_letters[2] += "A";
-                } else if dvec[1].tag == dvec[2].tag {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
-
-        for dir_index in 0..dir_count {
-            tag_columns[dir_index] =
-                format!("{0:^4} ", status_letters[dir_index]);
         }
 
         if !only_show_differences || different {
@@ -412,11 +372,7 @@ fn show_extent(
                 print!("{}", column);
             }
             print!(" ");
-            for column in nonce_columns.iter().take(dir_count) {
-                print!("{}", column);
-            }
-            print!(" ");
-            for column in tag_columns.iter().take(dir_count) {
+            for column in encryption_context_columns.iter().take(dir_count) {
                 print!("{}", column);
             }
 
