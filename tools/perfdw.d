@@ -1,8 +1,10 @@
 /*
  * Trace all IOs for each downstairs from the time they are sent over
- * the network socket to a specific downstairs, then when the ack for
- * that IO is received and calculate the time spent.  Grouped by IO
- * type (R/W/F) and client ID (Which downstairs).
+ * the network socket to when the ack for an IO is received.
+ * Group by IO type (R/W/F) and client ID (Which downstairs).
+ *
+ * arg0 is the job ID number.
+ * arg1 is the client ID
  */
 cdt*:::gw_read_submit_start,
 cdt*:::gw_write_submit_start,
