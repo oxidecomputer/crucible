@@ -45,13 +45,19 @@ pub use pseudo_file::CruciblePseudoFile;
 #[usdt::provider]
 mod cdt {
     use crate::Arg;
-    fn up_status(_: String, arg: Arg) {}
-    fn gw_read_start(_: u64) {}
-    fn gw_write_start(_: u64) {}
-    fn gw_flush_start(_: u64) {}
-    fn gw_read_end(_: u64) {}
-    fn gw_write_end(_: u64) {}
-    fn gw_flush_end(_: u64) {}
+    fn up__status(_: String, arg: Arg) {}
+    fn gw__read__start(_: u64) {}
+    fn gw__write__start(_: u64) {}
+    fn gw__flush__start(_: u64) {}
+    fn gw__read__done(_: u64) {}
+    fn gw__write__done(_: u64) {}
+    fn gw__flush__done(_: u64) {}
+    fn ds__read__io__start(_: u64, _: u64) {}
+    fn ds__write__io__start(_: u64, _: u64) {}
+    fn ds__flush__io__start(_: u64, _: u64) {}
+    fn ds__read__io__done(_: u64, _: u64) {}
+    fn ds__write__io__done(_: u64, _: u64) {}
+    fn ds__flush__io__done(_: u64, _: u64) {}
 }
 
 #[derive(Debug, Clone)]
@@ -94,12 +100,15 @@ async fn process_message(
     let (uuid, ds_id, result) = match m {
         Message::Imok => return Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
+            cdt::ds__write__io__done!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::FlushAck(uuid, ds_id, result) => {
+            cdt::ds__flush__io__done!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::ReadResponse(uuid, ds_id, responses) => {
+            cdt::ds__read__io__done!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, responses.clone())
         }
         /*
@@ -312,6 +321,7 @@ async fn io_send(
                 dependencies,
                 writes,
             } => {
+                cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Write(
                     u.uuid,
                     *new_id,
@@ -325,6 +335,7 @@ async fn io_send(
                 flush_number,
                 gen_number,
             } => {
+                cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush(
                     u.uuid,
                     *new_id,
@@ -338,6 +349,7 @@ async fn io_send(
                 dependencies,
                 requests,
             } => {
+                cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::ReadRequest(
                     u.uuid,
                     *new_id,
@@ -1469,20 +1481,20 @@ impl Downstairs {
                 dependencies: _,
                 requests: _,
             } => {
-                cdt::gw_read_end!(|| (gw_id));
+                cdt::gw__read__done!(|| (gw_id));
             }
             IOop::Write {
                 dependencies: _,
                 writes: _,
             } => {
-                cdt::gw_write_end!(|| (gw_id));
+                cdt::gw__write__done!(|| (gw_id));
             }
             IOop::Flush {
                 dependencies: _,
                 flush_number: _,
                 gen_number: _,
             } => {
-                cdt::gw_flush_end!(|| (gw_id));
+                cdt::gw__flush__done!(|| (gw_id));
             }
         }
     }
@@ -2186,7 +2198,7 @@ impl Upstairs {
 
         let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         gw.active.insert(gw_id, new_gtos);
-        cdt::gw_flush_start!(|| (gw_id));
+        cdt::gw__flush__start!(|| (gw_id));
 
         downstairs.enqueue(fl);
 
@@ -2296,7 +2308,7 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt::gw_write_start!(|| (gw_id));
+        cdt::gw__write__start!(|| (gw_id));
 
         downstairs.enqueue(wr);
 
@@ -2387,7 +2399,7 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt::gw_read_start!(|| (gw_id));
+        cdt::gw__read__start!(|| (gw_id));
 
         downstairs.enqueue(wr);
 
@@ -4329,7 +4341,7 @@ pub struct Arg {
  */
 #[inline]
 fn stat_update(up: &Arc<Upstairs>, msg: &str) {
-    cdt::up_status!(|| {
+    cdt::up__status!(|| {
         let arg = Arg {
             up_count: up.up_work_active(),
             ds_count: up.ds_work_active(),
