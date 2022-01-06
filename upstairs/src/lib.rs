@@ -49,15 +49,15 @@ mod cdt {
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__read__end(_: u64) {}
-    fn gw__write__end(_: u64) {}
-    fn gw__flush__end(_: u64) {}
-    fn gw__read__submit__start(_: u64, _: u64) {}
-    fn gw__write__submit__start(_: u64, _: u64) {}
-    fn gw__flush__submit__start(_: u64, _: u64) {}
-    fn gw__read__submit__end(_: u64, _: u64) {}
-    fn gw__write__submit__end(_: u64, _: u64) {}
-    fn gw__flush__submit__end(_: u64, _: u64) {}
+    fn gw__read__done(_: u64) {}
+    fn gw__write__done(_: u64) {}
+    fn gw__flush__done(_: u64) {}
+    fn ds__read__io__start(_: u64, _: u64) {}
+    fn ds__write__io__start(_: u64, _: u64) {}
+    fn ds__flush__io__start(_: u64, _: u64) {}
+    fn ds__read__io__done(_: u64, _: u64) {}
+    fn ds__write__io__done(_: u64, _: u64) {}
+    fn ds__flush__io__done(_: u64, _: u64) {}
 }
 
 #[derive(Debug, Clone)]
@@ -100,15 +100,15 @@ async fn process_message(
     let (uuid, ds_id, result) = match m {
         Message::Imok => return Ok(()),
         Message::WriteAck(uuid, ds_id, result) => {
-            cdt::gw__write__submit__end!(|| (ds_id, up_coms.client_id as u64));
+            cdt::ds__write__io__done!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::FlushAck(uuid, ds_id, result) => {
-            cdt::gw__flush__submit__end!(|| (ds_id, up_coms.client_id as u64));
+            cdt::ds__flush__io__done!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
         }
         Message::ReadResponse(uuid, ds_id, responses) => {
-            cdt::gw__read__submit__end!(|| (ds_id, up_coms.client_id as u64));
+            cdt::ds__read__io__done!(|| (ds_id, up_coms.client_id as u64));
             (*uuid, *ds_id, responses.clone())
         }
         /*
@@ -321,7 +321,7 @@ async fn io_send(
                 dependencies,
                 writes,
             } => {
-                cdt::gw__write__submit__start!(|| (*new_id, client_id as u64));
+                cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Write(
                     u.uuid,
                     *new_id,
@@ -335,7 +335,7 @@ async fn io_send(
                 flush_number,
                 gen_number,
             } => {
-                cdt::gw__flush__submit__start!(|| (*new_id, client_id as u64));
+                cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush(
                     u.uuid,
                     *new_id,
@@ -349,7 +349,7 @@ async fn io_send(
                 dependencies,
                 requests,
             } => {
-                cdt::gw__read__submit__start!(|| (*new_id, client_id as u64));
+                cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::ReadRequest(
                     u.uuid,
                     *new_id,
@@ -1481,20 +1481,20 @@ impl Downstairs {
                 dependencies: _,
                 requests: _,
             } => {
-                cdt::gw__read__end!(|| (gw_id));
+                cdt::gw__read__done!(|| (gw_id));
             }
             IOop::Write {
                 dependencies: _,
                 writes: _,
             } => {
-                cdt::gw__write__end!(|| (gw_id));
+                cdt::gw__write__done!(|| (gw_id));
             }
             IOop::Flush {
                 dependencies: _,
                 flush_number: _,
                 gen_number: _,
             } => {
-                cdt::gw__flush__end!(|| (gw_id));
+                cdt::gw__flush__done!(|| (gw_id));
             }
         }
     }
