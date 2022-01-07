@@ -66,6 +66,7 @@ enum Args {
      * Multiple directories can be passed (up to 3)
      * With -e, you can dump just a single extent which will include
      * a block by block comparison.
+     * With -b, you can dump a single block to see a detailed comparison.
      */
     Dump {
         /*
@@ -79,6 +80,12 @@ enum Args {
          */
         #[structopt(short, long)]
         extent: Option<u32>,
+
+        /*
+         * Detailed view for a block
+         */
+        #[structopt(short, long)]
+        block: Option<u64>,
 
         /*
          * Only show differences
@@ -1555,12 +1562,13 @@ async fn main() -> Result<()> {
         Args::Dump {
             data,
             extent,
+            block,
             only_show_differences,
         } => {
             if data.is_empty() {
                 bail!("Need at least one data directory to dump");
             }
-            dump_region(data, extent, only_show_differences)?;
+            dump_region(data, extent, block, only_show_differences)?;
             Ok(())
         }
         Args::Export {

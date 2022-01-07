@@ -1544,26 +1544,50 @@ impl Downstairs {
                     let mut decryption_error = None;
 
                     for response in &mut responses {
-                        // XXX if we haven't encrypted it yet, is this an
-                        // attack?  block generation number would tell us
-                        if response.nonce.is_some() && response.tag.is_some() {
-                            let _nonce = response.nonce.as_ref().unwrap();
-                            let nonce = Nonce::from_slice(_nonce);
+                        // XXX because we don't have block generation numbers,
+                        // an attacker downstairs could:
+                        //
+                        // 1) remove encryption context and cause a denial of
+                        //    service, or
+                        // 2) roll back a block by writing an old data and
+                        //    encryption context
+                        //
+                        // check for response encryption contexts here
+                        if !response.encryption_contexts.is_empty() {
+                            let mut successful_decryption = false;
 
-                            let _tag = response.tag.as_ref().unwrap();
-                            let tag = Tag::from_slice(_tag);
+                            // Attempt decryption with each encryption context,
+                            // and fail if all do not work. The most recent
+                            // encryption context will most likely be the
+                            // correct one so start there.
+                            let encryption_context_iter =
+                                response.encryption_contexts.iter().rev();
+                            for ctx in encryption_context_iter {
+                                // Note: decrypt_in_place does not overwrite
+                                // the buffer if it fails, otherwise we would
+                                // need to copy here.
+                                let decryption_result = context
+                                    .decrypt_in_place(
+                                        &mut response.data[..],
+                                        Nonce::from_slice(&ctx.nonce[..]),
+                                        Tag::from_slice(&ctx.tag[..]),
+                                    );
 
-                            let decryption_result = context.decrypt_in_place(
-                                &mut response.data[..],
-                                nonce,
-                                tag,
-                            );
+                                if decryption_result.is_ok() {
+                                    successful_decryption = true;
+                                    break;
+                                }
+                            }
 
-                            if decryption_result.is_err() {
+                            if !successful_decryption {
                                 decryption_error =
                                     Some(Err(CrucibleError::DecryptionError));
                                 break;
                             }
+                        } else {
+                            // No encryption context! Either this is a read of
+                            // an unwritten block, or an attacker removed the
+                            // encryption contexts from the db
                         }
                     }
 
@@ -1577,7 +1601,7 @@ impl Downstairs {
                     responses
                 }
             } else {
-                // no encryption context
+                // no upstairs encryption context
                 responses
             };
 
@@ -2272,7 +2296,7 @@ impl Upstairs {
             let byte_len: usize =
                 num_blocks.value as usize * ddef.block_size() as usize;
 
-            let (sub_data, nonce, tag) = if let Some(context) =
+            let (sub_data, encryption_context) = if let Some(context) =
                 &self.encryption_context
             {
                 // Encrypt here
@@ -2280,18 +2304,23 @@ impl Upstairs {
                     data.slice(cur_offset..(cur_offset + byte_len)).to_vec();
                 let (nonce, tag) =
                     context.encrypt_in_place(&mut mut_data[..])?;
-                (Bytes::copy_from_slice(&mut_data), Some(nonce), Some(tag))
+                (
+                    Bytes::copy_from_slice(&mut_data),
+                    Some(crucible_protocol::EncryptionContext {
+                        nonce: Vec::from(nonce.as_slice()),
+                        tag: Vec::from(tag.as_slice()),
+                    }),
+                )
             } else {
                 // Unencrypted
-                (data.slice(cur_offset..(cur_offset + byte_len)), None, None)
+                (data.slice(cur_offset..(cur_offset + byte_len)), None)
             };
 
             writes.push(crucible_protocol::Write {
                 eid,
                 offset: bo,
                 data: sub_data,
-                nonce: nonce.map(|v| Vec::from(v.as_slice())),
-                tag: tag.map(|v| Vec::from(v.as_slice())),
+                encryption_context,
             });
 
             cur_offset += byte_len;

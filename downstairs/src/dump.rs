@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 use crate::region::ExtentMeta;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -10,11 +11,13 @@ struct ExtInfo {
 /*
  * Dump the metadata for one or more region directories.
  *
- * If a specific extent is requested, only dump info on that extent.
+ * If a specific extent is requested, only dump info on that extent. If a
+ * specific block offset is supplied, show details for only that block.
  */
 pub fn dump_region(
     region_dir: Vec<PathBuf>,
     cmp_extent: Option<u32>,
+    block: Option<u64>,
     only_show_differences: bool,
 ) -> Result<()> {
     /*
@@ -91,10 +94,33 @@ pub fn dump_region(
                 total_extents,
             );
         }
+
         if dir_count < 2 {
             bail!("Need more than one region directory to compare data");
         }
+
         let en = all_extents.get(&ce).unwrap();
+
+        /*
+         * If we only want details about one block, show that
+         */
+        if let Some(block) = block {
+            if block >= blocks_per_extent {
+                bail!(
+                    "Requested block {} is higher than {}!",
+                    block,
+                    blocks_per_extent
+                );
+            }
+
+            return show_extent_block(
+                region_dir,
+                ce,
+                block,
+                only_show_differences,
+            );
+        }
+
         show_extent(
             region_dir,
             &en.ei_hm,
@@ -236,11 +262,7 @@ fn show_extent(
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^6}", format!("NONCE{}", index));
-    }
-    print!(" ");
-    for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^4}", format!("TAG{}", index));
+        print!(" {0:^6}", format!("ECTX{}", index));
     }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
@@ -255,9 +277,7 @@ fn show_extent(
     for block in 0..blocks_per_extent {
         let mut data_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
-        let mut nonce_columns: [String; 3] =
-            ["".to_string(), "".to_string(), "".to_string()];
-        let mut tag_columns: [String; 3] =
+        let mut encryption_context_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
 
         /*
@@ -332,15 +352,15 @@ fn show_extent(
                 format!("{0:^5} ", status_letters[dir_index]);
         }
 
-        // then, compare nonces
+        // then, compare encryption_context_columns
         let mut status_letters = vec![String::new(); 3];
 
-        if dvec[0].nonce == dvec[1].nonce {
+        if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
             status_letters[0] += "A";
             status_letters[1] += "A";
 
             if dir_count > 2 {
-                if dvec[0].nonce == dvec[2].nonce {
+                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
                     status_letters[2] += "A";
                 } else {
                     status_letters[2] += "C";
@@ -353,9 +373,11 @@ fn show_extent(
             status_letters[1] += "B";
 
             if dir_count > 2 {
-                if dvec[0].nonce == dvec[2].nonce {
+                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
                     status_letters[2] += "A";
-                } else if dvec[1].nonce == dvec[2].nonce {
+                } else if dvec[1].encryption_contexts
+                    == dvec[2].encryption_contexts
+                {
                     status_letters[2] += "B";
                 } else {
                     status_letters[2] += "C";
@@ -365,44 +387,8 @@ fn show_extent(
 
         // Print nonce status letters
         for dir_index in 0..dir_count {
-            nonce_columns[dir_index] =
+            encryption_context_columns[dir_index] =
                 format!("{0:^6} ", status_letters[dir_index]);
-        }
-
-        // then, compare tags
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].tag == dvec[1].tag {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].tag == dvec[2].tag {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].tag == dvec[2].tag {
-                    status_letters[2] += "A";
-                } else if dvec[1].tag == dvec[2].tag {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
-
-        for dir_index in 0..dir_count {
-            tag_columns[dir_index] =
-                format!("{0:^4} ", status_letters[dir_index]);
         }
 
         if !only_show_differences || different {
@@ -412,11 +398,7 @@ fn show_extent(
                 print!("{}", column);
             }
             print!(" ");
-            for column in nonce_columns.iter().take(dir_count) {
-                print!("{}", column);
-            }
-            print!(" ");
-            for column in tag_columns.iter().take(dir_count) {
+            for column in encryption_context_columns.iter().take(dir_count) {
                 print!("{}", column);
             }
 
@@ -432,6 +414,205 @@ fn show_extent(
 
     if difference_found {
         bail!("Difference found!");
+    }
+
+    Ok(())
+}
+
+fn is_all_same<T: PartialEq>(slice: &[T]) -> bool {
+    slice.windows(2).all(|x| x[0] == x[1])
+}
+
+/*
+ * Show detailed comparison of different region's blocks
+ */
+fn show_extent_block(
+    region_dir: Vec<PathBuf>,
+    cmp_extent: u32,
+    block: u64,
+    only_show_differences: bool,
+) -> Result<()> {
+    println!("Extent {} Block {}", cmp_extent, block);
+    println!();
+
+    let dir_count = region_dir.len();
+
+    /*
+     * Build a Vector to hold our responses, one for each
+     * region we are comparing.
+     */
+    let mut dvec: Vec<ReadResponse> = Vec::with_capacity(dir_count);
+
+    /*
+     * Read the requested block in from the extent.  Store it
+     * in the Vec based on index.
+     */
+    for (index, dir) in region_dir.iter().enumerate() {
+        let region = Region::open(&dir, Default::default(), false)?;
+
+        dvec.insert(
+            index,
+            region.single_block_region_read(ReadRequest {
+                eid: cmp_extent as u64,
+                offset: Block::new_with_ddef(block, &region.def()),
+                num_blocks: 1,
+            })?,
+        );
+    }
+
+    /*
+     * Compare data
+     */
+    let mut different = false;
+    let mut status_letters = vec![String::new(); 3];
+
+    if dvec[0].data == dvec[1].data {
+        status_letters[0] += "A";
+        status_letters[1] += "A";
+
+        if dir_count > 2 {
+            if dvec[0].data == dvec[2].data {
+                status_letters[2] += "A";
+            } else {
+                status_letters[2] += "C";
+                different = true;
+            }
+        }
+    } else {
+        different = true;
+        status_letters[0] += "A";
+        status_letters[1] += "B";
+
+        if dir_count > 2 {
+            if dvec[0].data == dvec[2].data {
+                status_letters[2] += "A";
+            } else if dvec[1].data == dvec[2].data {
+                status_letters[2] += "B";
+            } else {
+                status_letters[2] += "C";
+            }
+        }
+    }
+
+    if !only_show_differences || different {
+        println!("{:>6}  {:<64}  {:3}", "DATA", "SHA256", "VER");
+        for dir_index in 0..dir_count {
+            let mut hasher = Sha256::new();
+            hasher.update(&dvec[dir_index].data[..]);
+            println!(
+                "{:>6}  {:64}  {:^3}",
+                dir_index,
+                hex::encode(hasher.finalize()),
+                status_letters[dir_index],
+            );
+        }
+        println!();
+    }
+
+    /*
+     * Compare encryption contexts
+     */
+    let mut different = false;
+    if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
+        if (dir_count > 2)
+            && (dvec[0].encryption_contexts != dvec[2].encryption_contexts)
+        {
+            different = true;
+        }
+    } else {
+        different = true;
+    }
+
+    if !only_show_differences || different {
+        /*
+         * Compare nonces (formatting assumes 12 byte nonces)
+         */
+        print!("{:>6}  ", "NONCES");
+
+        let mut max_nonce_depth = 0;
+
+        for (dir_index, response) in dvec.iter().enumerate() {
+            print!("{:^24} ", dir_index);
+
+            max_nonce_depth = std::cmp::max(
+                max_nonce_depth,
+                response.encryption_contexts.len(),
+            );
+        }
+        if !only_show_differences {
+            print!(" {:<5}", "DIFF");
+        }
+        println!();
+
+        for depth in 0..max_nonce_depth {
+            print!("{:>6}  ", depth);
+
+            let mut all_same_len = true;
+            let mut nonces = Vec::with_capacity(dir_count);
+            for response in dvec.iter() {
+                let ctxs = &response.encryption_contexts;
+                print!(
+                    "{:^24} ",
+                    if depth < ctxs.len() {
+                        nonces.push(&ctxs[depth].nonce);
+                        hex::encode(&ctxs[depth].nonce)
+                    } else {
+                        all_same_len = false;
+                        "".to_string()
+                    }
+                );
+            }
+            if !all_same_len || !is_all_same(&nonces) {
+                print!(" {:<5}", "<---");
+            }
+            println!();
+        }
+        println!();
+
+        /*
+         * Compare tags (formatting assumes 16 byte tags)
+         */
+        print!("{:>6}  ", "TAGS");
+
+        let mut max_tag_depth = 0;
+
+        for (dir_index, response) in dvec.iter().enumerate() {
+            print!("{:^32} ", dir_index);
+
+            max_tag_depth = std::cmp::max(
+                max_tag_depth,
+                response.encryption_contexts.len(),
+            );
+        }
+        if !only_show_differences {
+            print!(" {:<5}", "DIFF");
+        }
+        println!();
+
+        for depth in 0..max_tag_depth {
+            print!("{:>6}  ", depth);
+
+            let mut all_same_len = true;
+            let mut tags = Vec::with_capacity(dir_count);
+            for response in dvec.iter() {
+                let ctxs = &response.encryption_contexts;
+                print!(
+                    "{:^32} ",
+                    if depth < ctxs.len() {
+                        tags.push(&ctxs[depth].tag);
+                        hex::encode(&ctxs[depth].tag)
+                    } else {
+                        all_same_len = false;
+                        "".to_string()
+                    }
+                );
+            }
+            if !all_same_len || !is_all_same(&tags) {
+                print!(" {:<5}", "<---");
+            }
+            println!();
+        }
+        println!();
     }
 
     Ok(())

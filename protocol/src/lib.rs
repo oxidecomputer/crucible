@@ -16,8 +16,7 @@ pub struct Write {
     pub eid: u64,
     pub offset: Block,
     pub data: bytes::Bytes,
-    pub nonce: Option<Vec<u8>>,
-    pub tag: Option<Vec<u8>>,
+    pub encryption_context: Option<EncryptionContext>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -34,8 +33,13 @@ pub struct ReadResponse {
     pub num_blocks: u64,
 
     pub data: bytes::BytesMut,
-    pub nonce: Option<Vec<u8>>,
-    pub tag: Option<Vec<u8>>,
+    pub encryption_contexts: Vec<EncryptionContext>,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct EncryptionContext {
+    pub nonce: Vec<u8>,
+    pub tag: Vec<u8>,
 }
 
 impl ReadResponse {
@@ -55,8 +59,7 @@ impl ReadResponse {
             offset: request.offset,
             num_blocks: request.num_blocks,
             data,
-            nonce: None,
-            tag: None,
+            encryption_contexts: vec![],
         }
     }
 
@@ -69,8 +72,7 @@ impl ReadResponse {
             offset: request.offset,
             num_blocks: request.num_blocks,
             data: BytesMut::from(data),
-            nonce: None,
-            tag: None,
+            encryption_contexts: vec![],
         }
     }
 }
@@ -162,8 +164,10 @@ impl CrucibleEncoder {
                 data.resize(sz, 1);
                 bytes::Bytes::from(data)
             },
-            nonce: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            tag: Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            encryption_context: Some(EncryptionContext {
+                nonce: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                tag: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            }),
         }
     }
 

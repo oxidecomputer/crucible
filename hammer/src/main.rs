@@ -163,6 +163,9 @@ fn main() -> Result<()> {
 
     for idx in 0..rounds {
         let cpf = if idx / handoff_amount != cpf_idx {
+            // One last flush
+            cpfs[cpf_idx].flush()?;
+
             cpf_idx = idx / handoff_amount;
             assert!(cpf_idx != 0);
 
@@ -256,6 +259,9 @@ fn main() -> Result<()> {
             cpf.write_all(&vec![0; bsz])?;
         }
     }
+
+    // One last flush
+    cpfs[cpf_idx].flush()?;
 
     println!("Done ok, waiting on show_work");
 

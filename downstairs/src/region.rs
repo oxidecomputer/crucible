@@ -8,6 +8,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
 use crucible_common::*;
+use crucible_protocol::EncryptionContext;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -109,63 +110,128 @@ impl Inner {
         Ok(())
     }
 
-    fn get_encryption_context(
+    /*
+     * For a given block, return all encryption contexts since last fsync.
+     * Order so latest is last.
+     */
+    fn get_encryption_contexts(
         &self,
         block: u64,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let mut stmt = self.metadb.prepare(
-            &[
-                "SELECT nonce, tag FROM encryption_context",
-                "where block=?1",
-            ]
-            .join(" "),
-        )?;
+    ) -> Result<Vec<EncryptionContext>> {
+        // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
+        let stmt = vec![
+            "SELECT nonce, tag FROM encryption_context where block=?1",
+            "ORDER BY counter ASC",
+        ]
+        .join(" ");
 
-        let stmt_iter = stmt.query_map(params![block], |row| {
-            Ok(Some((row.get(0)?, row.get(1)?)))
-        })?;
+        let mut stmt = self.metadb.prepare(&stmt)?;
+
+        let stmt_iter = stmt
+            .query_map(params![block], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         let mut results = Vec::new();
 
         for row in stmt_iter {
-            results.push(row);
+            let (nonce, tag) = row?;
+            results.push(EncryptionContext { nonce, tag });
         }
 
-        if results.is_empty() {
-            Ok(None)
-        } else {
-            assert_eq!(results.len(), 1);
-            let result = results.pop().unwrap();
-            drop(results);
-            result.map_err(anyhow::Error::new)
-        }
+        Ok(results)
     }
 
+    /*
+     * Given a list of (block, nonce, tag), append encryption context rows.
+     *
+     * For the params, keep a list of references so that copying is
+     * minimized.
+     */
     fn set_encryption_context(
         &mut self,
-        encryption_context_params: &[(u64, &[u8], &[u8])],
+        encryption_context_params: &[(u64, &EncryptionContext)],
     ) -> Result<()> {
-        let stmt: Vec<String> = vec![
-            "INSERT OR REPLACE INTO encryption_context".to_string(),
-            "(block, nonce, tag) values".to_string(),
-            encryption_context_params
-                .iter()
-                .map(|tuple| {
-                    let (block, nonce, tag) = tuple;
-                    format!(
-                        "({}, X'{}', X'{}')",
-                        block,
-                        hex::encode(nonce),
-                        hex::encode(tag),
-                    )
-                })
-                .collect::<Vec<String>>()
-                .join(","),
-        ];
+        let mut stmts: Vec<String> =
+            Vec::with_capacity(encryption_context_params.len());
 
-        let _rows_affected = self.metadb.execute(&stmt.join(" "), [])?;
+        for (block, encryption_context) in encryption_context_params {
+            let stmt: String = vec![format!(
+                "({}, {}, X'{}', X'{}')",
+                /*
+                 * Auto-increment counter based on what's in the db
+                 */
+                vec![
+                    "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
+                    format!("from encryption_context WHERE block={})", block,),
+                ]
+                .join(" "),
+                block,
+                hex::encode(&encryption_context.nonce),
+                hex::encode(&encryption_context.tag),
+            )]
+            .join(" ");
+
+            stmts.push(stmt);
+        }
+
+        let mut stmt: String = vec![
+            "INSERT INTO encryption_context".to_string(),
+            "(counter, block, nonce, tag) values".to_string(),
+        ]
+        .join(" ");
+        stmt.push_str(&stmts.join(","));
+
+        let rows_affected = self.metadb.execute(&stmt, [])?;
+
+        assert_eq!(rows_affected, encryption_context_params.len());
 
         Ok(())
+    }
+
+    /*
+     * Get rid of all but most recent encryption context for each block.
+     */
+    fn truncate_encryption_contexts(&mut self) -> Result<()> {
+        let tx = self.metadb.transaction()?;
+
+        let stmt: String = vec![
+            "DELETE FROM encryption_context WHERE ROWID not in",
+            "(select ROWID from",
+            "(select ROWID,block,MAX(counter)",
+            "from encryption_context group by block)",
+            ");",
+        ]
+        .join(" ");
+
+        let _rows_affected = tx.execute(&stmt, [])?;
+
+        let _rows_affected =
+            tx.execute("UPDATE encryption_context SET counter = 0", [])?;
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    /*
+     * In order to unit test truncate_encryption_contexts, return blocks and
+     * counters.
+     */
+    #[cfg(test)]
+    fn get_blocks_and_counters(&mut self) -> Result<Vec<(u64, u64)>> {
+        let mut stmt = self
+            .metadb
+            .prepare(&"SELECT block, counter FROM encryption_context")?;
+
+        let stmt_iter =
+            stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        let mut results = Vec::new();
+
+        for row in stmt_iter {
+            results.push(row?);
+        }
+
+        Ok(results)
     }
 }
 
@@ -270,6 +336,7 @@ impl Extent {
         let metadb = Connection::open(&path)?;
         assert!(metadb.is_autocommit());
         metadb.pragma_update(None, "journal_mode", &"WAL")?;
+        metadb.pragma_update(None, "synchronous", &"FULL")?;
 
         // XXX: schema updates?
 
@@ -324,6 +391,7 @@ impl Extent {
         let metadb = Connection::open(&path)?;
         assert!(metadb.is_autocommit());
         metadb.pragma_update(None, "journal_mode", &"WAL")?;
+        metadb.pragma_update(None, "synchronous", &"FULL")?;
 
         /*
          * Create tables and insert base data
@@ -359,9 +427,11 @@ impl Extent {
 
         metadb.execute(
             "CREATE TABLE encryption_context (
-                block INTEGER PRIMARY KEY,
+                counter INTEGER,
+                block INTEGER,
                 nonce BLOB NOT NULL,
-                tag BLOB NOT NULL
+                tag BLOB NOT NULL,
+                PRIMARY KEY (block, counter)
             )",
             [],
         )?;
@@ -413,11 +483,8 @@ impl Extent {
              */
             inner.file.read_exact(&mut response.data)?;
 
-            let ctx = inner.get_encryption_context(request.offset.value)?;
-            if let Some((nonce, tag)) = ctx {
-                response.nonce = Some(nonce);
-                response.tag = Some(tag);
-            }
+            response.encryption_contexts =
+                inner.get_encryption_contexts(request.offset.value)?;
 
             responses.push(response);
         }
@@ -470,28 +537,54 @@ impl Extent {
             self.check_input(write.offset, &write.data)?;
         }
 
+        /*
+         * In order to be crash consistent, perform the following steps in
+         * order:
+         *
+         * 1) set the dirty bit
+         * 2) for each write:
+         *   a) write out encryption context first
+         *   b) write out extent data
+         *
+         * If encryption context is written after the extent data, a crash or
+         * interruption before extent data is written would potentially leave
+         * data on the disk that cannot be decrypted.
+         *
+         * Note that writing extent data here does not assume that it is
+         * durably on disk - the only guarantee of that is returning
+         * ok from fsync. The data is only potentially on disk and
+         * this depends on operating system implementation.
+         *
+         * To minimize the performance hit of sending many transactions to
+         * sqlite, all encryption contexts are written at the same time. This
+         * means two loops are required. The steps now look like:
+         *
+         * 1) set the dirty bit
+         * 2) gather and write all encryption contexts
+         * 3) write all extent data
+         */
+
         inner.set_dirty()?;
 
-        let mut encryption_context_params: Vec<(u64, &[u8], &[u8])> =
+        let mut encryption_context_params: Vec<(u64, &EncryptionContext)> =
             Vec::with_capacity(writes.len());
+
+        for write in writes {
+            if let Some(encryption_context) = &write.encryption_context {
+                encryption_context_params
+                    .push((write.offset.value, encryption_context));
+            }
+        }
+
+        if !encryption_context_params.is_empty() {
+            inner.set_encryption_context(&encryption_context_params)?;
+        }
 
         for write in writes {
             let byte_offset = write.offset.value * self.block_size;
 
             inner.file.seek(SeekFrom::Start(byte_offset))?;
             inner.file.write_all(&write.data)?;
-
-            if write.nonce.is_some() && write.tag.is_some() {
-                encryption_context_params.push((
-                    write.offset.value,
-                    write.nonce.as_ref().unwrap(),
-                    write.tag.as_ref().unwrap(),
-                ));
-            }
-        }
-
-        if !encryption_context_params.is_empty() {
-            inner.set_encryption_context(&encryption_context_params)?;
         }
 
         Ok(())
@@ -529,6 +622,12 @@ impl Extent {
                 e
             );
         }
+
+        /*
+         * Clear old encryption contexts. In order to be crash consistent,
+         * only perform this after the extent fsync is done.
+         */
+        inner.truncate_encryption_contexts()?;
 
         inner.file.seek(SeekFrom::Start(0))?;
 
@@ -727,12 +826,20 @@ impl Region {
         nonce: Option<Vec<u8>>,
         tag: Option<Vec<u8>>,
     ) -> Result<(), CrucibleError> {
+        let encryption_context = if nonce.is_some() && tag.is_some() {
+            Some(EncryptionContext {
+                nonce: nonce.as_ref().unwrap().to_vec(),
+                tag: tag.as_ref().unwrap().to_vec(),
+            })
+        } else {
+            None
+        };
+
         self.region_write(&[crucible_protocol::Write {
             eid,
             offset,
             data,
-            nonce,
-            tag,
+            encryption_context,
         }])
     }
 
@@ -1054,7 +1161,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, false)?;
+        dump_region(dvec, None, None, false)?;
 
         Ok(())
     }
@@ -1086,7 +1193,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, false)?;
+        dump_region(dvec, None, None, false)?;
 
         Ok(())
     }
@@ -1119,7 +1226,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, Some(2), false)?;
+        dump_region(dvec, Some(2), None, false)?;
 
         Ok(())
     }
@@ -1135,33 +1242,117 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_context(0)?.is_none());
-        assert!(inner.get_encryption_context(1)?.is_none());
+        assert!(inner.get_encryption_contexts(0)?.is_empty());
+        assert!(inner.get_encryption_contexts(1)?.is_empty());
 
         // Set and verify block 0's context
 
-        inner.set_encryption_context(&[(0, &[1, 2, 3], &[4, 5, 6, 7])])?;
+        inner.set_encryption_context(&[(
+            0,
+            &EncryptionContext {
+                nonce: [1, 2, 3].to_vec(),
+                tag: [4, 5, 6, 7].to_vec(),
+            },
+        )])?;
 
-        let ctx = inner.get_encryption_context(0)?.unwrap();
+        let ctxs = inner.get_encryption_contexts(0)?;
 
-        assert_eq!(ctx.0, vec![1, 2, 3]);
-        assert_eq!(ctx.1, vec![4, 5, 6, 7]);
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
+        assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
 
         // Block 1 should still be blank
 
-        assert!(inner.get_encryption_context(1)?.is_none());
+        assert!(inner.get_encryption_contexts(1)?.is_empty());
 
         // Set and verify a new context for block 0
 
         let blob1 = rand::thread_rng().gen::<[u8; 32]>();
         let blob2 = rand::thread_rng().gen::<[u8; 32]>();
 
-        inner.set_encryption_context(&[(0, &blob1, &blob2)])?;
+        inner.set_encryption_context(&[(
+            0,
+            &EncryptionContext {
+                nonce: blob1.to_vec(),
+                tag: blob2.to_vec(),
+            },
+        )])?;
 
-        let ctx = inner.get_encryption_context(0)?.unwrap();
+        let ctxs = inner.get_encryption_contexts(0)?;
 
-        assert_eq!(ctx.0, blob1);
-        assert_eq!(ctx.1, blob2);
+        assert_eq!(ctxs.len(), 2);
+
+        assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
+        assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
+
+        assert_eq!(ctxs[1].nonce, blob1);
+        assert_eq!(ctxs[1].tag, blob2);
+
+        // "Flush", so only the latest should remain.
+        inner.truncate_encryption_contexts()?;
+
+        let ctxs = inner.get_encryption_contexts(0)?;
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(ctxs[0].nonce, blob1);
+        assert_eq!(ctxs[0].tag, blob2);
+
+        // Assert counters were reset to zero
+        for (_block, counter) in inner.get_blocks_and_counters()? {
+            assert_eq!(counter, 0);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_encryption_context() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let ext = &region.extents[0];
+        let mut inner = ext.inner();
+
+        // Encryption context for blocks 0 and 1 should start blank
+
+        assert!(inner.get_encryption_contexts(0)?.is_empty());
+        assert!(inner.get_encryption_contexts(1)?.is_empty());
+
+        // Set and verify block 0's and 1's context
+
+        inner.set_encryption_context(&[
+            (
+                0,
+                &EncryptionContext {
+                    nonce: [1, 2, 3].to_vec(),
+                    tag: [4, 5, 6, 7].to_vec(),
+                },
+            ),
+            (
+                1,
+                &EncryptionContext {
+                    nonce: [4, 5, 6].to_vec(),
+                    tag: [8, 9, 0, 1].to_vec(),
+                },
+            ),
+        ])?;
+
+        let ctxs = inner.get_encryption_contexts(0)?;
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
+        assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
+
+        let ctxs = inner.get_encryption_contexts(1)?;
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(ctxs[0].nonce, vec![4, 5, 6]);
+        assert_eq!(ctxs[0].tag, vec![8, 9, 0, 1]);
 
         Ok(())
     }
@@ -1198,8 +1389,7 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                nonce: None,
-                tag: None,
+                encryption_context: None,
             });
         }
 
