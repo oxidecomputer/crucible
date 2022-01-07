@@ -509,17 +509,39 @@ impl Extent {
             self.check_input(write.offset, &write.data)?;
         }
 
+        /*
+         * In order to be crash consistent, perform the following steps in
+         * order:
+         *
+         * 1) set the dirty bit
+         * 2) for each write:
+         *   a) write out encryption context first
+         *   b) write out extent data
+         *
+         * If encryption context is written after the extent data, a crash or
+         * interruption before extent data is written would potentially leave
+         * data on the disk that cannot be decrypted.
+         *
+         * Note that writing extent data here does not assume that it is
+         * durably on disk - the only guarantee of that is returning
+         * ok from fsync. The data is only potentially on disk and
+         * this depends on operating system implementation.
+         *
+         * To minimize the performance hit of sending many transactions to
+         * sqlite, all encryption contexts are written at the same time. This
+         * means two loops are required. The steps now look like:
+         *
+         * 1) set the dirty bit
+         * 2) gather and write all encryption contexts
+         * 3) write all extent data
+         */
+
         inner.set_dirty()?;
 
         let mut encryption_context_params: Vec<(u64, &EncryptionContext)> =
             Vec::with_capacity(writes.len());
 
         for write in writes {
-            let byte_offset = write.offset.value * self.block_size;
-
-            inner.file.seek(SeekFrom::Start(byte_offset))?;
-            inner.file.write_all(&write.data)?;
-
             if let Some(encryption_context) = &write.encryption_context {
                 encryption_context_params
                     .push((write.offset.value, encryption_context));
@@ -528,6 +550,13 @@ impl Extent {
 
         if !encryption_context_params.is_empty() {
             inner.set_encryption_context(&encryption_context_params)?;
+        }
+
+        for write in writes {
+            let byte_offset = write.offset.value * self.block_size;
+
+            inner.file.seek(SeekFrom::Start(byte_offset))?;
+            inner.file.write_all(&write.data)?;
         }
 
         Ok(())
