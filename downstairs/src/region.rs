@@ -191,19 +191,49 @@ impl Inner {
      * Get rid of all but most recent encryption context for each block.
      */
     fn truncate_encryption_contexts(&mut self) -> Result<()> {
+        let tx = self.metadb.transaction()?;
+
         let stmt: String = vec![
             "DELETE FROM encryption_context WHERE ROWID not in",
             "(select ROWID from",
             "(select ROWID,block,MAX(counter)",
             "from encryption_context group by block)",
             ");",
-            "UPDATE encryption_context SET counter = 0 WHERE block = ?1",
         ]
         .join(" ");
 
-        let _rows_affected = self.metadb.execute(&stmt, [])?;
+        let _rows_affected = tx.execute(&stmt, [])?;
+
+        let _rows_affected = tx.execute(
+            &"UPDATE encryption_context SET counter = 0",
+            [],
+        )?;
+
+        tx.commit()?;
 
         Ok(())
+    }
+
+    /*
+     * In order to unit test truncate_encryption_contexts, return blocks and
+     * counters.
+     */
+    #[cfg(test)]
+    fn get_blocks_and_counters(&mut self) -> Result<Vec<(u64, u64)>> {
+        let mut stmt = self.metadb.prepare(
+            &"SELECT block, counter FROM encryption_context"
+        )?;
+
+        let stmt_iter = stmt
+            .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        let mut results = Vec::new();
+
+        for row in stmt_iter {
+            results.push(row?);
+        }
+
+        Ok(results)
     }
 }
 
@@ -1270,6 +1300,11 @@ mod test {
 
         assert_eq!(ctxs[0].nonce, blob1);
         assert_eq!(ctxs[0].tag, blob2);
+
+        // Assert counters were reset to zero
+        for (_block, counter) in inner.get_blocks_and_counters()? {
+            assert_eq!(counter, 0);
+        }
 
         Ok(())
     }
