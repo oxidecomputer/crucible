@@ -153,8 +153,7 @@ impl Inner {
         let mut stmts: Vec<String> =
             Vec::with_capacity(encryption_context_params.len());
 
-        for params in encryption_context_params {
-            let (block, encryption_context) = params;
+        for (block, encryption_context) in encryption_context_params {
             let stmt: String = vec![format!(
                 "({}, {}, X'{}', X'{}')",
                 /*
