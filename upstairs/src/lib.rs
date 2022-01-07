@@ -1551,7 +1551,7 @@ impl Downstairs {
                             let encryption_context_iter =
                                 response.encryption_contexts.iter().rev();
                             for ctx in encryption_context_iter {
-                                // Note: decrypt_in_place does not overwrites
+                                // Note: decrypt_in_place does not overwrite
                                 // the buffer if it fails, otherwise we would
                                 // need to copy here.
                                 let decryption_result = context
