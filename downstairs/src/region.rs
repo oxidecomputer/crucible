@@ -188,7 +188,7 @@ impl Inner {
     }
 
     /*
-     * Get rid of all but largest encryption contexts
+     * Get rid of all but most recent encryption context for each block.
      */
     fn truncate_encryption_contexts(&mut self) -> Result<()> {
         let stmt: String = vec![
