@@ -12,3 +12,6 @@ members = [
 	"smf",
 	"upstairs",
 ]
+
+[patch."https://github.com/oxidecomputer/progenitor"]
+progenitor = { path = "../progenitor/progenitor" }
