@@ -514,10 +514,10 @@ fn show_extent_block(
      */
     let mut different = false;
     if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
-        if dir_count > 2 {
-            if dvec[0].encryption_contexts != dvec[2].encryption_contexts {
-                different = true;
-            }
+        if (dir_count > 2)
+            && (dvec[0].encryption_contexts != dvec[2].encryption_contexts)
+        {
+            different = true;
         }
     } else {
         different = true;
@@ -531,12 +531,12 @@ fn show_extent_block(
 
         let mut max_nonce_depth = 0;
 
-        for dir_index in 0..dir_count {
+        for (dir_index, response) in dvec.iter().enumerate() {
             print!("{:^24} ", dir_index);
 
             max_nonce_depth = std::cmp::max(
                 max_nonce_depth,
-                dvec[dir_index].encryption_contexts.len(),
+                response.encryption_contexts.len(),
             );
         }
         if !only_show_differences {
@@ -549,8 +549,8 @@ fn show_extent_block(
 
             let mut all_same_len = true;
             let mut nonces = Vec::with_capacity(dir_count);
-            for dir_index in 0..dir_count {
-                let ctxs = &dvec[dir_index].encryption_contexts;
+            for response in dvec.iter() {
+                let ctxs = &response.encryption_contexts;
                 print!(
                     "{:^24} ",
                     if depth < ctxs.len() {
@@ -576,12 +576,12 @@ fn show_extent_block(
 
         let mut max_tag_depth = 0;
 
-        for dir_index in 0..dir_count {
+        for (dir_index, response) in dvec.iter().enumerate() {
             print!("{:^32} ", dir_index);
 
             max_tag_depth = std::cmp::max(
                 max_tag_depth,
-                dvec[dir_index].encryption_contexts.len(),
+                response.encryption_contexts.len(),
             );
         }
         if !only_show_differences {
@@ -594,8 +594,8 @@ fn show_extent_block(
 
             let mut all_same_len = true;
             let mut tags = Vec::with_capacity(dir_count);
-            for dir_index in 0..dir_count {
-                let ctxs = &dvec[dir_index].encryption_contexts;
+            for response in dvec.iter() {
+                let ctxs = &response.encryption_contexts;
                 print!(
                     "{:^32} ",
                     if depth < ctxs.len() {

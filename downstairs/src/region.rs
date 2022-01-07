@@ -205,7 +205,7 @@ impl Inner {
         let _rows_affected = tx.execute(&stmt, [])?;
 
         let _rows_affected =
-            tx.execute(&"UPDATE encryption_context SET counter = 0", [])?;
+            tx.execute("UPDATE encryption_context SET counter = 0", [])?;
 
         tx.commit()?;
 
