@@ -1,7 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 use crate::region::ExtentMeta;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -499,7 +499,8 @@ fn show_extent_block(
         for dir_index in 0..dir_count {
             let mut hasher = Sha256::new();
             hasher.update(&dvec[dir_index].data[..]);
-            println!("{:>6}  {:64}  {:^3}",
+            println!(
+                "{:>6}  {:64}  {:^3}",
                 dir_index,
                 hex::encode(hasher.finalize()),
                 status_letters[dir_index],
@@ -535,7 +536,7 @@ fn show_extent_block(
 
             max_nonce_depth = std::cmp::max(
                 max_nonce_depth,
-                dvec[dir_index].encryption_contexts.len()
+                dvec[dir_index].encryption_contexts.len(),
             );
         }
         if !only_show_differences {
@@ -550,7 +551,8 @@ fn show_extent_block(
             let mut nonces = Vec::with_capacity(dir_count);
             for dir_index in 0..dir_count {
                 let ctxs = &dvec[dir_index].encryption_contexts;
-                print!("{:^24} ",
+                print!(
+                    "{:^24} ",
                     if depth < ctxs.len() {
                         nonces.push(&ctxs[depth].nonce);
                         hex::encode(&ctxs[depth].nonce)
@@ -579,7 +581,7 @@ fn show_extent_block(
 
             max_tag_depth = std::cmp::max(
                 max_tag_depth,
-                dvec[dir_index].encryption_contexts.len()
+                dvec[dir_index].encryption_contexts.len(),
             );
         }
         if !only_show_differences {
@@ -594,7 +596,8 @@ fn show_extent_block(
             let mut tags = Vec::with_capacity(dir_count);
             for dir_index in 0..dir_count {
                 let ctxs = &dvec[dir_index].encryption_contexts;
-                print!("{:^32} ",
+                print!(
+                    "{:^32} ",
                     if depth < ctxs.len() {
                         tags.push(&ctxs[depth].tag);
                         hex::encode(&ctxs[depth].tag)

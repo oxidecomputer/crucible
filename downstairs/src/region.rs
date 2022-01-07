@@ -204,10 +204,8 @@ impl Inner {
 
         let _rows_affected = tx.execute(&stmt, [])?;
 
-        let _rows_affected = tx.execute(
-            &"UPDATE encryption_context SET counter = 0",
-            [],
-        )?;
+        let _rows_affected =
+            tx.execute(&"UPDATE encryption_context SET counter = 0", [])?;
 
         tx.commit()?;
 
@@ -220,12 +218,12 @@ impl Inner {
      */
     #[cfg(test)]
     fn get_blocks_and_counters(&mut self) -> Result<Vec<(u64, u64)>> {
-        let mut stmt = self.metadb.prepare(
-            &"SELECT block, counter FROM encryption_context"
-        )?;
+        let mut stmt = self
+            .metadb
+            .prepare(&"SELECT block, counter FROM encryption_context")?;
 
-        let stmt_iter = stmt
-            .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let stmt_iter =
+            stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         let mut results = Vec::new();
 
@@ -1195,7 +1193,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None,  None,false)?;
+        dump_region(dvec, None, None, false)?;
 
         Ok(())
     }
