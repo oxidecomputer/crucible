@@ -26,7 +26,8 @@ pub use region::Region;
 pub fn lib_dump_region(
     region_dir: Vec<PathBuf>,
     cmp_extent: Option<u32>,
+    block: Option<u64>,
     only_show_differences: bool,
 ) -> Result<()> {
-    dump::dump_region(region_dir, cmp_extent, only_show_differences)
+    dump::dump_region(region_dir, cmp_extent, block, only_show_differences)
 }
