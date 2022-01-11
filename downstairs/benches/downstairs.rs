@@ -52,8 +52,7 @@ pub fn downstairs_rw_speed_benchmark<const BS: usize>(c: &mut Criterion) {
                         eid,
                         offset,
                         data: data.freeze(),
-                        nonce: None,
-                        tag: None,
+                        encryption_context: None,
                     });
                 }
 
@@ -91,7 +90,7 @@ pub fn downstairs_rw_speed_benchmark<const BS: usize>(c: &mut Criterion) {
             |requests| {
                 let responses = region.region_read(&requests).unwrap();
                 for response in responses {
-                    assert!(response.nonce.is_none());
+                    assert!(response.encryption_contexts.is_empty());
                 }
             },
             criterion::BatchSize::SmallInput,
@@ -120,13 +119,19 @@ pub fn downstairs_rw_speed_benchmark<const BS: usize>(c: &mut Criterion) {
 
                         let data =
                             BytesMut::from(&buffer[(i * BS)..((i + 1) * BS)]);
+                        let nonce = Vec::from(rng.gen::<[u8; 12]>());
+                        let tag = Vec::from(rng.gen::<[u8; 16]>());
 
                         writes.push(crucible_protocol::Write {
                             eid,
                             offset,
                             data: data.freeze(),
-                            nonce: Some(Vec::from(rng.gen::<[u8; 12]>())),
-                            tag: Some(Vec::from(rng.gen::<[u8; 16]>())),
+                            encryption_context: Some(
+                                crucible_protocol::EncryptionContext {
+                                    nonce,
+                                    tag,
+                                },
+                            ),
                         });
                     }
 
@@ -167,7 +172,7 @@ pub fn downstairs_rw_speed_benchmark<const BS: usize>(c: &mut Criterion) {
                 |requests| {
                     let responses = region.region_read(&requests).unwrap();
                     for response in responses {
-                        assert!(response.nonce.is_some());
+                        assert!(!response.encryption_contexts.is_empty());
                     }
                 },
                 criterion::BatchSize::SmallInput,

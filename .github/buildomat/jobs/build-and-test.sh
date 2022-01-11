@@ -20,6 +20,9 @@ ptime -m cargo build --verbose
 banner test
 ptime -m cargo test --lib --verbose
 
+banner bench
+ptime -m cargo bench -p crucible-downstairs
+
 banner test_up.sh
 ptime -m ./tools/test_up.sh
 
