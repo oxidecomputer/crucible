@@ -130,7 +130,7 @@ pub fn downstairs_rw_speed_benchmark<const BS: usize>(c: &mut Criterion) {
                                 crucible_protocol::EncryptionContext {
                                     nonce,
                                     tag,
-                                }
+                                },
                             ),
                         });
                     }
