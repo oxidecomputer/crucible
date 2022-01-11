@@ -34,4 +34,6 @@ jobs:
       run: cargo build --verbose
     - name: Test Libraries
       run: cargo test --lib --verbose
+    - name: Downstairs benchmark
+      run: cargo bench -p crucible-downstairs
 
