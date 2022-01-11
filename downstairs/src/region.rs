@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
@@ -141,58 +142,146 @@ impl Inner {
     }
 
     /*
-     * Given a list of (block, nonce, tag), append encryption context rows.
+     * For a given block, return all hashes since last fsync. Order so latest
+     * is last.
+     */
+    pub fn get_hashes(&self, block: u64) -> Result<Vec<u64>> {
+        // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
+        let stmt = vec![
+            "SELECT hash FROM integrity_hashes where block=?1",
+            "ORDER BY counter ASC",
+        ]
+        .join(" ");
+
+        let mut stmt = self.metadb.prepare(&stmt)?;
+
+        let stmt_iter = stmt.query_map(params![block], |row| row.get(0))?;
+
+        let mut results = Vec::new();
+
+        for row in stmt_iter {
+            let hash: Vec<u8> = row?;
+            assert_eq!(hash.len(), 8);
+
+            results.push(u64::from_le_bytes(hash[..].try_into()?));
+        }
+
+        Ok(results)
+    }
+
+    /*
+     * Given a (block, nonce, tag), append an encryption context row.
      *
      * For the params, keep a list of references so that copying is
      * minimized.
      */
-    fn set_encryption_context(
-        &mut self,
-        encryption_context_params: &[(u64, &EncryptionContext)],
+    pub fn tx_set_encryption_context(
+        tx: &rusqlite::Transaction,
+        encryption_context_params: &(u64, &EncryptionContext),
     ) -> Result<()> {
-        let mut stmts: Vec<String> =
-            Vec::with_capacity(encryption_context_params.len());
+        let (block, encryption_context) = encryption_context_params;
 
-        for (block, encryption_context) in encryption_context_params {
-            let stmt: String = vec![format!(
+        let stmt: String = vec![
+            "INSERT INTO encryption_context".to_string(),
+            "(counter, block, nonce, tag) values".to_string(),
+            format!(
                 "({}, {}, X'{}', X'{}')",
                 /*
                  * Auto-increment counter based on what's in the db
                  */
                 vec![
                     "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
-                    format!("from encryption_context WHERE block={})", block,),
+                    format!("from encryption_context WHERE block={})", block),
                 ]
                 .join(" "),
                 block,
                 hex::encode(&encryption_context.nonce),
                 hex::encode(&encryption_context.tag),
-            )]
-            .join(" ");
-
-            stmts.push(stmt);
-        }
-
-        let mut stmt: String = vec![
-            "INSERT INTO encryption_context".to_string(),
-            "(counter, block, nonce, tag) values".to_string(),
+            ),
         ]
         .join(" ");
-        stmt.push_str(&stmts.join(","));
 
-        let rows_affected = self.metadb.execute(&stmt, [])?;
+        let rows_affected = tx.execute(&stmt, [])?;
+        assert_eq!(rows_affected, 1);
 
-        assert_eq!(rows_affected, encryption_context_params.len());
+        Ok(())
+    }
+
+    pub fn metadb_transaction(&mut self) -> Result<rusqlite::Transaction> {
+        Ok(self.metadb.transaction()?)
+    }
+
+    #[cfg(test)]
+    fn set_encryption_context(
+        &mut self,
+        encryption_context_params: &[(u64, &EncryptionContext)],
+    ) -> Result<()> {
+        let tx = self.metadb.transaction()?;
+
+        for tuple in encryption_context_params {
+            Self::tx_set_encryption_context(&tx, &tuple)?;
+        }
+
+        tx.commit()?;
 
         Ok(())
     }
 
     /*
-     * Get rid of all but most recent encryption context for each block.
+     * Given a (block, hash), append a hash row.
      */
-    fn truncate_encryption_contexts(&mut self) -> Result<()> {
+    pub fn tx_set_hash(
+        tx: &rusqlite::Transaction,
+        hash_params: &(u64, u64),
+    ) -> Result<()> {
+        let (block, hash) = hash_params;
+
+        let stmt: String = vec![
+            "INSERT INTO integrity_hashes".to_string(),
+            "(counter, block, hash) values".to_string(),
+            format!(
+                "({}, {}, X'{}')",
+                /*
+                 * Auto-increment counter based on what's in the db
+                 */
+                vec![
+                    "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
+                    format!("from integrity_hashes WHERE block={})", block),
+                ]
+                .join(" "),
+                block,
+                hex::encode(&hash.to_le_bytes())
+            ),
+        ]
+        .join(" ");
+
+        let rows_affected = tx.execute(&stmt, [])?;
+        assert_eq!(rows_affected, 1);
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn set_hashes(&mut self, hash_params: &[(u64, u64)]) -> Result<()> {
         let tx = self.metadb.transaction()?;
 
+        for tuple in hash_params {
+            Self::tx_set_hash(&tx, tuple)?;
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    /*
+     * Get rid of all but most recent encryption context and hash for each
+     * block.
+     */
+    fn truncate_encryption_contexts_and_hashes(&mut self) -> Result<()> {
+        let tx = self.metadb.transaction()?;
+
+        // Clear encryption context
         let stmt: String = vec![
             "DELETE FROM encryption_context WHERE ROWID not in",
             "(select ROWID from",
@@ -207,20 +296,57 @@ impl Inner {
         let _rows_affected =
             tx.execute("UPDATE encryption_context SET counter = 0", [])?;
 
+        // Clear integrity hash
+        let stmt: String = vec![
+            "DELETE FROM integrity_hashes WHERE ROWID not in",
+            "(select ROWID from",
+            "(select ROWID,block,MAX(counter)",
+            "from integrity_hashes group by block)",
+            ");",
+        ]
+        .join(" ");
+
+        let _rows_affected = tx.execute(&stmt, [])?;
+
+        let _rows_affected =
+            tx.execute("UPDATE integrity_hashes SET counter = 0", [])?;
+
         tx.commit()?;
 
         Ok(())
     }
 
     /*
-     * In order to unit test truncate_encryption_contexts, return blocks and
-     * counters.
+     * In order to unit test truncate_encryption_contexts_and_hashes, return
+     * blocks and counters.
      */
     #[cfg(test)]
-    fn get_blocks_and_counters(&mut self) -> Result<Vec<(u64, u64)>> {
+    fn get_blocks_and_counters_for_encryption_context(
+        &mut self,
+    ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
             .prepare(&"SELECT block, counter FROM encryption_context")?;
+
+        let stmt_iter =
+            stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        let mut results = Vec::new();
+
+        for row in stmt_iter {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
+
+    #[cfg(test)]
+    fn get_blocks_and_counters_for_hashes(
+        &mut self,
+    ) -> Result<Vec<(u64, u64)>> {
+        let mut stmt = self
+            .metadb
+            .prepare(&"SELECT block, counter FROM integrity_hashes")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -436,6 +562,16 @@ impl Extent {
             [],
         )?;
 
+        metadb.execute(
+            "CREATE TABLE integrity_hashes (
+                counter INTEGER,
+                block INTEGER,
+                hash BLOB NOT NULL,
+                PRIMARY KEY (block, counter)
+            )",
+            [],
+        )?;
+
         /*
          * Complete the construction of our new extent
          */
@@ -486,6 +622,8 @@ impl Extent {
             response.encryption_contexts =
                 inner.get_encryption_contexts(request.offset.value)?;
 
+            response.hashes = inner.get_hashes(request.offset.value)?;
+
             responses.push(response);
         }
 
@@ -504,7 +642,10 @@ impl Extent {
         offset: Block,
         data: &[u8],
     ) -> Result<(), CrucibleError> {
-        if (data.len() % self.block_size as usize) != 0 {
+        /*
+         * Only accept block sized operations
+         */
+        if data.len() != self.block_size as usize {
             crucible_bail!(DataLenUnaligned);
         }
 
@@ -544,11 +685,16 @@ impl Extent {
          * 1) set the dirty bit
          * 2) for each write:
          *   a) write out encryption context first
-         *   b) write out extent data
+         *   b) write out hashes second
+         *   c) write out extent data third
          *
          * If encryption context is written after the extent data, a crash or
          * interruption before extent data is written would potentially leave
          * data on the disk that cannot be decrypted.
+         *
+         * If hash is written after extent data, same thing - a crash or
+         * interruption would leave data on disk that would fail the
+         * integrity hash check.
          *
          * Note that writing extent data here does not assume that it is
          * durably on disk - the only guarantee of that is returning
@@ -556,29 +702,27 @@ impl Extent {
          * this depends on operating system implementation.
          *
          * To minimize the performance hit of sending many transactions to
-         * sqlite, all encryption contexts are written at the same time. This
-         * means two loops are required. The steps now look like:
+         * sqlite, as much as possible is written at the same time. This
+         * means multiple loops are required. The steps now look like:
          *
          * 1) set the dirty bit
-         * 2) gather and write all encryption contexts
+         * 2) gather and write all encryption contexts + hashes
          * 3) write all extent data
          */
-
         inner.set_dirty()?;
 
-        let mut encryption_context_params: Vec<(u64, &EncryptionContext)> =
-            Vec::with_capacity(writes.len());
-
+        let tx = inner.metadb_transaction()?;
         for write in writes {
             if let Some(encryption_context) = &write.encryption_context {
-                encryption_context_params
-                    .push((write.offset.value, encryption_context));
+                Inner::tx_set_encryption_context(
+                    &tx,
+                    &(write.offset.value, encryption_context),
+                )?;
             }
-        }
 
-        if !encryption_context_params.is_empty() {
-            inner.set_encryption_context(&encryption_context_params)?;
+            Inner::tx_set_hash(&tx, &(write.offset.value, write.hash))?;
         }
+        tx.commit()?;
 
         for write in writes {
             let byte_offset = write.offset.value * self.block_size;
@@ -624,10 +768,10 @@ impl Extent {
         }
 
         /*
-         * Clear old encryption contexts. In order to be crash consistent,
-         * only perform this after the extent fsync is done.
+         * Clear old encryption contexts and hashes. In order to be crash
+         * consistent, only perform this after the extent fsync is done.
          */
-        inner.truncate_encryption_contexts()?;
+        inner.truncate_encryption_contexts_and_hashes()?;
 
         inner.file.seek(SeekFrom::Start(0))?;
 
@@ -817,30 +961,28 @@ impl Region {
             .collect::<Result<Vec<_>>>()
     }
 
-    #[instrument]
-    pub fn single_block_region_write(
+    pub fn validate_hashes(
         &self,
-        eid: u64,
-        offset: Block,
-        data: bytes::Bytes,
-        nonce: Option<Vec<u8>>,
-        tag: Option<Vec<u8>>,
+        writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
-        let encryption_context = if nonce.is_some() && tag.is_some() {
-            Some(EncryptionContext {
-                nonce: nonce.as_ref().unwrap().to_vec(),
-                tag: tag.as_ref().unwrap().to_vec(),
-            })
-        } else {
-            None
-        };
+        for write in writes {
+            let computed_hash =
+                if let Some(encryption_context) = &write.encryption_context {
+                    integrity_hash(&[
+                        &encryption_context.nonce[..],
+                        &encryption_context.tag[..],
+                        &write.data[..],
+                    ])
+                } else {
+                    integrity_hash(&[&write.data[..]])
+                };
 
-        self.region_write(&[crucible_protocol::Write {
-            eid,
-            offset,
-            data,
-            encryption_context,
-        }])
+            if computed_hash != write.hash {
+                crucible_bail!(HashMismatch);
+            }
+        }
+
+        Ok(())
     }
 
     #[instrument]
@@ -848,6 +990,11 @@ impl Region {
         &self,
         writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
+        /*
+         * Before anything, validate hashes
+         */
+        self.validate_hashes(writes)?;
+
         /*
          * Batch writes so they can all be sent to the appropriate extent
          * together.
@@ -869,17 +1016,6 @@ impl Region {
         }
 
         Ok(())
-    }
-
-    #[instrument]
-    pub fn single_block_region_read(
-        &self,
-        request: crucible_protocol::ReadRequest,
-    ) -> Result<crucible_protocol::ReadResponse, CrucibleError> {
-        let mut responses = self.region_read(&[request])?;
-        let response = responses.pop().unwrap();
-        drop(responses);
-        Ok(response)
     }
 
     #[instrument]
@@ -1033,26 +1169,6 @@ mod test {
 
         assert_eq!((), ext.check_input(Block::new_512(0), &data).unwrap());
         assert_eq!((), ext.check_input(Block::new_512(99), &data).unwrap());
-    }
-
-    #[test]
-    fn extent_io_valid2() {
-        let mut data = BytesMut::with_capacity(1024);
-        data.put(&[1; 1024][..]);
-
-        let ext = new_extent();
-
-        assert_eq!((), ext.check_input(Block::new_512(0), &data).unwrap());
-        assert_eq!((), ext.check_input(Block::new_512(97), &data).unwrap());
-    }
-
-    #[test]
-    fn extent_io_valid_large() {
-        let mut data = BytesMut::with_capacity(512 * 100);
-        data.put(&[1; 512 * 100][..]);
-
-        let ext = new_extent();
-        ext.check_input(Block::new_512(0), &data).unwrap();
     }
 
     #[test]
@@ -1290,7 +1406,7 @@ mod test {
         assert_eq!(ctxs[1].tag, blob2);
 
         // "Flush", so only the latest should remain.
-        inner.truncate_encryption_contexts()?;
+        inner.truncate_encryption_contexts_and_hashes()?;
 
         let ctxs = inner.get_encryption_contexts(0)?;
 
@@ -1300,7 +1416,9 @@ mod test {
         assert_eq!(ctxs[0].tag, blob2);
 
         // Assert counters were reset to zero
-        for (_block, counter) in inner.get_blocks_and_counters()? {
+        for (_block, counter) in
+            inner.get_blocks_and_counters_for_encryption_context()?
+        {
             assert_eq!(counter, 0);
         }
 
@@ -1358,6 +1476,96 @@ mod test {
     }
 
     #[test]
+    fn hashes() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let ext = &region.extents[0];
+        let mut inner = ext.inner();
+
+        // Hashes for blocks 0 and 1 should start blank
+
+        assert!(inner.get_hashes(0)?.is_empty());
+        assert!(inner.get_hashes(1)?.is_empty());
+
+        // Set and verify block 0's hash
+
+        inner.set_hashes(&[(0, 23874612987634)])?;
+
+        let hashes = inner.get_hashes(0)?;
+
+        assert_eq!(hashes.len(), 1);
+
+        assert_eq!(hashes[0], 23874612987634);
+
+        // Block 1 should still be blank
+
+        assert!(inner.get_hashes(1)?.is_empty());
+
+        // Set and verify a new hash for block 0
+
+        let blob1 = rand::thread_rng().gen::<u64>();
+
+        inner.set_hashes(&[(0, blob1)])?;
+
+        let hashes = inner.get_hashes(0)?;
+
+        assert_eq!(hashes.len(), 2);
+
+        assert_eq!(hashes[0], 23874612987634);
+        assert_eq!(hashes[1], blob1);
+
+        // "Flush", so only the latest should remain.
+        inner.truncate_encryption_contexts_and_hashes()?;
+
+        let hashes = inner.get_hashes(0)?;
+
+        assert_eq!(hashes.len(), 1);
+
+        assert_eq!(hashes[0], blob1);
+
+        // Assert counters were reset to zero
+        for (_block, counter) in inner.get_blocks_and_counters_for_hashes()? {
+            assert_eq!(counter, 0);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_hashes() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let ext = &region.extents[0];
+        let mut inner = ext.inner();
+
+        // Hashes for blocks 0 and 1 should start blank
+
+        assert!(inner.get_hashes(0)?.is_empty());
+        assert!(inner.get_hashes(1)?.is_empty());
+
+        // Set and verify block 0's and 1's context
+
+        inner
+            .set_hashes(&[(0, 0xbd1f97574fa0c3f4), (1, 0xa040b75cd3c96fff)])?;
+
+        let hashes = inner.get_hashes(0)?;
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0], 0xbd1f97574fa0c3f4);
+
+        let hashes = inner.get_hashes(1)?;
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0], 0xa040b75cd3c96fff);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_big_write() -> Result<()> {
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options())?;
@@ -1384,12 +1592,15 @@ mod test {
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
             let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
 
             writes.push(crucible_protocol::Write {
                 eid,
                 offset,
-                data: data.freeze(),
+                data,
                 encryption_context: None,
+                hash,
             });
         }
 
@@ -1434,6 +1645,91 @@ mod test {
         }
 
         assert_eq!(buffer, read_from_region);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ok_hash_ok() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let data = BytesMut::from(&[1u8; 512][..]);
+
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 5061083712412462836,
+            }];
+
+        region.region_write(&writes)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bad_hash_bad() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let data = BytesMut::from(&[1u8; 512][..]);
+
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 2398419238764,
+            }];
+
+        let result = region.region_write(&writes);
+
+        assert!(result.is_err());
+
+        match result.err().unwrap() {
+            CrucibleError::HashMismatch => {
+                // ok
+            }
+            _ => {
+                assert!(false);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_blank_block_read_ok() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        let responses =
+            region.region_read(&[crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+                num_blocks: 1,
+            }])?;
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].hashes.len(), 0);
+        assert_eq!(responses[0].data[..], [0u8; 512][..]);
 
         Ok(())
     }

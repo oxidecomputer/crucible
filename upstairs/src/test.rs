@@ -10,8 +10,8 @@ mod test {
     use ringbuffer::RingBuffer;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    fn extent_tuple(eid: u64, offset: u64, len: u64) -> (u64, Block, Block) {
-        (eid, Block::new_512(offset), Block::new_512(len))
+    fn extent_tuple(eid: u64, offset: u64) -> (u64, Block, Block) {
+        (eid, Block::new_512(offset), Block::new_512(1))
     }
 
     #[test]
@@ -23,84 +23,73 @@ mod test {
 
         // Test block size, less than extent size
         assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(0),
-                Block::new_512(1),
-                false
-            )
-            .unwrap(),
-            vec![extent_tuple(0, 0, 1)],
+            extent_from_offset(ddef, Block::new_512(0), Block::new_512(1),)
+                .unwrap(),
+            vec![extent_tuple(0, 0)],
         );
 
         // Test greater than block size, less than extent size
         assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(0),
-                Block::new_512(2),
-                false
-            )
-            .unwrap(),
-            vec![extent_tuple(0, 0, 2)],
+            extent_from_offset(ddef, Block::new_512(0), Block::new_512(2),)
+                .unwrap(),
+            vec![extent_tuple(0, 0), extent_tuple(0, 1),],
         );
 
         // Test greater than extent size
         assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(0),
-                Block::new_512(4),
-                false
-            )
-            .unwrap(),
-            vec![extent_tuple(0, 0, 2), extent_tuple(1, 0, 2)],
+            extent_from_offset(ddef, Block::new_512(0), Block::new_512(4),)
+                .unwrap(),
+            vec![
+                extent_tuple(0, 0),
+                extent_tuple(0, 1),
+                extent_tuple(1, 0),
+                extent_tuple(1, 1),
+            ],
         );
 
         // Test offsets
         assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(1),
-                Block::new_512(4),
-                false
-            )
-            .unwrap(),
+            extent_from_offset(ddef, Block::new_512(1), Block::new_512(4),)
+                .unwrap(),
             vec![
-                extent_tuple(0, 1, 1),
-                extent_tuple(1, 0, 2),
-                extent_tuple(2, 0, 1),
+                extent_tuple(0, 1),
+                extent_tuple(1, 0),
+                extent_tuple(1, 1),
+                extent_tuple(2, 0),
             ],
         );
 
         assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(2),
-                Block::new_512(4),
-                false
-            )
-            .unwrap(),
-            vec![extent_tuple(1, 0, 2), extent_tuple(2, 0, 2)],
+            extent_from_offset(ddef, Block::new_512(2), Block::new_512(4),)
+                .unwrap(),
+            vec![
+                extent_tuple(1, 0),
+                extent_tuple(1, 1),
+                extent_tuple(2, 0),
+                extent_tuple(2, 1),
+            ],
         );
 
         assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(2),
-                Block::new_512(16),
-                false
-            )
-            .unwrap(),
+            extent_from_offset(ddef, Block::new_512(2), Block::new_512(16),)
+                .unwrap(),
             vec![
-                extent_tuple(1, 0, 2),
-                extent_tuple(2, 0, 2),
-                extent_tuple(3, 0, 2),
-                extent_tuple(4, 0, 2),
-                extent_tuple(5, 0, 2),
-                extent_tuple(6, 0, 2),
-                extent_tuple(7, 0, 2),
-                extent_tuple(8, 0, 2),
+                extent_tuple(1, 0),
+                extent_tuple(1, 1),
+                extent_tuple(2, 0),
+                extent_tuple(2, 1),
+                extent_tuple(3, 0),
+                extent_tuple(3, 1),
+                extent_tuple(4, 0),
+                extent_tuple(4, 1),
+                extent_tuple(5, 0),
+                extent_tuple(5, 1),
+                extent_tuple(6, 0),
+                extent_tuple(6, 1),
+                extent_tuple(7, 0),
+                extent_tuple(7, 1),
+                extent_tuple(8, 0),
+                extent_tuple(8, 1),
             ],
         );
     }
@@ -117,10 +106,9 @@ mod test {
                 ddef,
                 Block::new_512(2), // offset
                 Block::new_512(1), // num_blocks
-                true,
             )
             .unwrap(),
-            vec![extent_tuple(1, 0, 1),]
+            vec![extent_tuple(1, 0),]
         );
 
         assert_eq!(
@@ -128,10 +116,9 @@ mod test {
                 ddef,
                 Block::new_512(2), // offset
                 Block::new_512(2), // num_blocks
-                true,
             )
             .unwrap(),
-            vec![extent_tuple(1, 0, 1), extent_tuple(1, 1, 1),]
+            vec![extent_tuple(1, 0), extent_tuple(1, 1),]
         );
 
         assert_eq!(
@@ -139,28 +126,9 @@ mod test {
                 ddef,
                 Block::new_512(2), // offset
                 Block::new_512(3), // num_blocks
-                true,
             )
             .unwrap(),
-            vec![
-                extent_tuple(1, 0, 1),
-                extent_tuple(1, 1, 1),
-                extent_tuple(2, 0, 1),
-            ]
-        );
-
-        assert_eq!(
-            extent_from_offset(
-                ddef,
-                Block::new_512(2), // offset
-                Block::new_512(3), // num_blocks
-                false,             // not single block only
-            )
-            .unwrap(),
-            vec![
-                extent_tuple(1, 0, 2), // more than a single block
-                extent_tuple(2, 0, 1),
-            ]
+            vec![extent_tuple(1, 0), extent_tuple(1, 1), extent_tuple(2, 0),]
         );
     }
 
@@ -256,7 +224,7 @@ mod test {
     ) -> Result<Vec<(u64, Block, Block)>> {
         let ddef = up.ddef.lock().unwrap();
         let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
-        extent_from_offset(*ddef, offset, num_blocks, false)
+        extent_from_offset(*ddef, offset, num_blocks)
     }
 
     #[test]
@@ -264,19 +232,19 @@ mod test {
         let up = make_upstairs();
 
         for i in 0..100 {
-            let exv = vec![extent_tuple(0, i, 1)];
+            let exv = vec![extent_tuple(0, i)];
             assert_eq!(up_efo(&up, Block::new_512(i), 1).unwrap(), exv);
         }
 
         for i in 0..100 {
-            let exv = vec![extent_tuple(1, i, 1)];
+            let exv = vec![extent_tuple(1, i)];
             assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).unwrap(), exv);
         }
 
-        let exv = vec![extent_tuple(2, 0, 1)];
+        let exv = vec![extent_tuple(2, 0)];
         assert_eq!(up_efo(&up, Block::new_512(200), 1).unwrap(), exv);
 
-        let exv = vec![extent_tuple(9, 99, 1)];
+        let exv = vec![extent_tuple(9, 99)];
         assert_eq!(up_efo(&up, Block::new_512(999), 1).unwrap(), exv);
     }
 
@@ -285,25 +253,25 @@ mod test {
         let up = make_upstairs();
 
         for i in 0..99 {
-            let exv = vec![extent_tuple(0, i, 2)];
+            let exv = vec![extent_tuple(0, i + 0), extent_tuple(0, i + 1)];
             assert_eq!(up_efo(&up, Block::new_512(i), 2).unwrap(), exv);
         }
 
-        let exv = vec![extent_tuple(0, 99, 1), extent_tuple(1, 0, 1)];
+        let exv = vec![extent_tuple(0, 99), extent_tuple(1, 0)];
         assert_eq!(up_efo(&up, Block::new_512(99), 2).unwrap(), exv);
 
         for i in 0..99 {
-            let exv = vec![extent_tuple(1, i, 1)];
+            let exv = vec![extent_tuple(1, i)];
             assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).unwrap(), exv);
         }
 
-        let exv = vec![extent_tuple(1, 99, 1), extent_tuple(2, 0, 1)];
+        let exv = vec![extent_tuple(1, 99), extent_tuple(2, 0)];
         assert_eq!(up_efo(&up, Block::new_512(199), 2).unwrap(), exv);
 
-        let exv = vec![extent_tuple(2, 0, 2)];
+        let exv = vec![extent_tuple(2, 0), extent_tuple(2, 1)];
         assert_eq!(up_efo(&up, Block::new_512(200), 2).unwrap(), exv);
 
-        let exv = vec![extent_tuple(9, 98, 2)];
+        let exv = vec![extent_tuple(9, 98), extent_tuple(9, 99)];
         assert_eq!(up_efo(&up, Block::new_512(998), 2).unwrap(), exv);
     }
 
@@ -319,36 +287,30 @@ mod test {
          */
         assert_eq!(
             up_efo(&up, Block::new_512(99), 2).unwrap(),
-            vec![extent_tuple(0, 99, 1), extent_tuple(1, 0, 1)],
+            vec![extent_tuple(0, 99), extent_tuple(1, 0)],
         );
         assert_eq!(
             up_efo(&up, Block::new_512(98), 4).unwrap(),
-            vec![extent_tuple(0, 98, 2), extent_tuple(1, 0, 2)],
+            vec![
+                extent_tuple(0, 98),
+                extent_tuple(0, 99),
+                extent_tuple(1, 0),
+                extent_tuple(1, 1),
+            ],
         );
 
         /*
-         * Largest buffer
+         * Largest buffer at different offsets
          */
-        assert_eq!(
-            up_efo(&up, Block::new_512(1), 100).unwrap(),
-            vec![extent_tuple(0, 1, 99), extent_tuple(1, 0, 1),],
-        );
-        assert_eq!(
-            up_efo(&up, Block::new_512(2), 100).unwrap(),
-            vec![extent_tuple(0, 2, 98), extent_tuple(1, 0, 2)],
-        );
-        assert_eq!(
-            up_efo(&up, Block::new_512(4), 100).unwrap(),
-            vec![extent_tuple(0, 4, 96), extent_tuple(1, 0, 4)],
-        );
-
-        /*
-         * Largest buffer, last block offset possible
-         */
-        assert_eq!(
-            up_efo(&up, Block::new_512(99), 100).unwrap(),
-            vec![extent_tuple(0, 99, 1), extent_tuple(1, 0, 99)],
-        );
+        for offset in 0..100 {
+            let expected: Vec<(u64, Block, Block)> = (0..100)
+                .map(|i| extent_tuple((offset + i) / 100, (offset + i) % 100))
+                .collect();
+            assert_eq!(
+                up_efo(&up, Block::new_512(offset), 100).unwrap(),
+                expected
+            );
+        }
     }
 
     /*
@@ -409,7 +371,7 @@ mod test {
 
         let orig_block = block.clone();
 
-        let (nonce, tag) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
 
         context.decrypt_in_place(&mut block[..], &nonce, &tag)?;
@@ -432,7 +394,7 @@ mod test {
 
         let orig_block = block.clone();
 
-        let (_, tag) = context.encrypt_in_place(&mut block[..])?;
+        let (_, tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
 
         let nonce = context.get_random_nonce();
@@ -466,7 +428,7 @@ mod test {
 
         let orig_block = block.clone();
 
-        let (nonce, mut tag) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
 
         tag[2] += 1;
@@ -996,6 +958,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
 
@@ -1348,6 +1311,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         work.enqueue(op);
@@ -1361,6 +1325,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         work.enqueue(op);
@@ -1490,6 +1455,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         // Put the write on the queue.
@@ -1585,6 +1551,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         work.enqueue(op);
@@ -1598,6 +1565,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         work.enqueue(op);
@@ -1923,6 +1891,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         work.enqueue(op);
@@ -1986,6 +1955,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         work.enqueue(op);
@@ -2198,7 +2168,7 @@ mod test {
 
         let mut data = Vec::from([1u8; 512]);
 
-        let (nonce, tag) = context.encrypt_in_place(&mut data).unwrap();
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data).unwrap();
 
         let nonce = nonce.to_vec();
         let mut tag = tag.to_vec();
@@ -2210,6 +2180,10 @@ mod test {
             tag[3] = 0xFF;
         }
 
+        // compute integrity hash after alteration above! it should still
+        // validate
+        let hash = crucible_common::integrity_hash(&[&nonce, &tag, &data]);
+
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
@@ -2220,6 +2194,7 @@ mod test {
                 nonce,
                 tag,
             }],
+            hashes: vec![hash],
         }]);
 
         // should not notify Guest
@@ -2243,5 +2218,135 @@ mod test {
             err,
             IOState::Error(CrucibleError::DecryptionError)
         ));
+    }
+
+    #[test]
+    fn bad_hash_means_read_error() {
+        let upstairs = Upstairs::default();
+        upstairs.set_active();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let next_id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+        work.in_progress(next_id, 0);
+
+        // fake read response from downstairs that will fail integrity hash
+        // check
+
+        let data = Vec::from([1u8; 512]);
+
+        let response = Ok(vec![ReadResponse {
+            eid: request.eid,
+            offset: request.offset,
+            num_blocks: request.num_blocks,
+
+            data: BytesMut::from(&data[..]),
+            encryption_contexts: vec![],
+            hashes: vec![
+                10000, // junk hash
+            ],
+        }]);
+
+        // should not notify Guest
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &None)
+                .unwrap(),
+            false
+        );
+
+        // should not be completed ok
+        assert_eq!(work.state_count(next_id).unwrap().completed_ok(), 0);
+
+        // should still be NotAcked
+        let job = work.active.get_mut(&next_id).unwrap();
+        let state = job.ack_status;
+        assert_eq!(state, AckStatus::NotAcked);
+
+        // should be marked as error
+        let err = job.state.get(&0).unwrap();
+        assert!(matches!(err, IOState::Error(CrucibleError::HashMismatch)));
+    }
+
+    #[test]
+    fn bad_hash_means_read_error_encrypted() {
+        let upstairs = Upstairs::default();
+        upstairs.set_active();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let next_id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+
+        let context = Arc::new(EncryptionContext::new(
+            vec![
+                0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x0, 0x1, 0x2, 0x3,
+                0x4, 0x5, 0x6, 0x7, 0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7,
+                0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7,
+            ],
+            512,
+        ));
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+
+        // fake read response from downstairs that will fail integrity hash
+        // check
+
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data).unwrap();
+
+        let nonce = nonce.to_vec();
+        let tag = tag.to_vec();
+
+        let response = Ok(vec![ReadResponse {
+            eid: request.eid,
+            offset: request.offset,
+            num_blocks: request.num_blocks,
+
+            data: BytesMut::from(&data[..]),
+            encryption_contexts: vec![crucible_protocol::EncryptionContext {
+                nonce,
+                tag,
+            }],
+            hashes: vec![
+                10000, // junk hash
+            ],
+        }]);
+
+        // should not notify Guest
+        assert_eq!(
+            work.process_ds_completion(next_id, 0, response, &Some(context))
+                .unwrap(),
+            false
+        );
+
+        // should not be completed ok
+        assert_eq!(work.state_count(next_id).unwrap().completed_ok(), 0);
+
+        // should still be NotAcked
+        let job = work.active.get_mut(&next_id).unwrap();
+        let state = job.ack_status;
+        assert_eq!(state, AckStatus::NotAcked);
+
+        // should be marked as error
+        let err = job.state.get(&0).unwrap();
+        assert!(matches!(err, IOState::Error(CrucibleError::HashMismatch)));
     }
 }

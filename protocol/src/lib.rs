@@ -17,6 +17,15 @@ pub struct Write {
     pub offset: Block,
     pub data: bytes::Bytes,
     pub encryption_context: Option<EncryptionContext>,
+
+    /*
+     * xxHash of:
+     *
+     * [data] if non-encrypted
+     * [nonce + tag + data] if encrypted
+     *
+     */
+    pub hash: u64,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -26,6 +35,8 @@ pub struct ReadRequest {
     pub num_blocks: u64,
 }
 
+// Note: if you change this, you may have to add to the dump commands that show
+// block specific data.
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponse {
     pub eid: u64,
@@ -34,6 +45,7 @@ pub struct ReadResponse {
 
     pub data: bytes::BytesMut,
     pub encryption_contexts: Vec<EncryptionContext>,
+    pub hashes: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -60,6 +72,7 @@ impl ReadResponse {
             num_blocks: request.num_blocks,
             data,
             encryption_contexts: vec![],
+            hashes: vec![],
         }
     }
 
@@ -73,6 +86,7 @@ impl ReadResponse {
             num_blocks: request.num_blocks,
             data: BytesMut::from(data),
             encryption_contexts: vec![],
+            hashes: vec![crucible_common::integrity_hash(&[data])],
         }
     }
 }
@@ -168,6 +182,7 @@ impl CrucibleEncoder {
                 nonce: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 tag: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             }),
+            hash: 0,
         }
     }
 
