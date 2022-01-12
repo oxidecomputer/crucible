@@ -25,7 +25,7 @@ serde = { version = "1", features = ["derive"] }
 structopt = "0.3"
 tokio = { version = "1.7.1", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"]}
-tracing = "0.1.26"
+tracing = "0.1.29"
 toml = "0.5"
 opentelemetry = "0.15.0"
 opentelemetry-jaeger = { version = "0.14.0" }
