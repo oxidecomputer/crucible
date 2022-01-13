@@ -51,7 +51,7 @@ if ! cargo run -q -p crucible-client -- "${args[@]}" \
 fi
 
 # Now run the quick client test in a loop
-for i in {1..10}
+for i in {1..100}
 do
     SECONDS=0
     echo "" > "$test_log"

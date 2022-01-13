@@ -489,7 +489,7 @@ mod test {
     #[test]
     fn work_flush_three_ok() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -503,16 +503,28 @@ mod test {
         work.in_progress(next_id, 2);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(work.ackable_work().len(), 1);
@@ -523,8 +535,14 @@ mod test {
         work.ack(next_id);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
@@ -534,7 +552,7 @@ mod test {
     #[test]
     fn work_flush_one_error_then_ok() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -553,6 +571,7 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -561,16 +580,28 @@ mod test {
         assert_eq!(work.completed.len(), 0);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         assert_eq!(work.completed.len(), 0);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(work.ackable_work().len(), 1);
@@ -584,7 +615,7 @@ mod test {
     #[test]
     fn work_flush_two_errors_equals_fail() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -603,6 +634,7 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -611,8 +643,14 @@ mod test {
         assert_eq!(work.completed.len(), 0);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
@@ -624,6 +662,7 @@ mod test {
                 2,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             true
@@ -639,7 +678,7 @@ mod test {
     #[test]
     fn work_read_one_ok() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -663,8 +702,14 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(work.ackable_work().len(), 1);
@@ -680,55 +725,12 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, response, &None)
-                .unwrap(),
-            false
-        );
-        assert_eq!(work.ackable_work().len(), 0);
-        assert_eq!(work.completed.len(), 0);
-
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-
-        assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
-            false
-        );
-        assert_eq!(work.ackable_work().len(), 0);
-        // A flush is required to move work to completed
-        assert_eq!(work.completed.len(), 0);
-    }
-
-    #[test]
-    fn work_read_one_bad_two_ok() {
-        let upstairs = Upstairs::default();
-        upstairs.set_active();
-        let mut work = upstairs.downstairs.lock().unwrap();
-
-        let next_id = work.next_id();
-
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-            num_blocks: 2,
-        };
-        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
-
-        work.enqueue(op);
-
-        work.in_progress(next_id, 0);
-        work.in_progress(next_id, 1);
-        work.in_progress(next_id, 2);
-
-        assert_eq!(
             work.process_ds_completion(
                 next_id,
-                0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                1,
+                response,
                 &None,
+                UpState::Active
             )
             .unwrap(),
             false
@@ -742,37 +744,25 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 1, response, &None)
-                .unwrap(),
-            true
-        );
-        assert_eq!(work.ackable_work().len(), 1);
-        assert_eq!(work.completed.len(), 0);
-
-        let state = work.active.get_mut(&next_id).unwrap().ack_status;
-        assert_eq!(state, AckStatus::AckReady);
-        work.ack(next_id);
-
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-
-        assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
         // A flush is required to move work to completed
-        // That this is still zero is part of the test
         assert_eq!(work.completed.len(), 0);
     }
 
     #[test]
-    fn work_read_two_bad_one_ok() {
+    fn work_read_one_bad_two_ok() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -796,6 +786,87 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        assert_eq!(work.completed.len(), 0);
+
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+
+        assert_eq!(
+            work.process_ds_completion(
+                next_id,
+                1,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            true
+        );
+        assert_eq!(work.ackable_work().len(), 1);
+        assert_eq!(work.completed.len(), 0);
+
+        let state = work.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        work.ack(next_id);
+
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+
+        assert_eq!(
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            false
+        );
+        assert_eq!(work.ackable_work().len(), 0);
+        // A flush is required to move work to completed
+        // That this is still zero is part of the test
+        assert_eq!(work.completed.len(), 0);
+    }
+
+    #[test]
+    fn work_read_two_bad_one_ok() {
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let next_id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(next_id, 0);
+        work.in_progress(next_id, 1);
+        work.in_progress(next_id, 2);
+
+        assert_eq!(
+            work.process_ds_completion(
+                next_id,
+                0,
+                Err(CrucibleError::GenericError(format!("bad"))),
+                &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -809,6 +880,7 @@ mod test {
                 1,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -822,8 +894,14 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(work.ackable_work().len(), 1);
@@ -839,7 +917,7 @@ mod test {
     #[test]
     fn work_read_three_bad() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -863,6 +941,7 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -876,6 +955,7 @@ mod test {
                 1,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -889,6 +969,7 @@ mod test {
                 2,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             true
@@ -905,7 +986,7 @@ mod test {
     #[test]
     fn work_read_two_ok_one_bad() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
 
         let request = ReadRequest {
             eid: 0,
@@ -980,7 +1061,7 @@ mod test {
     #[test]
     fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -1011,6 +1092,7 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -1024,6 +1106,7 @@ mod test {
                 1,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -1034,8 +1117,14 @@ mod test {
         let response = Ok(vec![]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1066,8 +1155,14 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1081,7 +1176,7 @@ mod test {
     #[test]
     fn work_assert_reads_do_not_cause_failure_state_transition() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -1107,6 +1202,7 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -1120,6 +1216,7 @@ mod test {
                 1,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false
@@ -1133,8 +1230,14 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1171,6 +1274,7 @@ mod test {
                 0,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false,
@@ -1184,6 +1288,7 @@ mod test {
                 1,
                 Err(CrucibleError::GenericError(format!("bad"))),
                 &None,
+                UpState::Active,
             )
             .unwrap(),
             false,
@@ -1197,8 +1302,14 @@ mod test {
         )]);
 
         assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1214,7 +1325,7 @@ mod test {
         // Verify that a read remains on the active queue until a flush
         // comes through and clears it.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build our read, put it into the work queue
@@ -1240,8 +1351,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1254,8 +1371,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 1, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1264,8 +1387,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 2, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1296,19 +1425,37 @@ mod test {
 
         // Complete the Flush at each downstairs.
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         // Two completed means we return true (ack ready now)
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1332,7 +1479,7 @@ mod test {
         // 2/3 for each IO.  We later come back and finish the 3rd IO
         // and the flush, which then allows the work to be completed.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create two writes, put them on the work queue
@@ -1373,23 +1520,47 @@ mod test {
 
         // Simulate completing both writes to downstairs 0 and 1
         assert_eq!(
-            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(
-            work.process_ds_completion(id2, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id2,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id2, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id2,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1412,13 +1583,25 @@ mod test {
 
         // Simulate completing the flush to downstairs 0 and 1
         assert_eq!(
-            work.process_ds_completion(flush_id, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                flush_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(flush_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                flush_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1443,13 +1626,25 @@ mod test {
         assert!(work.in_progress(id1, 2).is_some());
         assert!(work.in_progress(id2, 2).is_some());
         assert_eq!(
-            work.process_ds_completion(id1, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id2, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id2,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1459,8 +1654,14 @@ mod test {
         // Complete the flush on downstairs 2.
         work.in_progress(flush_id, 2);
         assert_eq!(
-            work.process_ds_completion(flush_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                flush_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1475,7 +1676,7 @@ mod test {
         // Verify that a write remains on the active queue until a flush
         // comes through and clears it.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build our write IO.
@@ -1502,18 +1703,36 @@ mod test {
 
         // Complete the write on all three downstairs.
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1536,18 +1755,36 @@ mod test {
 
         // Complete the flush on all three downstairs.
         assert_eq!(
-            work.process_ds_completion(next_id, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(next_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(
-            work.process_ds_completion(next_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1569,7 +1806,7 @@ mod test {
         // and the flush, which then allows the work to be completed.
         // Also, we mix up which client finishes which job first.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build two writes, put them on the work queue.
@@ -1610,23 +1847,47 @@ mod test {
 
         // Complete the writes that we sent to the 2 downstairs.
         assert_eq!(
-            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(
-            work.process_ds_completion(id2, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id2,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id2, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id2,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1649,13 +1910,25 @@ mod test {
 
         // Complete the flush on those downstairs.
         assert_eq!(
-            work.process_ds_completion(flush_id, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                flush_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(flush_id, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                flush_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1678,13 +1951,25 @@ mod test {
         assert!(work.in_progress(id1, 2).is_some());
         assert!(work.in_progress(id2, 0).is_some());
         assert_eq!(
-            work.process_ds_completion(id1, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id2, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id2,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1694,8 +1979,14 @@ mod test {
         // Send and complete the flush
         work.in_progress(flush_id, 1);
         assert_eq!(
-            work.process_ds_completion(flush_id, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                flush_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1710,7 +2001,7 @@ mod test {
     fn work_completed_read_replay() {
         // Verify that a single read will replay and move back from AckReady
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build our read IO and submit it to the work queue.
@@ -1734,8 +2025,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1758,7 +2055,7 @@ mod test {
         // Verify that a read will replay and move not back from AckReady if
         // there is more than one done read.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Build a read and put it on the work queue.
@@ -1782,8 +2079,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(work.ackable_work().len(), 1);
@@ -1796,8 +2099,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 1, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                1,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -1821,8 +2130,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
         assert_eq!(work.ackable_work().len(), 1);
@@ -1835,7 +2150,7 @@ mod test {
         // Verify that a read we Acked will still replay if that downstairs
         // goes away. Make sure everything still finishes ok.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create the read and put it on the work queue.
@@ -1859,8 +2174,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1894,8 +2215,14 @@ mod test {
             &vec![],
         )]);
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(work.ackable_work().len(), 0);
@@ -1909,7 +2236,7 @@ mod test {
         // change state from AckReady back to NotAcked.
         // If we then redo the work, it should go back to AckReady.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create the write and put it on the work queue.
@@ -1933,13 +2260,25 @@ mod test {
 
         // Complete the write on two downstairs.
         assert_eq!(
-            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1957,8 +2296,14 @@ mod test {
         // Re-submit and complete the write
         assert!(work.in_progress(id1, 1).is_some());
         assert_eq!(
-            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -1972,7 +2317,7 @@ mod test {
         // Verify that a replay when we have acked a write will not
         // undo that ack.
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         // Create the write and put it on the work queue.
@@ -1996,13 +2341,25 @@ mod test {
 
         // Complete the write on two downstairs.
         assert_eq!(
-            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id1, 1, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             true
         );
 
@@ -2027,13 +2384,25 @@ mod test {
         assert!(work.in_progress(id1, 2).is_some());
 
         assert_eq!(
-            work.process_ds_completion(id1, 0, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
         assert_eq!(
-            work.process_ds_completion(id1, 2, Ok(vec![]), &None)
-                .unwrap(),
+            work.process_ds_completion(
+                id1,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
     }
@@ -2054,10 +2423,360 @@ mod test {
         let up = Upstairs::default();
         up.ds_transition(0, DsState::WaitActive);
         up.ds_transition(0, DsState::WaitQuorum);
-        up.set_active();
+        up.set_active().unwrap();
         up.ds_transition(0, DsState::Active);
         up.ds_transition(0, DsState::Offline);
         up.ds_transition(0, DsState::Replay);
+    }
+    #[test]
+    fn downstairs_transition_deactivate() {
+        // Verify deactivate goes to new
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::Active);
+        up.set_active().unwrap();
+        up.ds_transition(0, DsState::Deactivated);
+        up.ds_transition(0, DsState::New);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_deactivate_not_new() {
+        // Verify deactivate goes to new
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::Deactivated);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_deactivate_not_wa() {
+        // Verify no deactivate from wa
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::Deactivated);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_deactivate_not_wq() {
+        // Verify no deactivate from wq
+        let up = Upstairs::default();
+        up.ds_transition(0, DsState::WaitActive);
+        up.ds_transition(0, DsState::WaitQuorum);
+        up.ds_transition(0, DsState::Deactivated);
+    }
+
+    // Deactivate tests
+    #[test]
+    fn deactivate_after_work_completed() {
+        // Verify that submitted IO will continue after a deactivate.
+        // Verify that the flush takes three completions.
+        // Verify that deactivate done returns the upstairs to init.
+
+        let up = Upstairs::default();
+        up.set_active().unwrap();
+        let mut ds = up.downstairs.lock().unwrap();
+        ds.ds_state[0] = DsState::Active;
+        ds.ds_state[1] = DsState::Active;
+        ds.ds_state[2] = DsState::Active;
+
+        // Build a write, put it on the work queue.
+        let id1 = ds.next_id();
+
+        let op = create_write_eob(
+            id1,
+            vec![],
+            10,
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+                encryption_context: None,
+            }],
+        );
+        ds.enqueue(op);
+
+        // Submit the writes
+        assert!(ds.in_progress(id1, 0).is_some());
+        assert!(ds.in_progress(id1, 1).is_some());
+        assert!(ds.in_progress(id1, 2).is_some());
+
+        drop(ds);
+        up.set_deactivate().unwrap();
+        ds = up.downstairs.lock().unwrap();
+
+        // Complete the writes
+        ds.process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap();
+        ds.process_ds_completion(id1, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap();
+        ds.process_ds_completion(id1, 2, Ok(vec![]), &None, UpState::Active)
+            .unwrap();
+
+        // Ack the writes to the guest.
+        ds.ack(id1);
+
+        // Create and enqueue the flush.
+        let flush_id = ds.next_id();
+        let op = create_flush(flush_id, vec![], 10, 0, 0);
+        ds.enqueue(op);
+
+        // Send the flush to two downstairs.
+        ds.in_progress(flush_id, 0);
+        ds.in_progress(flush_id, 2);
+
+        // Complete the flush on those downstairs.
+        // One flush won't result in an ACK
+        assert_eq!(
+            ds.process_ds_completion(
+                flush_id,
+                0,
+                Ok(vec![]),
+                &None,
+                UpState::Deactivating
+            )
+            .unwrap(),
+            false
+        );
+
+        // The 2nd ack when disconnecting still won't trigger an ack.
+        assert_eq!(
+            ds.process_ds_completion(
+                flush_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Deactivating
+            )
+            .unwrap(),
+            false
+        );
+
+        // Verify we can deactivate the completed DS
+        drop(ds);
+        assert_eq!(up.ds_deactivate(0), true);
+        assert_eq!(up.ds_deactivate(2), true);
+
+        // Verify the remaining DS can not deactivate
+        assert_eq!(up.ds_deactivate(1), false);
+
+        // Verify the deactivate is not done yet.
+        up.deactivate_transition_check();
+        assert_eq!(up.is_deactivating(), true);
+
+        ds = up.downstairs.lock().unwrap();
+        // Make sure the correct DS have changed state.
+        assert_eq!(ds.ds_state[0], DsState::Deactivated);
+        assert_eq!(ds.ds_state[2], DsState::Deactivated);
+        assert_eq!(ds.ds_state[1], DsState::Active);
+
+        // Send and complete the flush
+        ds.in_progress(flush_id, 1);
+        assert_eq!(
+            ds.process_ds_completion(
+                flush_id,
+                1,
+                Ok(vec![]),
+                &None,
+                UpState::Deactivating
+            )
+            .unwrap(),
+            true
+        );
+        // Ack the flush..
+        ds.ack(flush_id);
+
+        drop(ds);
+        assert_eq!(up.ds_deactivate(1), true);
+
+        // Reprot all three DS as missing, which moves them to New
+        up.ds_missing(0);
+        up.ds_missing(1);
+        up.ds_missing(2);
+
+        // Verify we have disconnected and can go back to init.
+        up.deactivate_transition_check();
+        assert_eq!(up.is_deactivating(), false);
+    }
+
+    #[test]
+    fn deactivate_when_empty() {
+        // Verify we can deactivate if no work is present.
+        // Verify after all three downstairs are deactivated, we can
+        // transition the upstairs back to init.
+
+        let up = Upstairs::default();
+        up.set_active().unwrap();
+        let mut ds = up.downstairs.lock().unwrap();
+        ds.ds_state[0] = DsState::Active;
+        ds.ds_state[1] = DsState::Active;
+        ds.ds_state[2] = DsState::Active;
+
+        drop(ds);
+        up.set_deactivate().unwrap();
+
+        // Verify we can deactivate as there is no work
+        assert_eq!(up.ds_deactivate(0), true);
+        assert_eq!(up.ds_deactivate(1), true);
+        assert_eq!(up.ds_deactivate(2), true);
+
+        ds = up.downstairs.lock().unwrap();
+        // Make sure the correct DS have changed state.
+        assert_eq!(ds.ds_state[0], DsState::Deactivated);
+        assert_eq!(ds.ds_state[1], DsState::Deactivated);
+        assert_eq!(ds.ds_state[2], DsState::Deactivated);
+        drop(ds);
+
+        // Mark all three DS as missing, which moves their state to New
+        up.ds_missing(0);
+        up.ds_missing(1);
+        up.ds_missing(2);
+
+        // Verify now we can go back to init.
+        up.deactivate_transition_check();
+        assert_eq!(up.is_deactivating(), false);
+    }
+
+    #[test]
+    fn deactivate_not_without_flush() {
+        // Verify that we can't deactivate without a flush as the
+        // last job on the list
+
+        let up = Upstairs::default();
+        up.set_active().unwrap();
+        let mut ds = up.downstairs.lock().unwrap();
+        ds.ds_state[0] = DsState::Active;
+        ds.ds_state[1] = DsState::Active;
+        ds.ds_state[2] = DsState::Active;
+
+        // Build a write, put it on the work queue.
+        let id1 = ds.next_id();
+
+        let op = create_write_eob(
+            id1,
+            vec![],
+            10,
+            vec![crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(7),
+                data: Bytes::from(vec![1]),
+                encryption_context: None,
+            }],
+        );
+        ds.enqueue(op);
+
+        // Submit the writes
+        assert!(ds.in_progress(id1, 0).is_some());
+        assert!(ds.in_progress(id1, 1).is_some());
+        assert!(ds.in_progress(id1, 2).is_some());
+
+        drop(ds);
+        up.set_deactivate().unwrap();
+        ds = up.downstairs.lock().unwrap();
+
+        // Complete the writes
+        ds.process_ds_completion(
+            id1,
+            0,
+            Ok(vec![]),
+            &None,
+            UpState::Deactivating,
+        )
+        .unwrap();
+        ds.process_ds_completion(
+            id1,
+            1,
+            Ok(vec![]),
+            &None,
+            UpState::Deactivating,
+        )
+        .unwrap();
+        ds.process_ds_completion(
+            id1,
+            2,
+            Ok(vec![]),
+            &None,
+            UpState::Deactivating,
+        )
+        .unwrap();
+
+        // Ack the writes to the guest.
+        ds.ack(id1);
+
+        // Verify we will not transition to deactivated without a flush.
+        drop(ds);
+        assert_eq!(up.ds_deactivate(0), false);
+        assert_eq!(up.ds_deactivate(1), false);
+        assert_eq!(up.ds_deactivate(2), false);
+
+        // Verify the deactivate is not done yet.
+        up.deactivate_transition_check();
+        assert_eq!(up.is_deactivating(), true);
+
+        ds = up.downstairs.lock().unwrap();
+        // Make sure no DS have changed state.
+        assert_eq!(ds.ds_state[0], DsState::Active);
+        assert_eq!(ds.ds_state[2], DsState::Active);
+        assert_eq!(ds.ds_state[1], DsState::Active);
+    }
+
+    #[test]
+    fn deactivate_not_when_active() {
+        // Verify that we can't set deactivate on the upstairs when
+        // the upstairs is still in init.
+        // Verify that we can't set deactivate on the upstairs when
+        // we are deactivating.
+        // TODO: This test should change when we support this behavior.
+
+        let up = Upstairs::default();
+        assert!(up.set_deactivate().is_err());
+        up.set_active().unwrap();
+        up.set_deactivate().unwrap();
+        assert!(up.set_deactivate().is_err());
+    }
+
+    #[test]
+    fn deactivate_ds_not_when_active() {
+        // No ds can deactivate when upstairs is not deactivating.
+
+        let up = Upstairs::default();
+        up.set_active().unwrap();
+        let mut ds = up.downstairs.lock().unwrap();
+        ds.ds_state[0] = DsState::Active;
+        ds.ds_state[1] = DsState::Active;
+        ds.ds_state[2] = DsState::Active;
+
+        drop(ds);
+
+        // Verify we cannot deactivate even when there is no work
+        assert_eq!(up.ds_deactivate(0), false);
+        assert_eq!(up.ds_deactivate(1), false);
+        assert_eq!(up.ds_deactivate(2), false);
+
+        ds = up.downstairs.lock().unwrap();
+        // Make sure no DS have changed state.
+        assert_eq!(ds.ds_state[0], DsState::Active);
+        assert_eq!(ds.ds_state[1], DsState::Active);
+        assert_eq!(ds.ds_state[2], DsState::Active);
+    }
+
+    #[test]
+    fn deactivate_ds_not_when_initializing() {
+        // No deactivate of downstairs when upstairs not active.
+
+        let up = Upstairs::default();
+
+        // Verify we cannot deactivate before the upstairs is active
+        assert_eq!(up.ds_deactivate(0), false);
+        assert_eq!(up.ds_deactivate(1), false);
+        assert_eq!(up.ds_deactivate(2), false);
+
+        let ds = up.downstairs.lock().unwrap();
+        // Make sure no DS have changed state.
+        assert_eq!(ds.ds_state[0], DsState::New);
+        assert_eq!(ds.ds_state[1], DsState::New);
+        assert_eq!(ds.ds_state[2], DsState::New);
     }
 
     #[test]
@@ -2168,7 +2887,7 @@ mod test {
     #[test]
     fn bad_decryption_means_read_error() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -2224,8 +2943,14 @@ mod test {
 
         // should not notify Guest
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &Some(context))
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &Some(context),
+                UpState::Active,
+            )
+            .unwrap(),
             false
         );
 
