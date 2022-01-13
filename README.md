@@ -205,20 +205,6 @@ LAST_FLUSH=$(cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_
 cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3801-3801-3801-000000003801 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
 ```
 
-# Benchmarking #
-
-To run the benchmarks, do:
-
-```
-cargo bench
-```
-
-You can include a benchmark name (read: what criterion's "bench_function" string is) to limit which bencharks are run. Example:
-
-```
-cargo bench region_write
-```
-
 ## License
 
 Unless otherwise noted, all components are licensed under the [Mozilla Public License Version 2.0](LICENSE).
