@@ -82,6 +82,13 @@ pub struct Opt {
     gen: u64,
 
     /*
+     * Retry for activate, as long as it takes.  If we pass this arg, the
+     * test will retry the initial activate command as long as it takes.
+     */
+    #[structopt(long)]
+    retry_activate: bool,
+
+    /*
      * For tests that support it, load the expected write count from
      * the provided file.
      */
@@ -251,7 +258,15 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    guest.activate(opt.gen)?;
+    if opt.retry_activate {
+        while let Err(e) = guest.activate(opt.gen) {
+            println!("Activate returns: {:#}  Retrying", e);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        println!("Activate successful");
+    } else {
+        guest.activate(opt.gen)?;
+    }
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
