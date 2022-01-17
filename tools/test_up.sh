@@ -5,6 +5,12 @@
 # This should eventually either move to some common test framework, or be
 # thrown away.
 
+if [[ ${#} -ne 1 ]];
+then
+    echo "specify either 'unencrypted' or 'encrypted' string"
+    exit 1
+fi
+
 set -o pipefail
 SECONDS=0
 
@@ -53,6 +59,16 @@ for (( i = 0; i < 3; i++ )); do
     set +o errexit
 done
 
+case ${1} in
+    "unencrypted")
+        ;;
+    "encrypted")
+        args+=( --key "$(openssl rand -base64 32)" )
+        ;;
+    *)
+        ;;
+esac
+
 res=0
 test_list="one big dep rand balloon"
 for tt in ${test_list}; do
@@ -71,8 +87,7 @@ done
 
 echo "Running hammer"
 if ! time cargo run -p crucible-hammer -- \
-    "${args[@]}" \
-    --key "$(openssl rand -base64 32)"; then
+    "${args[@]}"; then
 
 	echo "Failed hammer test"
     (( res += 1 ))
