@@ -390,10 +390,12 @@ async fn proc(
     }
 
     let mut self_promotion = false;
+
     /*
      * As the "client", we must begin the negotiation.
      */
-    fw.send(Message::HereIAm(1, up.uuid)).await?;
+    let m = Message::HereIAm(1, up.uuid, up.encryption_context.is_some());
+    fw.send(m).await?;
 
     /*
      * Used to track where we are in the current negotiation.

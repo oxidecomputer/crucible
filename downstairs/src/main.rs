@@ -573,6 +573,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
 
     let mut negotiated = 0;
     let mut upstairs_uuid = None;
+    let mut upstairs_is_encrypted = None;
 
     let (_another_upstairs_active_tx, mut another_upstairs_active_rx) =
         channel(1);
@@ -654,7 +655,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                         let mut fw = fw.lock().await;
                         fw.send(Message::Imok).await?;
                     }
-                    Some(Message::HereIAm(version, uuid)) => {
+                    Some(Message::HereIAm(version, uuid, is_encrypted)) => {
                         if negotiated != 0 {
                             bail!("Received connect out of order {}",
                                 negotiated);
@@ -666,6 +667,32 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                         upstairs_uuid = Some(uuid);
                         println!("upstairs {:?} connected",
                             upstairs_uuid.unwrap());
+
+                        /*
+                         * Reject an upstair's connection if it doesn't match
+                         * what the downstairs expects for encryption.
+                         */
+                        let ds = ads.lock().await;
+                        if let Some(expect_encryption) = ds.expect_upstairs_encryption_context() {
+                            if expect_encryption != is_encrypted {
+                                println!(
+                                    "downstairs expects {} but upstairs {}!",
+                                    if expect_encryption {
+                                        "encryption"
+                                    } else {
+                                        "no encryption"
+                                    },
+                                    if is_encrypted {
+                                        "is encrypted"
+                                    } else {
+                                        "is not encrypted"
+                                    },
+                                );
+                                bail!("Encryption expectation mismatch!");
+                            }
+                        }
+                        upstairs_is_encrypted = Some(is_encrypted);
+
                         let mut fw = fw.lock().await;
                         fw.send(Message::YesItsMe(1)).await?;
                     }
@@ -770,6 +797,17 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
     println!("Downstairs has completed Negotiation");
     assert!(upstairs_uuid.is_some());
     let u_uuid = upstairs_uuid.unwrap();
+
+    /*
+     * If an upstairs completes negotation, set the encryption context
+     * expectation downstairs.
+     */
+    {
+        let mut ds = ads.lock().await;
+        ds.set_expect_upstairs_encryption_context(
+            upstairs_is_encrypted.unwrap(),
+        )?;
+    }
 
     resp_loop(ads, fr, fw, another_upstairs_active_rx, u_uuid).await
 }
@@ -1186,6 +1224,18 @@ impl Downstairs {
         work.active = HashMap::new();
         work.completed = Vec::with_capacity(32);
         work.last_flush = 0;
+    }
+
+    fn expect_upstairs_encryption_context(&self) -> Option<bool> {
+        self.region.expect_upstairs_encryption_context()
+    }
+
+    fn set_expect_upstairs_encryption_context(
+        &mut self,
+        is_encrypted: bool,
+    ) -> Result<()> {
+        self.region
+            .set_expect_upstairs_encryption_context(is_encrypted)
     }
 }
 

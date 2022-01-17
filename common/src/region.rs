@@ -120,6 +120,13 @@ pub struct RegionDefinition {
      * UUID for this region
      */
     uuid: Uuid,
+
+    /**
+     * 0 if no upstairs has ever connected
+     * 1 if an upstairs previously connected without encryption
+     * 2 if an upstairs previously connected with encryption
+     */
+    upstairs_previous_connection: u32,
 }
 
 impl RegionDefinition {
@@ -130,6 +137,7 @@ impl RegionDefinition {
             extent_size: opts.extent_size,
             extent_count: 0,
             uuid: opts.uuid,
+            upstairs_previous_connection: 0,
         })
     }
 
@@ -168,6 +176,18 @@ impl RegionDefinition {
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = uuid;
     }
+
+    pub fn get_upstairs_previous_connection(&self) -> u32 {
+        self.upstairs_previous_connection
+    }
+
+    pub fn set_upstairs_previous_connection(&mut self, is_encrypted: bool) {
+        if is_encrypted {
+            self.upstairs_previous_connection = 2;
+        } else {
+            self.upstairs_previous_connection = 1;
+        }
+    }
 }
 
 /**
@@ -181,6 +201,7 @@ impl Default for RegionDefinition {
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
+            upstairs_previous_connection: 0,
         }
     }
 }

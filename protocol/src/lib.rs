@@ -94,9 +94,10 @@ impl ReadResponse {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     /*
-     * Initial negotiation
+     * Initial negotiation: version, upstairs uuid, and a boolean for if
+     * the upstairs is connecting with an encryption context.
      */
-    HereIAm(u32, Uuid),
+    HereIAm(u32, Uuid, bool),
     YesItsMe(u32),
 
     /*
@@ -404,7 +405,7 @@ mod tests {
 
     #[test]
     fn rt_here_i_am() -> Result<()> {
-        let input = Message::HereIAm(2, Uuid::new_v4());
+        let input = Message::HereIAm(2, Uuid::new_v4(), false);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
@@ -460,7 +461,7 @@ mod tests {
         let mut encoder = CrucibleEncoder::new();
         let mut decoder = CrucibleDecoder::new();
 
-        let input = Message::HereIAm(0, Uuid::new_v4());
+        let input = Message::HereIAm(0, Uuid::new_v4(), false);
         let mut buffer = BytesMut::new();
 
         encoder.encode(input, &mut buffer)?;
