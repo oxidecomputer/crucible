@@ -138,6 +138,7 @@ pub async fn ox_stats(
     let dropshot_config = ConfigDropshot {
         bind_address: my_address,
         request_body_max_bytes: 2048,
+        tls: None,
     };
     let logging_config = ConfigLogging::StderrTerminal {
         level: ConfigLoggingLevel::Error,
