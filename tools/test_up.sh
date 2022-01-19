@@ -140,6 +140,6 @@ else
     echo "All Tests have passed"
 fi
 duration=$SECONDS
-printf "%d:%2d Test duration\n" $((duration / 60)) $((duration % 60))
+printf "%d:%02d Test duration\n" $((duration / 60)) $((duration % 60))
 
 exit "$res"
