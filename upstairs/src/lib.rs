@@ -634,13 +634,26 @@ async fn proc(
                          * actually our uuid, do we just ignore it?
                          */
                         println!(
-                            "[{}] {} new: {} downstairs self deactivate!",
+                            "[{}] {} downstairs self deactivate: new {:?}",
                             up.uuid,
                             new_active_uuid,
                             up_coms.client_id
                         );
                         up.ds_transition(up_coms.client_id, DsState::New);
                         up.set_inactive();
+                        if up.uuid == new_active_uuid {
+                            /*
+                             * Now, this is really going off the rails.  Our
+                             * downstairs things we have a different UUID
+                             * and is sending us the UUID of the "new"
+                             * downstairs, but that UUID IS our UUID.  So
+                             * clearly the downstairs is confused.
+                             */
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, {:?}!",
+                                up_coms.client_id, up.uuid, new_active_uuid,
+                            );
+                        }
                         return Err(CrucibleError::UuidMismatch.into());
                     }
                     Some(Message::RegionInfo(region_def)) => {
@@ -760,11 +773,14 @@ async fn proc(
                     }
                     Some(Message::UuidMismatch(expected_uuid)) => {
                         /*
-                         * XXX If our downstairs
-                         * is returning a different UUID then we have, is that
-                         * a cause to disable ourselves, or just drop this work
-                         * on the ground?  Can this happen in a case where
+                         * XXX Our downstairs is returning a different
+                         * UUID then we have, can this happen in a case where
                          * we (the upstairs) should continue to accept work?
+                         *
+                         * Until we know better, we are going to disable
+                         * this upstairs, which will stop the other
+                         * downstairs from taking and sending any more
+                         * IO.
                          */
                         println!(
                             "[{}] {} received UuidMismatch, expecting {:?}!",
@@ -774,6 +790,19 @@ async fn proc(
                             up_coms.client_id, DsState::Disabled
                         );
                         up.set_inactive();
+                        if up.uuid == expected_uuid {
+                            /*
+                             * Now, this is really going off the rails.  OUr
+                             * downstairs things we have a different UUID
+                             * and is sending us the UUID of the "new"
+                             * downstairs, but that UUID IS our UUID.  So
+                             * clearly the downstairs is confused.
+                             */
+                            bail!(
+                                "[{}] {} received bad UuidMismatch, {:?}!",
+                                up_coms.client_id, up.uuid, expected_uuid
+                            );
+                        }
                         bail!(
                             "[{}] {} received UuidMismatch, expecting {:?}!",
                             up_coms.client_id, up.uuid, expected_uuid
@@ -1302,13 +1331,15 @@ impl Downstairs {
     }
 
     /**
-     * TODO:
      * We have received a deactivate command from the guest, but we have
      * a downstairs that is offline.  Since we don't know when it might
      * come back, we have to discard all the work it has as we have no
      * longer consider the upstairs active, so the replay will not happen.
      * Mark every job on this downstairs not done as skipped, then take
      * the downstairs out.
+     * TODO: This is not completed yet.  The logic for how to ACK the
+     * deactivate does not support having any (or all) downstairs offline
+     * when there is work in the queue.
      */
     fn ds_deactivate_offline(&mut self, client_id: u8) {
         let mut kvec: Vec<u64> =
@@ -2223,15 +2254,35 @@ impl Upstairs {
     }
 
     /*
-     * To set deactivate, we need to submit a flush to all downstairs
-     * while holding the upstairs active state lock.  This prevents
-     * any work sneaking in after our switch to deactivation, and prevents
-     * confusion from a flush already in the work queue from being
-     * confused as our deactivation flush.  Since we plan to create a
+     * Set deactivate on the upstairs.
+     *
+     * For a deactivation to complete, we need to:
+     * Stop all incoming IO.
+     * Let any outstanding IO finish.
+     * Submit a final flush to all downstairs.
+     * Wait for that final flush to finish (on all downstairs).
+     *
+     * We may be able to take some shortcuts if there is no work
+     * in the active queue, and our last IO was a flush.
+     *
+     * We decide what to do while holding the upstairs active state lock.
+     * This prevents any work sneaking in after our switch to deactivation,
+     * and prevents confusion from a flush already in the work queue from
+     * being confused as our deactivation flush.  Since we plan to create a
      * flush with a real guest job ID and use the ACK of that flush as a
      * way to notify the guest that their deactivate request is done,
      * we also need the guest work lock.
+     *
+     * By creating a real guest job, we can have the guest wait on completion
+     * of that job as a way to be sure the final flush has been ack'd from
+     * all downstairs (that are present).
+     *
+     * At the moment, we don't have any timeout on how long we will try
+     * to clear the outstanding work and final flush.  We try forever and
+     * will only give up if a downstairs goes offline or we finish the
+     * work in the queue.
      */
+
     fn set_deactivate(
         &self,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
@@ -2249,7 +2300,7 @@ impl Upstairs {
          * before we are activated.
          *
          * TODO: Support deactivation during initial setup.
-         * We don't yet have a way to interrupt that.
+         * We don't yet have a way to interrupt a deactivation in progress.
          */
         if active.up_state == UpState::Initializing {
             crucible_bail!(UpstairsInactive);
@@ -4383,19 +4434,12 @@ impl Guest {
     }
 
     pub fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        // Disable IO from this guest and deactivate the downstairs
-        // This means walking all the downstairs and kicking out any IO
-        // that is not finished and throwing away all outstanding IO?
+        // Disable any more IO from this guest and deactivate the downstairs.
+        // We can't deactivate if we are not yet active.
         if !self.is_active() {
             return Err(CrucibleError::UpstairsInactive);
         }
-        // Now, let all in-progress IO finish.
-        // Should I really disable IO? Yes.
-        // Some "block new IO?", shut the door behind you option?
-        // Maybe, make a state for the upstairs itself?
-        // Waiting for activate, waiting for quorum, repair, active, quesce,
-        // failed, back to waiting for activate?/que
-        //
+
         Ok(self.send(BlockOp::Deactivate))
     }
 
@@ -4684,15 +4728,6 @@ async fn process_new_io(
             send_active(dst, gen);
             let _ = req.send.send(Ok(()));
         }
-        BlockOp::Deactivate => {
-            println!("Request to deactivate this guest");
-            if let Err(e) = up.set_deactivate(Some(req.send.clone())) {
-                let _ = req.send.send(Err(e));
-                return;
-            }
-            send_work(dst, *lastcast);
-            *lastcast += 1;
-        }
         BlockOp::QueryUpstairsActive { data } => {
             *data.lock().unwrap() = up.guest_io_ready();
             let _ = req.send.send(Ok(()));
@@ -4705,6 +4740,22 @@ async fn process_new_io(
          * These options are only functional once the upstairs is
          * active and should not be accepted if we are not active.
          */
+        BlockOp::Deactivate => {
+            println!("Request to deactivate this guest");
+            /*
+             * First do an initial check to make sure we can deactivate.
+             * If we can't then return error right away.  If we don't
+             * return error here, then we have started the process to
+             * deactivation and need to signal all our downstairs that
+             * they (may) have a flush to do.
+             */
+            if let Err(e) = up.set_deactivate(Some(req.send.clone())) {
+                let _ = req.send.send(Err(e));
+                return;
+            }
+            send_work(dst, *lastcast);
+            *lastcast += 1;
+        }
         BlockOp::Read { offset, data } => {
             if let Err(e) = up.submit_read(offset, data, Some(req.send.clone()))
             {
