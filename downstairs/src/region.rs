@@ -633,9 +633,6 @@ impl Extent {
     /**
      * Verify that the requested block offset and size of the buffer
      * will fit within the extent.
-     *
-     * Note that the checks here do take into account that the first block
-     * is the metadata block.
      */
     fn check_input(
         &self,
