@@ -1081,14 +1081,6 @@ impl Region {
         }
         Ok(())
     }
-
-    /*
-     * Regions are created with the expectation that upstairs will attach
-     * unencrypted or encrypted.
-     */
-    pub fn expect_upstairs_encryption_context(&self) -> bool {
-        self.def.get_expect_upstairs_encrypted()
-    }
 }
 
 #[cfg(test)]
@@ -1738,87 +1730,6 @@ mod test {
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].hashes.len(), 0);
         assert_eq!(responses[0].data[..], [0u8; 512][..]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_expect_encryption_context_downstairs_default() -> Result<()> {
-        // create region
-
-        let block_size: u64 = 512;
-        let extent_size = 10;
-
-        let mut region_options: crucible_common::RegionOptions =
-            Default::default();
-        region_options.set_block_size(block_size);
-        region_options.set_extent_size(Block::new(
-            extent_size,
-            block_size.trailing_zeros(),
-        ));
-        region_options.set_uuid(Uuid::new_v4());
-
-        let dir = tempdir()?;
-        mkdir_for_file(dir.path())?;
-
-        let region = Region::create(&dir, region_options.clone())?;
-
-        // default is unencrypted
-        assert_eq!(region.expect_upstairs_encryption_context(), false);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_expect_encryption_context_downstairs_false() -> Result<()> {
-        // create region
-
-        let block_size: u64 = 512;
-        let extent_size = 10;
-
-        let mut region_options: crucible_common::RegionOptions =
-            Default::default();
-        region_options.set_block_size(block_size);
-        region_options.set_extent_size(Block::new(
-            extent_size,
-            block_size.trailing_zeros(),
-        ));
-        region_options.set_uuid(Uuid::new_v4());
-        region_options.set_expect_upstairs_encrypted(false);
-
-        let dir = tempdir()?;
-        mkdir_for_file(dir.path())?;
-
-        let region = Region::create(&dir, region_options.clone())?;
-
-        assert_eq!(region.expect_upstairs_encryption_context(), false);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_expect_encryption_context_downstairs_true() -> Result<()> {
-        // create region
-
-        let block_size: u64 = 512;
-        let extent_size = 10;
-
-        let mut region_options: crucible_common::RegionOptions =
-            Default::default();
-        region_options.set_block_size(block_size);
-        region_options.set_extent_size(Block::new(
-            extent_size,
-            block_size.trailing_zeros(),
-        ));
-        region_options.set_uuid(Uuid::new_v4());
-        region_options.set_expect_upstairs_encrypted(true);
-
-        let dir = tempdir()?;
-        mkdir_for_file(dir.path())?;
-
-        let region = Region::create(&dir, region_options.clone())?;
-
-        assert_eq!(region.expect_upstairs_encryption_context(), true);
 
         Ok(())
     }

@@ -657,7 +657,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                         let mut fw = fw.lock().await;
                         fw.send(Message::Imok).await?;
                     }
-                    Some(Message::HereIAm(version, uuid, is_encrypted)) => {
+                    Some(Message::HereIAm(version, uuid)) => {
                         if negotiated != 0 {
                             bail!("Received connect out of order {}",
                                 negotiated);
@@ -669,30 +669,6 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                         upstairs_uuid = Some(uuid);
                         println!("upstairs {:?} connected",
                             upstairs_uuid.unwrap());
-
-                        /*
-                         * Reject an upstair's connection if it doesn't match
-                         * what the downstairs expects for encryption.
-                         */
-                        let ds = ads.lock().await;
-                        let expect_encryption
-                            = ds.expect_upstairs_encryption_context();
-                        if is_encrypted != expect_encryption {
-                            println!(
-                                "downstairs expects {} but upstairs {}!",
-                                if expect_encryption {
-                                    "encryption"
-                                } else {
-                                    "no encryption"
-                                },
-                                if is_encrypted {
-                                    "is encrypted"
-                                } else {
-                                    "is not encrypted"
-                                },
-                            );
-                            bail!("Encryption expectation mismatch!");
-                        }
 
                         let mut fw = fw.lock().await;
                         fw.send(Message::YesItsMe(1)).await?;
@@ -1214,10 +1190,6 @@ impl Downstairs {
         work.active = HashMap::new();
         work.completed = Vec::with_capacity(32);
         work.last_flush = 0;
-    }
-
-    fn expect_upstairs_encryption_context(&self) -> bool {
-        self.region.expect_upstairs_encryption_context()
     }
 }
 

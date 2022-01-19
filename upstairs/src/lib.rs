@@ -394,7 +394,7 @@ async fn proc(
     /*
      * As the "client", we must begin the negotiation.
      */
-    let m = Message::HereIAm(1, up.uuid, up.encryption_context.is_some());
+    let m = Message::HereIAm(1, up.uuid);
     fw.send(m).await?;
 
     /*
