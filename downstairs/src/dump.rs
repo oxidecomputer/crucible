@@ -2,6 +2,7 @@
 use super::*;
 use crate::region::ExtentMeta;
 use sha2::{Digest, Sha256};
+use std::convert::TryInto;
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -199,6 +200,46 @@ pub fn dump_region(
     Ok(())
 }
 
+fn return_status_letters<T, U: std::cmp::PartialEq>(
+    items: &[T],
+    accessor: fn(&T) -> &U,
+) -> ([String; 3], bool) {
+    let mut status_letters = vec![String::new(); 3];
+    let mut different = false;
+
+    let count = items.len();
+
+    if accessor(&items[0]) == accessor(&items[1]) {
+        status_letters[0] += "A";
+        status_letters[1] += "A";
+
+        if count > 2 {
+            if accessor(&items[0]) == accessor(&items[2]) {
+                status_letters[2] += "A";
+            } else {
+                status_letters[2] += "C";
+                different = true;
+            }
+        }
+    } else {
+        different = true;
+        status_letters[0] += "A";
+        status_letters[1] += "B";
+
+        if count > 2 {
+            if accessor(&items[0]) == accessor(&items[2]) {
+                status_letters[2] += "A";
+            } else if accessor(&items[1]) == accessor(&items[2]) {
+                status_letters[2] += "B";
+            } else {
+                status_letters[2] += "C";
+            }
+        }
+    }
+
+    (status_letters.try_into().unwrap(), different)
+}
+
 /*
  * Show the metadata and a block by block diff of a single extent
  * We need at least two directories to compare, and no more than three.
@@ -319,38 +360,9 @@ fn show_extent(
          * previous block.
          */
 
-        let mut different = false;
-
         // first compare data
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].data == dvec[1].data {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].data == dvec[2].data {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].data == dvec[2].data {
-                    status_letters[2] += "A";
-                } else if dvec[1].data == dvec[2].data {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
+        let (status_letters, data_different) =
+            return_status_letters(&dvec, |x| &x.data);
 
         // Print the data status letters
         for dir_index in 0..dir_count {
@@ -359,37 +371,8 @@ fn show_extent(
         }
 
         // then, compare encryption_context_columns
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
-                    status_letters[2] += "A";
-                } else if dvec[1].encryption_contexts
-                    == dvec[2].encryption_contexts
-                {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
+        let (status_letters, ec_different) =
+            return_status_letters(&dvec, |x| &x.encryption_contexts);
 
         // Print nonce status letters
         for dir_index in 0..dir_count {
@@ -398,41 +381,16 @@ fn show_extent(
         }
 
         // then, compare hashes
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].hashes == dvec[1].hashes {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].hashes == dvec[2].hashes {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].hashes == dvec[2].hashes {
-                    status_letters[2] += "A";
-                } else if dvec[1].hashes == dvec[2].hashes {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
+        let (status_letters, hashes_different) =
+            return_status_letters(&dvec, |x| &x.hashes);
 
         // Print hash status letters
         for dir_index in 0..dir_count {
             hash_columns[dir_index] =
                 format!("{0:^6} ", status_letters[dir_index]);
         }
+
+        let different = data_different || ec_different || hashes_different;
 
         if !only_show_differences || different {
             print!("{:5}  ", block);
@@ -510,36 +468,7 @@ fn show_extent_block(
     /*
      * Compare data
      */
-    let mut different = false;
-    let mut status_letters = vec![String::new(); 3];
-
-    if dvec[0].data == dvec[1].data {
-        status_letters[0] += "A";
-        status_letters[1] += "A";
-
-        if dir_count > 2 {
-            if dvec[0].data == dvec[2].data {
-                status_letters[2] += "A";
-            } else {
-                status_letters[2] += "C";
-                different = true;
-            }
-        }
-    } else {
-        different = true;
-        status_letters[0] += "A";
-        status_letters[1] += "B";
-
-        if dir_count > 2 {
-            if dvec[0].data == dvec[2].data {
-                status_letters[2] += "A";
-            } else if dvec[1].data == dvec[2].data {
-                status_letters[2] += "B";
-            } else {
-                status_letters[2] += "C";
-            }
-        }
-    }
+    let (status_letters, different) = return_status_letters(&dvec, |x| &x.data);
 
     if !only_show_differences || different {
         println!("{:>6}  {:<64}  {:3}", "DATA", "SHA256", "VER");
@@ -565,16 +494,8 @@ fn show_extent_block(
     /*
      * Compare encryption contexts
      */
-    let mut different = false;
-    if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
-        if (dir_count > 2)
-            && (dvec[0].encryption_contexts != dvec[2].encryption_contexts)
-        {
-            different = true;
-        }
-    } else {
-        different = true;
-    }
+    let (_, different) =
+        return_status_letters(&dvec, |x| &x.encryption_contexts);
 
     if !only_show_differences || different {
         /*
@@ -689,14 +610,7 @@ fn show_extent_block(
     /*
      * Compare integrity hashes
      */
-    let mut different = false;
-    if dvec[0].hashes == dvec[1].hashes {
-        if (dir_count > 2) && (dvec[0].hashes != dvec[2].hashes) {
-            different = true;
-        }
-    } else {
-        different = true;
-    }
+    let (_, different) = return_status_letters(&dvec, |x| &x.hashes);
 
     if !only_show_differences || different {
         /*
