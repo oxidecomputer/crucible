@@ -2917,6 +2917,12 @@ impl Upstairs {
     ) -> Result<()> {
         println!("[{}] Got region def {:?}", client_id, client_ddef);
 
+        if client_ddef.get_expect_upstairs_encrypted()
+            != self.encryption_context.is_some()
+        {
+            bail!("Encryption expectation mismatch!");
+        }
+
         /*
          * XXX Eventually we will be provided UUIDs when the upstairs
          * starts, so we can compare those with what we get here.
