@@ -33,6 +33,7 @@ serde_json = "1"
 structopt = "0.3"
 tokio = { version = "1.15.0", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"]}
+tokio-rustls = { version = "0.23.2" }
 toml = "0.5"
 tracing = "0.1.29"
 usdt = "0.3.1"

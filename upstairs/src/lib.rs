@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
+use std::convert::TryFrom;
 
 pub use crucible_common::*;
 use crucible_protocol::*;
@@ -22,7 +23,6 @@ use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use serde::Serialize;
-use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::{sleep_until, Instant};
@@ -60,11 +60,14 @@ mod cdt {
     fn ds__flush__io__done(_: u64, _: u64) {}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CrucibleOpts {
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
     pub key: Option<String>,
+    pub cert_pem: Option<String>,
+    pub key_pem: Option<String>,
+    pub root_cert_pem: Option<String>,
 }
 
 impl CrucibleOpts {
@@ -236,12 +239,15 @@ pub fn extent_from_offset(
  * We return true if we have more work to do, false if we are all caught up.
  */
 #[instrument(skip(fw))]
-async fn io_send(
+async fn io_send<WT>(
     u: &Arc<Upstairs>,
-    fw: &mut FramedWrite<WriteHalf<'_>, CrucibleEncoder>,
+    fw: &mut FramedWrite<WT, CrucibleEncoder>,
     client_id: u8,
     lossy: bool,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+{
     /*
      * Make sure we are either active, or in repair mode.  Otherwise, we
      * should not be sending IO requests to the downstairs.
@@ -363,22 +369,51 @@ async fn io_send(
     Ok(false)
 }
 
-/*
- * Once we have a connection to a downstairs, this task takes over and
- * handles the initial negotiation.
- */
-async fn proc(
+async fn proc_stream(
     target: &SocketAddr,
     up: &Arc<Upstairs>,
-    mut sock: TcpStream,
+    stream: WrappedStream,
     connected: &mut bool,
     up_coms: &mut UpComs,
     lossy: bool,
 ) -> Result<()> {
-    let (r, w) = sock.split();
-    let mut fr = FramedRead::new(r, CrucibleDecoder::new());
-    let mut fw = FramedWrite::new(w, CrucibleEncoder::new());
+    match stream {
+        WrappedStream::Http(sock) => {
+            let (read, write) = sock.into_split();
 
+            let fr = FramedRead::new(read, CrucibleDecoder::new());
+            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+            proc(target, up, fr, fw, connected, up_coms, lossy).await
+        },
+        WrappedStream::Https(stream) => {
+            let (read, write) = tokio::io::split(stream);
+
+            let fr = FramedRead::new(read, CrucibleDecoder::new());
+            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+            proc(target, up, fr, fw, connected, up_coms, lossy).await
+        },
+    }
+}
+
+/*
+ * Once we have a connection to a downstairs, this task takes over and
+ * handles the initial negotiation.
+ */
+async fn proc<RT, WT>(
+    target: &SocketAddr,
+    up: &Arc<Upstairs>,
+    mut fr: FramedRead<RT, CrucibleDecoder>,
+    mut fw: FramedWrite<WT, CrucibleEncoder>,
+    connected: &mut bool,
+    up_coms: &mut UpComs,
+    lossy: bool,
+) -> Result<()>
+where
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+{
     {
         let mut ds = up.downstairs.lock().unwrap();
         let my_state = ds.ds_state[up_coms.client_id as usize];
@@ -849,19 +884,17 @@ async fn proc(
  * downstairs that comes back.  In that situation we also need to take our
  * work queue and resend everything since the last flush that was ACK'd.
  */
-async fn cmd_loop(
+async fn cmd_loop<RT, WT>(
     up: &Arc<Upstairs>,
-    mut fr: FramedRead<
-        tokio::net::tcp::ReadHalf<'_>,
-        crucible_protocol::CrucibleDecoder,
-    >,
-    mut fw: FramedWrite<
-        tokio::net::tcp::WriteHalf<'_>,
-        crucible_protocol::CrucibleEncoder,
-    >,
+    mut fr: FramedRead<RT, crucible_protocol::CrucibleDecoder>,
+    mut fw: FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
     lossy: bool,
-) -> Result<()> {
+) -> Result<()>
+where
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+{
     println!("[{}] Starts cmd_loop", up_coms.client_id);
 
     /*
@@ -1047,12 +1080,18 @@ struct UpComs {
     ds_active_rx: watch::Receiver<u64>,
 }
 
+enum WrappedStream {
+    Http(tokio::net::TcpStream),
+    Https(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+}
+
 /*
  * This task is responsible for the connection to a specific downstairs
  * instance.
  */
 async fn looper(
     target: SocketAddr,
+    tls_context: Arc<tokio::sync::Mutex<Option<crucible_common::x509::TLSContext>>>,
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
     lossy: bool,
@@ -1115,12 +1154,34 @@ async fn looper(
             }
         };
 
+        let tcp = {
+            let tls_context = tls_context.lock().await;
+            if let Some(ref tls_context) = *tls_context {
+                // XXX these unwraps are bad!
+                let config = tls_context.get_client_config().unwrap();
+
+                let connector = tokio_rustls::TlsConnector::from(
+                    Arc::new(config),
+                );
+
+                let server_name = tokio_rustls::rustls::ServerName::try_from(
+                    format!("downstairs{}", up_coms.client_id).as_str(),
+                ).unwrap();
+
+                WrappedStream::Https(
+                    connector.connect(server_name, tcp).await.unwrap()
+                )
+            } else {
+                WrappedStream::Http(tcp)
+            }
+        };
+
         /*
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
          */
         if let Err(e) =
-            proc(&target, up, tcp, &mut connected, &mut up_coms, lossy).await
+            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy).await
         {
             eprintln!("ERROR: {}: proc: {:?}", target, e);
             // XXX proc can return fatal and non-fatal errors, figure out what
@@ -2012,6 +2073,9 @@ impl Upstairs {
             target: vec![],
             lossy: false,
             key: None,
+            cert_pem: None,
+            key_pem: None,
+            root_cert_pem: None,
         };
         Self::new(
             &opts,
@@ -4584,6 +4648,22 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
         up_ds_listen(&upc, ds_done_rx).await;
     });
 
+    let tls_context = if let Some(cert_pem_path) = opt.cert_pem {
+        let key_pem_path = opt.key_pem.unwrap();
+        let root_cert_pem_path = opt.root_cert_pem.unwrap();
+
+        let tls_context = crucible_common::x509::TLSContext::from_paths(
+            &cert_pem_path,
+            &key_pem_path,
+            &root_cert_pem_path,
+        )?;
+
+        Some(tls_context)
+    } else {
+        None
+    };
+    let tls_context = Arc::new(tokio::sync::Mutex::new(tls_context));
+
     let mut client_id = 0;
     /*
      * Create one downstairs task (dst) for each target in the opt
@@ -4611,8 +4691,9 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
                 ds_done_tx: ds_done_tx.clone(),
                 ds_active_rx,
             };
+            let tls_context = tls_context.clone();
             tokio::spawn(async move {
-                looper(t0, &up, up_coms, lossy).await;
+                looper(t0, tls_context, &up, up_coms, lossy).await;
             });
             client_id += 1;
 

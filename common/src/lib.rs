@@ -14,6 +14,8 @@ pub use region::{
     Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
 };
 
+pub mod x509;
+
 #[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CrucibleError {
     #[error("Error: {0}")]

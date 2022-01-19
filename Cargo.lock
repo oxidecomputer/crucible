@@ -370,6 +370,7 @@ dependencies = [
  "serde_json",
  "structopt",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml",
  "tracing",
@@ -444,10 +445,12 @@ name = "crucible-common"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio-rustls",
  "toml",
  "uuid",
 ]
@@ -481,6 +484,7 @@ dependencies = [
  "structopt",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml",
  "tracing",

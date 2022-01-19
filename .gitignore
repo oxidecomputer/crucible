@@ -11,3 +11,6 @@ core
 /aws_benchmark/inventory
 /aws_benchmark/results.txt
 /aws_benchmark/terraform.tfstate*
+/x509/*.pem
+/x509/*.json
+/x509/*.csr
