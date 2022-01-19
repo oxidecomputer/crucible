@@ -1083,36 +1083,11 @@ impl Region {
     }
 
     /*
-     * If an upstairs connects with an encryption context, we don't want to
-     * support another upstairs connecting without one. Likewise, if an
-     * upstairs is using this downstairs without an encryption context,
-     * don't support connecting upstairs with encryption contexts.
-     *
-     * This function returns Some(true) if an upstairs previously connected
-     * with an encryption context, Some(false) if an upstairs connected
-     * without an encryption context, and None if no upstairs has
-     * connected.
+     * Regions are created with the expectation that upstairs will attach
+     * unencrypted or encrypted.
      */
-    pub fn expect_upstairs_encryption_context(&self) -> Option<bool> {
-        match self.def.get_upstairs_previous_connection() {
-            2 => Some(true),
-            1 => Some(false),
-            0 => None,
-            _ => panic!("bad value for expect_upstairs_encryption_context!"),
-        }
-    }
-
-    pub fn set_expect_upstairs_encryption_context(
-        &mut self,
-        is_encrypted: bool,
-    ) -> Result<()> {
-        self.def.set_upstairs_previous_connection(is_encrypted);
-
-        // Write out json
-        let cp = config_path(&self.dir);
-        write_json(&cp, &self.def, true)?;
-
-        Ok(())
+    pub fn expect_upstairs_encryption_context(&self) -> bool {
+        self.def.get_expect_upstairs_encrypted()
     }
 }
 
@@ -1768,7 +1743,7 @@ mod test {
     }
 
     #[test]
-    fn test_expect_encryption_context_downstairs() -> Result<()> {
+    fn test_expect_encryption_context_downstairs_default() -> Result<()> {
         // create region
 
         let block_size: u64 = 512;
@@ -1786,27 +1761,16 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options.clone())?;
+        let region = Region::create(&dir, region_options.clone())?;
 
-        // it should start out with no expectation
-        assert_eq!(region.expect_upstairs_encryption_context(), None);
-
-        // upstairs connects encrypted
-        region.set_expect_upstairs_encryption_context(true)?;
-
-        // this should return true
-        assert_eq!(region.expect_upstairs_encryption_context(), Some(true));
-
-        // the option should persist
-        drop(region);
-        let region = Region::open(&dir, region_options, false)?;
-        assert_eq!(region.expect_upstairs_encryption_context(), Some(true));
+        // default is unencrypted
+        assert_eq!(region.expect_upstairs_encryption_context(), false);
 
         Ok(())
     }
 
     #[test]
-    fn test_expect_no_encryption_context_downstairs() -> Result<()> {
+    fn test_expect_encryption_context_downstairs_false() -> Result<()> {
         // create region
 
         let block_size: u64 = 512;
@@ -1820,25 +1784,41 @@ mod test {
             block_size.trailing_zeros(),
         ));
         region_options.set_uuid(Uuid::new_v4());
+        region_options.set_expect_upstairs_encrypted(false);
 
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options.clone())?;
+        let region = Region::create(&dir, region_options.clone())?;
 
-        // it should start out with no expectation
-        assert_eq!(region.expect_upstairs_encryption_context(), None);
+        assert_eq!(region.expect_upstairs_encryption_context(), false);
 
-        // upstairs connects unencrypted
-        region.set_expect_upstairs_encryption_context(false)?;
+        Ok(())
+    }
 
-        // this should return true
-        assert_eq!(region.expect_upstairs_encryption_context(), Some(false));
+    #[test]
+    fn test_expect_encryption_context_downstairs_true() -> Result<()> {
+        // create region
 
-        // the option should persist
-        drop(region);
-        let region = Region::open(&dir, region_options, false)?;
-        assert_eq!(region.expect_upstairs_encryption_context(), Some(false));
+        let block_size: u64 = 512;
+        let extent_size = 10;
+
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+        region_options.set_expect_upstairs_encrypted(true);
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let region = Region::create(&dir, region_options.clone())?;
+
+        assert_eq!(region.expect_upstairs_encryption_context(), true);
 
         Ok(())
     }

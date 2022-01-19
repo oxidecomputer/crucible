@@ -122,11 +122,9 @@ pub struct RegionDefinition {
     uuid: Uuid,
 
     /**
-     * 0 if no upstairs has ever connected
-     * 1 if an upstairs previously connected without encryption
-     * 2 if an upstairs previously connected with encryption
+     * region expects upstairs to be encrypted
      */
-    upstairs_previous_connection: u32,
+    expect_upstairs_encrypted: bool,
 }
 
 impl RegionDefinition {
@@ -137,7 +135,7 @@ impl RegionDefinition {
             extent_size: opts.extent_size,
             extent_count: 0,
             uuid: opts.uuid,
-            upstairs_previous_connection: 0,
+            expect_upstairs_encrypted: opts.expect_upstairs_encrypted,
         })
     }
 
@@ -177,16 +175,8 @@ impl RegionDefinition {
         self.uuid = uuid;
     }
 
-    pub fn get_upstairs_previous_connection(&self) -> u32 {
-        self.upstairs_previous_connection
-    }
-
-    pub fn set_upstairs_previous_connection(&mut self, is_encrypted: bool) {
-        if is_encrypted {
-            self.upstairs_previous_connection = 2;
-        } else {
-            self.upstairs_previous_connection = 1;
-        }
+    pub fn get_expect_upstairs_encrypted(&self) -> bool {
+        self.expect_upstairs_encrypted
     }
 }
 
@@ -201,7 +191,7 @@ impl Default for RegionDefinition {
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
-            upstairs_previous_connection: 0,
+            expect_upstairs_encrypted: false,
         }
     }
 }
@@ -222,6 +212,11 @@ pub struct RegionOptions {
      * UUID for this region
      */
     uuid: Uuid,
+
+    /**
+     * region expects upstairs to be encrypted
+     */
+    expect_upstairs_encrypted: bool,
 }
 
 impl RegionOptions {
@@ -270,6 +265,13 @@ impl RegionOptions {
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = uuid;
     }
+
+    pub fn set_expect_upstairs_encrypted(
+        &mut self,
+        expect_upstairs_encrypted: bool,
+    ) {
+        self.expect_upstairs_encrypted = expect_upstairs_encrypted;
+    }
 }
 
 impl Default for RegionOptions {
@@ -280,6 +282,7 @@ impl Default for RegionOptions {
             block_size: MIN_BLOCK_SIZE as u64,
             extent_size: Block::new(100, 9),
             uuid: Uuid::nil(),
+            expect_upstairs_encrypted: false,
         }
     }
 }
