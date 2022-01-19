@@ -54,7 +54,7 @@ for (( i = 0; i < 3; i++ )); do
 done
 
 res=0
-test_list="one big dep rand balloon"
+test_list="one span big dep deactivate balloon"
 for tt in ${test_list}; do
     echo ""
     echo "Running test: $tt"

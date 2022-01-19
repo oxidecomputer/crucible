@@ -2503,9 +2503,13 @@ mod test {
         assert!(ds.in_progress(id1, 2).is_some());
 
         drop(ds);
-        up.set_deactivate().unwrap();
-        ds = up.downstairs.lock().unwrap();
 
+        // Create and enqueue the flush by setting deactivate
+        // The created flush should be the next ID
+        up.set_deactivate(None).unwrap();
+        let flush_id = id1 + 1;
+
+        ds = up.downstairs.lock().unwrap();
         // Complete the writes
         ds.process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
             .unwrap();
@@ -2517,12 +2521,8 @@ mod test {
         // Ack the writes to the guest.
         ds.ack(id1);
 
-        // Create and enqueue the flush.
-        let flush_id = ds.next_id();
-        let op = create_flush(flush_id, vec![], 10, 0, 0);
-        ds.enqueue(op);
-
-        // Send the flush to two downstairs.
+        // Send the flush created for us when we set deactivated to
+        // the two downstairs.
         ds.in_progress(flush_id, 0);
         ds.in_progress(flush_id, 2);
 
@@ -2590,7 +2590,7 @@ mod test {
         drop(ds);
         assert_eq!(up.ds_deactivate(1), true);
 
-        // Reprot all three DS as missing, which moves them to New
+        // Report all three DS as missing, which moves them to New
         up.ds_missing(0);
         up.ds_missing(1);
         up.ds_missing(2);
@@ -2598,11 +2598,18 @@ mod test {
         // Verify we have disconnected and can go back to init.
         up.deactivate_transition_check();
         assert_eq!(up.is_deactivating(), false);
+
+        // Verify after the ds_missing, all downstairs are New
+        let ds = up.downstairs.lock().unwrap();
+        assert_eq!(ds.ds_state[0], DsState::New);
+        assert_eq!(ds.ds_state[1], DsState::New);
+        assert_eq!(ds.ds_state[2], DsState::New);
     }
 
     #[test]
     fn deactivate_when_empty() {
-        // Verify we can deactivate if no work is present.
+        // Verify we can deactivate if no work is present, without
+        // creating a flush (as their should already have been one).
         // Verify after all three downstairs are deactivated, we can
         // transition the upstairs back to init.
 
@@ -2614,7 +2621,7 @@ mod test {
         ds.ds_state[2] = DsState::Active;
 
         drop(ds);
-        up.set_deactivate().unwrap();
+        up.set_deactivate(None).unwrap();
 
         // Verify we can deactivate as there is no work
         assert_eq!(up.ds_deactivate(0), true);
@@ -2672,7 +2679,7 @@ mod test {
         assert!(ds.in_progress(id1, 2).is_some());
 
         drop(ds);
-        up.set_deactivate().unwrap();
+        up.set_deactivate(None).unwrap();
         ds = up.downstairs.lock().unwrap();
 
         // Complete the writes
@@ -2730,10 +2737,10 @@ mod test {
         // TODO: This test should change when we support this behavior.
 
         let up = Upstairs::default();
-        assert!(up.set_deactivate().is_err());
+        assert!(up.set_deactivate(None).is_err());
         up.set_active().unwrap();
-        up.set_deactivate().unwrap();
-        assert!(up.set_deactivate().is_err());
+        up.set_deactivate(None).unwrap();
+        assert!(up.set_deactivate(None).is_err());
     }
 
     #[test]

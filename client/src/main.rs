@@ -316,9 +316,13 @@ fn main() -> Result<()> {
             ))?;
         }
         Workload::Deactivate => {
+            /*
+             * A small default of 5 is okay for a functional test, but
+             * not enough for a more exhaustive test.
+             */
             let count = {
                 if opt.count == 0 {
-                    100
+                    5
                 } else {
                     opt.count
                 }
@@ -849,8 +853,10 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 }
 
 /*
- * Generate a random offset and length, and write, flush, then read from
- * that offset/length.  Verify the data is what we expect.
+ * A test of deactivation and re-activation.
+ * In a loop, do some IO, then deactivate, then activate.  Verify that
+ * written data is read back.  We make use of the generic_workload test
+ * for the IO parts of this.
  */
 async fn deactivate_workload(
     guest: &Arc<Guest>,
