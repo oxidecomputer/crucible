@@ -1553,8 +1553,6 @@ impl Downstairs {
                             // Hashes and encryption contexts are written out at
                             // the same time, therefore there should be the same
                             // number of them.
-                            //
-                            // XXX shouldn't be an assert?
                             assert_eq!(
                                 response.encryption_contexts.len(),
                                 response.hashes.len(),
