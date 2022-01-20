@@ -139,7 +139,7 @@ async fn process_message(
 /*
  * Convert a virtual block offset and length into a Vec of tuples:
  *
- *     (Extent number (EID), Block offset, 1 block)
+ *     (Extent number (EID), Block offset)
  *
  * Each tuple represents the "address" of one block downstairs.
  */
@@ -147,7 +147,7 @@ pub fn extent_from_offset(
     ddef: RegionDefinition,
     offset: Block,
     num_blocks: Block,
-) -> Result<Vec<(u64, Block, Block)>> {
+) -> Result<Vec<(u64, Block)>> {
     assert!(num_blocks.value > 0);
     assert!(
         (offset.value + num_blocks.value)
@@ -181,11 +181,7 @@ pub fn extent_from_offset(
         let extent_offset: u64 = o % ddef.extent_size().value;
         let sz: u64 = 1; // one block at a time
 
-        result.push((
-            eid,
-            Block::new_with_ddef(extent_offset, &ddef),
-            Block::new_with_ddef(sz, &ddef),
-        ));
+        result.push((eid, Block::new_with_ddef(extent_offset, &ddef)));
 
         match blocks_left.checked_sub(sz) {
             Some(v) => {
@@ -2384,9 +2380,8 @@ impl Upstairs {
             Vec::with_capacity(nwo.len());
 
         /* Lock here, through both jobs submitted */
-        for (eid, bo, num_blocks) in nwo {
-            let byte_len: usize =
-                num_blocks.value as usize * ddef.block_size() as usize;
+        for (eid, bo) in nwo {
+            let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
                 &self.encryption_context
@@ -2500,11 +2495,11 @@ impl Upstairs {
 
         let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
 
-        for (eid, bo, num_blocks) in nwo {
+        for (eid, bo) in nwo {
             requests.push(ReadRequest {
                 eid,
                 offset: bo,
-                num_blocks: num_blocks.value,
+                num_blocks: 1,
             });
         }
 

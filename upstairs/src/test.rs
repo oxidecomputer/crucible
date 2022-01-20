@@ -10,8 +10,8 @@ mod test {
     use ringbuffer::RingBuffer;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    fn extent_tuple(eid: u64, offset: u64) -> (u64, Block, Block) {
-        (eid, Block::new_512(offset), Block::new_512(1))
+    fn extent_tuple(eid: u64, offset: u64) -> (u64, Block) {
+        (eid, Block::new_512(offset))
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod test {
         up: &Arc<Upstairs>,
         offset: Block,
         num_blocks: u64,
-    ) -> Result<Vec<(u64, Block, Block)>> {
+    ) -> Result<Vec<(u64, Block)>> {
         let ddef = up.ddef.lock().unwrap();
         let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
         extent_from_offset(*ddef, offset, num_blocks)
@@ -303,7 +303,7 @@ mod test {
          * Largest buffer at different offsets
          */
         for offset in 0..100 {
-            let expected: Vec<(u64, Block, Block)> = (0..100)
+            let expected: Vec<(u64, Block)> = (0..100)
                 .map(|i| extent_tuple((offset + i) / 100, (offset + i) % 100))
                 .collect();
             assert_eq!(
