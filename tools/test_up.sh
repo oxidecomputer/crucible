@@ -52,7 +52,14 @@ for (( i = 0; i < 3; i++ )); do
     args+=( -t "127.0.0.1:$port" )
     echo ${cds} create -u "$uuid" -p "$port" -d "$dir" --extent-count 5 --extent-size 10
     set -o errexit
-    ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+    case ${1} in
+        "unencrypted")
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+            ;;
+        "encrypted")
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --expect-upstairs-encrypted
+            ;;
+    esac
     echo ${cds} run -p "$port" -d "$dir"
     ${cds} run -p "$port" -d "$dir" &
     downstairs[$i]=$!
