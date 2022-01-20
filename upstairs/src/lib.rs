@@ -142,20 +142,15 @@ async fn process_message(
 /*
  * Convert a virtual block offset and length into a Vec of tuples:
  *
- *     Extent number (EID), Block offset, Length in Blocks
+ *     (Extent number (EID), Block offset)
  *
- * Note: length in blocks can be up to the region size
- *
- * If performing authenticated encryption, nonce and tags must be sent per
- * block. This means extent_from_offset must return a list of single blocks
- * only, hence the boolean argument `single_blocks_only`.
+ * Each tuple represents the "address" of one block downstairs.
  */
 pub fn extent_from_offset(
     ddef: RegionDefinition,
     offset: Block,
     num_blocks: Block,
-    single_blocks_only: bool,
-) -> Result<Vec<(u64, Block, Block)>> {
+) -> Result<Vec<(u64, Block)>> {
     assert!(num_blocks.value > 0);
     assert!(
         (offset.value + num_blocks.value)
@@ -187,21 +182,9 @@ pub fn extent_from_offset(
         assert!((eid as u32) < ddef.extent_count());
 
         let extent_offset: u64 = o % ddef.extent_size().value;
-        let sz: u64 = if single_blocks_only {
-            1
-        } else {
-            let mut sz = ddef.extent_size().value - extent_offset;
-            if blocks_left < sz {
-                sz = blocks_left;
-            }
-            sz
-        };
+        let sz: u64 = 1; // one block at a time
 
-        result.push((
-            eid,
-            Block::new_with_ddef(extent_offset, &ddef),
-            Block::new_with_ddef(sz, &ddef),
-        ));
+        result.push((eid, Block::new_with_ddef(extent_offset, &ddef)));
 
         match blocks_left.checked_sub(sz) {
             Some(v) => {
@@ -213,14 +196,6 @@ pub fn extent_from_offset(
         }
 
         o += sz;
-    }
-
-    {
-        let mut blocks = 0;
-        for r in &result {
-            blocks += r.2.value;
-        }
-        assert_eq!(blocks, num_blocks.value);
     }
 
     Ok(result)
@@ -452,10 +427,12 @@ where
     }
 
     let mut self_promotion = false;
+
     /*
      * As the "client", we must begin the negotiation.
      */
-    fw.send(Message::HereIAm(1, up.uuid)).await?;
+    let m = Message::HereIAm(1, up.uuid);
+    fw.send(m).await?;
 
     /*
      * Used to track where we are in the current negotiation.
@@ -1572,6 +1549,136 @@ impl Downstairs {
         }
     }
 
+    fn validate_unencrypted_read_response(
+        response: &mut ReadResponse,
+    ) -> Result<(), CrucibleError> {
+        // check integrity hashes - make sure at least one is correct.
+        if !response.hashes.is_empty() {
+            let mut successful_hash = false;
+
+            let computed_hash = integrity_hash(&[&response.data[..]]);
+
+            // The most recent hash is probably going to be the right one.
+            for hash in response.hashes.iter().rev() {
+                if computed_hash == *hash {
+                    successful_hash = true;
+                    break;
+                }
+            }
+
+            if !successful_hash {
+                // no integrity hash was correct for this
+                // response
+                return Err(CrucibleError::HashMismatch);
+            }
+        } else {
+            // No hashes in response!
+            //
+            // Either this is a read of an unwritten block, or an attacker
+            // removed the hashes from the db.
+            //
+            // XXX if it's not a blank block, we may be under attack?
+            assert!(response.data[..].iter().all(|&x| x == 0));
+        }
+
+        Ok(())
+    }
+
+    fn validate_encrypted_read_response(
+        response: &mut ReadResponse,
+        encryption_context: &Arc<EncryptionContext>,
+    ) -> Result<(), CrucibleError> {
+        // XXX because we don't have block generation numbers, an attacker
+        // downstairs could:
+        //
+        // 1) remove encryption context and cause a denial of service, or
+        // 2) roll back a block by writing an old data and encryption context
+        //
+        // check for response encryption contexts here
+        if !response.encryption_contexts.is_empty() {
+            let mut successful_decryption = false;
+            let mut successful_hash = false;
+
+            // Attempt decryption with each encryption context, and fail if all
+            // do not work. The most recent encryption context will most likely
+            // be the correct one so start there.
+            let encryption_context_iter =
+                response.encryption_contexts.iter().enumerate().rev();
+
+            // Hashes and encryption contexts are written out at the same time
+            // (in the same transaction) therefore there should be the same
+            // number of them.
+            assert_eq!(
+                response.encryption_contexts.len(),
+                response.hashes.len(),
+            );
+
+            for (i, ctx) in encryption_context_iter {
+                // Validate integrity hash before decryption
+                let computed_hash = integrity_hash(&[
+                    &ctx.nonce[..],
+                    &ctx.tag[..],
+                    &response.data[..],
+                ]);
+
+                if computed_hash == response.hashes[i] {
+                    successful_hash = true;
+
+                    // Now that the integrity hash was verified, attempt
+                    // decryption.
+                    //
+                    // Note: decrypt_in_place does not overwrite the buffer if
+                    // it fails, otherwise we would need to copy here. There's a
+                    // unit test to validate this behaviour.
+                    let decryption_result = encryption_context
+                        .decrypt_in_place(
+                            &mut response.data[..],
+                            Nonce::from_slice(&ctx.nonce[..]),
+                            Tag::from_slice(&ctx.tag[..]),
+                        );
+
+                    if decryption_result.is_ok() {
+                        successful_decryption = true;
+                        break;
+                    } else {
+                        // Because hashes, nonces, and tags are committed to
+                        // disk every time there is a Crucible write, but data
+                        // is only committed to disk when there's a Crucible
+                        // flush, only one hash + nonce + tag + data combination
+                        // will be correct. Due to the fact that nonces are
+                        // random for each write, even if the Guest wrote the
+                        // same data block 100 times, only one index will be
+                        // valid.
+                        //
+                        // if the computed integrity hash matched but decryption
+                        // failed, bail out here.
+                        break;
+                    }
+                }
+            }
+
+            if !successful_hash {
+                // no hash was correct
+                return Err(CrucibleError::HashMismatch);
+            } else if !successful_decryption {
+                // no hash + encryption context combination decrypted this block
+                return Err(CrucibleError::DecryptionError);
+            } else {
+                // Ok!
+            }
+        } else {
+            // No encryption context in the response!
+            //
+            // Either this is a read of an unwritten block, or an attacker
+            // removed the encryption contexts from the db.
+            //
+            // XXX if it's not a blank block, we may be under attack?
+            assert!(response.data[..].iter().all(|&x| x == 0));
+        }
+
+        Ok(())
+    }
+
     /**
      * Mark this downstairs request as complete for this client. Returns
      * true if this completion is enough that we should message the
@@ -1608,64 +1715,23 @@ impl Downstairs {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
+        // Validate integrity hashes and optionally authenticated decryption.
+        //
         // With AE, responses can come back that are invalid given an encryption
         // context. Test this here. It will allow us to determine if the
         // decryption is bad and set the job result to error accordingly.
         let read_data: Result<Vec<ReadResponse>, CrucibleError> =
             if let Some(context) = &encryption_context {
                 if let Ok(mut responses) = responses {
-                    let mut decryption_error = None;
+                    let result: Result<(), CrucibleError> =
+                        responses.iter_mut().try_for_each(|x| {
+                            Downstairs::validate_encrypted_read_response(
+                                x, context,
+                            )
+                        });
 
-                    for response in &mut responses {
-                        // XXX because we don't have block generation numbers,
-                        // an attacker downstairs could:
-                        //
-                        // 1) remove encryption context and cause a denial of
-                        //    service, or
-                        // 2) roll back a block by writing an old data and
-                        //    encryption context
-                        //
-                        // check for response encryption contexts here
-                        if !response.encryption_contexts.is_empty() {
-                            let mut successful_decryption = false;
-
-                            // Attempt decryption with each encryption context,
-                            // and fail if all do not work. The most recent
-                            // encryption context will most likely be the
-                            // correct one so start there.
-                            let encryption_context_iter =
-                                response.encryption_contexts.iter().rev();
-                            for ctx in encryption_context_iter {
-                                // Note: decrypt_in_place does not overwrite
-                                // the buffer if it fails, otherwise we would
-                                // need to copy here.
-                                let decryption_result = context
-                                    .decrypt_in_place(
-                                        &mut response.data[..],
-                                        Nonce::from_slice(&ctx.nonce[..]),
-                                        Tag::from_slice(&ctx.tag[..]),
-                                    );
-
-                                if decryption_result.is_ok() {
-                                    successful_decryption = true;
-                                    break;
-                                }
-                            }
-
-                            if !successful_decryption {
-                                decryption_error =
-                                    Some(Err(CrucibleError::DecryptionError));
-                                break;
-                            }
-                        } else {
-                            // No encryption context! Either this is a read of
-                            // an unwritten block, or an attacker removed the
-                            // encryption contexts from the db
-                        }
-                    }
-
-                    if let Some(decryption_error) = decryption_error {
-                        decryption_error
+                    if let Some(error) = result.err() {
+                        Err(error)
                     } else {
                         Ok(responses)
                     }
@@ -1675,7 +1741,21 @@ impl Downstairs {
                 }
             } else {
                 // no upstairs encryption context
-                responses
+                if let Ok(mut responses) = responses {
+                    let result: Result<(), CrucibleError> =
+                        responses.iter_mut().try_for_each(|x| {
+                            Downstairs::validate_unencrypted_read_response(x)
+                        });
+
+                    if let Some(error) = result.err() {
+                        Err(error)
+                    } else {
+                        Ok(responses)
+                    }
+                } else {
+                    // bad responses
+                    responses
+                }
             };
 
         let newstate = if let Err(ref e) = read_data {
@@ -1953,7 +2033,10 @@ impl EncryptionContext {
         Nonce::clone_from_slice(&random_iv)
     }
 
-    pub fn encrypt_in_place(&self, data: &mut [u8]) -> Result<(Nonce, Tag)> {
+    pub fn encrypt_in_place(
+        &self,
+        data: &mut [u8],
+    ) -> Result<(Nonce, Tag, u64)> {
         let nonce = self.get_random_nonce();
 
         let tag = self.cipher.encrypt_in_place_detached(&nonce, b"", data);
@@ -1962,7 +2045,13 @@ impl EncryptionContext {
             bail!("Could not encrypt! {:?}", tag.err());
         }
 
-        Ok((nonce, tag.unwrap()))
+        let tag = tag.unwrap();
+
+        // Hash [nonce + tag + data] in that order. Perform this after
+        // encryption so that the downstairs can verify it without the key.
+        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], &data[..]]);
+
+        Ok((nonce, tag, computed_hash))
     }
 
     pub fn decrypt_in_place(
@@ -2341,7 +2430,6 @@ impl Upstairs {
             *ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
-            self.encryption_context.is_some(),
         )?;
 
         /*
@@ -2368,17 +2456,16 @@ impl Upstairs {
             Vec::with_capacity(nwo.len());
 
         /* Lock here, through both jobs submitted */
-        for (eid, bo, num_blocks) in nwo {
-            let byte_len: usize =
-                num_blocks.value as usize * ddef.block_size() as usize;
+        for (eid, bo) in nwo {
+            let byte_len: usize = ddef.block_size() as usize;
 
-            let (sub_data, encryption_context) = if let Some(context) =
+            let (sub_data, encryption_context, hash) = if let Some(context) =
                 &self.encryption_context
             {
                 // Encrypt here
                 let mut mut_data =
                     data.slice(cur_offset..(cur_offset + byte_len)).to_vec();
-                let (nonce, tag) =
+                let (nonce, tag, hash) =
                     context.encrypt_in_place(&mut mut_data[..])?;
                 (
                     Bytes::copy_from_slice(&mut_data),
@@ -2386,10 +2473,14 @@ impl Upstairs {
                         nonce: Vec::from(nonce.as_slice()),
                         tag: Vec::from(tag.as_slice()),
                     }),
+                    hash,
                 )
             } else {
                 // Unencrypted
-                (data.slice(cur_offset..(cur_offset + byte_len)), None)
+                let sub_data = data.slice(cur_offset..(cur_offset + byte_len));
+                let hash = integrity_hash(&[&sub_data[..]]);
+
+                (sub_data, None, hash)
             };
 
             writes.push(crucible_protocol::Write {
@@ -2397,6 +2488,7 @@ impl Upstairs {
                 offset: bo,
                 data: sub_data,
                 encryption_context,
+                hash,
             });
 
             cur_offset += byte_len;
@@ -2455,7 +2547,6 @@ impl Upstairs {
             *ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
-            self.encryption_context.is_some(),
         )?;
 
         /*
@@ -2480,11 +2571,11 @@ impl Upstairs {
 
         let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
 
-        for (eid, bo, num_blocks) in nwo {
+        for (eid, bo) in nwo {
             requests.push(ReadRequest {
                 eid,
                 offset: bo,
-                num_blocks: num_blocks.value,
+                num_blocks: 1,
             });
         }
 
@@ -2908,6 +2999,10 @@ impl Upstairs {
         client_ddef: RegionDefinition,
     ) -> Result<()> {
         println!("[{}] Got region def {:?}", client_id, client_ddef);
+
+        if client_ddef.get_encrypted() != self.encryption_context.is_some() {
+            bail!("Encryption expectation mismatch!");
+        }
 
         /*
          * XXX Eventually we will be provided UUIDs when the upstairs

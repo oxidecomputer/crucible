@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use std::fs::File;
+use std::hash::Hasher;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 
@@ -59,6 +60,9 @@ pub enum CrucibleError {
 
     #[error("Decryption failed!")]
     DecryptionError,
+
+    #[error("Integrity hash mismatch!")]
+    HashMismatch,
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -77,6 +81,12 @@ impl Into<std::io::Error> for CrucibleError {
 
 impl From<anyhow::Error> for CrucibleError {
     fn from(e: anyhow::Error) -> Self {
+        CrucibleError::GenericError(format!("{:?}", e))
+    }
+}
+
+impl From<rusqlite::Error> for CrucibleError {
+    fn from(e: rusqlite::Error) -> Self {
         CrucibleError::GenericError(format!("{:?}", e))
     }
 }
@@ -142,4 +152,12 @@ where
 
 pub fn mkdir_for_file(file: &Path) -> Result<()> {
     Ok(std::fs::create_dir_all(file.parent().expect("file path"))?)
+}
+
+pub fn integrity_hash(args: &[&[u8]]) -> u64 {
+    let mut hasher: twox_hash::XxHash64 = Default::default();
+    for arg in args {
+        hasher.write(arg);
+    }
+    hasher.finish()
 }

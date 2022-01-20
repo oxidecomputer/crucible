@@ -5,6 +5,12 @@
 # This should eventually either move to some common test framework, or be
 # thrown away.
 
+if [[ ${#} -ne 1 ]];
+then
+    echo "specify either 'unencrypted' or 'encrypted' string"
+    exit 1
+fi
+
 set -o pipefail
 SECONDS=0
 
@@ -44,14 +50,32 @@ for (( i = 0; i < 3; i++ )); do
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-    echo ${cds} create -u "$uuid" -p "$port" -d "$dir" --extent-count 5 --extent-size 10
     set -o errexit
-    ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+    case ${1} in
+        "unencrypted")
+            echo ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+            ;;
+        "encrypted")
+            echo ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted
+            ;;
+    esac
     echo ${cds} run -p "$port" -d "$dir"
     ${cds} run -p "$port" -d "$dir" &
     downstairs[$i]=$!
     set +o errexit
 done
+
+case ${1} in
+    "unencrypted")
+        ;;
+    "encrypted")
+        args+=( --key "$(openssl rand -base64 32)" )
+        ;;
+    *)
+        ;;
+esac
 
 res=0
 test_list="one big dep rand balloon"
@@ -71,8 +95,7 @@ done
 
 echo "Running hammer"
 if ! time cargo run -p crucible-hammer -- \
-    "${args[@]}" \
-    --key "$(openssl rand -base64 32)"; then
+    "${args[@]}"; then
 
 	echo "Failed hammer test"
     (( res += 1 ))
