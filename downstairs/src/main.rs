@@ -62,7 +62,7 @@ enum Args {
         uuid: Uuid,
 
         #[structopt(long)]
-        expect_upstairs_encrypted: bool,
+        encrypted: bool,
     },
     /*
      * Dump region information.
@@ -1529,7 +1529,7 @@ async fn main() -> Result<()> {
             extent_count,
             import_path,
             uuid,
-            expect_upstairs_encrypted,
+            encrypted,
         } => {
             /*
              * Create the region options, then the region.
@@ -1542,8 +1542,7 @@ async fn main() -> Result<()> {
                 block_size.trailing_zeros(),
             ));
             region_options.set_uuid(uuid);
-            region_options
-                .set_expect_upstairs_encrypted(expect_upstairs_encrypted);
+            region_options.set_encrypted(encrypted);
 
             region = Region::create(&data, region_options)?;
             region.extend(extent_count as u32)?;

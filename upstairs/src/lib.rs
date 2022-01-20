@@ -2933,9 +2933,7 @@ impl Upstairs {
     ) -> Result<()> {
         println!("[{}] Got region def {:?}", client_id, client_ddef);
 
-        if client_ddef.get_expect_upstairs_encrypted()
-            != self.encryption_context.is_some()
-        {
+        if client_ddef.get_encrypted() != self.encryption_context.is_some() {
             bail!("Encryption expectation mismatch!");
         }
 

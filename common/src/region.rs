@@ -122,9 +122,9 @@ pub struct RegionDefinition {
     uuid: Uuid,
 
     /**
-     * region expects upstairs to be encrypted
+     * region data will be encrypted
      */
-    expect_upstairs_encrypted: bool,
+    encrypted: bool,
 }
 
 impl RegionDefinition {
@@ -135,7 +135,7 @@ impl RegionDefinition {
             extent_size: opts.extent_size,
             extent_count: 0,
             uuid: opts.uuid,
-            expect_upstairs_encrypted: opts.expect_upstairs_encrypted,
+            encrypted: opts.encrypted,
         })
     }
 
@@ -175,8 +175,8 @@ impl RegionDefinition {
         self.uuid = uuid;
     }
 
-    pub fn get_expect_upstairs_encrypted(&self) -> bool {
-        self.expect_upstairs_encrypted
+    pub fn get_encrypted(&self) -> bool {
+        self.encrypted
     }
 }
 
@@ -191,7 +191,7 @@ impl Default for RegionDefinition {
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
-            expect_upstairs_encrypted: false,
+            encrypted: false,
         }
     }
 }
@@ -214,9 +214,9 @@ pub struct RegionOptions {
     uuid: Uuid,
 
     /**
-     * region expects upstairs to be encrypted
+     * region data will be encrypted
      */
-    expect_upstairs_encrypted: bool,
+    encrypted: bool,
 }
 
 impl RegionOptions {
@@ -266,11 +266,8 @@ impl RegionOptions {
         self.uuid = uuid;
     }
 
-    pub fn set_expect_upstairs_encrypted(
-        &mut self,
-        expect_upstairs_encrypted: bool,
-    ) {
-        self.expect_upstairs_encrypted = expect_upstairs_encrypted;
+    pub fn set_encrypted(&mut self, encrypted: bool) {
+        self.encrypted = encrypted;
     }
 }
 
@@ -282,7 +279,7 @@ impl Default for RegionOptions {
             block_size: MIN_BLOCK_SIZE as u64,
             extent_size: Block::new(100, 9),
             uuid: Uuid::nil(),
-            expect_upstairs_encrypted: false,
+            encrypted: false,
         }
     }
 }
