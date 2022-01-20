@@ -50,13 +50,14 @@ for (( i = 0; i < 3; i++ )); do
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-    echo ${cds} create -u "$uuid" -p "$port" -d "$dir" --extent-count 5 --extent-size 10
     set -o errexit
     case ${1} in
         "unencrypted")
+            echo ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
             ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
             ;;
         "encrypted")
+            echo ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted
             ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted
             ;;
     esac
