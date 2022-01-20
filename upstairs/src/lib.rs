@@ -1586,6 +1586,23 @@ impl Downstairs {
                                     if decryption_result.is_ok() {
                                         successful_decryption = true;
                                         break;
+                                    } else {
+                                        // Because hashes, nonces, and tags are
+                                        // committed to disk every time there is
+                                        // a Crucible write, but data is only
+                                        // committed to disk when there's a
+                                        // Crucible flush, only one hash + nonce
+                                        // + tag + data combination will be
+                                        // correct. Due to the fact that nonces
+                                        // are random for each write, even
+                                        // if the Guest wrote the same data
+                                        // block 100 times, only one index will
+                                        // be valid.
+                                        //
+                                        // if the computed integrity
+                                        // hash matched but decryption failed,
+                                        // bail out here.
+                                        break;
                                     }
                                 }
                             }
@@ -1595,7 +1612,8 @@ impl Downstairs {
                                 error = Some(CrucibleError::HashMismatch);
                                 break;
                             } else if !successful_decryption {
-                                // no encryption context decrypted this block
+                                // no hash + encryption context combination
+                                // decrypted this block
                                 error = Some(CrucibleError::DecryptionError);
                                 break;
                             } else {
