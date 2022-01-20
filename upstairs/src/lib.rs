@@ -4780,6 +4780,13 @@ async fn process_new_io(
             *lastcast += 1;
         }
         BlockOp::Flush => {
+            /*
+             * Submit for read and write both check if the upstairs is
+             * ready for guest IO or not.  Because the Upstairs itself can
+             * call submit_flush, we have to check here that it is okay
+             * to accept IO from the guest before calling a guest requested
+             * flush command.
+             */
             if !up.guest_io_ready() {
                 let _ = req.send.send(Err(CrucibleError::UpstairsInactive));
                 return;
