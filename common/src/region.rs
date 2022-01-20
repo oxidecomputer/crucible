@@ -120,6 +120,11 @@ pub struct RegionDefinition {
      * UUID for this region
      */
     uuid: Uuid,
+
+    /**
+     * region data will be encrypted
+     */
+    encrypted: bool,
 }
 
 impl RegionDefinition {
@@ -130,6 +135,7 @@ impl RegionDefinition {
             extent_size: opts.extent_size,
             extent_count: 0,
             uuid: opts.uuid,
+            encrypted: opts.encrypted,
         })
     }
 
@@ -168,6 +174,10 @@ impl RegionDefinition {
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = uuid;
     }
+
+    pub fn get_encrypted(&self) -> bool {
+        self.encrypted
+    }
 }
 
 /**
@@ -181,6 +191,7 @@ impl Default for RegionDefinition {
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
+            encrypted: false,
         }
     }
 }
@@ -201,6 +212,11 @@ pub struct RegionOptions {
      * UUID for this region
      */
     uuid: Uuid,
+
+    /**
+     * region data will be encrypted
+     */
+    encrypted: bool,
 }
 
 impl RegionOptions {
@@ -249,6 +265,10 @@ impl RegionOptions {
     pub fn set_uuid(&mut self, uuid: Uuid) {
         self.uuid = uuid;
     }
+
+    pub fn set_encrypted(&mut self, encrypted: bool) {
+        self.encrypted = encrypted;
+    }
 }
 
 impl Default for RegionOptions {
@@ -259,6 +279,7 @@ impl Default for RegionOptions {
             block_size: MIN_BLOCK_SIZE as u64,
             extent_size: Block::new(100, 9),
             uuid: Uuid::nil(),
+            encrypted: false,
         }
     }
 }

@@ -270,4 +270,7 @@ client/src/main.  It's an easy way to quickly run some simple tests without
 having to spin up a bunch of things.  These tests are limited in their scope and
 should not be considered substantial.
 
+Specify "unencrypted" or "encrypted" when running the script to test both code
+paths.
+
 That's all for now!
