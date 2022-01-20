@@ -60,6 +60,9 @@ enum Args {
 
         #[structopt(short, long, name = "UUID", parse(try_from_str))]
         uuid: Uuid,
+
+        #[structopt(long)]
+        encrypted: bool,
     },
     /*
      * Dump region information.
@@ -194,15 +197,12 @@ fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
-                let response =
-                    region.single_block_region_read(ReadRequest {
-                        eid: eid as u64,
-                        offset: Block::new_with_ddef(
-                            block_offset,
-                            &region.def(),
-                        ),
-                        num_blocks: 1,
-                    })?;
+                let mut responses = region.region_read(&[ReadRequest {
+                    eid: eid as u64,
+                    offset: Block::new_with_ddef(block_offset, &region.def()),
+                    num_blocks: 1,
+                }])?;
+                let response = responses.pop().unwrap();
 
                 out_file.write_all(&response.data).unwrap();
 
@@ -316,23 +316,26 @@ fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          */
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
-        for (eid, offset, len) in
-            extent_from_offset(rm, offset, nblocks, false)?
-        {
+        let mut writes = vec![];
+        for (eid, offset) in extent_from_offset(rm, offset, nblocks)? {
+            let len = Block::new_with_ddef(1, &region.def());
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
             buffer.resize(data.len(), 0);
             buffer.copy_from_slice(data);
-            region.single_block_region_write(
+
+            writes.push(crucible_protocol::Write {
                 eid,
                 offset,
-                buffer.freeze(),
-                None,
-                None,
-            )?;
+                data: buffer.freeze(),
+                encryption_context: None,
+                hash: integrity_hash(&[data]),
+            });
 
             pos.advance(len);
         }
+
+        region.region_write(&writes)?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -667,6 +670,7 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
                         upstairs_uuid = Some(uuid);
                         println!("upstairs {:?} connected",
                             upstairs_uuid.unwrap());
+
                         let mut fw = fw.lock().await;
                         fw.send(Message::YesItsMe(1)).await?;
                     }
@@ -1526,6 +1530,7 @@ async fn main() -> Result<()> {
             extent_count,
             import_path,
             uuid,
+            encrypted,
         } => {
             /*
              * Create the region options, then the region.
@@ -1538,6 +1543,7 @@ async fn main() -> Result<()> {
                 block_size.trailing_zeros(),
             ));
             region_options.set_uuid(uuid);
+            region_options.set_encrypted(encrypted);
 
             region = Region::create(&data, region_options)?;
             region.extend(extent_count as u32)?;
@@ -2461,6 +2467,84 @@ mod test {
         let mut padding = Vec::with_capacity(padding_in_extra_block);
         padding.resize(padding_in_extra_block, 0);
         assert_eq!(actual[total_bytes..], padding);
+
+        Ok(())
+    }
+
+    #[test]
+    fn import_test_basic_read_blocks() -> Result<()> {
+        /*
+         * import + export test where data matches region size, and read the
+         * blocks
+         */
+        let block_size: u64 = 512;
+        let extent_size = 10;
+
+        // create region
+
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(10)?;
+
+        // create random file
+
+        let total_bytes = region.def().total_size();
+        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        random_data.resize(total_bytes as usize, 0);
+
+        let mut rng = ChaCha20Rng::from_entropy();
+        rng.fill_bytes(&mut random_data);
+
+        // write random_data to file
+
+        let tempdir = tempdir()?;
+        mkdir_for_file(tempdir.path())?;
+
+        let random_file_path = tempdir.path().join("random_data");
+        let mut random_file = File::create(&random_file_path)?;
+        random_file.write_all(&random_data[..])?;
+
+        // import random_data to the region
+
+        downstairs_import(&mut region, &random_file_path)?;
+        region.region_flush(1, 1)?;
+
+        // read block by block
+        let mut read_data = Vec::with_capacity(total_bytes as usize);
+        for eid in 0..region.def().extent_count() {
+            for offset in 0..region.def().extent_size().value {
+                let responses =
+                    region.region_read(&[crucible_protocol::ReadRequest {
+                        eid: eid.into(),
+                        offset: Block::new_512(offset),
+                        num_blocks: 1,
+                    }])?;
+
+                assert_eq!(responses.len(), 1);
+
+                let response = &responses[0];
+                assert_eq!(response.hashes.len(), 1);
+                assert_eq!(
+                    integrity_hash(&[&response.data[..]]),
+                    response.hashes[0],
+                );
+
+                read_data.extend_from_slice(&response.data[..]);
+            }
+        }
+
+        assert_eq!(random_data, read_data);
 
         Ok(())
     }

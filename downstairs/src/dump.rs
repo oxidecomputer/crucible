@@ -2,6 +2,7 @@
 use super::*;
 use crate::region::ExtentMeta;
 use sha2::{Digest, Sha256};
+use std::convert::TryInto;
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -199,6 +200,46 @@ pub fn dump_region(
     Ok(())
 }
 
+fn return_status_letters<T, U: std::cmp::PartialEq>(
+    items: &[T],
+    accessor: fn(&T) -> &U,
+) -> ([String; 3], bool) {
+    let mut status_letters = vec![String::new(); 3];
+    let mut different = false;
+
+    let count = items.len();
+
+    if accessor(&items[0]) == accessor(&items[1]) {
+        status_letters[0] += "A";
+        status_letters[1] += "A";
+
+        if count > 2 {
+            if accessor(&items[0]) == accessor(&items[2]) {
+                status_letters[2] += "A";
+            } else {
+                status_letters[2] += "C";
+                different = true;
+            }
+        }
+    } else {
+        different = true;
+        status_letters[0] += "A";
+        status_letters[1] += "B";
+
+        if count > 2 {
+            if accessor(&items[0]) == accessor(&items[2]) {
+                status_letters[2] += "A";
+            } else if accessor(&items[1]) == accessor(&items[2]) {
+                status_letters[2] += "B";
+            } else {
+                status_letters[2] += "C";
+            }
+        }
+    }
+
+    (status_letters.try_into().unwrap(), different)
+}
+
 /*
  * Show the metadata and a block by block diff of a single extent
  * We need at least two directories to compare, and no more than three.
@@ -264,6 +305,10 @@ fn show_extent(
     for (index, _) in region_dir.iter().enumerate() {
         print!(" {0:^6}", format!("ECTX{}", index));
     }
+    print!(" ");
+    for (index, _) in region_dir.iter().enumerate() {
+        print!(" {0:^6}", format!("HASH{}", index));
+    }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
     }
@@ -279,6 +324,8 @@ fn show_extent(
             ["".to_string(), "".to_string(), "".to_string()];
         let mut encryption_context_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
+        let mut hash_columns: [String; 3] =
+            ["".to_string(), "".to_string(), "".to_string()];
 
         /*
          * Build a Vector to hold our responses, one for each
@@ -293,14 +340,14 @@ fn show_extent(
         for (index, dir) in region_dir.iter().enumerate() {
             let region = Region::open(&dir, Default::default(), false)?;
 
-            dvec.insert(
-                index,
-                region.single_block_region_read(ReadRequest {
-                    eid: cmp_extent as u64,
-                    offset: Block::new_with_ddef(block, &region.def()),
-                    num_blocks: 1,
-                })?,
-            );
+            let mut responses = region.region_read(&[ReadRequest {
+                eid: cmp_extent as u64,
+                offset: Block::new_with_ddef(block, &region.def()),
+                num_blocks: 1,
+            }])?;
+            let response = responses.pop().unwrap();
+
+            dvec.insert(index, response);
         }
 
         /*
@@ -313,38 +360,9 @@ fn show_extent(
          * previous block.
          */
 
-        let mut different = false;
-
         // first compare data
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].data == dvec[1].data {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].data == dvec[2].data {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].data == dvec[2].data {
-                    status_letters[2] += "A";
-                } else if dvec[1].data == dvec[2].data {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
+        let (status_letters, data_different) =
+            return_status_letters(&dvec, |x| &x.data);
 
         // Print the data status letters
         for dir_index in 0..dir_count {
@@ -353,43 +371,26 @@ fn show_extent(
         }
 
         // then, compare encryption_context_columns
-        let mut status_letters = vec![String::new(); 3];
-
-        if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
-            status_letters[0] += "A";
-            status_letters[1] += "A";
-
-            if dir_count > 2 {
-                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
-                    status_letters[2] += "A";
-                } else {
-                    status_letters[2] += "C";
-                    different = true;
-                }
-            }
-        } else {
-            different = true;
-            status_letters[0] += "A";
-            status_letters[1] += "B";
-
-            if dir_count > 2 {
-                if dvec[0].encryption_contexts == dvec[2].encryption_contexts {
-                    status_letters[2] += "A";
-                } else if dvec[1].encryption_contexts
-                    == dvec[2].encryption_contexts
-                {
-                    status_letters[2] += "B";
-                } else {
-                    status_letters[2] += "C";
-                }
-            }
-        }
+        let (status_letters, ec_different) =
+            return_status_letters(&dvec, |x| &x.encryption_contexts);
 
         // Print nonce status letters
         for dir_index in 0..dir_count {
             encryption_context_columns[dir_index] =
                 format!("{0:^6} ", status_letters[dir_index]);
         }
+
+        // then, compare hashes
+        let (status_letters, hashes_different) =
+            return_status_letters(&dvec, |x| &x.hashes);
+
+        // Print hash status letters
+        for dir_index in 0..dir_count {
+            hash_columns[dir_index] =
+                format!("{0:^6} ", status_letters[dir_index]);
+        }
+
+        let different = data_different || ec_different || hashes_different;
 
         if !only_show_differences || different {
             print!("{:5}  ", block);
@@ -399,6 +400,10 @@ fn show_extent(
             }
             print!(" ");
             for column in encryption_context_columns.iter().take(dir_count) {
+                print!("{}", column);
+            }
+            print!(" ");
+            for column in hash_columns.iter().take(dir_count) {
                 print!("{}", column);
             }
 
@@ -450,52 +455,29 @@ fn show_extent_block(
     for (index, dir) in region_dir.iter().enumerate() {
         let region = Region::open(&dir, Default::default(), false)?;
 
-        dvec.insert(
-            index,
-            region.single_block_region_read(ReadRequest {
-                eid: cmp_extent as u64,
-                offset: Block::new_with_ddef(block, &region.def()),
-                num_blocks: 1,
-            })?,
-        );
+        let mut responses = region.region_read(&[ReadRequest {
+            eid: cmp_extent as u64,
+            offset: Block::new_with_ddef(block, &region.def()),
+            num_blocks: 1,
+        }])?;
+        let response = responses.pop().unwrap();
+
+        dvec.insert(index, response);
     }
 
     /*
      * Compare data
      */
-    let mut different = false;
-    let mut status_letters = vec![String::new(); 3];
-
-    if dvec[0].data == dvec[1].data {
-        status_letters[0] += "A";
-        status_letters[1] += "A";
-
-        if dir_count > 2 {
-            if dvec[0].data == dvec[2].data {
-                status_letters[2] += "A";
-            } else {
-                status_letters[2] += "C";
-                different = true;
-            }
-        }
-    } else {
-        different = true;
-        status_letters[0] += "A";
-        status_letters[1] += "B";
-
-        if dir_count > 2 {
-            if dvec[0].data == dvec[2].data {
-                status_letters[2] += "A";
-            } else if dvec[1].data == dvec[2].data {
-                status_letters[2] += "B";
-            } else {
-                status_letters[2] += "C";
-            }
-        }
-    }
+    let (status_letters, different) = return_status_letters(&dvec, |x| &x.data);
 
     if !only_show_differences || different {
         println!("{:>6}  {:<64}  {:3}", "DATA", "SHA256", "VER");
+        println!(
+            "{}  {}  {}",
+            String::from_utf8(vec![b'-'; 6])?,
+            String::from_utf8(vec![b'-'; 64])?,
+            String::from_utf8(vec![b'-'; 3])?,
+        );
         for dir_index in 0..dir_count {
             let mut hasher = Sha256::new();
             hasher.update(&dvec[dir_index].data[..]);
@@ -512,16 +494,8 @@ fn show_extent_block(
     /*
      * Compare encryption contexts
      */
-    let mut different = false;
-    if dvec[0].encryption_contexts == dvec[1].encryption_contexts {
-        if (dir_count > 2)
-            && (dvec[0].encryption_contexts != dvec[2].encryption_contexts)
-        {
-            different = true;
-        }
-    } else {
-        different = true;
-    }
+    let (_, different) =
+        return_status_letters(&dvec, |x| &x.encryption_contexts);
 
     if !only_show_differences || different {
         /*
@@ -541,6 +515,15 @@ fn show_extent_block(
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
+        }
+        println!();
+
+        print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
+        for (_, _) in dvec.iter().enumerate() {
+            print!("{} ", String::from_utf8(vec![b'-'; 24])?);
+        }
+        if !only_show_differences {
+            print!("{} ", String::from_utf8(vec![b'-'; 5])?);
         }
         println!();
 
@@ -589,6 +572,15 @@ fn show_extent_block(
         }
         println!();
 
+        print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
+        for (_, _) in dvec.iter().enumerate() {
+            print!("{} ", String::from_utf8(vec![b'-'; 32])?);
+        }
+        if !only_show_differences {
+            print!("{} ", String::from_utf8(vec![b'-'; 5])?);
+        }
+        println!();
+
         for depth in 0..max_tag_depth {
             print!("{:>6}  ", depth);
 
@@ -608,6 +600,64 @@ fn show_extent_block(
                 );
             }
             if !all_same_len || !is_all_same(&tags) {
+                print!(" {:<5}", "<---");
+            }
+            println!();
+        }
+        println!();
+    }
+
+    /*
+     * Compare integrity hashes
+     */
+    let (_, different) = return_status_letters(&dvec, |x| &x.hashes);
+
+    if !only_show_differences || different {
+        /*
+         * note formatting assumes 8 byte integrity hashes
+         */
+        print!("{:>6}  ", "HASHES");
+
+        let mut max_hash_depth = 0;
+
+        for (dir_index, response) in dvec.iter().enumerate() {
+            print!("{:^16} ", dir_index);
+
+            max_hash_depth =
+                std::cmp::max(max_hash_depth, response.hashes.len());
+        }
+        if !only_show_differences {
+            print!(" {:<5}", "DIFF");
+        }
+        println!();
+
+        print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
+        for (_, _) in dvec.iter().enumerate() {
+            print!("{} ", String::from_utf8(vec![b'-'; 16])?);
+        }
+        if !only_show_differences {
+            print!("{} ", String::from_utf8(vec![b'-'; 5])?);
+        }
+        println!();
+
+        for depth in 0..max_hash_depth {
+            print!("{:>6}  ", depth);
+
+            let mut all_same_len = true;
+            let mut hashes = Vec::with_capacity(dir_count);
+            for response in dvec.iter() {
+                print!(
+                    "{:^16} ",
+                    if depth < response.hashes.len() {
+                        hashes.push(&response.hashes[depth]);
+                        hex::encode(&response.hashes[depth].to_le_bytes())
+                    } else {
+                        all_same_len = false;
+                        "".to_string()
+                    }
+                );
+            }
+            if !all_same_len || !is_all_same(&hashes) {
                 print!(" {:<5}", "<---");
             }
             println!();
