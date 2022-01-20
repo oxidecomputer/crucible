@@ -881,7 +881,7 @@ async fn deactivate_workload(
             println!("{}/{} Retry:{} activate {:?}", c, count, retry, e);
             std::thread::sleep(std::time::Duration::from_secs(5));
             if retry > 100 {
-                bail!("Too many retires {} for activate", retry);
+                bail!("Too many retries {} for activate", retry);
             }
             retry += 1;
         }
@@ -889,6 +889,10 @@ async fn deactivate_workload(
     }
     println!("One final");
     generic_workload(guest, 20, ri).await?;
+
+    if let Err(e) = verify_volume(guest, ri) {
+        bail!("Final volume verify failed: {:?}", e)
+    }
     Ok(())
 }
 

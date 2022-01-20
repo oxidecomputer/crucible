@@ -635,16 +635,16 @@ async fn proc(
                          */
                         println!(
                             "[{}] {} downstairs self deactivate: new {:?}",
+                            up_coms.client_id,
                             up.uuid,
                             new_active_uuid,
-                            up_coms.client_id
                         );
                         up.ds_transition(up_coms.client_id, DsState::New);
                         up.set_inactive();
                         if up.uuid == new_active_uuid {
                             /*
                              * Now, this is really going off the rails.  Our
-                             * downstairs things we have a different UUID
+                             * downstairs thinks we have a different UUID
                              * and is sending us the UUID of the "new"
                              * downstairs, but that UUID IS our UUID.  So
                              * clearly the downstairs is confused.
@@ -793,7 +793,7 @@ async fn proc(
                         if up.uuid == expected_uuid {
                             /*
                              * Now, this is really going off the rails.  OUr
-                             * downstairs things we have a different UUID
+                             * downstairs thinks we have a different UUID
                              * and is sending us the UUID of the "new"
                              * downstairs, but that UUID IS our UUID.  So
                              * clearly the downstairs is confused.
@@ -940,10 +940,13 @@ async fn cmd_loop(
         tokio::select! {
             /*
              * We set biased so the loop will:
-             * First make sure the pm task is running.
-             * Second, respond to any ACKs coming back from the downstairs.
-             * By handling ACKs first before sending new work, we help to
-             * avoid overwhelming the downstairs.
+             * First make sure the pm task is still running.
+             * Second, get and look at messages received from the downstiars.
+             *   Some messages we can handle right here, but ACK's from
+             *   messages we sent are passed on to the pm task.
+             *
+             * By handling messages from the downstairs before sending
+             * new work, we help to avoid overwhelming the downstairs.
              */
             biased;
             _ = &mut pm_task => {
@@ -2488,7 +2491,10 @@ impl Upstairs {
                 crucible_bail!(UpstairsDeactivating);
             }
             UpState::Active => {
-                println!("Request to activate upstairs already active");
+                println!(
+                    "{} Request to activate upstairs already active",
+                    self.uuid
+                );
                 crucible_bail!(UpstairsAlreadyActive);
             }
         }
@@ -3027,9 +3033,7 @@ impl Upstairs {
          * Reconciliation only happens during initialization.
          */
         let active = self.active.lock().unwrap();
-        if active.up_state == UpState::Active
-            || active.up_state == UpState::Deactivating
-        {
+        if active.up_state != UpState::Initializing {
             return false;
         }
         let up_state = active.up_state;
@@ -3888,7 +3892,7 @@ enum BlockOp {
     // Query ops
     QueryBlockSize { data: Arc<Mutex<u64>> },
     QueryTotalSize { data: Arc<Mutex<u64>> },
-    QueryUpstairsActive { data: Arc<Mutex<bool>> },
+    QueryGuestIOReady { data: Arc<Mutex<bool>> },
     QueryUpstairsUuid { data: Arc<Mutex<Uuid>> },
     // Begin testing options.
     QueryExtentSize { data: Arc<Mutex<Block>> },
@@ -4470,7 +4474,7 @@ impl Guest {
 
     pub fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
-        let active_query = BlockOp::QueryUpstairsActive { data: data.clone() };
+        let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
         self.send(active_query).block_wait()?;
         return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
@@ -4728,7 +4732,7 @@ async fn process_new_io(
             send_active(dst, gen);
             let _ = req.send.send(Ok(()));
         }
-        BlockOp::QueryUpstairsActive { data } => {
+        BlockOp::QueryGuestIOReady { data } => {
             *data.lock().unwrap() = up.guest_io_ready();
             let _ = req.send.send(Ok(()));
         }
@@ -4908,12 +4912,6 @@ async fn up_listen(
                 }
             }
             req = up.guest.recv() => {
-                /*
-                 * There are a few commands we will accept before we
-                 * have all downstairs online. Other commands should
-                 * return an error.  process_new_io should be able
-                 * to handle the difference.
-                 */
                 process_new_io(up, &dst, req, &mut lastcast).await;
             }
             _ = sleep_until(flush_check) => {
