@@ -19,11 +19,21 @@ pub struct Write {
     pub encryption_context: Option<EncryptionContext>,
 
     /*
-     * xxHash of:
+     * If this is a non-encrypted write, then the integrity hasher has the data
+     * as an input:
      *
-     * [data] if non-encrypted
-     * [nonce + tag + data] if encrypted
+     *   let hasher = Hasher()
+     *   hasher.write(&data)
+     *   hash = hasher.digest()
      *
+     * If this is an encrypted write, then the integrity hasher has the nonce,
+     * then tag, then data written to it.
+     *
+     *   let hasher = Hasher()
+     *   hasher.write(&nonce)
+     *   hasher.write(&tag)
+     *   hasher.write(&data)
+     *   hash = hasher.digest()
      */
     pub hash: u64,
 }
