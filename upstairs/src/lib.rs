@@ -5,6 +5,7 @@
 
 use std::clone::Clone;
 use std::collections::{HashMap, VecDeque};
+use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
@@ -12,7 +13,6 @@ use std::net::SocketAddr;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
-use std::convert::TryFrom;
 
 pub use crucible_common::*;
 use crucible_protocol::*;
@@ -246,7 +246,10 @@ async fn io_send<WT>(
     lossy: bool,
 ) -> Result<bool>
 where
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
 {
     /*
      * Make sure we are either active, or in repair mode.  Otherwise, we
@@ -385,7 +388,7 @@ async fn proc_stream(
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
             proc(target, up, fr, fw, connected, up_coms, lossy).await
-        },
+        }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
 
@@ -393,7 +396,7 @@ async fn proc_stream(
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
             proc(target, up, fr, fw, connected, up_coms, lossy).await
-        },
+        }
     }
 }
 
@@ -412,7 +415,10 @@ async fn proc<RT, WT>(
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
 {
     {
         let mut ds = up.downstairs.lock().unwrap();
@@ -893,7 +899,10 @@ async fn cmd_loop<RT, WT>(
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
 {
     println!("[{}] Starts cmd_loop", up_coms.client_id);
 
@@ -1091,7 +1100,9 @@ enum WrappedStream {
  */
 async fn looper(
     target: SocketAddr,
-    tls_context: Arc<tokio::sync::Mutex<Option<crucible_common::x509::TLSContext>>>,
+    tls_context: Arc<
+        tokio::sync::Mutex<Option<crucible_common::x509::TLSContext>>,
+    >,
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
     lossy: bool,
@@ -1160,16 +1171,16 @@ async fn looper(
                 // XXX these unwraps are bad!
                 let config = tls_context.get_client_config().unwrap();
 
-                let connector = tokio_rustls::TlsConnector::from(
-                    Arc::new(config),
-                );
+                let connector =
+                    tokio_rustls::TlsConnector::from(Arc::new(config));
 
                 let server_name = tokio_rustls::rustls::ServerName::try_from(
                     format!("downstairs{}", up_coms.client_id).as_str(),
-                ).unwrap();
+                )
+                .unwrap();
 
                 WrappedStream::Https(
-                    connector.connect(server_name, tcp).await.unwrap()
+                    connector.connect(server_name, tcp).await.unwrap(),
                 )
             } else {
                 WrappedStream::Http(tcp)
@@ -1181,7 +1192,8 @@ async fn looper(
          * handles negotiation and work processing.
          */
         if let Err(e) =
-            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy).await
+            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
+                .await
         {
             eprintln!("ERROR: {}: proc: {:?}", target, e);
             // XXX proc can return fatal and non-fatal errors, figure out what

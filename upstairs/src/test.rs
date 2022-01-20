@@ -240,6 +240,7 @@ mod test {
             target: vec![],
             lossy: false,
             key: None,
+            ..Default::default()
         };
 
         Upstairs::new(&opts, def, Arc::new(Guest::new()))

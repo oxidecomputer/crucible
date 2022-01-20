@@ -582,21 +582,26 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = Arc::new(Mutex::new(FramedWrite::new(write, CrucibleEncoder::new())));
+            let fw = Arc::new(Mutex::new(FramedWrite::new(
+                write,
+                CrucibleEncoder::new(),
+            )));
 
             proc(ads, fr, fw).await
-        },
+        }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = Arc::new(Mutex::new(FramedWrite::new(write, CrucibleEncoder::new())));
+            let fw = Arc::new(Mutex::new(FramedWrite::new(
+                write,
+                CrucibleEncoder::new(),
+            )));
 
             proc(ads, fr, fw).await
-        },
+        }
     }
 }
-
 
 /*
  * This function handles the initial negotiation steps between the
@@ -611,7 +616,10 @@ async fn proc<RT, WT>(
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
 {
     let mut negotiated = 0;
     let mut upstairs_uuid = None;
@@ -830,7 +838,10 @@ async fn resp_loop<RT, WT>(
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
 {
     let mut lossy_interval = deadline_secs(5);
 
@@ -1737,7 +1748,7 @@ async fn main() -> Result<()> {
                 let context = crucible_common::x509::TLSContext::from_paths(
                     &cert_pem_path,
                     &key_pem_path,
-                    &root_cert_pem_path
+                    &root_cert_pem_path,
                 )?;
 
                 let config = context.get_server_config()?;

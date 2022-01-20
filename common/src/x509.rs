@@ -4,8 +4,10 @@ use std::io::{self, BufReader};
 
 // Reference tokio-rustls repo examples/server/src/main.rs
 use rustls_pemfile::{certs, rsa_private_keys};
-use tokio_rustls::rustls::{Certificate, PrivateKey, ClientConfig, ServerConfig, RootCertStore};
 use tokio_rustls::rustls::server::AllowAnyAuthenticatedClient;
+use tokio_rustls::rustls::{
+    Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig,
+};
 
 pub fn load_certs(path: &str) -> io::Result<Vec<Certificate>> {
     certs(&mut BufReader::new(File::open(path)?))
@@ -33,7 +35,6 @@ pub enum TLSContextError {
     RusTLSError(#[from] tokio_rustls::rustls::Error),
 }
 
-
 #[derive(Debug)]
 pub struct TLSContext {
     certs: Vec<Certificate>,
@@ -48,14 +49,14 @@ impl TLSContext {
         root_cert_pem_path: &str,
     ) -> Result<Self, TLSContextError> {
         let mut root_cert_store = RootCertStore::empty();
-        for root_cert in load_certs(&root_cert_pem_path)? {
+        for root_cert in load_certs(root_cert_pem_path)? {
             root_cert_store.add(&root_cert)?;
         }
 
         Ok(Self {
             certs: load_certs(cert_pem_path)?,
             keys: load_rsa_keys(key_pem_path)?,
-            root_cert_store
+            root_cert_store,
         })
     }
 
@@ -63,20 +64,16 @@ impl TLSContext {
         Ok(ClientConfig::builder()
             .with_safe_defaults()
             .with_root_certificates(self.root_cert_store.clone())
-            .with_single_cert(self.certs.clone(), self.keys[0].clone())
-            ?)
+            .with_single_cert(self.certs.clone(), self.keys[0].clone())?)
     }
 
     pub fn get_server_config(&self) -> Result<ServerConfig, TLSContextError> {
-        let client_cert_verifier = AllowAnyAuthenticatedClient::new(
-            self.root_cert_store.clone(),
-        );
+        let client_cert_verifier =
+            AllowAnyAuthenticatedClient::new(self.root_cert_store.clone());
 
         Ok(ServerConfig::builder()
             .with_safe_defaults()
             .with_client_cert_verifier(client_cert_verifier)
-            .with_single_cert(self.certs.clone(), self.keys[0].clone())
-            ?)
+            .with_single_cert(self.certs.clone(), self.keys[0].clone())?)
     }
 }
-

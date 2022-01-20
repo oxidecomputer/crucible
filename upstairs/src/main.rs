@@ -119,6 +119,7 @@ mod tests {
             target: opt.target,
             lossy: false,
             key: opt.key,
+            ..Default::default()
         };
 
         if let Some(key) = crucible_opts.key_bytes() {
