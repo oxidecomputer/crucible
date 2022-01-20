@@ -57,7 +57,7 @@ for (( i = 0; i < 3; i++ )); do
             ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
             ;;
         "encrypted")
-            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --expect-upstairs-encrypted
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted
             ;;
     esac
     echo ${cds} run -p "$port" -d "$dir"
