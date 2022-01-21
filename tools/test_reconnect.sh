@@ -43,22 +43,23 @@ for (( i = 0; i < 3; i++ )); do
 done
 
 # Initial seed for verify file
-if ! cargo run -q -p crucible-client -- "${args[@]}" \
-          -w one -q --verify-out alan >> "$test_log" 2>&1 ; then
+if ! cargo run -q -p crucible-client -- "${args[@]}" -w one -q \
+          --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     touch /var/tmp/ds_test/stop
     exit 1
 fi
 
 # Now run the quick client test in a loop
-for i in {1..10}
+for i in {1..100}
 do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
     cargo run -q -p crucible-client -- "${args[@]}" \
             -w one -q --verify-out alan \
-            --verify-in alan >> "$test_log" 2>&1
+            --verify-in alan \
+            --retry-activate >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
         touch /var/tmp/ds_test/up 2> /dev/null

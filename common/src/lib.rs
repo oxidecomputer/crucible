@@ -52,7 +52,13 @@ pub enum CrucibleError {
     #[error("Offset past end of extent")]
     OffsetInvalid,
 
-    #[error("Upstairs is not active!")]
+    #[error("Upstairs is already active")]
+    UpstairsAlreadyActive,
+
+    #[error("Upstairs is deactivating")]
+    UpstairsDeactivating,
+
+    #[error("Upstairs is not active")]
     UpstairsInactive,
 
     #[error("Saw a UUID that wasn't ours!")]
