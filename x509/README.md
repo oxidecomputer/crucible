@@ -12,13 +12,13 @@ Create a downstairs like normal, but run with new arguments:
         --root-cert-pem x509/ca.pem
         
     cargo run --release -q -p crucible-downstairs -- \
-        run -p "44101" -d "disks/d0/" \
+        run -p "44101" -d "disks/d1/" \
         --cert-pem x509/downstairs1.pem \
         --key-pem x509/downstairs1-key.pem \
         --root-cert-pem x509/ca.pem
         
     cargo run --release -q -p crucible-downstairs -- \
-        run -p "44102" -d "disks/d0/" \
+        run -p "44102" -d "disks/d2/" \
         --cert-pem x509/downstairs2.pem \
         --key-pem x509/downstairs2-key.pem \
         --root-cert-pem x509/ca.pem
