@@ -20,8 +20,7 @@ use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use structopt::StructOpt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep_until, Instant};
@@ -142,6 +141,14 @@ enum Args {
 
         #[structopt(short, long)]
         trace_endpoint: Option<String>,
+
+        // TLS options
+        #[structopt(long)]
+        cert_pem: Option<String>,
+        #[structopt(long)]
+        key_pem: Option<String>,
+        #[structopt(long)]
+        root_cert_pem: Option<String>,
     },
 }
 
@@ -416,13 +423,16 @@ async fn _show_work(ds: &Downstairs) {
  * If the message is a ping or negotiation message, send the correct
  * response. If the message is an IO, then put the new IO the work hashmap.
  */
-async fn proc_frame(
+async fn proc_frame<WT>(
     upstairs_uuid: Uuid,
     ad: &mut Arc<Mutex<Downstairs>>,
     m: &Message,
-    fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
+    fw: &mut Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
     job_channel_tx: &Arc<Mutex<Sender<u64>>>,
-) -> Result<()> {
+) -> Result<()>
+where
+    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
+{
     let new_ds_id = match m {
         Message::Write(uuid, ds_id, dependencies, writes) => {
             if upstairs_uuid != *uuid {
@@ -486,11 +496,14 @@ async fn proc_frame(
     Ok(())
 }
 
-async fn do_work_task(
+async fn do_work_task<T>(
     ads: &mut Arc<Mutex<Downstairs>>,
     mut job_channel_rx: Receiver<u64>,
-    fw: &mut Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
-) -> Result<()> {
+    fw: &mut Arc<Mutex<FramedWrite<T, CrucibleEncoder>>>,
+) -> Result<()>
+where
+    T: tokio::io::AsyncWrite + std::marker::Unpin,
+{
     /*
      * job_channel_rx is a notification that we should look for new work.
      */
@@ -563,18 +576,54 @@ async fn do_work_task(
     Ok(())
 }
 
+async fn proc_stream(
+    ads: &mut Arc<Mutex<Downstairs>>,
+    stream: WrappedStream,
+) -> Result<()> {
+    match stream {
+        WrappedStream::Http(sock) => {
+            let (read, write) = sock.into_split();
+
+            let fr = FramedRead::new(read, CrucibleDecoder::new());
+            let fw = Arc::new(Mutex::new(FramedWrite::new(
+                write,
+                CrucibleEncoder::new(),
+            )));
+
+            proc(ads, fr, fw).await
+        }
+        WrappedStream::Https(stream) => {
+            let (read, write) = tokio::io::split(stream);
+
+            let fr = FramedRead::new(read, CrucibleDecoder::new());
+            let fw = Arc::new(Mutex::new(FramedWrite::new(
+                write,
+                CrucibleEncoder::new(),
+            )));
+
+            proc(ads, fr, fw).await
+        }
+    }
+}
+
 /*
  * This function handles the initial negotiation steps between the
  * upstairs and the downstairs.  Either we return error, or we call
  * the next function if everything was successful and we can start
  * taking IOs from the upstairs.
  */
-async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
-    let (read, write) = sock.into_split();
-    let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-    let fw =
-        Arc::new(Mutex::new(FramedWrite::new(write, CrucibleEncoder::new())));
-
+async fn proc<RT, WT>(
+    ads: &mut Arc<Mutex<Downstairs>>,
+    mut fr: FramedRead<RT, CrucibleDecoder>,
+    fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
+) -> Result<()>
+where
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
+{
     let mut negotiated = 0;
     let mut upstairs_uuid = None;
 
@@ -784,13 +833,20 @@ async fn proc(ads: &mut Arc<Mutex<Downstairs>>, sock: TcpStream) -> Result<()> {
  * We assume here that correct negotiation has taken place and this
  * downstairs is ready to receive IO.
  */
-async fn resp_loop(
+async fn resp_loop<RT, WT>(
     ads: &mut Arc<Mutex<Downstairs>>,
-    mut fr: FramedRead<OwnedReadHalf, CrucibleDecoder>,
-    fw: Arc<Mutex<FramedWrite<OwnedWriteHalf, CrucibleEncoder>>>,
+    mut fr: FramedRead<RT, CrucibleDecoder>,
+    fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
     mut another_upstairs_active_rx: mpsc::Receiver<u64>,
     upstairs_uuid: Uuid,
-) -> Result<()> {
+) -> Result<()>
+where
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
+{
     let mut lossy_interval = deadline_secs(5);
 
     // XXX flow control size to double what Upstairs has for upper limit?
@@ -897,7 +953,7 @@ async fn resp_loop(
                 return Ok(());
             }
             new_read = fr.next() => {
-                match new_read.transpose()? {
+                match new_read {
                     None => {
                         let mut ds = ads.lock().await;
 
@@ -914,7 +970,7 @@ async fn resp_loop(
 
                         return Ok(());
                     }
-                    Some(msg) => {
+                    Some(Ok(msg)) => {
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
                             let mut fw = fw.lock().await;
@@ -922,6 +978,11 @@ async fn resp_loop(
                         } else {
                             message_channel_tx.send(msg).await?;
                         }
+                    }
+                    Some(Err(e)) => {
+                        // XXX "unexpected end of file" can occur if upstairs
+                        // terminates, we don't yet have a HangUp message
+                        return Err(e);
                     }
                 }
             }
@@ -1513,6 +1574,11 @@ impl fmt::Display for WorkState {
     }
 }
 
+enum WrappedStream {
+    Http(tokio::net::TcpStream),
+    Https(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::from_args_safe()?;
@@ -1596,6 +1662,9 @@ async fn main() -> Result<()> {
             port,
             return_errors,
             trace_endpoint,
+            cert_pem,
+            key_pem,
+            root_cert_pem,
         } => {
             region = Region::open(&data, Default::default(), true)?;
 
@@ -1678,6 +1747,27 @@ async fn main() -> Result<()> {
             println!("Using address: {:?}", listen_on);
             let listener = TcpListener::bind(&listen_on).await?;
 
+            let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
+                let key_pem_path = key_pem.unwrap();
+                let root_cert_pem_path = root_cert_pem.unwrap();
+
+                let context = crucible_common::x509::TLSContext::from_paths(
+                    &cert_pem_path,
+                    &key_pem_path,
+                    &root_cert_pem_path,
+                )?;
+
+                let config = context.get_server_config()?;
+
+                println!("Configured SSL acceptor");
+
+                Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+            } else {
+                // unencrypted
+                println!("No SSL acceptor configured");
+                None
+            };
+
             /*
              * We now loop listening for a connection from the Upstairs.
              * When we get one, we then spawn the proc() function to handle
@@ -1688,7 +1778,26 @@ async fn main() -> Result<()> {
             loop {
                 let (sock, raddr) = listener.accept().await?;
 
-                println!("connection from {:?}", raddr);
+                let stream: WrappedStream =
+                    if let Some(ssl_acceptor) = &ssl_acceptor {
+                        let ssl_acceptor = ssl_acceptor.clone();
+                        WrappedStream::Https(
+                            match ssl_acceptor.accept(sock).await {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    println!(
+                                        "rejecting connection from {:?}: {:?}",
+                                        raddr, e,
+                                    );
+                                    continue;
+                                }
+                            },
+                        )
+                    } else {
+                        WrappedStream::Http(sock)
+                    };
+
+                println!("accepted connection from {:?}", raddr);
                 {
                     /*
                      * Add one to the counter every time we have a connection
@@ -1701,7 +1810,7 @@ async fn main() -> Result<()> {
                 let mut dd = d.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = proc(&mut dd, sock).await {
+                    if let Err(e) = proc_stream(&mut dd, stream).await {
                         println!("ERROR: connection({}): {:?}", raddr, e);
                     } else {
                         println!("OK: connection({}): all done", raddr);

@@ -46,6 +46,14 @@ pub struct Opt {
      */
     #[structopt(short, long, default_value = "5")]
     num_upstairs: usize,
+
+    // TLS options
+    #[structopt(long)]
+    cert_pem: Option<String>,
+    #[structopt(long)]
+    key_pem: Option<String>,
+    #[structopt(long)]
+    root_cert_pem: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -70,6 +78,9 @@ fn main() -> Result<()> {
         target: opt.target,
         lossy: false,
         key: opt.key,
+        cert_pem: opt.cert_pem,
+        key_pem: opt.key_pem,
+        root_cert_pem: opt.root_cert_pem,
     };
     let mut generation_number = opt.gen;
 

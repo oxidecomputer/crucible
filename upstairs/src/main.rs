@@ -23,6 +23,14 @@ pub struct Opt {
 
     #[structopt(short, long, default_value = "0")]
     gen: u64,
+
+    // TLS options
+    #[structopt(long)]
+    cert_pem: Option<String>,
+    #[structopt(long)]
+    key_pem: Option<String>,
+    #[structopt(long)]
+    root_cert_pem: Option<String>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -111,6 +119,7 @@ mod tests {
             target: opt.target,
             lossy: false,
             key: opt.key,
+            ..Default::default()
         };
 
         if let Some(key) = crucible_opts.key_bytes() {
@@ -127,6 +136,9 @@ fn main() -> Result<()> {
         target: opt.target,
         lossy: false,
         key: opt.key,
+        cert_pem: opt.cert_pem,
+        key_pem: opt.key_pem,
+        root_cert_pem: opt.root_cert_pem,
     };
 
     let runtime = Builder::new_multi_thread()
