@@ -17,4 +17,4 @@ tokio = { version = "1.15.0", features = ["full"] }
 opentelemetry = "0.16.0"
 opentelemetry-jaeger = { version = "0.14.0" }
 tracing-subscriber = "0.2.19"
-tracing-opentelemetry = "0.14.0"
+tracing-opentelemetry = "0.16.0"
