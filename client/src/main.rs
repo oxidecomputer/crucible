@@ -23,6 +23,7 @@ arg_enum! {
         Big,
         Biggest,
         Burst,
+        Deactivate,
         Demo,
         Dep,
         Dirty,
@@ -38,6 +39,13 @@ arg_enum! {
 #[derive(Debug, StructOpt)]
 #[structopt(about = "crucible upstairs test client")]
 pub struct Opt {
+    /*
+     * For tests that support it, pass this count value for the number
+     * of loops the test should do.
+     */
+    #[structopt(short, long, default_value = "0")]
+    count: u32,
+
     #[structopt(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
 
@@ -72,6 +80,13 @@ pub struct Opt {
 
     #[structopt(short, long, default_value = "0")]
     gen: u64,
+
+    /*
+     * Retry for activate, as long as it takes.  If we pass this arg, the
+     * test will retry the initial activate command as long as it takes.
+     */
+    #[structopt(long)]
+    retry_activate: bool,
 
     /*
      * For tests that support it, load the expected write count from
@@ -243,7 +258,15 @@ fn main() -> Result<()> {
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
-    guest.activate(opt.gen)?;
+    if opt.retry_activate {
+        while let Err(e) = guest.activate(opt.gen) {
+            println!("Activate returns: {:#}  Retrying", e);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        println!("Activate successful");
+    } else {
+        guest.activate(opt.gen)?;
+    }
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -292,6 +315,26 @@ fn main() -> Result<()> {
                 &opt.verify_out,
             ))?;
         }
+        Workload::Deactivate => {
+            /*
+             * A small default of 5 is okay for a functional test, but
+             * not enough for a more exhaustive test.
+             */
+            let count = {
+                if opt.count == 0 {
+                    5
+                } else {
+                    opt.count
+                }
+            };
+            println!("Run deactivate test");
+            runtime.block_on(deactivate_workload(
+                &guest,
+                count,
+                &mut region_info,
+                opt.gen,
+            ))?;
+        }
         Workload::Demo => {
             println!("Run Demo test");
             println!("Pause for 10 seconds, then start testing");
@@ -334,6 +377,15 @@ fn main() -> Result<()> {
         }
         Workload::Nothing => {
             println!("Do nothing test, just start");
+            /*
+             * If we don't want to quit right away, then just loop
+             * forever
+             */
+            if !opt.quit {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                }
+            }
         }
         Workload::Rand => {
             println!("Run random test");
@@ -375,12 +427,12 @@ fn main() -> Result<()> {
         println!("Wrote out file {:?}", cp);
     }
 
-    println!("Tests done.  All submitted work has been ACK'd");
+    println!("CLIENT: Tests done.  All submitted work has been ACK'd");
     loop {
         let wc = guest.show_work()?;
-        println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
+        println!("CLIENT: Up:{} ds:{}", wc.up_count, wc.ds_count);
         if opt.quit && wc.up_count + wc.ds_count == 0 {
-            println!("All crucible jobs finished, exiting program");
+            println!("CLIENT: All crucible jobs finished, exiting program");
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(4));
@@ -775,7 +827,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
     let data = Bytes::from(vec);
 
-    println!("IO at block {:5}, len:{:7}", offset.value, data.len());
+    println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
     let mut waiter = guest.write(offset, data)?;
     waiter.block_wait()?;
@@ -783,6 +835,8 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let length: usize = size * ri.block_size as usize;
     let vec: Vec<u8> = vec![255; length];
     let data = crucible::Buffer::from_vec(vec);
+
+    println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     let mut waiter = guest.read(offset, data.clone())?;
     waiter.block_wait()?;
 
@@ -791,9 +845,54 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         bail!("Error at {}", block_index);
     }
 
+    println!("Flush");
     let mut waiter = guest.flush()?;
     waiter.block_wait()?;
 
+    Ok(())
+}
+
+/*
+ * A test of deactivation and re-activation.
+ * In a loop, do some IO, then deactivate, then activate.  Verify that
+ * written data is read back.  We make use of the generic_workload test
+ * for the IO parts of this.
+ */
+async fn deactivate_workload(
+    guest: &Arc<Guest>,
+    count: u32,
+    ri: &mut RegionInfo,
+    mut gen: u64,
+) -> Result<()> {
+    for c in 0..count {
+        println!("{}/{} CLIENT: run rand test", c, count);
+        generic_workload(guest, 20, ri).await?;
+        println!("{}/{} CLIENT: Now disconnect", c, count);
+        let mut waiter = guest.deactivate()?;
+        waiter.block_wait()?;
+        println!("{}/{} CLIENT: Now disconnect done.", c, count);
+        let wc = guest.show_work()?;
+        println!(
+            "{}/{} CLIENT: Up:{} ds:{}",
+            c, count, wc.up_count, wc.ds_count
+        );
+        let mut retry = 1;
+        while let Err(e) = guest.activate(gen) {
+            println!("{}/{} Retry:{} activate {:?}", c, count, retry, e);
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if retry > 100 {
+                bail!("Too many retries {} for activate", retry);
+            }
+            retry += 1;
+        }
+        gen += 1;
+    }
+    println!("One final");
+    generic_workload(guest, 20, ri).await?;
+
+    if let Err(e) = verify_volume(guest, ri) {
+        bail!("Final volume verify failed: {:?}", e)
+    }
     Ok(())
 }
 
