@@ -60,7 +60,7 @@ mod cdt {
     fn ds__flush__io__done(_: u64, _: u64) {}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CrucibleOpts {
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
