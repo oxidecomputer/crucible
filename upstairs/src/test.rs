@@ -2463,6 +2463,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         ds.enqueue(op);
@@ -2639,6 +2640,7 @@ mod test {
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
                 encryption_context: None,
+                hash: 0,
             }],
         );
         ds.enqueue(op);
@@ -2990,8 +2992,14 @@ mod test {
 
         // should not notify Guest
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &None)
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
@@ -3064,8 +3072,14 @@ mod test {
 
         // should not notify Guest
         assert_eq!(
-            work.process_ds_completion(next_id, 0, response, &Some(context))
-                .unwrap(),
+            work.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &Some(context),
+                UpState::Active
+            )
+            .unwrap(),
             false
         );
 
