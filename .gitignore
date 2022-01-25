@@ -3,6 +3,7 @@
 core
 *.swp
 /.*.sock
+.cli_history.txt
 /fio/*.png
 /fio/*.log
 /fio/*.log.hist

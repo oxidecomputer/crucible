@@ -82,8 +82,8 @@ test_list="one span big dep deactivate balloon"
 for tt in ${test_list}; do
     echo ""
     echo "Running test: $tt"
-    echo "$cc" -q -w "$tt" "${args[@]}"
-    if ! "$cc" -q -w "$tt" "${args[@]}"; then
+    echo "$cc" "$tt" -q "${args[@]}"
+    if ! "$cc" "$tt" -q "${args[@]}"; then
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client $tt test"
@@ -104,15 +104,15 @@ fi
 echo ""
 echo "Running verify test: $tt"
 vfile="${testdir}/verify"
-echo "$cc" -q -w rand --verify-out "$vfile" "${args[@]}"
-if ! "$cc" -q -w rand --verify-out "$vfile" "${args[@]}"; then
+echo "$cc" rand -q --verify-out "$vfile" "${args[@]}"
+if ! "$cc" rand -q --verify-out "$vfile" "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client rand verify test"
     echo ""
 else
-    echo "$cc" -q -w rand --verify-in "$vfile" "${args[@]}"
-    if ! "$cc" -q -w rand --verify-in "$vfile" "${args[@]}"; then
+    echo "$cc" rand -q --verify-in "$vfile" "${args[@]}"
+    if ! "$cc" rand -q --verify-in "$vfile" "${args[@]}"; then
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client rand verify part 2 test"

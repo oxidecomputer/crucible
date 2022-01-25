@@ -138,9 +138,8 @@ else
 fi
 
 cds="./target/debug/crucible-downstairs"
-cc="./target/debug/crucible-client"
-if [[ ! -f ${cds} ]] || [[ ! -f ${cc} ]]; then
-    echo "Can't find crucible binary at $cds or $cc"
+if [[ ! -f ${cds} ]]; then
+    echo "Can't find crucible binary at $cds"
     exit 1
 fi
 

@@ -1,5 +1,5 @@
-// Copyright 2021 Oxide Computer Company
-use std::net::SocketAddr;
+// Copyright 2022 Oxide Computer Company
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,55 +7,65 @@ use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
-use structopt::clap::arg_enum;
+use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use tokio::runtime::Builder;
+
+mod cli;
+mod protocol;
 
 use crucible::*;
 
 /*
  * The various tests this program supports.
  */
-arg_enum! {
-    #[derive(Debug, PartialEq, StructOpt)]
-    enum Workload {
-        Balloon,
-        Big,
-        Biggest,
-        Burst,
-        Deactivate,
-        Demo,
-        Dep,
-        Dirty,
-        Generic,
-        Nothing,
-        One,
-        Rand,
-        Span,
-        Verify,
-    }
+#[derive(Debug, PartialEq, StructOpt)]
+enum Workload {
+    Balloon,
+    Big,
+    Biggest,
+    Burst,
+    Cli {
+        /// Address to connect to
+        #[structopt(long, short, default_value = "0.0.0.0:5050")]
+        attach: SocketAddr,
+    },
+    /// Start a server and listen on the given address and port
+    CliServer {
+        /// Address to listen on
+        #[structopt(long, short, default_value = "0.0.0.0")]
+        listen: IpAddr,
+        /// Port to listen on
+        #[structopt(long, short, default_value = "5050")]
+        port: u16,
+    },
+    Deactivate,
+    Demo,
+    Dep,
+    Dirty,
+    Generic,
+    Nothing,
+    One,
+    Rand,
+    Span,
+    Verify,
 }
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "crucible upstairs test client")]
+#[structopt(setting = structopt::clap::AppSettings::ColoredHelp)]
 pub struct Opt {
     /*
      * For tests that support it, pass this count value for the number
      * of loops the test should do.
      */
-    #[structopt(short, long, default_value = "0")]
+    #[structopt(short, long, global = true, default_value = "0")]
     count: u32,
 
-    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    #[structopt(short, long, global = true, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
 
-    #[structopt(
-        short,
-        long,
-        possible_values = &Workload::variants(),
-        default_value = "One",
-        case_insensitive = true
-    )]
+    #[structopt(subcommand)]
     workload: Workload,
 
     /*
@@ -66,40 +76,40 @@ pub struct Opt {
      * may not be the best way to test, but until we have something
      * better... XXX
      */
-    #[structopt(long)]
+    #[structopt(long, global = true)]
     lossy: bool,
 
     /*
      * quit after all crucible work queues are empty.
      */
-    #[structopt(short, long)]
+    #[structopt(short, global = true, long)]
     quit: bool,
 
-    #[structopt(short, long)]
+    #[structopt(short, global = true, long)]
     key: Option<String>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[structopt(short, global = true, long, default_value = "0")]
     gen: u64,
 
     /*
      * Retry for activate, as long as it takes.  If we pass this arg, the
      * test will retry the initial activate command as long as it takes.
      */
-    #[structopt(long)]
+    #[structopt(long, global = true)]
     retry_activate: bool,
 
     /*
      * For tests that support it, load the expected write count from
      * the provided file.
      */
-    #[structopt(long, parse(from_os_str), name = "INFILE")]
+    #[structopt(long, global = true, parse(from_os_str), name = "INFILE")]
     verify_in: Option<PathBuf>,
 
     /*
      * For tests that support it, save the write count into the
      * provided file.
      */
-    #[structopt(long, parse(from_os_str), name = "FILE")]
+    #[structopt(long, global = true, parse(from_os_str), name = "FILE")]
     verify_out: Option<PathBuf>,
 
     // TLS options
@@ -114,10 +124,6 @@ pub struct Opt {
 pub fn opts() -> Result<Opt> {
     let opt: Opt = Opt::from_args();
 
-    if opt.target.is_empty() {
-        bail!("must specify at least one --target");
-    }
-
     Ok(opt)
 }
 
@@ -130,8 +136,8 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_count yet, but perhaps someday..
  */
-#[derive(Debug)]
-struct RegionInfo {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegionInfo {
     block_size: u64,
     extent_size: Block,
     total_size: u64,
@@ -144,10 +150,7 @@ struct RegionInfo {
  * All the tests need this basic set of information about the region.
  * We also load and verify the write count if an input file is provided.
  */
-fn get_region_info(
-    guest: &Arc<Guest>,
-    vi: Option<PathBuf>,
-) -> Result<RegionInfo> {
+fn get_region_info(guest: &Arc<Guest>) -> Result<RegionInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
@@ -183,14 +186,22 @@ fn get_region_info(
      */
     let write_count = vec![0_u32; total_blocks];
 
-    let mut ri = RegionInfo {
+    Ok(RegionInfo {
         block_size,
         extent_size,
         total_size,
         total_blocks,
         write_count,
         max_block_io,
-    };
+    })
+}
+
+fn update_region_info(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    vi: Option<PathBuf>,
+    verify: bool,
+) -> Result<()> {
     /*
      * If requested, fill the write count from a provided file.
      */
@@ -201,19 +212,24 @@ fn get_region_info(
             Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
         };
         println!("Load write count information from file {:?}", cp);
-        if ri.write_count.len() != total_blocks {
+        if ri.write_count.len() != ri.total_blocks {
             bail!(
                 "Verify file {:?} blocks:{} does not match regions:{}",
                 cp,
                 ri.write_count.len(),
-                total_blocks
+                ri.total_blocks
             );
         }
-        if let Err(e) = verify_volume(guest, &mut ri) {
-            bail!("Initial volume verify failed: {:?}", e)
+        /*
+         * Only verify the volume if requested.
+         */
+        if verify {
+            if let Err(e) = verify_volume(guest, ri) {
+                bail!("Initial volume verify failed: {:?}", e)
+            }
         }
     }
-    Ok(ri)
+    Ok(())
 }
 
 /**
@@ -259,6 +275,16 @@ fn main() -> Result<()> {
         .unwrap();
 
     /*
+     * If just want the cli, then start that after our runtime.  The cli
+     * does not need upstairs started, as that should happen in the
+     * cli-server code.
+     */
+    if let Workload::Cli { attach } = opt.workload {
+        runtime.block_on(cli::start_cli_client(attach))?;
+        return Ok(());
+    }
+
+    /*
      * The structure we use to send work from outside crucible into the
      * Upstairs main task.
      * We create this here instead of inside up_main() so we can use
@@ -268,6 +294,11 @@ fn main() -> Result<()> {
 
     runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
+
+    if let Workload::CliServer { listen, port } = opt.workload {
+        runtime.block_on(cli::start_cli_server(&guest, listen, port))?;
+        return Ok(());
+    }
 
     if opt.retry_activate {
         while let Err(e) = guest.activate(opt.gen) {
@@ -294,10 +325,17 @@ fn main() -> Result<()> {
      * Build the region info struct that all the tests will use.
      * This includes importing and verifying from a write log, if requested.
      */
-    let mut region_info = match get_region_info(&guest, opt.verify_in) {
+    let mut region_info = match get_region_info(&guest) {
         Ok(region_info) => region_info,
         Err(e) => bail!("failed to get region info: {:?}", e),
     };
+
+    /*
+     * Now that we have the region info from the Upstaris, apply any
+     * info from the verify file, and verify it matches what we expect
+     * if we are expecting anything.
+     */
+    update_region_info(&guest, &mut region_info, opt.verify_in, true)?;
 
     /*
      * Call the function for the workload option passed from the command
@@ -429,6 +467,9 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        c => {
+            panic!("Unsupported cmd {:?}", c);
         }
     }
 
