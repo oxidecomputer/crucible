@@ -4103,11 +4103,11 @@ impl BlockOp {
     }
 
     pub fn consumes_iops(&self) -> bool {
-        match self {
-            BlockOp::Read { offset: _, data: _ } => true,
-            BlockOp::Write { offset: _, data: _ } => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            BlockOp::Read { offset: _, data: _ }
+                | BlockOp::Write { offset: _, data: _ }
+        )
     }
 }
 
@@ -5206,8 +5206,9 @@ async fn up_listen(
     let mut lastcast = 1;
 
     /*
-     * If this guest was configured with an IOPs limit, one branch of the loop
-     * below has to leak tokens. Leak every IOP_LEAK_MS milliseconds.
+     * If this guest was configured with an IOPs limit, one branch of the
+     * loop below has to leak tokens. Leak every IOP_LEAK_MS
+     * milliseconds.
      */
     let guest_has_iop_limit = up.guest.get_iop_limit().is_some();
     const IOP_LEAK_MS: usize = 1000;

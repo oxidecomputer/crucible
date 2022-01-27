@@ -4,13 +4,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use rand::Rng;
 use structopt::StructOpt;
 use tokio::runtime::Builder;
-use tokio::time::{Instant, Duration};
-use rand::Rng;
+use tokio::time::{Duration, Instant};
 
 use crucible::*;
-
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "measure iops!")]
@@ -106,7 +105,7 @@ fn main() -> Result<()> {
 
     let guest = Arc::new(guest);
 
-    runtime.spawn(up_main(crucible_opts.clone(), guest.clone()));
+    runtime.spawn(up_main(crucible_opts, guest.clone()));
     println!("Crucible runtime is spawned");
 
     guest.activate(opt.gen)?;
@@ -117,7 +116,7 @@ fn main() -> Result<()> {
 
     let mut rng = rand::thread_rng();
 
-    let bsz: u64 = guest.query_block_size()?.into();
+    let bsz: u64 = guest.query_block_size()?;
     let total_blocks: u64 = guest.query_total_size()? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
@@ -144,26 +143,22 @@ fn main() -> Result<()> {
                     .map(|_| rng.sample(rand::distributions::Standard))
                     .collect();
 
-                let waiter = guest.write_to_byte_offset(
-                    offset * bsz,
-                    Bytes::from(vec),
-                )?;
+                let waiter = guest
+                    .write_to_byte_offset(offset * bsz, Bytes::from(vec))?;
 
                 waiters.push(waiter);
             } else {
                 let read_buffer = Buffer::new(io_size as usize);
 
-                let waiter = guest.read_from_byte_offset(
-                    offset * bsz,
-                    read_buffer,
-                )?;
+                let waiter =
+                    guest.read_from_byte_offset(offset * bsz, read_buffer)?;
 
                 waiters.push(waiter);
             }
         }
 
-        for i in 0..io_depth {
-            waiters[i].block_wait()?;
+        for mut waiter in waiters {
+            waiter.block_wait()?;
             io_operations_sent += ceiling_div!(io_size, 16000);
 
             let diff = io_operation_time.elapsed();
@@ -200,8 +195,13 @@ fn main() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
 
+    iops.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
     println!("IOPS: {:?}", iops);
-    println!("IOPS mean {} stddev {}",
+    println!(
+        "IOPS min {} max {} mean {} stddev {}",
+        iops.first().unwrap(),
+        iops.last().unwrap(),
         statistical::mean(&iops),
         statistical::standard_deviation(&iops, None),
     );
