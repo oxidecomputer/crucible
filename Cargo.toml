@@ -6,6 +6,7 @@ members = [
 	"common",
 	"downstairs",
 	"hammer",
+	"measure_iops",
 	"nbd_server",
 	"protocol",
 	"scope",

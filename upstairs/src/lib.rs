@@ -4074,6 +4074,72 @@ enum BlockOp {
     ShowWork { data: Arc<Mutex<WQCounts>> },
 }
 
+macro_rules! ceiling_div {
+    ($a: expr, $b: expr) => {
+        ($a + ($b - 1)) / $b
+    };
+}
+
+impl BlockOp {
+    /*
+     * Compute number of IO operations represented by this BlockOp, rounding
+     * up. For example, if IOP size is 16k:
+     *
+     *   A read of 8k is 1 IOP
+     *   A write of 16k is 1 IOP
+     *   A write of 16001b is 2 IOPs
+     *   A flush isn't an IOP
+     */
+    pub fn iops(&self, iop_sz: usize) -> Option<usize> {
+        match self {
+            BlockOp::Read { offset: _, data } => {
+                Some(ceiling_div!(data.len(), iop_sz))
+            }
+            BlockOp::Write { offset: _, data } => {
+                Some(ceiling_div!(data.len(), iop_sz))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn consumes_iops(&self) -> bool {
+        match self {
+            BlockOp::Read { offset: _, data: _ } => true,
+            BlockOp::Write { offset: _, data: _ } => true,
+            _ => false,
+        }
+    }
+}
+
+#[test]
+fn test_return_iops() {
+    const IOP_SZ: usize = 16000;
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(1),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(8000),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(16000),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(16001),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
+}
+
 /*
  * This structure is for tracking the underlying storage side operations
  * that map to a single Guest IO request. G to S stands for Guest
@@ -4445,6 +4511,15 @@ pub struct Guest {
      * required downstairs operations are completed.
      */
     guest_work: Mutex<GuestWork>,
+
+    /*
+     * Setting an IOP limit means that the rate at which block reqs are
+     * pulled off will be limited. No setting means they are sent right
+     * away.
+     */
+    iop_tokens: Mutex<usize>,
+    bytes_per_iop: Option<usize>,
+    iop_limit: Option<usize>,
 }
 
 /*
@@ -4471,7 +4546,22 @@ impl Guest {
                 next_gw_id: 1,
                 completed: AllocRingBuffer::with_capacity(2048),
             }),
+            iop_tokens: Mutex::new(0),
+            bytes_per_iop: None,
+            iop_limit: None,
         }
+    }
+
+    pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
+        self.bytes_per_iop = Some(bytes_per_iop);
+        self.iop_limit = Some(limit);
+    }
+
+    /*
+     * Return IOPs per second
+     */
+    pub fn get_iop_limit(&self) -> Option<usize> {
+        self.iop_limit
     }
 
     /*
@@ -4491,11 +4581,69 @@ impl Guest {
      */
     async fn recv(&self) -> BlockReq {
         loop {
-            if let Some(req) = self.reqs.lock().unwrap().pop_front() {
+            if let Some(req) = self.consume_req() {
                 return req;
             }
+
             self.notify.notified().await;
         }
+    }
+
+    /*
+     * Consume one request off queue if it is under IOP limit
+     */
+    fn consume_req(&self) -> Option<BlockReq> {
+        let mut reqs = self.reqs.lock().unwrap();
+
+        // TODO exposing queue depth here would be a good metric for disk
+        // contention
+
+        // Check if no requests are queued
+        if reqs.is_empty() {
+            return None;
+        }
+
+        let req_ref: &BlockReq = reqs.front().unwrap();
+
+        // Consume right away if
+        // - there's no IOP limit, or
+        // - if op doesn't consume IOPs
+        if self.iop_limit.is_none() || !req_ref.op.consumes_iops() {
+            return Some(reqs.pop_front().unwrap());
+        }
+
+        let iop_limit = self.iop_limit.unwrap();
+        let bytes_per_iops = self.bytes_per_iop.unwrap();
+
+        let req_iops = req_ref.op.iops(bytes_per_iops).unwrap();
+
+        // Consume if the number of IOPs used by this block req is below the
+        // limit
+        let mut iop_tokens = self.iop_tokens.lock().unwrap();
+        if (req_iops + *iop_tokens) <= iop_limit {
+            *iop_tokens += req_iops;
+            return Some(reqs.pop_front().unwrap());
+        }
+
+        // Otherwise, don't consume this block req
+        None
+    }
+
+    /*
+     * IOPs are IO operations per second, so leak tokens to allow that
+     * through.
+     */
+    pub fn leak_iop_tokens(&self, tokens: usize) {
+        let mut iop_tokens = self.iop_tokens.lock().unwrap();
+
+        if tokens > *iop_tokens {
+            *iop_tokens = 0;
+        } else {
+            *iop_tokens -= tokens;
+        }
+
+        // Notify to wake up recv now that there may be room.
+        self.notify.notify_one();
     }
 
     pub fn byte_offset_to_block(
@@ -5057,6 +5205,22 @@ async fn up_listen(
     println!("Wait for all three downstairs to come online");
     let mut lastcast = 1;
 
+    /*
+     * If this guest was configured with an IOPs limit, one branch of the loop
+     * below has to leak tokens. Leak every IOP_LEAK_MS milliseconds.
+     */
+    let guest_has_iop_limit = up.guest.get_iop_limit().is_some();
+    const IOP_LEAK_MS: usize = 1000;
+
+    let (iop_leak_tick, mut iop_leak_time) =
+        if up.guest.get_iop_limit().is_some() {
+            let tick = tokio::time::Duration::from_millis(IOP_LEAK_MS as u64);
+            let deadline = Instant::now().checked_add(tick).unwrap();
+            (Some(tick), deadline)
+        } else {
+            (None, deadline_secs(1))
+        };
+
     stat_update(up, "start");
     let mut flush_check = deadline_secs(5);
     let mut show_work_interval = deadline_secs(5);
@@ -5091,6 +5255,16 @@ async fn up_listen(
             }
             req = up.guest.recv() => {
                 process_new_io(up, &dst, req, &mut lastcast).await;
+            }
+            _ = sleep_until(iop_leak_time), if guest_has_iop_limit => {
+                let tokens =
+                    up.guest.get_iop_limit().unwrap() / (1000 / IOP_LEAK_MS);
+
+                up.guest.leak_iop_tokens(tokens);
+                iop_leak_time =
+                    Instant::now()
+                        .checked_add(iop_leak_tick.unwrap())
+                        .unwrap();
             }
             _ = sleep_until(flush_check) => {
                 /*
@@ -5142,6 +5316,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     }
 
     let lossy = opt.lossy;
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks

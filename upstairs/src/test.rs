@@ -3096,4 +3096,111 @@ mod test {
         let err = job.state.get(&0).unwrap();
         assert!(matches!(err, IOState::Error(CrucibleError::HashMismatch)));
     }
+
+    #[test]
+    fn test_no_iop_limit() -> Result<()> {
+        let guest = Guest::new();
+        guest.set_active();
+
+        assert!(guest.consume_req().is_none());
+
+        // Don't use guest.read, that will send a block size query that will
+        // never be answered.
+        let _ = guest.send(BlockOp::Read {
+            offset: Block::new_512(0),
+            data: Buffer::new(1),
+        });
+        let _ = guest.send(BlockOp::Read {
+            offset: Block::new_512(0),
+            data: Buffer::new(8000),
+        });
+        let _ = guest.send(BlockOp::Read {
+            offset: Block::new_512(0),
+            data: Buffer::new(16000),
+        });
+
+        // With no IOP limit, all requests are consumed immediately
+        assert!(guest.consume_req().is_some());
+        assert!(guest.consume_req().is_some());
+        assert!(guest.consume_req().is_some());
+
+        assert!(guest.consume_req().is_none());
+
+        // If no IOP limit set, don't track it
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_iop_limit() -> Result<()> {
+        let mut guest = Guest::new();
+        guest.set_active();
+        guest.set_iop_limit(16000, 2);
+
+        assert!(guest.consume_req().is_none());
+
+        // Don't use guest.read, that will send a block size query that will
+        // never be answered.
+        let _ = guest.send(BlockOp::Read {
+            offset: Block::new_512(0),
+            data: Buffer::new(1),
+        });
+        let _ = guest.send(BlockOp::Read {
+            offset: Block::new_512(0),
+            data: Buffer::new(8000),
+        });
+        let _ = guest.send(BlockOp::Read {
+            offset: Block::new_512(0),
+            data: Buffer::new(16000),
+        });
+
+        // First two reads succeed
+        assert!(guest.consume_req().is_some());
+        assert!(guest.consume_req().is_some());
+
+        // Next cannot be consumed until there's available IOP tokens so it
+        // remains in the queue.
+        assert!(guest.consume_req().is_none());
+        assert!(!guest.reqs.lock().unwrap().is_empty());
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 2);
+
+        // Replenish one token, meaning next read can be consumed
+        guest.leak_iop_tokens(1);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 1);
+
+        assert!(guest.consume_req().is_some());
+        assert!(guest.reqs.lock().unwrap().is_empty());
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 2);
+
+        guest.leak_iop_tokens(2);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+
+        guest.leak_iop_tokens(16000);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_flush_does_not_consume_iops() -> Result<()> {
+        let mut guest = Guest::new();
+        guest.set_active();
+
+        // Set 0 as IOP limit
+        guest.set_iop_limit(16000, 0);
+        assert!(guest.consume_req().is_none());
+
+        let _ = guest.send(BlockOp::Flush);
+        let _ = guest.send(BlockOp::Flush);
+        let _ = guest.send(BlockOp::Flush);
+
+        assert!(guest.consume_req().is_some());
+        assert!(guest.consume_req().is_some());
+        assert!(guest.consume_req().is_some());
+
+        assert!(guest.consume_req().is_none());
+
+        Ok(())
+    }
 }
