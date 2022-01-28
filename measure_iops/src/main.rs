@@ -110,10 +110,6 @@ fn main() -> Result<()> {
 
     guest.activate(opt.gen)?;
 
-    let mut io_operations_sent = 0;
-    let mut io_operation_time = Instant::now();
-    let mut iops: Vec<f32> = vec![];
-
     let mut rng = rand::thread_rng();
 
     let bsz: u64 = guest.query_block_size()?;
@@ -130,6 +126,10 @@ fn main() -> Result<()> {
     } else {
         1
     };
+
+    let mut io_operations_sent = 0;
+    let mut io_operation_time = Instant::now();
+    let mut iops: Vec<f32> = vec![];
 
     'outer: loop {
         let mut waiters = Vec::with_capacity(io_depth);
