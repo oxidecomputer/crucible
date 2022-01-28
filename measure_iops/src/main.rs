@@ -127,6 +127,21 @@ fn main() -> Result<()> {
         1
     };
 
+    let write_buffers: Vec<Bytes> =
+        (0..io_depth)
+            .map(|_|
+                Bytes::from(
+                    (0..io_size)
+                        .map(|_| rng.sample(rand::distributions::Standard))
+                        .collect::<Vec<u8>>()
+                )
+            ).collect();
+
+    let read_buffers: Vec<Buffer> =
+        (0..io_depth)
+            .map(|_| Buffer::new(io_size as usize))
+            .collect();
+
     let mut io_operations_sent = 0;
     let mut io_operation_time = Instant::now();
     let mut iops: Vec<f32> = vec![];
@@ -134,24 +149,22 @@ fn main() -> Result<()> {
     'outer: loop {
         let mut waiters = Vec::with_capacity(io_depth);
 
-        for _ in 0..io_depth {
+        for i in 0..io_depth {
             let offset: u64 =
                 rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz as u64);
 
             if rng.gen::<bool>() {
-                let vec: Vec<u8> = (0..io_size)
-                    .map(|_| rng.sample(rand::distributions::Standard))
-                    .collect();
-
-                let waiter = guest
-                    .write_to_byte_offset(offset * bsz, Bytes::from(vec))?;
+                let waiter = guest.write_to_byte_offset(
+                    offset * bsz,
+                    write_buffers[i].clone(),
+                )?;
 
                 waiters.push(waiter);
             } else {
-                let read_buffer = Buffer::new(io_size as usize);
-
-                let waiter =
-                    guest.read_from_byte_offset(offset * bsz, read_buffer)?;
+                let waiter = guest.read_from_byte_offset(
+                    offset * bsz,
+                    read_buffers[i].clone(),
+                )?;
 
                 waiters.push(waiter);
             }
