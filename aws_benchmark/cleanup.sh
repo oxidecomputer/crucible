@@ -2,7 +2,7 @@
 set -o errexit
 set -o pipefail
 
-source <(cat ./args.sh);
+source ./args.sh
 
 ansible-playbook -i inventory cleanup.yml -e user="${user}" -e os="${OS}" || true
 

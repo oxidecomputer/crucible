@@ -2,7 +2,7 @@
 set -o errexit
 set -o pipefail
 
-source <(cat ./args.sh);
+source ./args.sh
 
 cleanup() {
     ./cleanup.sh "${OS}" "${REGION}"

@@ -1,3 +1,5 @@
+#!/bin/bash
+
 if [[ ${#} -lt 2 ]];
 then
     echo "usage: <OS> <REGION>"
@@ -21,7 +23,7 @@ OS="${1}"
 REGION="${2}"
 
 # Prevent re-entry from hitting AWS api again
-if [[ ! -z "${user}" ]];
+if [[ -n "${user}" ]];
 then
     return
 fi
@@ -37,9 +39,9 @@ case "${OS}" in
                  | tail -n1 | awk '{ print $1 }')
         echo "ubuntu ami: ${ami_id} $(aws ec2 describe-images --region "${REGION}" --image-id "${ami_id}" --query 'Images[*].[Name]' --output text)"
 
-        instance_type="m5d.2xlarge"
-        user_data_path="ubuntu_user_data.sh"
-        user="ubuntu"
+        export instance_type="m5d.2xlarge"
+        export user_data_path="ubuntu_user_data.sh"
+        export user="ubuntu"
         ;;
 
     "helios")
@@ -53,9 +55,9 @@ case "${OS}" in
 
         # TODO: rpz's ena patch for m5d? need an updated helios-full-* image.
         # need: 6f443ebc1fb4fec01d6e8fa8ca4648182ed215bb, so helios version at least 20793
-        instance_type="m4.2xlarge"
-        user_data_path="helios_user_data.sh"
-        user="helios"
+        export instance_type="m4.2xlarge"
+        export user_data_path="helios_user_data.sh"
+        export user="helios"
         ;;
 
     *)

@@ -2,7 +2,7 @@
 set -o errexit
 set -o pipefail
 
-source <(cat ./args.sh);
+source ./args.sh
 
 # re-upload + build crucible code and bench.sh for rerun
 ansible-playbook -i inventory install_crucible.yml -e user="${user}" -e os="${OS}" -t rerun

@@ -2,7 +2,7 @@
 set -o errexit
 set -o pipefail
 
-source <(cat ./args.sh);
+source ./args.sh;
 
 if [[ ! -e "${HOME}/.ssh/id_ed25519.pub" ]];
 then
