@@ -127,20 +127,19 @@ fn main() -> Result<()> {
         1
     };
 
-    let write_buffers: Vec<Bytes> =
-        (0..io_depth)
-            .map(|_|
-                Bytes::from(
-                    (0..io_size)
-                        .map(|_| rng.sample(rand::distributions::Standard))
-                        .collect::<Vec<u8>>()
-                )
-            ).collect();
+    let write_buffers: Vec<Bytes> = (0..io_depth)
+        .map(|_| {
+            Bytes::from(
+                (0..io_size)
+                    .map(|_| rng.sample(rand::distributions::Standard))
+                    .collect::<Vec<u8>>(),
+            )
+        })
+        .collect();
 
-    let read_buffers: Vec<Buffer> =
-        (0..io_depth)
-            .map(|_| Buffer::new(io_size as usize))
-            .collect();
+    let read_buffers: Vec<Buffer> = (0..io_depth)
+        .map(|_| Buffer::new(io_size as usize))
+        .collect();
 
     let mut io_operations_sent = 0;
     let mut io_operation_time = Instant::now();
