@@ -45,6 +45,9 @@ pub struct Opt {
 
     #[structopt(long)]
     io_depth: Option<usize>,
+
+    #[structopt(long)]
+    bw_limit_in_bytes: Option<usize>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -103,6 +106,10 @@ fn main() -> Result<()> {
         guest.set_iop_limit(16 * 1024 * 1024, iop_limit);
     }
 
+    if let Some(bw_limit) = opt.bw_limit_in_bytes {
+        guest.set_bw_limit(bw_limit);
+    }
+
     let guest = Arc::new(guest);
 
     runtime.spawn(up_main(crucible_opts, guest.clone()));
@@ -142,8 +149,10 @@ fn main() -> Result<()> {
         .collect();
 
     let mut io_operations_sent = 0;
+    let mut bw_consumed = 0;
     let mut io_operation_time = Instant::now();
     let mut iops: Vec<f32> = vec![];
+    let mut bws: Vec<f32> = vec![];
 
     'outer: loop {
         let mut waiters = Vec::with_capacity(io_depth);
@@ -172,22 +181,23 @@ fn main() -> Result<()> {
         for mut waiter in waiters {
             waiter.block_wait()?;
             io_operations_sent += ceiling_div!(io_size, 16 * 1024 * 1024);
+            bw_consumed += io_size;
 
             let diff = io_operation_time.elapsed();
 
             if diff > Duration::from_secs(1) {
-                let total_io_operations_sent: f32 = io_operations_sent as f32;
-
                 let fractional_seconds: f32 =
                     diff.as_secs() as f32 + (diff.subsec_nanos() as f32 / 1e9);
 
-                iops.push(total_io_operations_sent / fractional_seconds);
+                iops.push(io_operations_sent as f32 / fractional_seconds);
+                bws.push(bw_consumed as f32 / fractional_seconds);
 
                 if iops.len() >= opt.samples {
                     break 'outer;
                 }
 
                 io_operations_sent = 0;
+                bw_consumed = 0;
                 io_operation_time = Instant::now();
             }
         }
@@ -222,6 +232,20 @@ fn main() -> Result<()> {
         iops.last().unwrap(),
     );
 
+    println!("BW: {:?}", bws);
+    println!(
+        "BW mean {} stddev {}",
+        statistical::mean(&bws),
+        statistical::standard_deviation(&bws, None),
+    );
+
+    bws.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    println!(
+        "BW min {} max {}",
+        bws.first().unwrap(),
+        bws.last().unwrap(),
+    );
 
     Ok(())
 }
