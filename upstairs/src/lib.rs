@@ -22,7 +22,8 @@ pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::{sleep_until, Instant};
@@ -35,6 +36,7 @@ use aes_gcm_siv::aead::{AeadInPlace, NewAead};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
+mod info;
 mod mend;
 mod pseudo_file;
 mod test;
@@ -68,6 +70,7 @@ pub struct CrucibleOpts {
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
+    pub info: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -2198,7 +2201,7 @@ impl EncryptionContext {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+#[derive(Debug, Copy, Clone, JsonSchema, PartialEq, Serialize, Deserialize)]
 enum UpState {
     /*
      * The upstairs is just coming online.  We can send IO on behalf of
@@ -2325,6 +2328,7 @@ impl Upstairs {
             cert_pem: None,
             key_pem: None,
             root_cert_pem: None,
+            info: None,
         };
         Self::new(
             &opts,
@@ -5230,6 +5234,14 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     drop(ds_done_tx);
     drop(ds_status_tx);
 
+    // If requested, start the info server on the given address:port
+    if let Some(info) = opt.info {
+        let upi = Arc::clone(&up);
+        tokio::spawn(async move {
+            let r = info::start_info(&upi, info).await;
+            println!("Info task finished with {:?}", r);
+        });
+    }
     /*
      * The final step is to call this function to wait for our downstairs
      * tasks to connect to their respective downstairs instance.

@@ -31,6 +31,10 @@ pub struct Opt {
     key_pem: Option<String>,
     #[structopt(long)]
     root_cert_pem: Option<String>,
+
+    // Start upstairs info server
+    #[structopt(long)]
+    info: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -139,6 +143,7 @@ fn main() -> Result<()> {
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
+        info: opt.info,
     };
 
     let runtime = Builder::new_multi_thread()
