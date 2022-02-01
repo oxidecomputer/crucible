@@ -4113,12 +4113,8 @@ impl BlockOp {
     // Return the total size of this BlockOp
     pub fn sz(&self) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => {
-                Some(data.len())
-            }
-            BlockOp::Write { offset: _, data } => {
-                Some(data.len())
-            }
+            BlockOp::Read { offset: _, data } => Some(data.len()),
+            BlockOp::Write { offset: _, data } => Some(data.len()),
             _ => None,
         }
     }
@@ -4535,8 +4531,8 @@ pub struct Guest {
     iop_limit: Option<usize>,
 
     /*
-     * Setting a bandwidth limit will also limit the rate at which block reqs
-     * are pulled off the queue.
+     * Setting a bandwidth limit will also limit the rate at which block
+     * reqs are pulled off the queue.
      */
     bw_tokens: Mutex<usize>, // bytes
     bw_limit: Option<usize>, // bytes per second
@@ -4639,10 +4635,10 @@ impl Guest {
         let req_ref: &BlockReq = reqs.front().unwrap();
 
         // Check if we can consume right away
-        let iop_limit_applies
-            = self.iop_limit.is_some() && req_ref.op.consumes_iops();
-        let bw_limit_applies
-            = self.bw_limit.is_some() && req_ref.op.sz().is_some();
+        let iop_limit_applies =
+            self.iop_limit.is_some() && req_ref.op.consumes_iops();
+        let bw_limit_applies =
+            self.bw_limit.is_some() && req_ref.op.sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return Some(reqs.pop_front().unwrap());
@@ -5299,8 +5295,9 @@ async fn up_listen(
     let mut lastcast = 1;
 
     /*
-     * If this guest was configured with an IOPs or BW limit, one branch of the
-     * loop below has to leak tokens. Leak every LEAK_MS milliseconds.
+     * If this guest was configured with an IOPs or BW limit, one branch of
+     * the loop below has to leak tokens. Leak every LEAK_MS
+     * milliseconds.
      */
     const LEAK_MS: usize = 1000;
 

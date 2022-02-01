@@ -3208,7 +3208,7 @@ mod test {
     fn test_set_bw_limit() -> Result<()> {
         let mut guest = Guest::new();
         guest.set_active();
-        guest.set_bw_limit(1024*1024); // 1 KiB
+        guest.set_bw_limit(1024 * 1024); // 1 KiB
 
         assert!(guest.consume_req().is_none());
 
@@ -3216,15 +3216,15 @@ mod test {
         // never be answered.
         let _ = guest.send(BlockOp::Read {
             offset: Block::new_512(0),
-            data: Buffer::new(1024*1024/2),
+            data: Buffer::new(1024 * 1024 / 2),
         });
         let _ = guest.send(BlockOp::Read {
             offset: Block::new_512(0),
-            data: Buffer::new(1024*1024/2),
+            data: Buffer::new(1024 * 1024 / 2),
         });
         let _ = guest.send(BlockOp::Read {
             offset: Block::new_512(0),
-            data: Buffer::new(1024*1024/2),
+            data: Buffer::new(1024 * 1024 / 2),
         });
 
         // First two reads succeed
@@ -3235,20 +3235,20 @@ mod test {
         // remains in the queue.
         assert!(guest.consume_req().is_none());
         assert!(!guest.reqs.lock().unwrap().is_empty());
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024*1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
 
         // Replenish enough tokens, meaning next read can be consumed
-        guest.leak_bw_tokens(1024*1024/2);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024*1024/2);
+        guest.leak_bw_tokens(1024 * 1024 / 2);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024 / 2);
 
         assert!(guest.consume_req().is_some());
         assert!(guest.reqs.lock().unwrap().is_empty());
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024*1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
 
-        guest.leak_bw_tokens(1024*1024);
+        guest.leak_bw_tokens(1024 * 1024);
         assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
-        guest.leak_bw_tokens(1024*1024*1024);
+        guest.leak_bw_tokens(1024 * 1024 * 1024);
         assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
         Ok(())
@@ -3305,17 +3305,17 @@ mod test {
 
         // Assert we've hit the BW limit before IOPS
         assert_eq!(*guest.iop_tokens.lock().unwrap(), 438); // 437.5 rounded up
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 7000*1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 7000 * 1024);
 
         guest.leak_iop_tokens(438);
-        guest.leak_bw_tokens(7000*1024);
+        guest.leak_bw_tokens(7000 * 1024);
 
         assert!(guest.consume_req().is_some());
         assert!(guest.reqs.lock().unwrap().is_empty());
 
         // Back to zero
         guest.leak_iop_tokens(438);
-        guest.leak_bw_tokens(7000*1024);
+        guest.leak_bw_tokens(7000 * 1024);
 
         assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
         assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
@@ -3337,11 +3337,11 @@ mod test {
 
         // Assert we've hit the IOPS limit
         assert_eq!(*guest.iop_tokens.lock().unwrap(), 500);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 500*1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 500 * 1024);
 
         // Back to zero
         guest.leak_iop_tokens(500);
-        guest.leak_bw_tokens(500*1024);
+        guest.leak_bw_tokens(500 * 1024);
         guest.reqs.lock().unwrap().clear();
 
         assert!(guest.reqs.lock().unwrap().is_empty());
@@ -3385,15 +3385,15 @@ mod test {
         let mut guest = Guest::new();
         guest.set_active();
 
-        guest.set_iop_limit(1024*1024/2, 10); // 1 IOP is half a KiB
-        guest.set_bw_limit(1024*1024); // 1 KiB
+        guest.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
+        guest.set_bw_limit(1024 * 1024); // 1 KiB
         assert!(guest.consume_req().is_none());
 
         // Sending an IO of 10 KiB is larger than the bandwidth limit and
         // represents 20 IOPs, larger than the IOP limit.
         let _ = guest.send(BlockOp::Read {
             offset: Block::new_512(0),
-            data: Buffer::new(10*1024*1024),
+            data: Buffer::new(10 * 1024 * 1024),
         });
         let _ = guest.send(BlockOp::Read {
             offset: Block::new_512(0),
@@ -3412,24 +3412,24 @@ mod test {
         assert!(guest.consume_req().is_none());
 
         assert_eq!(*guest.iop_tokens.lock().unwrap(), 20);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 10*1024*1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 10 * 1024 * 1024);
 
         // Bandwidth trigger is going to be larger and need more leaking to get
         // down to a point where the zero sized IO can fire.
         for _ in 0..9 {
             guest.leak_iop_tokens(10);
-            guest.leak_bw_tokens(1024*1024);
+            guest.leak_bw_tokens(1024 * 1024);
 
             assert!(guest.consume_req().is_none());
         }
 
         assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024*1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
 
         assert!(guest.consume_req().is_none());
 
         guest.leak_iop_tokens(10);
-        guest.leak_bw_tokens(1024*1024);
+        guest.leak_bw_tokens(1024 * 1024);
 
         // We've leaked 10 KiB worth, it should fire now!
         assert!(guest.consume_req().is_some());
