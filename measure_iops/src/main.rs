@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     let mut guest = Guest::new();
 
     if let Some(iop_limit) = opt.iop_limit {
-        guest.set_iop_limit(16000, iop_limit);
+        guest.set_iop_limit(16 * 1024 * 1024, iop_limit);
     }
 
     let guest = Arc::new(guest);
@@ -171,7 +171,7 @@ fn main() -> Result<()> {
 
         for mut waiter in waiters {
             waiter.block_wait()?;
-            io_operations_sent += ceiling_div!(io_size, 16000);
+            io_operations_sent += ceiling_div!(io_size, 16 * 1024 * 1024);
 
             let diff = io_operation_time.elapsed();
 
