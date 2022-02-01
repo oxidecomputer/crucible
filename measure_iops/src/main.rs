@@ -207,16 +207,21 @@ fn main() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
 
-    iops.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
     println!("IOPS: {:?}", iops);
     println!(
-        "IOPS min {} max {} mean {} stddev {}",
-        iops.first().unwrap(),
-        iops.last().unwrap(),
+        "IOPS mean {} stddev {}",
         statistical::mean(&iops),
         statistical::standard_deviation(&iops, None),
     );
+
+    iops.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    println!(
+        "IOPS min {} max {}",
+        iops.first().unwrap(),
+        iops.last().unwrap(),
+    );
+
 
     Ok(())
 }
