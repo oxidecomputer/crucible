@@ -16,8 +16,8 @@ use std::net::{TcpListener, TcpStream as NetTcpStream};
  * into Guest work ops.
  */
 
-fn handle_nbd_client(
-    cpf: &mut crucible::CruciblePseudoFile,
+fn handle_nbd_client<T: crucible::BlockIO>(
+    cpf: &mut crucible::CruciblePseudoFile<T>,
     mut stream: NetTcpStream,
 ) -> Result<()> {
     let e = Export {
@@ -103,10 +103,11 @@ fn main() -> Result<()> {
 
     // NBD server
 
-    let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
-    let mut cpf = crucible::CruciblePseudoFile::from_guest(guest)?;
+    guest.activate(opt.gen)?;
+    let volume = Volume::from_guest(guest)?;
+    let mut cpf = crucible::CruciblePseudoFile::from(Arc::new(volume))?;
 
-    cpf.activate(opt.gen)?;
+    let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
 
     // sent to NBD client during handshake through Export struct
     println!("NBD advertised size as {} bytes", cpf.sz());

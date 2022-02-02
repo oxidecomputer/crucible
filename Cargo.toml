@@ -12,4 +12,5 @@ members = [
 	"scope",
 	"smf",
 	"upstairs",
+	"volume_integration_tests",
 ]

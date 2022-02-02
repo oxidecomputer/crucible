@@ -129,7 +129,7 @@ fn main() -> Result<()> {
     }));
 
     // Create N CruciblePseudoFiles to test activation handoff.
-    let mut cpfs: Vec<crucible::CruciblePseudoFile> =
+    let mut cpfs: Vec<crucible::CruciblePseudoFile<Guest>> =
         Vec::with_capacity(opt.num_upstairs);
 
     for _ in 0..opt.num_upstairs {
@@ -144,7 +144,7 @@ fn main() -> Result<()> {
         runtime.spawn(up_main(crucible_opts.clone(), guest.clone()));
         println!("Crucible runtime is spawned");
 
-        cpfs.push(crucible::CruciblePseudoFile::from_guest(guest)?);
+        cpfs.push(crucible::CruciblePseudoFile::from(guest)?);
     }
 
     use rand::Rng;
@@ -157,11 +157,7 @@ fn main() -> Result<()> {
     println!("Handing off to CPF {}", cpf_idx);
     cpfs[cpf_idx].activate(generation_number)?;
     generation_number += 1;
-    println!(
-        "Handed off to CPF {} {:?}",
-        cpf_idx,
-        cpfs[cpf_idx].upstairs_uuid()
-    );
+    println!("Handed off to CPF {} {:?}", cpf_idx, cpfs[cpf_idx].uuid());
 
     if opt.verify_isolation {
         println!("clearing...");
@@ -191,7 +187,7 @@ fn main() -> Result<()> {
             cpf.activate(generation_number)?;
             generation_number += 1;
 
-            println!("Handed off to CPF {} {:?}", cpf_idx, cpf.upstairs_uuid());
+            println!("Handed off to CPF {} {:?}", cpf_idx, cpf.uuid());
 
             cpf
         } else {

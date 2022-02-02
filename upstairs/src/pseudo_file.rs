@@ -15,7 +15,7 @@ pub struct IOSpan {
     offset: u64,
     sz: u64,
 
-    // Block and Guest details
+    // Block and details
     block_size: u64,
     phase: u64,
     buffer: Buffer,
@@ -65,12 +65,12 @@ impl IOSpan {
         &self.buffer
     }
 
-    #[instrument]
-    pub fn read_affected_blocks_from_guest(
+    #[instrument(skip(block_io))]
+    pub fn read_affected_blocks_from_volume<T: BlockIO>(
         &mut self,
-        guest: &Guest,
+        block_io: &Arc<T>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        guest.read(
+        block_io.read(
             Block::new(
                 self.affected_block_numbers[0],
                 self.block_size.trailing_zeros(),
@@ -79,13 +79,13 @@ impl IOSpan {
         )
     }
 
-    #[instrument]
-    pub fn write_affected_blocks_to_guest(
+    #[instrument(skip(block_io))]
+    pub fn write_affected_blocks_to_volume<T: BlockIO>(
         &self,
-        guest: &Guest,
+        block_io: &Arc<T>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         let bytes = Bytes::from(self.buffer.as_vec().clone());
-        guest.write(
+        block_io.write(
             Block::new(
                 self.affected_block_numbers[0],
                 self.block_size.trailing_zeros(),
@@ -114,28 +114,28 @@ impl IOSpan {
 }
 
 /*
- * Wrap a Crucible guest and implement Read + Write + Seek traits.
+ * Wrap a Crucible volume and implement Read + Write + Seek traits.
  */
-pub struct CruciblePseudoFile {
+pub struct CruciblePseudoFile<T: BlockIO> {
     active: bool,
-    guest: Arc<Guest>,
+    block_io: Arc<T>,
     offset: u64,
     sz: u64,
     block_size: u64,
     rmw_lock: RwLock<bool>,
-    upstairs_uuid: Uuid,
+    uuid: Uuid,
 }
 
-impl CruciblePseudoFile {
-    pub fn from_guest(guest: Arc<Guest>) -> Result<Self, CrucibleError> {
+impl<T: BlockIO> CruciblePseudoFile<T> {
+    pub fn from(block_io: Arc<T>) -> Result<Self, CrucibleError> {
         Ok(CruciblePseudoFile {
             active: false,
-            guest,
+            block_io,
             offset: 0,
             sz: 0,
             block_size: 0,
             rmw_lock: RwLock::new(false),
-            upstairs_uuid: Uuid::default(),
+            uuid: Uuid::default(),
         })
     }
 
@@ -148,11 +148,21 @@ impl CruciblePseudoFile {
     }
 
     pub fn activate(&mut self, gen: u64) -> Result<(), CrucibleError> {
-        self.guest.activate(gen)?;
+        if let Err(e) = self.block_io.activate(gen) {
+            match e {
+                CrucibleError::UpstairsAlreadyActive => {
+                    // underlying block io is already active, but pseudo file
+                    // needs fields below populated
+                }
+                _ => {
+                    return Err(e);
+                }
+            }
+        }
 
-        self.sz = self.guest.query_total_size()? as u64;
-        self.block_size = self.guest.query_block_size()? as u64;
-        self.upstairs_uuid = self.guest.query_upstairs_uuid()?;
+        self.sz = self.block_io.total_size()?;
+        self.block_size = self.block_io.get_block_size()?;
+        self.uuid = self.block_io.get_uuid()?;
 
         self.active = true;
 
@@ -160,11 +170,11 @@ impl CruciblePseudoFile {
     }
 
     pub fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        self.guest.show_work()
+        self.block_io.show_work()
     }
 
-    pub fn upstairs_uuid(&self) -> Uuid {
-        self.upstairs_uuid
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
     }
 }
 
@@ -172,7 +182,7 @@ impl CruciblePseudoFile {
  * The Read + Write impls here translate arbitrary sized operations into
  * calls for the underlying Crucible API.
  */
-impl Read for CruciblePseudoFile {
+impl<T: BlockIO> Read for CruciblePseudoFile<T> {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         if !self.active {
             return Err(std::io::Error::new(
@@ -185,7 +195,7 @@ impl Read for CruciblePseudoFile {
     }
 }
 
-impl Write for CruciblePseudoFile {
+impl<T: BlockIO> Write for CruciblePseudoFile<T> {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
         if !self.active {
             return Err(std::io::Error::new(
@@ -209,7 +219,7 @@ impl Write for CruciblePseudoFile {
     }
 }
 
-impl Seek for CruciblePseudoFile {
+impl<T: BlockIO> Seek for CruciblePseudoFile<T> {
     fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
         // TODO: let guard = self.rmw_lock.write().unwrap() ?
         // TODO: does not check against block device size
@@ -244,14 +254,15 @@ impl Seek for CruciblePseudoFile {
     }
 }
 
-impl CruciblePseudoFile {
+impl<T: BlockIO> CruciblePseudoFile<T> {
     fn _read(&mut self, buf: &mut [u8]) -> Result<usize, CrucibleError> {
         let _guard = self.rmw_lock.read().unwrap();
 
         let mut span =
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
-        let mut waiter = span.read_affected_blocks_from_guest(&self.guest)?;
+        let mut waiter =
+            span.read_affected_blocks_from_volume(&self.block_io)?;
         waiter.block_wait()?;
 
         span.read_from_blocks_into_buffer(buf);
@@ -282,13 +293,13 @@ impl CruciblePseudoFile {
             let _guard = self.rmw_lock.write().unwrap();
 
             let mut waiter =
-                span.read_affected_blocks_from_guest(&self.guest)?;
+                span.read_affected_blocks_from_volume(&self.block_io)?;
             waiter.block_wait()?;
 
             span.write_from_buffer_into_blocks(buf);
 
             let mut waiter =
-                span.write_affected_blocks_to_guest(&self.guest)?;
+                span.write_affected_blocks_to_volume(&self.block_io)?;
             waiter.block_wait()?;
         } else {
             let _guard = self.rmw_lock.read().unwrap();
@@ -298,7 +309,7 @@ impl CruciblePseudoFile {
                 self.block_size.trailing_zeros(),
             );
             let bytes = BytesMut::from(buf);
-            let mut waiter = self.guest.write(offset, bytes.freeze())?;
+            let mut waiter = self.block_io.write(offset, bytes.freeze())?;
             waiter.block_wait()?;
         }
 
@@ -311,7 +322,7 @@ impl CruciblePseudoFile {
     fn _flush(&mut self) -> Result<(), CrucibleError> {
         let _guard = self.rmw_lock.write().unwrap();
 
-        let mut waiter = self.guest.flush()?;
+        let mut waiter = self.block_io.flush()?;
         waiter.block_wait()?;
 
         Ok(())
