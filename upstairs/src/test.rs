@@ -2958,7 +2958,7 @@ mod test {
     #[test]
     fn bad_hash_means_read_error() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
@@ -3020,7 +3020,7 @@ mod test {
     #[test]
     fn bad_hash_means_read_error_encrypted() {
         let upstairs = Upstairs::default();
-        upstairs.set_active();
+        upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
 
         let next_id = work.next_id();
