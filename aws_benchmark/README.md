@@ -22,3 +22,12 @@ Any error results in cleanup being performed. Add an `echo` to the terraform
 apply -destroy command in cleanup() if you want to debug further, but make sure
 to clean up your AWS resources!
 
+Edit bench.sh to modify which program is run as part of the benchmark.
+
+To individually run steps:
+
+* ./bring_up_resources.sh will bring up AWS resources and run ansible to
+  install everything that's required
+* ./run_benchmark.sh will run a warm up plus benchmarking step
+* ./cleanup.sh will deprovision all AWS resources
+

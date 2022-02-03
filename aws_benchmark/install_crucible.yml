@@ -25,6 +25,8 @@
         rsync_opts:
           - '--exclude=".git"'
           - '--exclude="target"'
+      tags:
+        - rerun
 
     - name: build ubuntu pre-reqs
       become: yes
@@ -49,8 +51,8 @@
         cmd: "/home/{{ user }}/.cargo/bin/cargo build --release"
         chdir: /opt/crucible/
         executable: /bin/bash
-      args:
-        creates: /opt/crucible/target/release/crucible-downstairs
+      tags:
+        - rerun
 
 - hosts: upstairs
   user: "{{ user }}"
@@ -59,6 +61,8 @@
         src: bench.sh
         dest: /opt/crucible/bench.sh
         mode: u+rwx
+      tags:
+        - rerun
 
 - hosts: downstairs
   user: "{{ user }}"

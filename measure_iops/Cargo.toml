@@ -1,0 +1,15 @@
+[package]
+name = "measure-iops"
+version = "0.0.1"
+license = "MPL-2.0"
+edition = "2018"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+crucible = { path = "../upstairs" }
+crucible-common = { path = "../common" }
+structopt = "0.3"
+rand = "0.8.4"
+tokio = { version = "1.15.0", features = ["full"] }
+statistical = "1.0.0"

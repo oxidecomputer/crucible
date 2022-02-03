@@ -13,7 +13,7 @@ As this is under active development, this space is subject to change.
 The steps below still work, but may give slightly different output as
 more code is written.
 
-To give it a burl, first build the workspace with `cargo build`.  Then run
+To give it a whirl, first build the workspace with `cargo build`.  Then run
 a set of Downstairs processes:
 
 To create a downstairs region, use the `create` subcommand.

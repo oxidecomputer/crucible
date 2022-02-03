@@ -4078,6 +4078,81 @@ enum BlockOp {
     ShowWork { data: Arc<Mutex<WQCounts>> },
 }
 
+macro_rules! ceiling_div {
+    ($a: expr, $b: expr) => {
+        ($a + ($b - 1)) / $b
+    };
+}
+
+impl BlockOp {
+    /*
+     * Compute number of IO operations represented by this BlockOp, rounding
+     * up. For example, if IOP size is 16k:
+     *
+     *   A read of 8k is 1 IOP
+     *   A write of 16k is 1 IOP
+     *   A write of 16001b is 2 IOPs
+     *   A flush isn't an IOP
+     */
+    pub fn iops(&self, iop_sz: usize) -> Option<usize> {
+        match self {
+            BlockOp::Read { offset: _, data } => {
+                Some(ceiling_div!(data.len(), iop_sz))
+            }
+            BlockOp::Write { offset: _, data } => {
+                Some(ceiling_div!(data.len(), iop_sz))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn consumes_iops(&self) -> bool {
+        matches!(
+            self,
+            BlockOp::Read { offset: _, data: _ }
+                | BlockOp::Write { offset: _, data: _ }
+        )
+    }
+
+    // Return the total size of this BlockOp
+    pub fn sz(&self) -> Option<usize> {
+        match self {
+            BlockOp::Read { offset: _, data } => Some(data.len()),
+            BlockOp::Write { offset: _, data } => Some(data.len()),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn test_return_iops() {
+    const IOP_SZ: usize = 16000;
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(1),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(8000),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(16000),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
+
+    let op = BlockOp::Read {
+        offset: Block::new_512(1),
+        data: Buffer::new(16001),
+    };
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
+}
+
 /*
  * This structure is for tracking the underlying storage side operations
  * that map to a single Guest IO request. G to S stands for Guest
@@ -4449,6 +4524,22 @@ pub struct Guest {
      * required downstairs operations are completed.
      */
     guest_work: Mutex<GuestWork>,
+
+    /*
+     * Setting an IOP limit means that the rate at which block reqs are
+     * pulled off will be limited. No setting means they are sent right
+     * away.
+     */
+    iop_tokens: Mutex<usize>,
+    bytes_per_iop: Option<usize>,
+    iop_limit: Option<usize>,
+
+    /*
+     * Setting a bandwidth limit will also limit the rate at which block
+     * reqs are pulled off the queue.
+     */
+    bw_tokens: Mutex<usize>, // bytes
+    bw_limit: Option<usize>, // bytes per second
 }
 
 /*
@@ -4475,7 +4566,34 @@ impl Guest {
                 next_gw_id: 1,
                 completed: AllocRingBuffer::with_capacity(2048),
             }),
+
+            iop_tokens: Mutex::new(0),
+            bytes_per_iop: None,
+            iop_limit: None,
+
+            bw_tokens: Mutex::new(0),
+            bw_limit: None,
         }
+    }
+
+    pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
+        self.bytes_per_iop = Some(bytes_per_iop);
+        self.iop_limit = Some(limit);
+    }
+
+    /*
+     * Return IOPs per second
+     */
+    pub fn get_iop_limit(&self) -> Option<usize> {
+        self.iop_limit
+    }
+
+    pub fn set_bw_limit(&mut self, bytes_per_second: usize) {
+        self.bw_limit = Some(bytes_per_second);
+    }
+
+    pub fn get_bw_limit(&self) -> Option<usize> {
+        self.bw_limit
     }
 
     /*
@@ -4495,11 +4613,130 @@ impl Guest {
      */
     async fn recv(&self) -> BlockReq {
         loop {
-            if let Some(req) = self.reqs.lock().unwrap().pop_front() {
+            if let Some(req) = self.consume_req() {
                 return req;
             }
+
             self.notify.notified().await;
         }
+    }
+
+    /*
+     * Consume one request off queue if it is under the IOP limit and the BW
+     * limit.
+     */
+    fn consume_req(&self) -> Option<BlockReq> {
+        let mut reqs = self.reqs.lock().unwrap();
+
+        // TODO exposing queue depth here would be a good metric for disk
+        // contention
+
+        // Check if no requests are queued
+        if reqs.is_empty() {
+            return None;
+        }
+
+        let req_ref: &BlockReq = reqs.front().unwrap();
+
+        // Check if we can consume right away
+        let iop_limit_applies =
+            self.iop_limit.is_some() && req_ref.op.consumes_iops();
+        let bw_limit_applies =
+            self.bw_limit.is_some() && req_ref.op.sz().is_some();
+
+        if !iop_limit_applies && !bw_limit_applies {
+            return Some(reqs.pop_front().unwrap());
+        }
+
+        // Check bandwidth limit before IOP limit, but make sure only to consume
+        // tokens if both checks pass!
+
+        let mut bw_check_ok = true;
+        let mut iop_check_ok = true;
+
+        // XXX if recv ever is called from multiple threads, token locks must be
+        // taken for the whole of the procedure, not multiple times in the below
+        // if blocks!
+
+        // When checking tokens vs the limit, do not check by checking if adding
+        // the block request's values to the applicable limit: this would create
+        // a scenario where a large IO enough would stall the pipeline (see
+        // test_impossible_io). Instead, check if the limits are already
+        // reached.
+
+        if let Some(bw_limit) = self.bw_limit {
+            if req_ref.op.sz().is_some() {
+                let bw_tokens = self.bw_tokens.lock().unwrap();
+                if *bw_tokens >= bw_limit {
+                    bw_check_ok = false;
+                }
+            }
+        }
+
+        if let Some(iop_limit) = self.iop_limit {
+            let bytes_per_iops = self.bytes_per_iop.unwrap();
+            if req_ref.op.iops(bytes_per_iops).is_some() {
+                let iop_tokens = self.iop_tokens.lock().unwrap();
+                if *iop_tokens >= iop_limit {
+                    iop_check_ok = false;
+                }
+            }
+        }
+
+        // If both checks pass, consume appropriate resources and return the
+        // block req
+        if bw_check_ok && iop_check_ok {
+            if self.bw_limit.is_some() {
+                if let Some(sz) = req_ref.op.sz() {
+                    let mut bw_tokens = self.bw_tokens.lock().unwrap();
+                    *bw_tokens += sz;
+                }
+            }
+
+            if self.iop_limit.is_some() {
+                let bytes_per_iops = self.bytes_per_iop.unwrap();
+                if let Some(req_iops) = req_ref.op.iops(bytes_per_iops) {
+                    let mut iop_tokens = self.iop_tokens.lock().unwrap();
+                    *iop_tokens += req_iops;
+                }
+            }
+
+            return Some(reqs.pop_front().unwrap());
+        }
+
+        // Otherwise, don't consume this block req
+        None
+    }
+
+    /*
+     * IOPs are IO operations per second, so leak tokens to allow that
+     * through.
+     */
+    pub fn leak_iop_tokens(&self, tokens: usize) {
+        let mut iop_tokens = self.iop_tokens.lock().unwrap();
+
+        if tokens > *iop_tokens {
+            *iop_tokens = 0;
+        } else {
+            *iop_tokens -= tokens;
+        }
+
+        // Notify to wake up recv now that there may be room.
+        self.notify.notify_one();
+    }
+
+    // Leak bytes from bandwidth tokens
+    pub fn leak_bw_tokens(&self, bytes: usize) {
+        let mut bw_tokens = self.bw_tokens.lock().unwrap();
+
+        if bytes > *bw_tokens {
+            *bw_tokens = 0;
+        } else {
+            *bw_tokens -= bytes;
+        }
+
+        // Notify to wake up recv now that there may be room.
+        self.notify.notify_one();
     }
 
     pub fn byte_offset_to_block(
@@ -5061,6 +5298,16 @@ async fn up_listen(
     println!("Wait for all three downstairs to come online");
     let mut lastcast = 1;
 
+    /*
+     * If this guest was configured with an IOPs or BW limit, one branch of
+     * the loop below has to leak tokens. Leak every LEAK_MS
+     * milliseconds.
+     */
+    const LEAK_MS: usize = 1000;
+
+    let leak_tick = tokio::time::Duration::from_millis(LEAK_MS as u64);
+    let mut leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
+
     stat_update(up, "start");
     let mut flush_check = deadline_secs(5);
     let mut show_work_interval = deadline_secs(5);
@@ -5095,6 +5342,19 @@ async fn up_listen(
             }
             req = up.guest.recv() => {
                 process_new_io(up, &dst, req, &mut lastcast).await;
+            }
+            _ = sleep_until(leak_deadline) => {
+                if let Some(iop_limit) = up.guest.get_iop_limit() {
+                    let tokens = iop_limit / (1000 / LEAK_MS);
+                    up.guest.leak_iop_tokens(tokens);
+                }
+
+                if let Some(bw_limit) = up.guest.get_bw_limit() {
+                    let tokens = bw_limit / (1000 / LEAK_MS);
+                    up.guest.leak_bw_tokens(tokens);
+                }
+
+                leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
             }
             _ = sleep_until(flush_check) => {
                 /*
@@ -5146,6 +5406,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     }
 
     let lossy = opt.lossy;
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
