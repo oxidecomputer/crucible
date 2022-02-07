@@ -438,6 +438,7 @@ name = "crucible-agent-client"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "percent-encoding",
  "progenitor",
  "reqwest",
@@ -513,8 +514,12 @@ dependencies = [
  "rand_chacha 0.3.1",
  "ringbuffer",
  "rusqlite",
+ "schemars",
  "serde",
  "sha2 0.10.1",
+ "slog",
+ "slog-async",
+ "slog-term",
  "structopt",
  "tempfile",
  "tokio",

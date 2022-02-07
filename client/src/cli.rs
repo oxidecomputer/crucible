@@ -526,7 +526,7 @@ pub async fn start_cli_server(
                             }
                         },
                         Some(CliMessage::Flush) => {
-                            match guest.flush() {
+                            match guest.flush(None) {
                                 Ok(_) => {
                                     fw.send(CliMessage::DoneOk).await?;
                                 }

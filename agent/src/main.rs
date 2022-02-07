@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-
+#![allow(clippy::needless_collect)]
 use anyhow::{anyhow, bail, Result};
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
 use slog::{error, info, o, warn, Logger};
@@ -45,7 +45,10 @@ enum Args {
         lowport: u16,
 
         #[structopt(short = "p", parse(try_from_str))]
-        prefix: String,
+        downstairs_prefix: String,
+
+        #[structopt(short = "s", parse(try_from_str))]
+        snapshot_prefix: String,
 
         #[allow(dead_code)]
         #[structopt(short = "n", parse(try_from_str))]
@@ -55,6 +58,16 @@ enum Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    /*
+     * If any of our async tasks in our runtime panic, then we should exit
+     * the program right away.
+     */
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     let args = Args::from_args_safe()?;
 
     match args {
@@ -73,7 +86,8 @@ async fn main() -> Result<()> {
             nexus: _,
             downstairs_program,
             lowport,
-            prefix,
+            downstairs_prefix,
+            snapshot_prefix,
         } => {
             let log = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
@@ -82,22 +96,37 @@ async fn main() -> Result<()> {
 
             info!(log, "data directory: {:?}", data_dir);
             info!(log, "listen IP: {:?}", listen);
-            info!(log, "SMF instance name prefix: {:?}", prefix);
+            info!(
+                log,
+                "SMF instance name downstairs_prefix: {:?}", downstairs_prefix
+            );
 
-            let mut dfpath = data_dir.clone();
-            std::fs::create_dir_all(&dfpath)?;
-            dfpath.push("crucible.json");
+            /*
+             * create zfs dataset for the data directory, where the dataset
+             * name matches the path:
+             *
+             *     # zfs list data data/crucible
+             *     NAME            USED  AVAIL  REFER  MOUNTPOINT
+             *     data            189M   899G    96K  /data
+             *     data/crucible    96K   899G    96K  /data/crucible
+             */
+            ensure_dataset(&log, &data_dir)?;
 
             let df = Arc::new(datafile::DataFile::new(
                 log.new(o!("component" => "datafile")),
-                &dfpath,
+                &data_dir,
                 lowport,
-                lowport + 999,
+                lowport + 999, // TODO high port as an argument?
             )?);
 
             let mut datapath = data_dir.clone();
             datapath.push("regions");
-            std::fs::create_dir_all(&datapath)?;
+
+            /*
+             * Make sure regions is also a dataset, otherwise creating
+             * {data_dir}/regions/{uuid} will fail due to lack of parent.
+             */
+            ensure_dataset(&log, &datapath)?;
 
             /*
              * Ensure that the SMF service we will use exists already.  If
@@ -114,7 +143,17 @@ async fn main() -> Result<()> {
                 }
             }
 
-            apply_smf(&log, &df, datapath.clone(), &prefix)?;
+            // Apply any outstanding actions.
+            //
+            // Note: ? here means that the failure of apply_smf will cause the
+            // binary to terminate.
+            apply_smf(
+                &log,
+                &df,
+                datapath.clone(),
+                &downstairs_prefix,
+                &snapshot_prefix,
+            )?;
 
             /*
              * Create the worker thread that will perform provisioning and
@@ -123,12 +162,75 @@ async fn main() -> Result<()> {
             let log0 = log.new(o!("component" => "worker"));
             let df0 = Arc::clone(&df);
             std::thread::spawn(|| {
-                worker(log0, df0, datapath, downstairs_program, prefix)
+                worker(
+                    log0,
+                    df0,
+                    datapath,
+                    downstairs_program,
+                    downstairs_prefix,
+                    snapshot_prefix,
+                )
             });
 
             server::run_server(&log, listen, df).await
         }
     }
+}
+
+/**
+ * Create a zfs dataset for a path if it doesn't exist. dataset name will
+ * match the path, except for dropping the leading slash.
+ */
+fn ensure_dataset(log: &Logger, dir: &Path) -> Result<()> {
+    let dataset = {
+        // drop the leading slash from the path
+        let dataset = dir
+            .to_str()
+            .ok_or_else(|| anyhow!("dir not UTF-8 valid!"))?;
+        let mut chars = dataset.chars();
+        chars.next();
+        chars.as_str()
+    };
+
+    // Test that this dataset doesn't already exist
+    let cmd = Command::new("zfs")
+        .env_clear()
+        .arg("list")
+        .arg("-H")
+        .arg(dataset)
+        .output()?;
+
+    if cmd.status.success() {
+        info!(
+            log,
+            "zfs dataset {:?} exists already, skipping creation", dataset,
+        );
+        return Ok(());
+    }
+
+    info!(log, "creating zfs dataset {}", dataset);
+    let cmd = Command::new("zfs")
+        .env_clear()
+        .arg("create")
+        .arg(dataset)
+        .output()?;
+
+    if cmd.status.success() {
+        info!(log, "zfs dataset {:?} created ok", dataset);
+    } else {
+        let err = String::from_utf8_lossy(&cmd.stderr);
+        let out = String::from_utf8_lossy(&cmd.stdout);
+        error!(
+            log,
+            "zfs dataset {:?} create failed: out {:?} err {:?}",
+            dataset,
+            out,
+            err,
+        );
+        bail!("zfs dataset create failure");
+    }
+
+    Ok(())
 }
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -142,7 +244,7 @@ fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
  * downstairs data files, but SMF services are a bit different.
  *
  * If the zone is upgraded, we will likely start from a blank SMF repository
- * database and will need to set up all of our instances again.  As such,
+ * database and will need to set up all of our instances again. As such,
  * the process of aligning SMF with the intent datastore is a separate
  * idempotent routine that we can call both at startup and after any changes
  * to the intent store.
@@ -151,9 +253,11 @@ fn apply_smf(
     log: &Logger,
     df: &Arc<datafile::DataFile>,
     datapath: PathBuf,
-    prefix: &str,
+    downstairs_prefix: &str,
+    snapshot_prefix: &str,
 ) -> Result<()> {
-    let all = df.all();
+    let regions = df.regions();
+    let mut running_snapshots = df.running_snapshots();
 
     let scf = crucible_smf::Scf::new()?;
     let scope = scf.scope_local()?;
@@ -165,12 +269,25 @@ fn apply_smf(
      * First, check to see if there are any instances that we do not expect,
      * and remove them.
      */
-    let expected_instances = all
+    let expected_downstairs_instances = regions
         .iter()
         .filter(|r| r.state == State::Created)
-        .map(|r| format!("{}-{}", prefix, r.id.0))
+        .map(|r| format!("{}-{}", downstairs_prefix, r.id.0))
         .collect::<HashSet<_>>();
+
+    let expected_snapshot_instances: Vec<String> = running_snapshots
+        .iter()
+        .flat_map(|(_, n)| {
+            n.iter()
+                .map(|(_, s)| {
+                    format!("{}-{}-{}", snapshot_prefix, s.id.0, s.name)
+                })
+                .collect::<Vec<String>>()
+        })
+        .collect();
+
     let mut insts = svc.instances()?;
+
     while let Some(inst) = insts.next().transpose()? {
         let n = inst.name()?;
 
@@ -178,41 +295,59 @@ fn apply_smf(
             continue;
         }
 
-        if !n.starts_with(&format!("{}-", prefix)) {
-            warn!(log, "ignoring instance with other prefix: {:?}", n);
-            continue;
-        }
+        // Look for either a running downstairs or snapshot:
+        //
+        // downstairs-6dec576f-0655-4f90-afd6-93ce0f5aacb9
+        // snapshot-6dec576f-0655-4f90-afd6-93ce0f5aacb9-1644509677
+        if n.starts_with(&format!("{}-", downstairs_prefix)) {
+            if !expected_downstairs_instances.contains(&n) {
+                error!(log, "remove downstairs instance: {}", n);
+                info!(log, "instance states: {:?}", inst.states()?);
 
-        if !expected_instances.contains(&n) {
-            error!(log, "remove instance: {}", n);
-            info!(log, "instance states: {:?}", inst.states()?);
-            /*
-             * XXX just disable for now.
-             */
-            inst.disable(false)?;
-            continue;
-        }
+                /*
+                 * XXX just disable for now.
+                 */
+                inst.disable(false)?;
+                continue;
+            }
 
-        info!(log, "found expected instance: {}", n);
+            info!(log, "found expected downstairs instance: {}", n);
+        } else if n.starts_with(&format!("{}-", snapshot_prefix)) {
+            if !expected_snapshot_instances.contains(&n) {
+                error!(log, "remove snapshot instance: {}", n);
+
+                /*
+                 * XXX just disable for now.
+                 */
+                inst.disable(false)?;
+                continue;
+            }
+
+            info!(log, "found expected snapshot instance: {}", n);
+        } else {
+            warn!(log, "ignoring instance: {:?}", n);
+        }
     }
 
     /*
-     * Second, create any instances that are missing.
+     * Second, create any downstairs and snapshot instances that are missing.
      */
-    for r in all.iter() {
+    for r in regions.iter() {
         if r.state != State::Created {
             continue;
         }
 
-        let name = format!("{}-{}", prefix, r.id.0);
+        let name = format!("{}-{}", downstairs_prefix, r.id.0);
+
         let mut dir = datapath.clone();
         dir.push(&r.id.0);
-        let datadir = dir.to_str().unwrap().to_string();
+
+        let properties = r.get_smf_properties(&dir);
 
         let inst = if let Some(inst) = svc.get_instance(&name)? {
             inst
         } else {
-            info!(log, "creating missing instance {}", name);
+            info!(log, "creating missing downstairs instance {}", name);
             let inst = svc.add_instance(&name)?;
             info!(log, "ok, have {}", inst.fmri()?);
             inst
@@ -223,31 +358,46 @@ fn apply_smf(
          */
         let reconfig = if let Some(snap) = inst.get_snapshot("running")? {
             /*
-             * Just check the values.
+             * Just check the propval values.
              */
             if let Some(pg) = snap.get_pg("config")? {
-                let mut found_directory = false;
-                let dir = pg.get_property("directory")?;
-                if let Some(dir) = dir {
-                    if let Some(val) = dir.value()? {
-                        if val.as_string()? == datadir {
-                            found_directory = true;
+                let mut reconfig = false;
+
+                for property in &properties {
+                    let existing_val = pg.get_property(property.name)?;
+                    if let Some(existing_val) = existing_val {
+                        if let Some(val) = existing_val.value()? {
+                            if val.as_string()? != property.val {
+                                reconfig = true;
+                                info!(
+                                    log,
+                                    "existing {} value {} does not match {}",
+                                    property.name,
+                                    val.as_string()?,
+                                    property.val,
+                                );
+                            }
+                        } else {
+                            reconfig = true;
+                            info!(
+                                log,
+                                "{} value call returned None", property.name,
+                            );
                         }
+                    } else {
+                        reconfig = true;
+                        info!(log, "{} value missing", property.name,);
                     }
                 }
 
-                let mut found_port = false;
-                let dir = pg.get_property("port")?;
-                if let Some(dir) = dir {
-                    if let Some(val) = dir.value()? {
-                        if val.as_string()? == r.port_number.to_string() {
-                            found_port = true;
-                        }
-                    }
+                // reconfig is required if propvals are missing, or wrong
+                if reconfig {
+                    info!(log, "reconfig required");
                 }
 
-                !found_port || !found_directory
+                reconfig
             } else {
+                info!(log, "reconfig required, no property group");
                 true
             }
         } else {
@@ -261,14 +411,14 @@ fn apply_smf(
         };
 
         if reconfig {
-            use crucible_smf::scf_type_t::*;
-
             /*
              * Ensure that there is a "config" property group:
              */
             let pg = if let Some(pg) = inst.get_pg("config")? {
+                info!(log, "using existing config property group");
                 pg
             } else {
+                info!(log, "creating config property group");
                 inst.add_pg("config", "application")?
             };
 
@@ -276,30 +426,21 @@ fn apply_smf(
 
             let tx = pg.transaction()?;
             tx.start()?;
-            let mut entries = Vec::new();
 
             /*
              * An expression of our values:
              */
-            let mut e = if pg.get_property("directory")?.is_some() {
-                info!(log, "change directory");
-                tx.property_change("directory", SCF_TYPE_ASTRING)?
-            } else {
-                info!(log, "add directory");
-                tx.property_new("directory", SCF_TYPE_ASTRING)?
-            };
-            e.add_from_string(SCF_TYPE_ASTRING, &datadir)?;
-            entries.push(e);
+            for property in &properties {
+                info!(
+                    log,
+                    "ensure {} {:?} {}",
+                    property.name,
+                    property.typ,
+                    property.val
+                );
 
-            let mut e = if pg.get_property("port")?.is_some() {
-                info!(log, "change port");
-                tx.property_change("port", SCF_TYPE_COUNT)?
-            } else {
-                info!(log, "add port");
-                tx.property_new("port", SCF_TYPE_COUNT)?
-            };
-            e.add_from_string(SCF_TYPE_COUNT, &r.port_number.to_string())?;
-            entries.push(e);
+                tx.property_ensure(property.name, property.typ, &property.val)?;
+            }
 
             info!(log, "commit");
             match tx.commit()? {
@@ -320,57 +461,301 @@ fn apply_smf(
         inst.enable(false)?;
     }
 
+    for (_, region_snapshots) in running_snapshots.iter_mut() {
+        for snapshot in region_snapshots.values_mut() {
+            let name = format!(
+                "{}-{}-{}",
+                snapshot_prefix, snapshot.id.0, snapshot.name
+            );
+
+            let mut dir = datapath.clone();
+            dir.push(&snapshot.id.0);
+            dir.push(".zfs");
+            dir.push("snapshot");
+            dir.push(snapshot.name.clone());
+
+            let properties = snapshot.get_smf_properties(&dir);
+
+            let inst = if let Some(inst) = svc.get_instance(&name)? {
+                inst
+            } else {
+                info!(log, "creating missing snapshot instance {}", name);
+                let inst = svc.add_instance(&name)?;
+                info!(log, "ok, have {}", inst.fmri()?);
+                inst
+            };
+
+            /*
+             * Determine the contents of the running snapshot.
+             */
+            let reconfig = if let Some(snap) = inst.get_snapshot("running")? {
+                /*
+                 * Just check the values.
+                 */
+                if let Some(pg) = snap.get_pg("config")? {
+                    let mut reconfig = false;
+
+                    for property in &properties {
+                        let existing_val = pg.get_property(property.name)?;
+                        if let Some(existing_val) = existing_val {
+                            if let Some(val) = existing_val.value()? {
+                                if val.as_string()? != property.val {
+                                    reconfig = true;
+                                    info!(
+                                        log,
+                                        "existing {} value {} does not match {}",
+                                        property.name,
+                                        val.as_string()?,
+                                        property.val,
+                                    );
+                                }
+                            } else {
+                                reconfig = true;
+                                info!(
+                                    log,
+                                    "{} value call returned None",
+                                    property.name,
+                                );
+                            }
+                        } else {
+                            reconfig = true;
+                            info!(log, "{} value missing", property.name,);
+                        }
+                    }
+
+                    // reconfig is required if propvals are missing, or wrong
+                    if reconfig {
+                        info!(log, "reconfig required");
+                    }
+
+                    reconfig
+                } else {
+                    info!(log, "reconfig required, no property group");
+                    true
+                }
+            } else {
+                /*
+                 * No running snapshot means the service has never started.
+                 * Prod the restarter by disabling it, then
+                 * we'll create everything from scratch.
+                 */
+                inst.disable(false)?;
+                true
+            };
+
+            if reconfig {
+                /*
+                 * Ensure that there is a "config" property group:
+                 */
+                let pg = if let Some(pg) = inst.get_pg("config")? {
+                    pg
+                } else {
+                    inst.add_pg("config", "application")?
+                };
+
+                info!(log, "reconfiguring {}", inst.fmri()?);
+
+                let tx = pg.transaction()?;
+                tx.start()?;
+
+                /*
+                 * An expression of our values:
+                 */
+                for property in &properties {
+                    info!(
+                        log,
+                        "ensure {} {:?} {}",
+                        property.name,
+                        property.typ,
+                        property.val
+                    );
+
+                    tx.property_ensure(
+                        property.name,
+                        property.typ,
+                        &property.val,
+                    )?;
+                }
+
+                info!(log, "commit");
+                match tx.commit()? {
+                    crucible_smf::CommitResult::Success => {
+                        info!(log, "ok!");
+                    }
+                    crucible_smf::CommitResult::OutOfDate => {
+                        error!(log, "concurrent modification?!");
+                    }
+                }
+            } else {
+                info!(log, "do not need to reconfigure {}", inst.fmri()?);
+            }
+
+            /*
+             * Finally, make sure the instance is enabled.
+             */
+            inst.enable(false)?;
+        }
+    }
+
     Ok(())
 }
 
+#[cfg(test)]
+mod test {
+    use crate::model::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_collect_behaviour() {
+        let mut running_snapshots =
+            BTreeMap::<RegionId, BTreeMap<String, RunningSnapshot>>::new();
+
+        running_snapshots.insert(RegionId("r1".into()), BTreeMap::new());
+        running_snapshots
+            .get_mut(&RegionId("r1".into()))
+            .unwrap()
+            .insert(
+                "first".into(),
+                RunningSnapshot {
+                    id: RegionId("r1".into()),
+                    name: "first".into(),
+                    port_number: 1,
+                    state: State::Created,
+                },
+            );
+        running_snapshots
+            .get_mut(&RegionId("r1".into()))
+            .unwrap()
+            .insert(
+                "second".into(),
+                RunningSnapshot {
+                    id: RegionId("r1".into()),
+                    name: "second".into(),
+                    port_number: 1,
+                    state: State::Created,
+                },
+            );
+
+        running_snapshots.insert(RegionId("r2".into()), BTreeMap::new());
+        running_snapshots
+            .get_mut(&RegionId("r2".into()))
+            .unwrap()
+            .insert(
+                "third".into(),
+                RunningSnapshot {
+                    id: RegionId("r2".into()),
+                    name: "third".into(),
+                    port_number: 1,
+                    state: State::Created,
+                },
+            );
+
+        let snapshot_prefix = "snapshot";
+
+        let expected_snapshot_instances: Vec<String> = running_snapshots
+            .iter()
+            .flat_map(|(_, n)| {
+                n.iter()
+                    .map(|(_, s)| {
+                        format!("{}-{}-{}", snapshot_prefix, s.id.0, s.name)
+                    })
+                    .collect::<Vec<String>>()
+            })
+            .collect();
+
+        assert_eq!(
+            expected_snapshot_instances,
+            vec![
+                "snapshot-r1-first".to_string(),
+                "snapshot-r1-second".to_string(),
+                "snapshot-r2-third".to_string(),
+            ],
+        );
+    }
+}
+
+/**
+ * For region with state Tombstoned, destroy the region.
+ *
+ * For region with state Requested, create the region.
+ */
 fn worker(
     log: Logger,
     df: Arc<datafile::DataFile>,
     datapath: PathBuf,
     downstairs_program: PathBuf,
-    prefix: String,
+    downstairs_prefix: String,
+    snapshot_prefix: String,
 ) {
     loop {
-        let r = df.first_in_states(&[State::Tombstoned, State::Requested]);
+        /*
+         * This loop fires whenever there's work to do. This work may be:
+         *
+         * - create a region
+         * - delete a region
+         * - create a running snapshot
+         * - delete a running snapshot
+         *
+         * Multiple requests could have accumulated before waking up on the
+         * cond var, so operate on batches instead of individual regions or
+         * running snapshots.
+         *
+         * First, create any requested regions. This has to occur before
+         * apply_smf.
+         *
+         * Then, run apply_smf. If this is successful, then tombstoned
+         * regions can be destroyed (has to occur after apply_smf
+         * removes the running instance so the zfs dataset is no
+         * longer in use).
+         */
 
-        match &r.state {
-            State::Tombstoned => {
-                let mut dir = datapath.clone();
-                dir.push(&r.id.0);
+        while let Some(r) = &df.first_region_in_states(&[State::Requested]) {
+            // if regions need to be created, do that before apply_smf.
+            let mut dir = datapath.clone();
+            dir.push(&r.id.0);
 
-                let res = worker_region_destroy(&log, &r, &dir)
-                    .and_then(|_| df.destroyed(&r.id));
+            let res = worker_region_create(&log, &downstairs_program, r, &dir)
+                .and_then(|_| df.created(&r.id));
 
-                if let Err(e) = res {
-                    error!(log, "region {:?} destroy failed: {:?}", r.id.0, e);
-                    df.fail(&r.id);
-                }
-            }
-            State::Requested => {
-                let mut dir = datapath.clone();
-                dir.push(&r.id.0);
-
-                let res =
-                    worker_region_create(&log, &downstairs_program, &r, &dir)
-                        .and_then(|_| df.created(&r.id));
-
-                if let Err(e) = res {
-                    error!(log, "region {:?} create failed: {:?}", r.id.0, e);
-                    df.fail(&r.id);
-                }
-            }
-            _ => {
-                eprintln!("worker got unexpected region state: {:?}", r);
-                std::process::exit(1);
+            if let Err(e) = res {
+                error!(log, "region {:?} create failed: {:?}", r.id.0, e);
+                df.fail(&r.id);
             }
         }
 
         info!(log, "applying SMF actions...");
-        if let Err(e) = apply_smf(&log, &df, datapath.clone(), &prefix) {
+        let result = apply_smf(
+            &log,
+            &df,
+            datapath.clone(),
+            &downstairs_prefix,
+            &snapshot_prefix,
+        );
+
+        if let Err(e) = result {
             error!(log, "SMF application failure: {:?}", e);
         } else {
             info!(log, "SMF ok!");
+
+            while let Some(r) = &df.first_region_in_states(&[State::Tombstoned])
+            {
+                // After SMF successfully shuts off downstairs, remove
+                // zfs dataset
+                let mut dir = datapath.clone();
+                dir.push(&r.id.0);
+
+                let res = worker_region_destroy(&log, r, &dir)
+                    .and_then(|_| df.destroyed(&r.id));
+
+                if let Err(e) = res {
+                    error!(log, "region {:?} destroy failed: {:?}", r.id.0, e,);
+                    df.fail(&r.id);
+                }
+            }
         }
+
+        // Wait for more work
+        df.wait_on_bell();
     }
 }
 
@@ -383,37 +768,51 @@ fn worker_region_create(
     let log = log.new(o!("region" => region.id.0.to_string()));
 
     /*
-     * We may have crashed half way through a previous provision.  To make
+     * Create zfs dataset for this region - snapshots taken by the downstairs
+     * will then only contain that region's data.
+     *
+     * This region's dataset will be named the same as the path without the
+     * leading slash.
+     */
+    ensure_dataset(&log, dir)?;
+
+    /*
+     * We may have crashed half way through a previous provision. To make
      * this idempotent, clean out the target data directory and try
      * again.
-     *
-     * XXX This could obviously be improved.
      */
-    if dir.exists() {
-        info!(log, "removing directory {:?}", dir);
-        std::fs::remove_dir_all(&dir)?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if entry.file_type()?.is_dir() {
+            info!(log, "removing existing directory {:?}", path);
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            info!(log, "removing existing file {:?}", path);
+            std::fs::remove_file(&path)?;
+        }
     }
 
     /*
      * Run the downstairs program in the mode where it will create the data
-     * files.
+     * files (note region starts blank).
      */
-    //let image = "/dev/null"; /* XXX */
-    let image = "/var/tmp/alpine.iso";
-    info!(log, "creating region files from image {:?}", image);
+    info!(log, "creating region {:?} at {:?}", region, dir);
     let cmd = Command::new(prog)
         .env_clear()
-        .arg("--create")
+        .arg("create")
+        .arg("--uuid")
+        .arg(region.id.0.clone())
         .arg("--data")
         .arg(dir)
-        .arg("--import-path")
-        .arg(image)
         .arg("--block-size")
         .arg(region.block_size.to_string())
         .arg("--extent-size")
         .arg(region.extent_size.to_string())
         .arg("--extent-count")
         .arg(region.extent_count.to_string())
+        .arg(format!("--encrypted={}", region.encrypted))
         .output()?;
 
     if cmd.status.success() {
@@ -426,16 +825,29 @@ fn worker_region_create(
     }
 
     /*
-     * - create/enable SMF instance
+     * If there are X509 files, write those out to the same directory.
      */
-    let scf = crucible_smf::Scf::new()?;
-    let _scope = scf.scope_local()?;
+    if let Some(cert_pem) = &region.cert_pem {
+        let mut path = dir.to_path_buf();
+        path.push("cert.pem");
+        std::fs::write(path, &cert_pem)?;
+    }
+
+    if let Some(key_pem) = &region.key_pem {
+        let mut path = dir.to_path_buf();
+        path.push("key.pem");
+        std::fs::write(path, &key_pem)?;
+    }
+
+    if let Some(root_pem) = &region.root_pem {
+        let mut path = dir.to_path_buf();
+        path.push("root.pem");
+        std::fs::write(path, &root_pem)?;
+    }
 
     /*
-     * First, ensure that the service exists.
+     * `apply_smf` will then create the appropriate instance
      */
-
-    // TODO this is where Josh stopped...
 
     Ok(())
 }
@@ -447,14 +859,45 @@ fn worker_region_destroy(
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
 
-    /*
-     * - stop/destroy SMF instance
-     */
-
-    if dir.exists() {
-        info!(log, "removing directory {:?}", dir);
-        std::fs::remove_dir_all(&dir)?;
+    if !dir.exists() {
+        info!(log, "directory {:?} already gone", dir);
+        return Ok(());
     }
+
+    info!(log, "deleting zfs dataset {:?}", dir);
+
+    // ZFS delete - will fail if snapshots exist
+    let dataset_name = {
+        let path = dir.to_str().unwrap().to_string();
+
+        let mut chars = path.chars();
+        chars.next();
+        chars.as_str().to_string()
+    };
+
+    let cmd = Command::new("zfs")
+        .arg("destroy")
+        .arg(dataset_name.clone())
+        .output()?;
+
+    if !cmd.status.success() {
+        let err = String::from_utf8_lossy(&cmd.stderr);
+        let out = String::from_utf8_lossy(&cmd.stdout);
+
+        error!(
+            log,
+            "zfs dataset {:?} delete failed: out {:?} err {:?}",
+            dataset_name,
+            out,
+            err,
+        );
+
+        bail!("zfs dataset delete failure");
+    }
+
+    /*
+     * `apply_smf` will then remove the corresponding instance
+     */
 
     Ok(())
 }

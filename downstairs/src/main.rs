@@ -29,17 +29,39 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
+use slog::Drain;
+
 mod dump;
+mod http;
 mod region;
 mod stats;
+use http::run_dropshot;
 
 use dump::dump_region;
 use region::Region;
 use stats::*;
 
+#[derive(Debug, PartialEq)]
+enum Mode {
+    Ro,
+    Rw,
+}
+
+impl std::str::FromStr for Mode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "ro" => Mode::Ro,
+            "rw" => Mode::Rw,
+            _ => {
+                bail!("not a valid mode!");
+            }
+        })
+    }
+}
+
 #[derive(Debug, StructOpt)]
 #[structopt(about = "disk-side storage component")]
-
 enum Args {
     Create {
         #[structopt(long, default_value = "512")]
@@ -60,7 +82,7 @@ enum Args {
         #[structopt(short, long, name = "UUID", parse(try_from_str))]
         uuid: Uuid,
 
-        #[structopt(long)]
+        #[structopt(long, parse(try_from_str), default_value = "false")]
         encrypted: bool,
     },
     /*
@@ -149,6 +171,17 @@ enum Args {
         key_pem: Option<String>,
         #[structopt(long)]
         root_cert_pem: Option<String>,
+
+        #[structopt(long, default_value = "rw")]
+        mode: Mode,
+    },
+    Serve {
+        #[structopt(short, long)]
+        trace_endpoint: Option<String>,
+
+        // Dropshot server details
+        #[structopt(long, default_value = "127.0.0.1:4567")]
+        bind_addr: SocketAddr,
     },
 }
 
@@ -401,6 +434,7 @@ async fn _show_work(ds: &Downstairs) {
                     dependencies,
                     flush_number: _flush_number,
                     gen_number: _gen_number,
+                    snapshot_details: _,
                 } => {
                     dsw_type = "Flush".to_string();
                     dep_list = dependencies.to_vec();
@@ -450,7 +484,14 @@ where
             d.add_work(*uuid, *ds_id, new_write).await?;
             Some(*ds_id)
         }
-        Message::Flush(uuid, ds_id, dependencies, flush_number, gen_number) => {
+        Message::Flush(
+            uuid,
+            ds_id,
+            dependencies,
+            flush_number,
+            gen_number,
+            snapshot_details,
+        ) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
@@ -461,6 +502,7 @@ where
                 dependencies: dependencies.to_vec(),
                 flush_number: *flush_number,
                 gen_number: *gen_number,
+                snapshot_details: snapshot_details.clone(),
             };
 
             let d = ad.lock().await;
@@ -1379,6 +1421,7 @@ impl Work {
                                     dependencies: _,
                                     flush_number: _flush_number,
                                     gen_number: _gen_number,
+                                    snapshot_details: _,
                                 } => "Flush",
                                 IOop::Read {
                                     dependencies: _,
@@ -1519,6 +1562,7 @@ impl Work {
                 dependencies: _dependencies,
                 flush_number,
                 gen_number,
+                snapshot_details,
             } => {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on flush!");
@@ -1526,7 +1570,11 @@ impl Work {
                 } else if !ds.is_active(job.upstairs_uuid) {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_flush(*flush_number, *gen_number)
+                    ds.region.region_flush(
+                        *flush_number,
+                        *gen_number,
+                        snapshot_details,
+                    )
                 };
 
                 Ok(Some(Message::FlushAck(
@@ -1574,6 +1622,7 @@ impl fmt::Display for WorkState {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum WrappedStream {
     Http(tokio::net::TcpStream),
     Https(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
@@ -1598,21 +1647,14 @@ async fn main() -> Result<()> {
             uuid,
             encrypted,
         } => {
-            /*
-             * Create the region options, then the region.
-             */
-            let mut region_options: crucible_common::RegionOptions =
-                Default::default();
-            region_options.set_block_size(block_size);
-            region_options.set_extent_size(Block::new(
+            let mut region = create_region(
+                block_size,
+                data,
                 extent_size,
-                block_size.trailing_zeros(),
-            ));
-            region_options.set_uuid(uuid);
-            region_options.set_encrypted(encrypted);
-
-            region = Region::create(&data, region_options)?;
-            region.extend(extent_count as u32)?;
+                extent_count,
+                uuid,
+                encrypted,
+            )?;
 
             if let Some(ref ip) = import_path {
                 downstairs_import(&mut region, ip).unwrap();
@@ -1620,7 +1662,7 @@ async fn main() -> Result<()> {
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0)?;
+                region.region_flush(1, 0, &None)?;
             }
 
             println!("UUID: {:?}", region.def().uuid());
@@ -1649,7 +1691,8 @@ async fn main() -> Result<()> {
             export_path,
             skip,
         } => {
-            region = Region::open(&data, Default::default(), true)?;
+            // Open Region read only
+            region = Region::open(&data, Default::default(), true, true)?;
 
             downstairs_export(&mut region, export_path, skip, count).unwrap();
             Ok(())
@@ -1665,22 +1708,8 @@ async fn main() -> Result<()> {
             cert_pem,
             key_pem,
             root_cert_pem,
+            mode,
         } => {
-            region = Region::open(&data, Default::default(), true)?;
-
-            println!("UUID: {:?}", region.def().uuid());
-            println!(
-                "Blocks per extent:{} Total Extents: {}",
-                region.def().extent_size().value,
-                region.def().extent_count(),
-            );
-
-            let d = Arc::new(Mutex::new(Downstairs::new(
-                region,
-                lossy,
-                return_errors,
-            )));
-
             /*
              * If any of our async tasks in our runtime panic, then we should
              * exit the program right away.
@@ -1691,6 +1720,7 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }));
 
+            // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
                 let tracer = opentelemetry_jaeger::new_pipeline()
                     .with_agent_endpoint(endpoint) // usually port 6831
@@ -1707,117 +1737,215 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
-            if let Some(oximeter) = oximeter {
-                let dssw = d.lock().await;
-                let dss = dssw.dss.clone();
+            let read_only = mode == Mode::Ro;
+            let d = create_downstairs(&data, lossy, return_errors, read_only)?;
 
-                tokio::spawn(async move {
-                    let new_address = match address {
-                        IpAddr::V4(ipv4) => {
-                            SocketAddr::new(std::net::IpAddr::V4(ipv4), 0)
-                        }
-                        IpAddr::V6(ipv6) => {
-                            SocketAddr::new(std::net::IpAddr::V6(ipv6), 0)
-                        }
-                    };
+            start_downstairs(
+                d,
+                address,
+                oximeter,
+                port,
+                cert_pem,
+                key_pem,
+                root_cert_pem,
+            )
+            .await
+        }
+        Args::Serve {
+            trace_endpoint,
+            bind_addr,
+        } => {
+            /*
+             * If any of our async tasks in our runtime panic, then we should
+             * exit the program right away.
+             */
+            let default_panic = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                default_panic(info);
+                std::process::exit(1);
+            }));
 
-                    if let Err(e) =
-                        stats::ox_stats(dss, oximeter, new_address).await
-                    {
-                        println!("ERROR: oximeter failed: {:?}", e);
-                    } else {
-                        println!("OK: oximeter all done");
-                    }
-                });
+            // Instrumentation is shared.
+            if let Some(endpoint) = trace_endpoint {
+                let tracer = opentelemetry_jaeger::new_pipeline()
+                    .with_agent_endpoint(endpoint) // usually port 6831
+                    .with_service_name("downstairs")
+                    .install_simple()
+                    .expect("Error initializing Jaeger exporter");
+
+                let telemetry =
+                    tracing_opentelemetry::layer().with_tracer(tracer);
+
+                tracing_subscriber::registry()
+                    .with(telemetry)
+                    .try_init()
+                    .expect("Error init tracing subscriber");
             }
 
-            let listen_on = match address {
+            // from https://docs.rs/slog/latest/slog/ - terminal out
+            let decorator = slog_term::TermDecorator::new().build();
+            let drain = slog_term::FullFormat::new(decorator).build().fuse();
+            let drain = slog_async::Async::new(drain).build().fuse();
+
+            let log = slog::Logger::root(drain, slog::o!());
+
+            run_dropshot(bind_addr, &log).await
+        }
+    }
+}
+
+fn create_region(
+    block_size: u64,
+    data: PathBuf,
+    extent_size: u64,
+    extent_count: u64,
+    uuid: Uuid,
+    encrypted: bool,
+) -> Result<Region> {
+    /*
+     * Create the region options, then the region.
+     */
+    let mut region_options: crucible_common::RegionOptions = Default::default();
+    region_options.set_block_size(block_size);
+    region_options
+        .set_extent_size(Block::new(extent_size, block_size.trailing_zeros()));
+    region_options.set_uuid(uuid);
+    region_options.set_encrypted(encrypted);
+
+    let mut region = Region::create(&data, region_options)?;
+    region.extend(extent_count as u32)?;
+
+    Ok(region)
+}
+
+fn create_downstairs(
+    data: &Path,
+    lossy: bool,
+    return_errors: bool,
+    read_only: bool,
+) -> Result<Arc<Mutex<Downstairs>>> {
+    let region = Region::open(&data, Default::default(), true, read_only)?;
+
+    println!("UUID: {:?}", region.def().uuid());
+    println!(
+        "Blocks per extent:{} Total Extents: {}",
+        region.def().extent_size().value,
+        region.def().extent_count(),
+    );
+
+    Ok(Arc::new(Mutex::new(Downstairs::new(
+        region,
+        lossy,
+        return_errors,
+    ))))
+}
+
+async fn start_downstairs(
+    d: Arc<Mutex<Downstairs>>,
+    address: IpAddr,
+    oximeter: Option<SocketAddr>,
+    port: u16,
+    cert_pem: Option<String>,
+    key_pem: Option<String>,
+    root_cert_pem: Option<String>,
+) -> Result<()> {
+    if let Some(oximeter) = oximeter {
+        let dssw = d.lock().await;
+        let dss = dssw.dss.clone();
+
+        tokio::spawn(async move {
+            let new_address = match address {
                 IpAddr::V4(ipv4) => {
-                    SocketAddr::new(std::net::IpAddr::V4(ipv4), port)
+                    SocketAddr::new(std::net::IpAddr::V4(ipv4), 0)
                 }
                 IpAddr::V6(ipv6) => {
-                    SocketAddr::new(std::net::IpAddr::V6(ipv6), port)
+                    SocketAddr::new(std::net::IpAddr::V6(ipv6), 0)
                 }
             };
 
-            /*
-             * Establish a listen server on the port.
-             */
-            // let listen_on = SocketAddrV4::new(address, port);
-            println!("Using address: {:?}", listen_on);
-            let listener = TcpListener::bind(&listen_on).await?;
-
-            let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
-                let key_pem_path = key_pem.unwrap();
-                let root_cert_pem_path = root_cert_pem.unwrap();
-
-                let context = crucible_common::x509::TLSContext::from_paths(
-                    &cert_pem_path,
-                    &key_pem_path,
-                    &root_cert_pem_path,
-                )?;
-
-                let config = context.get_server_config()?;
-
-                println!("Configured SSL acceptor");
-
-                Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+            if let Err(e) = stats::ox_stats(dss, oximeter, new_address).await {
+                println!("ERROR: oximeter failed: {:?}", e);
             } else {
-                // unencrypted
-                println!("No SSL acceptor configured");
-                None
-            };
-
-            /*
-             * We now loop listening for a connection from the Upstairs.
-             * When we get one, we then spawn the proc() function to handle
-             * it and wait for another connection. Downstairs can handle
-             * multiple Upstairs connecting but only one active one.
-             */
-            println!("listening on {}", listen_on);
-            loop {
-                let (sock, raddr) = listener.accept().await?;
-
-                let stream: WrappedStream =
-                    if let Some(ssl_acceptor) = &ssl_acceptor {
-                        let ssl_acceptor = ssl_acceptor.clone();
-                        WrappedStream::Https(
-                            match ssl_acceptor.accept(sock).await {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    println!(
-                                        "rejecting connection from {:?}: {:?}",
-                                        raddr, e,
-                                    );
-                                    continue;
-                                }
-                            },
-                        )
-                    } else {
-                        WrappedStream::Http(sock)
-                    };
-
-                println!("accepted connection from {:?}", raddr);
-                {
-                    /*
-                     * Add one to the counter every time we have a connection
-                     * from an upstairs
-                     */
-                    let mut ds = d.lock().await;
-                    ds.dss.add_connection().await;
-                }
-
-                let mut dd = d.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = proc_stream(&mut dd, stream).await {
-                        println!("ERROR: connection({}): {:?}", raddr, e);
-                    } else {
-                        println!("OK: connection({}): all done", raddr);
-                    }
-                });
+                println!("OK: oximeter all done");
             }
+        });
+    }
+
+    let listen_on = match address {
+        IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
+        IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), port),
+    };
+
+    /*
+     * Establish a listen server on the port.
+     */
+    // let listen_on = SocketAddrV4::new(address, port);
+    println!("Using address: {:?}", listen_on);
+    let listener = TcpListener::bind(&listen_on).await?;
+
+    let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
+        let key_pem_path = key_pem.unwrap();
+        let root_cert_pem_path = root_cert_pem.unwrap();
+
+        let context = crucible_common::x509::TLSContext::from_paths(
+            &cert_pem_path,
+            &key_pem_path,
+            &root_cert_pem_path,
+        )?;
+
+        let config = context.get_server_config()?;
+
+        println!("Configured SSL acceptor");
+
+        Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+    } else {
+        // unencrypted
+        println!("No SSL acceptor configured");
+        None
+    };
+
+    /*
+     * We now loop listening for a connection from the Upstairs.
+     * When we get one, we then spawn the proc() function to handle
+     * it and wait for another connection. Downstairs can handle
+     * multiple Upstairs connecting but only one active one.
+     */
+    println!("listening on {}", listen_on);
+    loop {
+        let (sock, raddr) = listener.accept().await?;
+
+        let stream: WrappedStream = if let Some(ssl_acceptor) = &ssl_acceptor {
+            let ssl_acceptor = ssl_acceptor.clone();
+            WrappedStream::Https(match ssl_acceptor.accept(sock).await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("rejecting connection from {:?}: {:?}", raddr, e,);
+                    continue;
+                }
+            })
+        } else {
+            WrappedStream::Http(sock)
+        };
+
+        println!("accepted connection from {:?}", raddr);
+        {
+            /*
+             * Add one to the counter every time we have a connection
+             * from an upstairs
+             */
+            let mut ds = d.lock().await;
+            ds.dss.add_connection().await;
         }
+
+        let mut dd = d.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = proc_stream(&mut dd, stream).await {
+                println!("ERROR: connection({}): {:?}", raddr, e);
+            } else {
+                println!("OK: connection({}): all done", raddr);
+            }
+        });
     }
 }
 
@@ -1844,6 +1972,7 @@ mod test {
                         dependencies: deps,
                         flush_number: 10,
                         gen_number: 0,
+                        snapshot_details: None,
                     }
                 } else {
                     IOop::Read {
@@ -1879,6 +2008,7 @@ mod test {
                     dependencies: _,
                     flush_number: _,
                     gen_number: _,
+                    snapshot_details: _,
                 }
             )
         };
@@ -2394,7 +2524,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1)?;
+        region.region_flush(1, 1, &None)?;
 
         // export region to another file
 
@@ -2462,7 +2592,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1)?;
+        region.region_flush(1, 1, &None)?;
 
         // export region to another file (note: 100 fewer bytes imported than
         // region size still means the whole region is exported)
@@ -2544,7 +2674,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1)?;
+        region.region_flush(1, 1, &None)?;
 
         // export region to another file (note: 100 more bytes will have caused
         // 10 more extents to be added, but someone running the export command
@@ -2627,7 +2757,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1)?;
+        region.region_flush(1, 1, &None)?;
 
         // read block by block
         let mut read_data = Vec::with_capacity(total_bytes as usize);

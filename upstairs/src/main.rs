@@ -193,7 +193,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
         .block_wait()?;
 
     println!("send a flush");
-    guest.flush()?.block_wait()?;
+    guest.flush(None)?.block_wait()?;
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;

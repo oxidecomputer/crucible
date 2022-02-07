@@ -110,6 +110,7 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
 
     // sent to NBD client during handshake through Export struct
+    cpf.activate(opt.gen)?;
     println!("NBD advertised size as {} bytes", cpf.sz());
 
     for stream in listener.incoming() {

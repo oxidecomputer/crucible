@@ -72,7 +72,7 @@ pub enum scf_error_t {
     SCF_ERROR_INTERNAL = 1101,        /* internal error */
 }
 
-#[derive(Debug, FromPrimitive, ToPrimitive)]
+#[derive(Debug, FromPrimitive, ToPrimitive, Clone, Copy)]
 #[repr(C)]
 pub enum scf_type_t {
     SCF_TYPE_INVALID = 0,

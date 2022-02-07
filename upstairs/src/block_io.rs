@@ -90,7 +90,10 @@ impl BlockIO for FileBlockIO {
         BlockReqWaiter::immediate()
     }
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
+    fn flush(
+        &self,
+        _snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         let mut file = self.file.lock().unwrap();
         file.flush()?;
         BlockReqWaiter::immediate()
@@ -226,7 +229,10 @@ impl BlockIO for ReqwestBlockIO {
         unimplemented!();
     }
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
+    fn flush(
+        &self,
+        _snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         BlockReqWaiter::immediate()
     }
 

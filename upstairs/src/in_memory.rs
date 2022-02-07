@@ -80,7 +80,10 @@ impl BlockIO for InMemoryBlockIO {
         BlockReqWaiter::immediate()
     }
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
+    fn flush(
+        &self,
+        _snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         BlockReqWaiter::immediate()
     }
 

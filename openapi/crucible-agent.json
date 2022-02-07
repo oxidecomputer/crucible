@@ -97,6 +97,164 @@
           }
         }
       }
+    },
+    "/crucible/0/regions/{id}/snapshots": {
+      "get": {
+        "operationId": "region_get_snapshots",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RegionId"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetSnapshotResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/crucible/0/regions/{id}/snapshots/{name}": {
+      "get": {
+        "operationId": "region_get_snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RegionId"
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "region_delete_snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RegionId"
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          }
+        }
+      }
+    },
+    "/crucible/0/regions/{id}/snapshots/{name}/run": {
+      "post": {
+        "operationId": "region_run_snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RegionId"
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunningSnapshot"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "region_delete_running_snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RegionId"
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -109,6 +267,13 @@
             "format": "uint64",
             "minimum": 0
           },
+          "cert_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "encrypted": {
+            "type": "boolean"
+          },
           "extent_count": {
             "type": "integer",
             "format": "uint64",
@@ -122,16 +287,46 @@
           "id": {
             "$ref": "#/components/schemas/RegionId"
           },
+          "key_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "root_pem": {
+            "nullable": true,
+            "type": "string"
+          },
           "volume_id": {
             "type": "string"
           }
         },
         "required": [
           "block_size",
+          "encrypted",
           "extent_count",
           "extent_size",
           "id",
           "volume_id"
+        ]
+      },
+      "GetSnapshotResponse": {
+        "type": "object",
+        "properties": {
+          "running_snapshots": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RunningSnapshot"
+            }
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Snapshot"
+            }
+          }
+        },
+        "required": [
+          "running_snapshots",
+          "snapshots"
         ]
       },
       "Region": {
@@ -142,6 +337,13 @@
             "format": "uint64",
             "minimum": 0
           },
+          "cert_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "encrypted": {
+            "type": "boolean"
+          },
           "extent_count": {
             "type": "integer",
             "format": "uint64",
@@ -155,10 +357,18 @@
           "id": {
             "$ref": "#/components/schemas/RegionId"
           },
+          "key_pem": {
+            "nullable": true,
+            "type": "string"
+          },
           "port_number": {
             "type": "integer",
             "format": "uint16",
             "minimum": 0
+          },
+          "root_pem": {
+            "nullable": true,
+            "type": "string"
           },
           "state": {
             "$ref": "#/components/schemas/State"
@@ -169,6 +379,7 @@
         },
         "required": [
           "block_size",
+          "encrypted",
           "extent_count",
           "extent_size",
           "id",
@@ -179,6 +390,47 @@
       },
       "RegionId": {
         "type": "string"
+      },
+      "RunningSnapshot": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/RegionId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port_number": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "port_number",
+          "state"
+        ]
+      },
+      "Snapshot": {
+        "type": "object",
+        "properties": {
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created",
+          "name"
+        ]
       },
       "State": {
         "type": "string",

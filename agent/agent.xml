@@ -21,7 +21,8 @@
       -i %{config/uuid}
       -n %{config/nexus}
       -P %{config/portbase}
-      -p %{config/prefix}'
+      -p %{config/downstairs_prefix}
+      -s %{config/snapshot_prefix}'
     timeout_seconds='30'
     />
 
@@ -37,7 +38,8 @@
     <propval name='uuid' type='astring' value='' />
     <propval name='nexus' type='astring' value='127.0.0.1:12221' />
     <propval name='portbase' type='astring' value='19000' />
-    <propval name='prefix' type='astring' value='downstairs' />
+    <propval name='downstairs_prefix' type='astring' value='downstairs' />
+    <propval name='snapshot_prefix' type='astring' value='snapshot' />
   </property_group>
 
   <stability value='Unstable' />

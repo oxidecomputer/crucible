@@ -14,9 +14,7 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/opt/oxide/crucible/bin/downstairs
-      --data %{config/directory}
-      --port %{config/port}'
+    exec='/opt/oxide/crucible/bin/downstairs_method_script.sh'
     timeout_seconds='30'
     />
 
@@ -29,6 +27,10 @@
   <property_group name='config' type='application'>
     <propval name='directory' type='astring' value='/dev/null' />
     <propval name='port' type='count' value='0' />
+    <propval name='mode' type='astring' value='rw' />
+    <propval name='cert_pem_path' type='astring' value='' />
+    <propval name='key_pem_path' type='astring' value='' />
+    <propval name='root_pem_path' type='astring' value='' />
   </property_group>
 
   <stability value='Unstable' />

@@ -113,3 +113,21 @@ cat > selfsigned-csr.json <<EOF
 EOF
 
 cfssl gencert -initca selfsigned-csr.json | cfssljson -bare selfsigned -
+
+cat > bad-upstairs-csr.json <<EOF
+{
+    "CN": "badupstairs",
+    "hosts": [
+        "badupstairs"
+    ],
+    "key": {
+        "algo": "rsa",
+        "size": 2048
+    }
+}
+EOF
+
+cat bad-upstairs-csr.json
+
+cfssl genkey bad-upstairs-csr.json | cfssljson -bare bad-upstairs -
+cfssl sign -ca selfsigned.pem -ca-key selfsigned-key.pem bad-upstairs.csr | cfssljson -bare bad-upstairs -

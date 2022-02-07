@@ -34,7 +34,7 @@ mod value;
 pub use value::{Value, Values};
 
 mod transaction;
-pub use transaction::{CommitResult, Transaction, TransactionEntry};
+pub use transaction::{CommitResult, Transaction};
 
 pub type Result<T> = std::result::Result<T, ScfError>;
 

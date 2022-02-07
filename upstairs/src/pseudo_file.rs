@@ -322,7 +322,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
     fn _flush(&mut self) -> Result<(), CrucibleError> {
         let _guard = self.rmw_lock.write().unwrap();
 
-        let mut waiter = self.block_io.flush()?;
+        let mut waiter = self.block_io.flush(None)?;
         waiter.block_wait()?;
 
         Ok(())
