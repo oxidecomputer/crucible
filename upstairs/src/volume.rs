@@ -314,7 +314,7 @@ impl BlockIO for Volume {
         // reads directly from that
         if self.sub_volumes.is_empty() {
             if let Some(read_only_parent) = &self.read_only_parent {
-                return read_only_parent.read(offset, data.clone());
+                return read_only_parent.read(offset, data);
             } else {
                 crucible_bail!(
                     CannotServeBlocks,
