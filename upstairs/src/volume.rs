@@ -490,10 +490,18 @@ impl BlockIO for Volume {
 impl SubVolume {
     // Compute sub volume LBA from total volume LBA.
     //
-    // Example:
+    // Total volume address:                    x
+    //     Total volume LBA:   |----------------x------------------|
+    //       Sub volume LBA:             |------x---------|
+    //   Sub volume address:                    x
     //
-    // Sub volume LBA range is from [1024, 2048), so total volume LBA of 1234 is
-    // sub volume LBA 210.
+    // For example, if total volume address is 1234, and this sub volume's range
+    // is [1024,2048), then the sub volume address is
+    //
+    //     total address - sub volume start
+    //     = 1234 - 1024
+    //     = 210
+    //
     pub fn compute_sub_volume_lba(&self, address: u64) -> u64 {
         assert!(self.lba_range.contains(&address));
         address - self.lba_range.start
