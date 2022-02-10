@@ -28,8 +28,7 @@ pub async fn start_info(
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
-        // tls: None,
-        ..Default::default()
+        tls: None,
     };
 
     /*
