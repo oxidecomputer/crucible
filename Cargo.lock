@@ -3649,17 +3649,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fecdca9a5291cc2b8dcf7dc02453fee791a280f3743cb0905f8822ae463b3fe"
 
 [[package]]
-name = "volume_integration_tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crucible",
- "hex",
- "rand 0.8.4",
- "tokio",
-]
-
-[[package]]
 name = "walkdir"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
