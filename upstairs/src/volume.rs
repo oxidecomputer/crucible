@@ -457,7 +457,10 @@ impl BlockIO for Volume {
             waiter.block_wait()?;
         }
 
-        // XXX no need to flush read only parent?
+        // no need to flush read only parent. we assume that read only parents
+        // are already consistent, because we can't write to them (they may be
+        // served out of a ZFS snapshot and be read only at the filesystem
+        // level)
 
         BlockReqWaiter::immediate()
     }
