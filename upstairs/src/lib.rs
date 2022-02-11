@@ -41,8 +41,69 @@ mod mend;
 mod pseudo_file;
 mod test;
 
+pub mod volume;
+pub use volume::Volume;
+
+pub mod in_memory;
+pub use in_memory::InMemoryBlockIO;
+
+pub mod block_io;
+pub use block_io::{FileBlockIO, ReqwestBlockIO};
+
 pub use mend::{DownstairsMend, Reconcile};
 pub use pseudo_file::CruciblePseudoFile;
+
+pub trait BlockIO {
+    fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
+
+    fn query_is_active(&self) -> Result<bool, CrucibleError>;
+
+    // Total bytes of Volume
+    fn total_size(&self) -> Result<u64, CrucibleError>;
+
+    fn get_block_size(&self) -> Result<u64, CrucibleError>;
+
+    fn get_uuid(&self) -> Result<Uuid, CrucibleError>;
+
+    fn read(
+        &self,
+        offset: Block,
+        data: Buffer,
+    ) -> Result<BlockReqWaiter, CrucibleError>;
+
+    fn write(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError>;
+
+    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError>;
+
+    fn show_work(&self) -> Result<WQCounts, CrucibleError>;
+
+    // Common methods
+
+    fn byte_offset_to_block(
+        &self,
+        offset: u64,
+    ) -> Result<Block, CrucibleError> {
+        let bs = self.get_block_size()?;
+
+        if (offset % bs) != 0 {
+            crucible_bail!(OffsetUnaligned);
+        }
+
+        Ok(Block::new(offset / bs, bs.trailing_zeros()))
+    }
+
+    fn conditional_activate(&self, gen: u64) -> Result<(), CrucibleError> {
+        if self.query_is_active()? {
+            return Ok(());
+        }
+
+        self.activate(gen)
+    }
+}
 
 #[usdt::provider]
 mod cdt {
@@ -1937,11 +1998,6 @@ impl Downstairs {
 
             let read_data: Vec<ReadResponse> = read_data.unwrap();
 
-            let mut bytes: Vec<Bytes> = Vec::with_capacity(read_data.len());
-            for response in read_data {
-                bytes.push(response.data.freeze());
-            }
-
             /*
              * Transition this job from Done to AckReady if enough have
              * returned ok.
@@ -1951,10 +2007,10 @@ impl Downstairs {
                     dependencies: _dependencies,
                     requests: _,
                 } => {
-                    assert!(!bytes.is_empty());
+                    assert!(!read_data.is_empty());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        job.data = Some(bytes);
+                        job.data = Some(read_data);
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
@@ -1964,7 +2020,7 @@ impl Downstairs {
                     dependencies: _,
                     writes: _,
                 } => {
-                    assert!(bytes.is_empty());
+                    assert!(read_data.is_empty());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -1975,7 +2031,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                 } => {
-                    assert!(bytes.is_empty());
+                    assert!(read_data.is_empty());
                     /*
                      * If we are deactivating, then we want an ACK from
                      * all three downstairs, not the usual two.
@@ -2236,6 +2292,7 @@ impl UpstairsState {
         }
     }
 }
+
 /*
  * XXX Track scheduled storage work in the central structure. Have the
  * target management task check for work to do here by changing the value in
@@ -3732,6 +3789,7 @@ struct DownstairsIO {
     ds_id: u64,    // This MUST match our hashmap index
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
+
     /*
      * Hash of work status where key is the downstairs "client id" and the
      * hash value is the current state of the IO request with respect to the
@@ -3742,14 +3800,16 @@ struct DownstairsIO {
      * or if by not putting a downstairs in the hash, if that is valid.
      */
     state: HashMap<u8, IOState>,
+
     /*
      * Has this been acked to the guest yet?
      */
     ack_status: AckStatus,
+
     /*
      * If the operation is a Read, this holds the resulting buffer
      */
-    data: Option<Vec<Bytes>>,
+    data: Option<Vec<ReadResponse>>,
 }
 
 impl DownstairsIO {
@@ -3971,18 +4031,22 @@ impl fmt::Display for AckStatus {
 #[derive(Clone, Debug)]
 pub struct Buffer {
     data: Arc<Mutex<Vec<u8>>>,
+    owned: Arc<Mutex<Vec<bool>>>,
 }
 
 impl Buffer {
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
+        let len = vec.len();
         Buffer {
             data: Arc::new(Mutex::new(vec)),
+            owned: Arc::new(Mutex::new(vec![false; len])),
         }
     }
 
     pub fn new(len: usize) -> Buffer {
         Buffer {
             data: Arc::new(Mutex::new(vec![0; len])),
+            owned: Arc::new(Mutex::new(vec![false; len])),
         }
     }
 
@@ -4005,6 +4069,10 @@ impl Buffer {
 
     pub fn as_vec(&self) -> MutexGuard<Vec<u8>> {
         self.data.try_lock().unwrap()
+    }
+
+    pub fn owned_vec(&self) -> MutexGuard<Vec<bool>> {
+        self.owned.try_lock().unwrap()
     }
 }
 
@@ -4188,7 +4256,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, Vec<Bytes>>,
+    downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -4207,7 +4275,7 @@ impl GtoS {
         submitted: HashMap<u64, u64>,
         completed: Vec<u64>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, Vec<Bytes>>,
+        downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
     ) -> GtoS {
         GtoS {
@@ -4231,18 +4299,22 @@ impl GtoS {
             assert!(!self.completed.is_empty());
 
             let mut offset = 0;
-            for ds_id in self.completed.iter() {
-                let data_vec = self.downstairs_buffer.remove(ds_id).unwrap();
+            let mut vec = guest_buffer.as_vec();
+            let mut owned_vec = guest_buffer.owned_vec();
 
-                for data in data_vec {
+            for ds_id in self.completed.iter() {
+                let responses = self.downstairs_buffer.remove(ds_id).unwrap();
+
+                for response in responses {
                     // Copy over into guest memory.
                     {
                         let _ignored =
                             span!(Level::TRACE, "copy to guest buffer")
                                 .entered();
-                        let mut vec = guest_buffer.as_vec();
-                        for i in &data {
+
+                        for i in &response.data {
                             vec[offset] = *i;
+                            owned_vec[offset] = !response.hashes.is_empty();
                             offset += 1;
                         }
                     }
@@ -4340,7 +4412,7 @@ impl GuestWork {
         &mut self,
         gw_id: u64,
         ds_id: u64,
-        data: Option<Vec<Bytes>>,
+        data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
     ) {
         /*
@@ -4444,6 +4516,13 @@ impl BlockReqWaiter {
         recv: std_mpsc::Receiver<Result<(), CrucibleError>>,
     ) -> BlockReqWaiter {
         Self { recv }
+    }
+
+    // Create a BlockReqWaiter that returns right away
+    fn immediate() -> Result<BlockReqWaiter, CrucibleError> {
+        let (send, recv) = std_mpsc::channel();
+        send.send(Ok(()))?;
+        Ok(BlockReqWaiter::new(recv))
     }
 
     pub fn block_wait(&mut self) -> Result<(), CrucibleError> {
@@ -4739,19 +4818,6 @@ impl Guest {
         self.notify.notify_one();
     }
 
-    pub fn byte_offset_to_block(
-        &self,
-        offset: u64,
-    ) -> Result<Block, CrucibleError> {
-        let bs = self.query_block_size()?;
-
-        if (offset % bs) != 0 {
-            crucible_bail!(OffsetUnaligned);
-        }
-
-        Ok(Block::new(offset / bs, bs.trailing_zeros()))
-    }
-
     /*
      * `read` and `write` accept a block offset, and data must be a
      * multiple of block size.
@@ -4859,31 +4925,6 @@ impl Guest {
         Ok(self.send(BlockOp::Deactivate))
     }
 
-    pub fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
-        let mut waiter = self.send(BlockOp::GoActive { gen });
-        println!("The guest is requesting activation with gen:{}", gen);
-        waiter.block_wait()?;
-
-        /*
-         * XXX Figure out how long to wait for this.  The time to go active
-         * will include the time to reconcile all three downstairs.
-         */
-        for _ in 0..10 {
-            if self.query_is_active()? {
-                println!("This guest Upstairs is now active");
-                self.set_active();
-                return Ok(());
-            } else {
-                println!(
-                    "Upstairs is not yet active, waiting in activate function"
-                );
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        }
-
-        Err(CrucibleError::UpstairsInactive)
-    }
-
     pub fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
         let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
@@ -4974,6 +5015,73 @@ impl Guest {
 
         let wc = data.lock().unwrap();
         Ok(*wc)
+    }
+}
+
+impl BlockIO for Guest {
+    fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
+        let mut waiter = self.send(BlockOp::GoActive { gen });
+        println!("The guest is requesting activation with gen:{}", gen);
+        waiter.block_wait()?;
+
+        /*
+         * XXX Figure out how long to wait for this.  The time to go active
+         * will include the time to reconcile all three downstairs.
+         */
+        for _ in 0..10 {
+            if self.query_is_active()? {
+                println!("This guest Upstairs is now active");
+                self.set_active();
+                return Ok(());
+            } else {
+                println!(
+                    "Upstairs is not yet active, waiting in activate function"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+
+        Err(CrucibleError::UpstairsInactive)
+    }
+
+    fn query_is_active(&self) -> Result<bool, CrucibleError> {
+        self.query_is_active()
+    }
+
+    fn total_size(&self) -> Result<u64, CrucibleError> {
+        self.query_total_size()
+    }
+
+    fn get_block_size(&self) -> Result<u64, CrucibleError> {
+        self.query_block_size()
+    }
+
+    fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
+        self.query_upstairs_uuid()
+    }
+
+    fn read(
+        &self,
+        offset: Block,
+        data: Buffer,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.read(offset, data)
+    }
+
+    fn write(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.write(offset, data)
+    }
+
+    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        self.flush()
+    }
+
+    fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+        self.show_work()
     }
 }
 

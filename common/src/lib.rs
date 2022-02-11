@@ -69,6 +69,18 @@ pub enum CrucibleError {
 
     #[error("Integrity hash mismatch!")]
     HashMismatch,
+
+    #[error("LBA range overlap!")]
+    LBARangeOverlap,
+
+    #[error("Subvolume size mismatch!")]
+    SubvolumeSizeMismatch,
+
+    #[error("Cannot serve blocks: {0}")]
+    CannotServeBlocks(String),
+
+    #[error("Cannot receive blocks: {0}")]
+    CannotReceiveBlocks(String),
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -93,6 +105,12 @@ impl From<anyhow::Error> for CrucibleError {
 
 impl From<rusqlite::Error> for CrucibleError {
     fn from(e: rusqlite::Error) -> Self {
+        CrucibleError::GenericError(format!("{:?}", e))
+    }
+}
+
+impl<T> From<std::sync::mpsc::SendError<T>> for CrucibleError {
+    fn from(e: std::sync::mpsc::SendError<T>) -> Self {
         CrucibleError::GenericError(format!("{:?}", e))
     }
 }

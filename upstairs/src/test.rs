@@ -1130,9 +1130,13 @@ mod test {
             true
         );
 
-        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        let responses = work.active.get(&next_id).unwrap().data.as_ref();
+        assert!(responses.is_some());
         assert_eq!(
-            work.active.get(&next_id).unwrap().data,
+            responses.map(|responses| responses
+                .iter()
+                .map(|response| response.data.clone().freeze())
+                .collect()),
             Some(vec![Bytes::from_static(&[3])]),
         );
     }
@@ -1205,9 +1209,13 @@ mod test {
             true
         );
 
-        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        let responses = work.active.get(&next_id).unwrap().data.as_ref();
+        assert!(responses.is_some());
         assert_eq!(
-            work.active.get(&next_id).unwrap().data,
+            responses.map(|responses| responses
+                .iter()
+                .map(|response| response.data.clone().freeze())
+                .collect()),
             Some(vec![Bytes::from_static(&[3])]),
         );
 
@@ -1277,9 +1285,13 @@ mod test {
             true
         );
 
-        assert!(work.active.get(&next_id).unwrap().data.is_some());
+        let responses = work.active.get(&next_id).unwrap().data.as_ref();
+        assert!(responses.is_some());
         assert_eq!(
-            work.active.get(&next_id).unwrap().data,
+            responses.map(|responses| responses
+                .iter()
+                .map(|response| response.data.clone().freeze())
+                .collect()),
             Some(vec![Bytes::from_static(&[6])]),
         );
     }
