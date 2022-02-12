@@ -93,6 +93,50 @@ for tt in ${test_list}; do
     fi
 done
 
+# Repair test
+echo "Copy the $port file"
+echo cp -r "${testdir}/${port}" "${testdir}/previous"
+cp -r "${testdir}/${port}" "${testdir}/previous"
+
+echo "$cc" "$tt" -q "${args[@]}"
+if ! "$cc" one -q "${args[@]}"; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed repair test part 1"
+    echo
+else
+    echo "Repair part 1 passed"
+fi
+
+echo ""
+
+echo Kill the current downstairs
+ds_pid=$(pgrep -U "$(id -u)" -f "run -p $port")
+kill "$ds_pid"
+
+echo rm -rf "${testdir:?}/${port:?}"
+echo "Now put back the original so we have a mismatch"
+echo mv "${testdir}/previous" "${testdir}/${port}"
+rm -rf "${testdir:?}/${port:?}"
+mv "${testdir}/previous" "${testdir}/${port}"
+
+echo "Restart downstairs with old directory"
+echo ${cds} run -p "$port" -d "${testdir}/$port"
+${cds} run -p "$port" -d "${testdir}/$port" &
+downstairs[4]=$!
+
+echo ""
+echo ""
+echo "$cc" "$tt" -q "${args[@]}"
+if ! "$cc" one -q "${args[@]}"; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed repair test part 2"
+    echo
+else
+    echo "Repair part 2 passed"
+fi
+
 echo "Running hammer"
 if ! time cargo run -p crucible-hammer -- \
     "${args[@]}"; then

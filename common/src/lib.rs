@@ -81,6 +81,9 @@ pub enum CrucibleError {
 
     #[error("Cannot receive blocks: {0}")]
     CannotReceiveBlocks(String),
+
+    #[error("Invalid extent")]
+    InvalidExtent,
 }
 
 impl From<std::io::Error> for CrucibleError {

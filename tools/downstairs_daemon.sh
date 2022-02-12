@@ -19,6 +19,7 @@ trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
     touch "$testdir"/stop
+    rm -f "$testdir"/up
 }
 
 # This loop will sleep some random time, then kill a downstairs.
@@ -198,3 +199,6 @@ for pid in ${dsd_pid[*]}; do
     kill "$pid"
     wait "$pid"
 done
+
+rm -f ${testdir}/up
+rm -f ${testdir}/stop
