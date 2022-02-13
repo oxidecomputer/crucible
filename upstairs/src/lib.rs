@@ -1306,7 +1306,7 @@ where
                          */
                         let st = up.ds_state(up_coms.client_id);
                         if st == DsState::Active || st == DsState::Repair {
-                            // Option 1 work is done
+                            // Option 1: work is done
                             if up.downstairs.
                                 lock().
                                 unwrap().
@@ -3872,9 +3872,12 @@ impl Upstairs {
          */
         let mut completed = 0;
         loop {
-            //
-            //If we get an error here, all DS have to reset and
-            //we should clear the work queue.
+            /*
+             * If we get an error here, all Downstairs have to reset and
+             * we should clear the work queue as everything starts over
+             * after getting the latest state from each downstairs and
+             * building a new repair list.
+             */
             let res = self.new_rec_work().await;
             match res {
                 Ok(true) => {
@@ -3883,17 +3886,13 @@ impl Upstairs {
                     println!("Sent work, now wait for resp");
                     // ZZZ XXX Remove after testing
                     std::thread::sleep(std::time::Duration::from_millis(25));
-                    let mut progress_check = deadline_secs(50);
+                    let mut progress_check = deadline_secs(20);
 
                     /*
                      * What to do if a downstairs goes away and never
-                     * comes back?  How can we tell if a DS has disconnected
-                     * (and possibly reconnected) while we are waiting
-                     * for the response?
-                     *
-                     * Perhaps a reconnect is a sure signal, but otherwise
-                     * do we just wait?  How can we exit this loop if
-                     * a downstairs state has changed?
+                     * comes back?  At some point we will either need to
+                     * give up, or accept an abort signal from outside to
+                     * help us get moving again. TODO!
                      */
                     let mut work_done = false;
                     while !work_done {
@@ -3907,15 +3906,18 @@ impl Upstairs {
                                     work_done = true;
                                     completed += 1;
                                 } else {
-                                    println!("Got junk from recv");
-                                    // Is this okay?  Will a disconnecting
-                                    // downstairs possibly get interrupted
-                                    // this way, or is this a real problem?
+                                    println!("Got None from reconcile_done_rx");
                                 }
                             }
                             _ = sleep_until(progress_check) => {
+                                /*
+                                 * This may not be an error.  We check every
+                                 * so often just to make sure a downstairs
+                                 * did not go away while we were waiting for
+                                 * an ACK from that downstairs.
+                                 */
                                 println!("progress_check");
-                                progress_check = deadline_secs(50);
+                                progress_check = deadline_secs(20);
                                 self.ds_state_show();
                                 let mut ds = self.downstairs.lock().unwrap();
                                 if let Err(e) = ds.repair_or_abort() {
@@ -4030,6 +4032,82 @@ impl Upstairs {
                 repair_commands,
             )
             .await?;
+
+            let mut active = self.active.lock().unwrap();
+            let mut ds = self.downstairs.lock().unwrap();
+            /*
+             * Now that we have completed reconciliation, we move all
+             * the downstairs to the next state.  If we fail here, it means
+             * something interrupted our repair and we have to start over.
+             *
+             * As we repaired, downstairs should all be DsState::Repair.
+             *
+             * As we have released the downstairs lock while repairing, we
+             * have to verify that the downstairs are all in the state we
+             * expect them to be.  Any change means we abort and require
+             * all downstairs to reconnect, even if repair work is finished
+             * as a disconnected DS does not yet know it is all done with
+             * work and could have its state reset to New.
+             */
+
+            println!("Any required repair work is now completed");
+            assert_eq!(ds.active.len(), 0);
+            assert_eq!(ds.reconcile_task_list.len(), 0);
+
+            let ready = ds
+                .ds_state
+                .iter()
+                .filter(|s| **s == DsState::Repair)
+                .count();
+
+            if ready != 3 {
+                for (i, s) in ds.ds_state.iter_mut().enumerate() {
+                    if *s == DsState::Repair {
+                        *s = DsState::FailedRepair;
+                        println!("Mark {} as FAILED REPAIR in final check", i);
+                    }
+                }
+                /*
+                 * We don't abort here, as we want the downstairs to all
+                 * be notified that the need to reset and go back through
+                 * repair because someone did not complete it.
+                 */
+            } else {
+                println!("Set Downstairs and Upstairs active after repairs");
+                for s in ds.ds_state.iter_mut() {
+                    *s = DsState::Active;
+                }
+                if active.up_state != UpState::Initializing {
+                    bail!("Upstairs in unexpected state while reconciling");
+                }
+                active.active_request = false;
+                active.up_state = UpState::Active;
+                println!("{} set active after repair", self.uuid);
+            }
+        } else {
+            let mut active = self.active.lock().unwrap();
+            let mut ds = self.downstairs.lock().unwrap();
+
+            let ready = ds
+                .ds_state
+                .iter()
+                .filter(|s| **s == DsState::WaitQuorum)
+                .count();
+
+            if ready != 3 {
+                bail!("Unexpected Downstairs state post repair");
+            } else {
+                println!("Set Downstairs and Upstairs active");
+                if active.up_state != UpState::Initializing {
+                    bail!("Upstairs in unexpected state while reconciling");
+                }
+                active.active_request = false;
+                active.up_state = UpState::Active;
+                for s in ds.ds_state.iter_mut() {
+                    *s = DsState::Active;
+                }
+                println!("{} Set Active after no repair", self.uuid);
+            }
         }
 
         /*
@@ -4037,13 +4115,6 @@ impl Upstairs {
          * be waiting in the reconcile task that all repair work is done
          * (even if none was required) and they should proceed to being
          * active and accepting commands on the ds_work_ message channel.
-         *
-         * XXX TODO: I think we can lock first, then change DS states if
-         * they are still good, then send_reconcile_work message.
-         * This gives us a chance to catch any last state changes
-         * from a downstairs and force a reset.  After this check, all
-         * DS should go active and a disconnect at that point will
-         * just take the replay path.
          */
         assert!(!self
             .downstairs
@@ -4051,50 +4122,11 @@ impl Upstairs {
             .unwrap()
             .reconcile_current_work
             .is_some());
-        println!("Final Sent work");
+
+        println!("Notify all downstairs there is no more repair work");
         send_reconcile_work(dst, *lastcast);
         *lastcast += 1;
 
-        let mut ds = self.downstairs.lock().unwrap();
-        println!("Fake reconciliation has finished!!!");
-        assert_eq!(ds.active.len(), 0);
-        assert_eq!(ds.reconcile_task_list.len(), 0);
-
-        /*
-         * Now that we have completed reconciliation, we move all
-         * the downstairs to the next state.  If we fail here, it means
-         * something interrupted our repair and we have to start over.
-         *
-         * If repairing, then it still should be repairing.
-         * If not repairing then it should be WaitQuorum.
-         *
-         * As we have released the downstairs lock while repairing, we
-         * have to verify that the downstairs are all in the state we
-         * expect them to be.  Any change means we abort and require
-         * all downstairs to reconnect.
-         */
-
-        // ZZZ This as a closure can only panic.
-        // However, now that we are here, the downstairs tasks could
-        // be moved beyond the reconcile loop and be in cmd_loop. How
-        // do we reset them?
-        ds.ds_state.iter_mut().for_each(|ds_state| {
-            println!("Transition from {:?} to Active", *ds_state);
-            if *ds_state != DsState::WaitQuorum && *ds_state != DsState::Repair
-            {
-                panic!(
-                    "Active cancelled. Invalid state for transition {:?}",
-                    *ds_state
-                );
-            }
-            *ds_state = DsState::Active;
-        });
-
-        /*
-         * As a final step, set the upstairs active, which should
-         * allow incoming IO
-         */
-        self.set_active().unwrap();
         Ok(())
     }
 
