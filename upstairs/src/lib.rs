@@ -2877,20 +2877,10 @@ impl Upstairs {
      * that happens on initial startup. This is because the running
      * upstairs has some state it can use to re-verify a downstairs.
      */
-    fn _set_active(&self) -> Result<(), CrucibleError> {
+    #[cfg(test)]
+    fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().unwrap();
-        if active.up_state == UpState::Active {
-            crucible_bail!(UpstairsAlreadyActive);
-        } else if active.up_state == UpState::Deactivating {
-            /*
-             * We don't support deactivate interruption, so we have to
-             * let the currently running deactivation finish before we
-             * can accept an activation.
-             */
-            crucible_bail!(UpstairsDeactivating);
-        }
-        active.set_active(self.uuid)?;
-        Ok(())
+        active.set_active(self.uuid)
     }
 
     /*

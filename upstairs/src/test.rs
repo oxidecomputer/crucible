@@ -2878,7 +2878,7 @@ mod test {
         let mut d = Vec::new();
         d.push(dst);
         let mut lastcast: u64 = 1;
-        let res = tokio_test::block_on(up.ds_reconciliation(
+        let res = tokio_test::block_on(up.connect_region_set(
             &d,
             &mut lastcast,
             &mut ds_reconcile_done_rx,
