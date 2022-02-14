@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# This is going away.  I hate this script.
+
+# It's just here now till the reconciliation work finishes and we make a
+# proper repair test.
+
 # This test needs to:
 # Create some mismatch volumes
 # cargo run -p crucible-client -- dirty -t 127.0.0.1:8801 -t 127.0.0.1:8802 -t 127.0.0.1:8803 -q

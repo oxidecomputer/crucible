@@ -18,8 +18,8 @@ set -o pipefail
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
-    touch "$testdir"/stop
     rm -f "$testdir"/up
+    touch "$testdir"/stop
 }
 
 # This loop will sleep some random time, then kill a downstairs.
