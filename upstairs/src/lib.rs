@@ -3957,8 +3957,6 @@ impl Upstairs {
                     bail!("Error: {}", e);
                 }
             }
-            // ZZZ XXX Remove after testing
-            std::thread::sleep(std::time::Duration::from_millis(25));
         }
         println!("All repair completed, clear queue and notify");
         self.downstairs.lock().unwrap().reconcile_current_work = None;
@@ -4138,7 +4136,7 @@ impl Upstairs {
             .reconcile_current_work
             .is_some());
 
-        println!("Notify all downstairs to begin accepting IO ");
+        println!("Notify all downstairs for a final check of reconcile queue.");
         send_reconcile_work(dst, *lastcast);
         *lastcast += 1;
 
