@@ -1685,7 +1685,7 @@ impl Downstairs {
      * downstairs that believes it is still repairing to failed.
      * This FailedRepair state is an indicator to a downstairs task
      * that it should give up on repairing and close the connection
-     * to itself (which will enable the repair once all downstars are
+     * to itself (which will enable the repair once all downstairs are
      * ready).
      */
     fn repair_or_abort(&mut self) -> Result<()> {
@@ -4086,9 +4086,6 @@ impl Upstairs {
                 for s in ds.ds_state.iter_mut() {
                     *s = DsState::Active;
                 }
-                // active.active_request = false;
-                // active.up_state = UpState::Active;
-                // println!("{} set active after repair", self.uuid);
                 active.set_active(self.uuid)?;
             }
         } else {
@@ -4113,8 +4110,6 @@ impl Upstairs {
                 if active.up_state != UpState::Initializing {
                     bail!("Upstairs in unexpected state while reconciling");
                 }
-                // active.active_request = false;
-                // active.up_state = UpState::Active;
                 for s in ds.ds_state.iter_mut() {
                     *s = DsState::Active;
                 }
@@ -5649,9 +5644,6 @@ impl Guest {
     pub fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
         // Disable any more IO from this guest and deactivate the downstairs.
         // We can't deactivate if we are not yet active.
-        //
-        // ZZZ This should come from the guest, not ourselves.
-        // Let the upstairs tell us if it is active or not.
         if !self.is_active() {
             return Err(CrucibleError::UpstairsInactive);
         }
@@ -5762,7 +5754,7 @@ impl BlockIO for Guest {
          * XXX Figure out how long to wait for this.  The time to go active
          * will include the time to reconcile all three downstairs.
          */
-        for _ in 0..1000 {
+        for _ in 0..10 {
             if self.query_is_active()? {
                 println!("This guest Upstairs is now active");
                 self.set_active();

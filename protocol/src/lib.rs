@@ -136,14 +136,19 @@ pub enum Message {
 
     /*
      * Repair related
+     * We use rep_id here (Repair ID) instead of job_id to be clear that
+     * this is repair work and not actual IO.  The repair work uses a
+     * different work queue  and each repair job must finish on all three
+     * downstairs before the next one can be sent.
      */
-    /// Close the given extent ID on the downstairs.
+    /// Send a close the given extent ID on the downstairs.
+    /// We send the downstairs the repair ID (rep_id) and the extent number.
     ExtentClose(u64, u64),
-    /// Ack the close of the given extent ID from the downstairs.
+    /// Ack the close of an extent from the downstairs using the rep_id.
     ExtentCloseAck(u64),
-    /// Re-Open the given extent ID on the downstairs
+    /// Send a request (with rep_id) to reopen the given extent.
     ExtentReopen(u64, u64),
-    /// Ack the Re-Open of the given extent ID from the downstairs
+    /// Ack the Re-Open of an extent from the downstairs using the rep_id.
     ExtentReopenAck(u64),
 
     /// A problem with the given extent

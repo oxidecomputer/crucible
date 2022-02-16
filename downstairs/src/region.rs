@@ -19,6 +19,14 @@ pub struct Extent {
     number: u32,
     block_size: u64,
     extent_size: Block,
+    /// Inner contains information about the actual extent file that holds
+    /// the data, and the metadata (stored in the database) about that
+    /// extent.
+    ///
+    /// If Some(), it means the extent file and database metadata for
+    /// it are opened.
+    /// If None, it means the extent is currently
+    /// closed (and possibly being updated out of band).
     inner: Option<Mutex<Inner>>,
 }
 
