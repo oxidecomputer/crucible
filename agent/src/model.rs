@@ -199,6 +199,11 @@ impl RunningSnapshot {
                 typ: SCF_TYPE_COUNT,
                 val: self.port_number.to_string(),
             },
+            SmfProperty {
+                name: "mode",
+                typ: SCF_TYPE_ASTRING,
+                val: "ro".to_string(),
+            },
         ];
 
         // Test for X509 files in snapshot - note this means that running
