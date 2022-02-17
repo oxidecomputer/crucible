@@ -37,7 +37,6 @@ use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
 mod http;
-mod mend;
 mod pseudo_file;
 mod test;
 

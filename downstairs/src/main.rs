@@ -549,7 +549,9 @@ where
             println!("{} Reopen extent {}", rep_id, eid);
             let msg = {
                 let mut d = ad.lock().await;
-                match d.region.reopen_extent(*eid as usize) {
+                // If we're performing this action, then the extent should be
+                // opened rw.
+                match d.region.reopen_extent(*eid as usize, false) {
                     Ok(()) => Message::ExtentReopenAck(*rep_id),
                     Err(e) => Message::ExtentError(*rep_id, *eid, e),
                 }
@@ -1310,9 +1312,10 @@ impl Downstairs {
         work.last_flush = 0;
 
         /*
-         * Re-open any closed extents
+         * Re-open any closed extents - if performing this type of
+         * reconciliation, then we're opening them rw
          */
-        self.region.reopen_all_extents()?;
+        self.region.reopen_all_extents(false)?;
 
         println!("{:?} is now active", uuid);
 
