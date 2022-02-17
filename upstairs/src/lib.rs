@@ -134,7 +134,7 @@ pub struct CrucibleOpts {
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
-    pub info: Option<SocketAddr>,
+    pub http: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -2413,7 +2413,7 @@ impl Upstairs {
             cert_pem: None,
             key_pem: None,
             root_cert_pem: None,
-            info: None,
+            http: None,
         };
         Self::new(
             &opts,
@@ -5676,12 +5676,12 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     drop(ds_done_tx);
     drop(ds_status_tx);
 
-    // If requested, start the info server on the given address:port
-    if let Some(info) = opt.info {
+    // If requested, start the http server on the given address:port
+    if let Some(http) = opt.http {
         let upi = Arc::clone(&up);
         tokio::spawn(async move {
-            let r = http::start(&upi, info).await;
-            println!("Info task finished with {:?}", r);
+            let r = http::start(&upi, http).await;
+            println!("HTTP task finished with {:?}", r);
         });
     }
     /*
