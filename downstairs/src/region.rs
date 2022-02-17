@@ -926,7 +926,9 @@ impl Region {
      * Walk the list of all extents and find any that are not open.
      * Open any extents that are not.
      */
-    pub fn reopen_all_extents(&mut self, read_only: bool) -> Result<()> {
+    pub fn reopen_all_extents(&mut self) -> Result<()> {
+        assert!(!self.read_only);
+
         let mut to_open = Vec::new();
         for (i, extent) in self.extents.iter().enumerate() {
             if extent.inner.is_none() {
@@ -935,7 +937,7 @@ impl Region {
         }
 
         for eid in to_open {
-            self.reopen_extent(eid as usize, read_only)?;
+            self.reopen_extent(eid as usize)?;
         }
 
         Ok(())
@@ -944,19 +946,21 @@ impl Region {
     /**
      * Re open an extent that was previously closed
      */
-    pub fn reopen_extent(
-        &mut self,
-        eid: usize,
-        read_only: bool,
-    ) -> Result<(), CrucibleError> {
+    pub fn reopen_extent(&mut self, eid: usize) -> Result<(), CrucibleError> {
         /*
-         * Make sure the extent is currently closed, and matches our eid
+         * Make sure the extent :
+         *
+         * - is currently closed
+         * - matches our eid
+         * - is not read-only
          */
         println!("reopen extent {}  {:?}", eid, self.extents[eid].inner);
         assert!(!self.extents[eid].inner.is_some());
         assert_eq!(self.extents[eid].number, eid as u32);
+        assert!(!self.read_only);
+
         let new_extent =
-            Extent::open(&self.dir, &self.def, eid as u32, read_only)?;
+            Extent::open(&self.dir, &self.def, eid as u32, self.read_only)?;
         self.extents[eid] = new_extent;
         Ok(())
     }
@@ -1277,7 +1281,7 @@ mod test {
         assert!(!ext_one.inner.is_some());
 
         // Reopen extent 1
-        region.reopen_extent(1, false)?;
+        region.reopen_extent(1)?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -1307,7 +1311,7 @@ mod test {
         assert!(!ext_four.inner.is_some());
 
         // Reopen all extents
-        region.reopen_all_extents(false)?;
+        region.reopen_all_extents()?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
