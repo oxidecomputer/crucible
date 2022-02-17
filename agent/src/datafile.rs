@@ -529,8 +529,7 @@ impl DataFile {
 
     /**
      * The worker thread will request the first region that is in a
-     * particular state.  If there are no tasks in the provided state,
-     * we sleep waiting for work to do.
+     * particular state.
      */
     pub fn first_region_in_states(&self, states: &[State]) -> Option<Region> {
         let inner = self.inner.lock().unwrap();
