@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub struct ServerContext {
+    // Region UUID -> a running Downstairs
     downstairs: Mutex<HashMap<Uuid, Arc<Mutex<Downstairs>>>>,
 }
 
