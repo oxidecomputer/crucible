@@ -282,10 +282,11 @@ async fn region_run_snapshot(
         ));
     }
 
+    // TODO support running snapshots with their own X509 creds
     let create = model::CreateRunningSnapshotRequest {
         id: p.id,
         name: p.name,
-        cert_pem: None, // XXX
+        cert_pem: None,
         key_pem: None,
         root_pem: None,
     };
