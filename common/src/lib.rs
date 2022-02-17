@@ -90,6 +90,9 @@ pub enum CrucibleError {
 
     #[error("Attempting to modify read-only region!")]
     ModifyingReadOnlyRegion,
+
+    #[error("Invalid extent")]
+    InvalidExtent,
 }
 
 impl From<std::io::Error> for CrucibleError {
