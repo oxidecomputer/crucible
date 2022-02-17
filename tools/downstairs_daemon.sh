@@ -18,6 +18,7 @@ set -o pipefail
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
+    rm -f "$testdir"/up
     touch "$testdir"/stop
 }
 
@@ -198,3 +199,6 @@ for pid in ${dsd_pid[*]}; do
     kill "$pid"
     wait "$pid"
 done
+
+rm -f ${testdir}/up
+rm -f ${testdir}/stop

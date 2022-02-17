@@ -483,6 +483,39 @@ where
             d.add_work(*uuid, *ds_id, new_read).await?;
             Some(*ds_id)
         }
+        Message::ExtentClose(rep_id, eid) => {
+            println!("{} Close extent {}", rep_id, eid);
+            let msg = {
+                let mut d = ad.lock().await;
+                match d.region.extents.get_mut(*eid as usize) {
+                    Some(ext) => {
+                        ext.close()?;
+                        Message::ExtentCloseAck(*rep_id)
+                    }
+                    None => Message::ExtentError(
+                        *rep_id,
+                        *eid,
+                        CrucibleError::InvalidExtent,
+                    ),
+                }
+            };
+            let mut fw = fw.lock().await;
+            fw.send(msg).await?;
+            return Ok(());
+        }
+        Message::ExtentReopen(rep_id, eid) => {
+            println!("{} Reopen extent {}", rep_id, eid);
+            let msg = {
+                let mut d = ad.lock().await;
+                match d.region.reopen_extent(*eid as usize) {
+                    Ok(()) => Message::ExtentReopenAck(*rep_id),
+                    Err(e) => Message::ExtentError(*rep_id, *eid, e),
+                }
+            };
+            let mut fw = fw.lock().await;
+            fw.send(msg).await?;
+            return Ok(());
+        }
         x => bail!("unexpected frame {:?}", x),
     };
 
@@ -744,7 +777,7 @@ where
                                 ds.promote_to_active(
                                     uuid,
                                     another_upstairs_active_tx.clone()
-                                ).await;
+                                ).await?;
                             }
                             negotiated = 2;
 
@@ -1172,10 +1205,12 @@ impl Downstairs {
         Ok(())
     }
 
-    async fn promote_to_active(&mut self, uuid: Uuid, tx: Arc<Sender<u64>>) {
+    async fn promote_to_active(
+        &mut self,
+        uuid: Uuid,
+        tx: Arc<Sender<u64>>,
+    ) -> Result<()> {
         let mut work = self.work.lock().await;
-
-        println!("{:?} is now active", uuid);
 
         /*
          * If there's an existing Upstairs connection, signal to terminate
@@ -1231,6 +1266,15 @@ impl Downstairs {
 
         work.completed = Vec::with_capacity(32);
         work.last_flush = 0;
+
+        /*
+         * Re-open any closed extents
+         */
+        self.region.reopen_all_extents()?;
+
+        println!("{:?} is now active", uuid);
+
+        Ok(())
     }
 
     fn is_active(&self, uuid: Uuid) -> bool {

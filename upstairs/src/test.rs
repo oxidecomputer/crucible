@@ -2854,7 +2854,7 @@ mod test {
 
     #[test]
     fn reconcile_not_ready() {
-        // Verify reconcile returns false when a downstairs is not ready/
+        // Verify reconcile returns false when a downstairs is not ready
         let up = Upstairs::default();
         up.ds_transition(0, DsState::WaitActive);
         up.ds_transition(0, DsState::WaitQuorum);
@@ -2863,17 +2863,416 @@ mod test {
         up.ds_transition(1, DsState::WaitQuorum);
 
         let (ds_work_tx, _) = watch::channel(1);
+        let (ds_reconcile_work_tx, _) = watch::channel(1);
         let (ds_active_tx, _) = watch::channel(1);
+        let (_, mut ds_reconcile_done_rx) = mpsc::channel::<Repair>(32);
         let t = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let dst = Target {
             target: t,
             ds_work_tx,
             ds_active_tx,
+            ds_reconcile_work_tx,
         };
+
+        // We just make one target to keep the method happy.
         let mut d = Vec::new();
         d.push(dst);
         let mut lastcast: u64 = 1;
-        assert_eq!(up.ds_reconciliation(&d, &mut lastcast), false);
+        let res = tokio_test::block_on(up.connect_region_set(
+            &d,
+            &mut lastcast,
+            &mut ds_reconcile_done_rx,
+        ));
+        assert!(res.is_ok());
+        let active = up.active.lock().unwrap();
+        assert_ne!(active.up_state, UpState::Active)
+    }
+
+    // Tests for rep_in_progress
+    #[test]
+    fn reconcile_rep_in_progress_none() {
+        // No repairs on the queue, should return None
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        ds.ds_state[0] = DsState::Repair;
+        ds.ds_state[1] = DsState::Repair;
+        ds.ds_state[2] = DsState::Repair;
+        let w = ds.rep_in_progress(0);
+        assert_eq!(w, None);
+    }
+
+    #[test]
+    fn reconcile_repair_workflow_not_repair() {
+        // Verify that rep_in_progress will not give out work if a
+        // downstairs is not in the correct state, and that it will
+        // clear the work queue and mark other downstairs as failed.
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            // Put a jobs on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+            // A downstairs is not in Repair state
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::WaitQuorum;
+            ds.ds_state[2] = DsState::Repair;
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.is_err());
+        let mut ds = up.downstairs.lock().unwrap();
+        assert_eq!(ds.ds_state[0], DsState::FailedRepair);
+        assert_eq!(ds.ds_state[1], DsState::WaitQuorum);
+        assert_eq!(ds.ds_state[2], DsState::FailedRepair);
+
+        // Verify rep_in_progress now returns none for all DS
+        assert!(ds.reconcile_task_list.is_empty());
+        assert!(!ds.rep_in_progress(0).is_some());
+        assert!(!ds.rep_in_progress(1).is_some());
+        assert!(!ds.rep_in_progress(2).is_some());
+    }
+
+    #[test]
+    fn reconcile_repair_workflow_not_repair_later() {
+        // Verify that rep_done still works even after we have a downstairs
+        // in the FailedRepair state. Verify that attempts to get new work
+        // after a failed repair now return none.
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put two jobs on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark all three as in progress
+        assert!(ds.rep_in_progress(0).is_some());
+        assert!(ds.rep_in_progress(1).is_some());
+        assert!(ds.rep_in_progress(2).is_some());
+
+        // Now verify we can be done even if a DS is gone
+        ds.ds_state[1] = DsState::New;
+        // Now, make sure we consider this done only after all three are done
+        assert!(!ds.rep_done(0, rep_id));
+        assert!(!ds.rep_done(1, rep_id));
+        assert!(ds.rep_done(2, rep_id));
+
+        // Getting the next work to do should verify the previous is done,
+        // and handle a state change for a downstairs.
+        drop(ds);
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.is_err());
+        let mut ds = up.downstairs.lock().unwrap();
+        assert_eq!(ds.ds_state[0], DsState::FailedRepair);
+        assert_eq!(ds.ds_state[1], DsState::New);
+        assert_eq!(ds.ds_state[2], DsState::FailedRepair);
+
+        // Verify rep_in_progress now returns none for all DS
+        assert!(ds.reconcile_task_list.is_empty());
+        assert!(!ds.rep_in_progress(0).is_some());
+        assert!(!ds.rep_in_progress(1).is_some());
+        assert!(!ds.rep_in_progress(2).is_some());
+    }
+
+    #[test]
+    fn reconcile_repair_workflow_repair_later() {
+        // Verify that a downstairs not in repair mode will ignore new
+        // work requests until it transitions to repair.
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put a job on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark all three as in progress
+        assert!(ds.rep_in_progress(0).is_some());
+        assert!(ds.rep_in_progress(1).is_some());
+        ds.ds_state[2] = DsState::New;
+        assert!(!ds.rep_in_progress(2).is_some());
+
+        // Okay, now the DS is back and ready for repair, verify it will
+        // start taking work.
+        ds.ds_state[2] = DsState::Repair;
+        assert!(ds.rep_in_progress(2).is_some());
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_rep_in_progress_bad1() {
+        // Verify the same downstairs can't mark a job in progress twice
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put a job on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let _ = tokio_test::block_on(up.new_rec_work());
+        let mut ds = up.downstairs.lock().unwrap();
+        assert!(ds.rep_in_progress(0).is_some());
+        assert!(ds.rep_in_progress(0).is_some());
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_rep_done_too_soon() {
+        // Verify a job can't go new -> done
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put a job on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let _ = tokio_test::block_on(up.new_rec_work());
+        let mut ds = up.downstairs.lock().unwrap();
+        ds.rep_done(0, rep_id);
+    }
+
+    #[test]
+    fn reconcile_repair_workflow_1() {
+        let up = Upstairs::default();
+        let mut rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put two jobs on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id + 1,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark all three as in progress
+        assert!(ds.rep_in_progress(0).is_some());
+        assert!(ds.rep_in_progress(1).is_some());
+        assert!(ds.rep_in_progress(2).is_some());
+
+        // Now, make sure we consider this done only after all three are done
+        assert!(!ds.rep_done(0, rep_id));
+        assert!(!ds.rep_done(1, rep_id));
+        assert!(ds.rep_done(2, rep_id));
+
+        // Getting the next work to do should verify the previous is done
+        drop(ds);
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark all three as in progress
+        assert!(ds.rep_in_progress(0).is_some());
+        assert!(ds.rep_in_progress(1).is_some());
+        assert!(ds.rep_in_progress(2).is_some());
+
+        // Now, make sure we consider this done only after all three are done
+        rep_id += 1;
+        assert!(!ds.rep_done(0, rep_id));
+        assert!(!ds.rep_done(1, rep_id));
+        assert!(ds.rep_done(2, rep_id));
+
+        drop(ds);
+        // Now, we should be empty, so nw is false
+        assert_eq!(tokio_test::block_on(up.new_rec_work()).unwrap(), false);
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_leave_no_job_behind() {
+        // Verify we can't start a new job before the old is finished.
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put two jobs on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id + 1,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark all three as in progress
+        assert!(ds.rep_in_progress(0).is_some());
+        assert!(ds.rep_in_progress(1).is_some());
+        assert!(ds.rep_in_progress(2).is_some());
+
+        // Now, make sure we consider this done only after all three are done
+        assert!(!ds.rep_done(0, rep_id));
+        assert!(!ds.rep_done(1, rep_id));
+        // don't finish
+
+        // Getting the next work to do should verify the previous is done
+        drop(ds);
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+    }
+
+    #[test]
+    fn reconcile_repair_workflow_2() {
+        // Verify Done or Skipped works for rep_done
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put a job on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark all three as in progress
+        assert!(ds.rep_in_progress(0).is_some());
+        if let Some(job) = &mut ds.reconcile_current_work {
+            let oldstate = job.state.insert(1, IOState::Skipped);
+            assert_eq!(oldstate, Some(IOState::New));
+        } else {
+            panic!("Failed to find next task");
+        }
+
+        assert!(ds.rep_in_progress(2).is_some());
+
+        // Now, make sure we consider this done only after all three are done
+        assert!(!ds.rep_done(0, rep_id));
+        // This should panic: assert!(!ds.rep_done(1, rep_id));
+        assert!(ds.rep_done(2, rep_id));
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_repair_inprogress_not_done() {
+        // Verify Done or Skipped works for rep_done
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put a job on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Mark one as skipped
+        if let Some(job) = &mut ds.reconcile_current_work {
+            let oldstate = job.state.insert(1, IOState::Skipped);
+            assert_eq!(oldstate, Some(IOState::New));
+        } else {
+            panic!("Failed to find next task");
+        }
+
+        // Can't mark done a skipped job
+        ds.rep_done(1, rep_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn reconcile_repair_workflow_too_soon() {
+        // Verify that jobs must be in progress before done.
+        let up = Upstairs::default();
+        let rep_id = 0;
+        {
+            let mut ds = up.downstairs.lock().unwrap();
+            ds.ds_state[0] = DsState::Repair;
+            ds.ds_state[1] = DsState::Repair;
+            ds.ds_state[2] = DsState::Repair;
+            // Put a job on the todo list
+            ds.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, 1),
+            ));
+        }
+        // Move that job to next to do.
+        let nw = tokio_test::block_on(up.new_rec_work());
+        assert!(nw.unwrap());
+        let mut ds = up.downstairs.lock().unwrap();
+        // Jump straight to done.
+        // Now, make sure we consider this done only after all three are done
+        ds.rep_done(0, rep_id);
+    }
+
+    #[test]
+    fn reconcile_rc_to_message() {
+        // Convert an extent fix to the crucible messages.
+        // TODO: This will grow as the protocol is finalized.
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        let mut rec_list = HashMap::new();
+        let ef = ExtentFix {
+            source: 0,
+            dest: vec![1, 2],
+        };
+        rec_list.insert(0, ef);
+        ds.convert_rc_to_messages(rec_list);
+        // TODO: When we finalize the message, update this test
+        // to expect more.
+        assert!(!ds.reconcile_task_list.is_empty());
     }
 
     #[test]

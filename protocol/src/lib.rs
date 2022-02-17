@@ -101,9 +101,12 @@ impl ReadResponse {
     }
 }
 
+/**
+ * These enums are for messages sent between an Upstairs and a Downstairs
+ */
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
-    /*
+    /**
      * Initial negotiation: version, upstairs uuid.
      */
     HereIAm(u32, Uuid),
@@ -131,6 +134,25 @@ pub enum Message {
     Ruok,
     Imok,
 
+    /*
+     * Repair related
+     * We use rep_id here (Repair ID) instead of job_id to be clear that
+     * this is repair work and not actual IO.  The repair work uses a
+     * different work queue  and each repair job must finish on all three
+     * downstairs before the next one can be sent.
+     */
+    /// Send a close the given extent ID on the downstairs.
+    /// We send the downstairs the repair ID (rep_id) and the extent number.
+    ExtentClose(u64, u64),
+    /// Ack the close of an extent from the downstairs using the rep_id.
+    ExtentCloseAck(u64),
+    /// Send a request (with rep_id) to reopen the given extent.
+    ExtentReopen(u64, u64),
+    /// Ack the Re-Open of an extent from the downstairs using the rep_id.
+    ExtentReopenAck(u64),
+
+    /// A problem with the given extent
+    ExtentError(u64, u64, CrucibleError),
     /*
      * Metadata exchange
      */

@@ -19,7 +19,15 @@ pub struct Extent {
     number: u32,
     block_size: u64,
     extent_size: Block,
-    inner: Mutex<Inner>,
+    /// Inner contains information about the actual extent file that holds
+    /// the data, and the metadata (stored in the database) about that
+    /// extent.
+    ///
+    /// If Some(), it means the extent file and database metadata for
+    /// it are opened.
+    /// If None, it means the extent is currently
+    /// closed (and possibly being updated out of band).
+    inner: Option<Mutex<Inner>>,
 }
 
 #[derive(Debug)]
@@ -470,8 +478,19 @@ impl Extent {
             number,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Mutex::new(Inner { file, metadb }),
+            inner: Some(Mutex::new(Inner { file, metadb })),
         })
+    }
+
+    /**
+     * Close an extent and the metadata db files for it.
+     */
+    pub fn close(&mut self) -> Result<()> {
+        let inner = self.inner.as_ref().unwrap().lock().unwrap();
+        println!("Close {} {:?}", self.number, inner);
+        drop(inner);
+        self.inner = None;
+        Ok(())
     }
 
     /**
@@ -579,12 +598,12 @@ impl Extent {
             number,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Mutex::new(Inner { file, metadb }),
+            inner: Some(Mutex::new(Inner { file, metadb })),
         })
     }
 
     pub fn inner(&self) -> MutexGuard<Inner> {
-        self.inner.lock().unwrap()
+        self.inner.as_ref().unwrap().lock().unwrap()
     }
 
     pub fn number(&self) -> u32 {
@@ -597,7 +616,7 @@ impl Extent {
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
     ) -> Result<(), CrucibleError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner();
 
         for request in requests {
             let mut response = crucible_protocol::ReadResponse::from_request(
@@ -669,7 +688,7 @@ impl Extent {
         &self,
         writes: &[&crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner();
 
         for write in writes {
             self.check_input(write.offset, &write.data)?;
@@ -737,7 +756,7 @@ impl Extent {
         new_flush: u64,
         new_gen: u64,
     ) -> Result<(), CrucibleError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner();
 
         if !inner.dirty()? {
             /*
@@ -891,6 +910,41 @@ impl Region {
             assert_eq!(self.extents[eid as usize].number, eid);
         }
         assert_eq!(self.def.extent_count() as usize, self.extents.len());
+
+        Ok(())
+    }
+
+    /**
+     * Walk the list of all extents and find any that are not open.
+     * Open any extents that are not.
+     */
+    pub fn reopen_all_extents(&mut self) -> Result<()> {
+        let mut to_open = Vec::new();
+        for (i, extent) in self.extents.iter().enumerate() {
+            if extent.inner.is_none() {
+                to_open.push(i);
+            }
+        }
+
+        for eid in to_open {
+            self.reopen_extent(eid as usize)?;
+        }
+
+        Ok(())
+    }
+
+    /**
+     * Re open an extent that was previously closed
+     */
+    pub fn reopen_extent(&mut self, eid: usize) -> Result<(), CrucibleError> {
+        /*
+         * Make sure the extent is currently closed, and matches our eid
+         */
+        println!("reopen extent {}  {:?}", eid, self.extents[eid].inner);
+        assert!(!self.extents[eid].inner.is_some());
+        assert_eq!(self.extents[eid].number, eid as u32);
+        let new_extent = Extent::open(&self.dir, &self.def, eid as u32)?;
+        self.extents[eid] = new_extent;
         Ok(())
     }
 
@@ -1094,7 +1148,7 @@ mod test {
         PathBuf::from(s)
     }
 
-    fn new_extent() -> Extent {
+    fn new_extent(number: u32) -> Extent {
         let ff = File::open("/dev/null").unwrap();
 
         let inn = Inner {
@@ -1107,10 +1161,10 @@ mod test {
          * these, then change the tests!
          */
         Extent {
-            number: 0,
+            number,
             block_size: 512,
             extent_size: Block::new_512(100),
-            inner: Mutex::new(inn),
+            inner: Some(Mutex::new(inn)),
         }
     }
 
@@ -1129,6 +1183,67 @@ mod test {
             .set_extent_size(Block::new(10, block_size.trailing_zeros()));
         region_options.set_uuid(test_uuid());
         region_options
+    }
+
+    #[test]
+    fn close_extent() -> Result<()> {
+        // Create the region, make three extents
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        // Close extent 1
+        let ext_one = &mut region.extents[1];
+        ext_one.close()?;
+        assert!(!ext_one.inner.is_some());
+
+        // Reopen extent 1
+        region.reopen_extent(1)?;
+
+        // Verify extent one is valid
+        let ext_one = &mut region.extents[1];
+        assert!(ext_one.inner.is_some());
+
+        // Make sure the eid matches
+        assert_eq!(ext_one.number, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reopen_all_extents() -> Result<()> {
+        // Create the region, make three extents
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(5)?;
+
+        // Close extent 1
+        let ext_one = &mut region.extents[1];
+        ext_one.close()?;
+        assert!(!ext_one.inner.is_some());
+
+        // Close extent 4
+        let ext_four = &mut region.extents[4];
+        ext_four.close()?;
+        assert!(!ext_four.inner.is_some());
+
+        // Reopen all extents
+        region.reopen_all_extents()?;
+
+        // Verify extent one is valid
+        let ext_one = &mut region.extents[1];
+        assert!(ext_one.inner.is_some());
+
+        // Make sure the eid matches
+        assert_eq!(ext_one.number, 1);
+
+        // Verify extent four is valid
+        let ext_four = &mut region.extents[4];
+        assert!(ext_four.inner.is_some());
+
+        // Make sure the eid matches
+        assert_eq!(ext_four.number, 4);
+        Ok(())
     }
 
     #[test]
@@ -1160,7 +1275,7 @@ mod test {
 
     #[test]
     fn extent_io_valid() {
-        let ext = new_extent();
+        let ext = new_extent(0);
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
@@ -1174,7 +1289,7 @@ mod test {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
-        let ext = new_extent();
+        let ext = new_extent(0);
         ext.check_input(Block::new_512(0), &data).unwrap();
     }
 
@@ -1184,7 +1299,7 @@ mod test {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
-        let ext = new_extent();
+        let ext = new_extent(0);
         ext.check_input(Block::new_512(0), &data).unwrap();
     }
 
@@ -1194,7 +1309,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        let ext = new_extent();
+        let ext = new_extent(0);
         ext.check_input(Block::new_512(100), &data).unwrap();
     }
 
@@ -1204,7 +1319,7 @@ mod test {
         let mut data = BytesMut::with_capacity(1024);
         data.put(&[1; 1024][..]);
 
-        let ext = new_extent();
+        let ext = new_extent(0);
         ext.check_input(Block::new_512(99), &data).unwrap();
     }
 
@@ -1214,7 +1329,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512 * 100);
         data.put(&[1; 512 * 100][..]);
 
-        let ext = new_extent();
+        let ext = new_extent(0);
         assert_eq!((), ext.check_input(Block::new_512(1), &data).unwrap());
     }
 

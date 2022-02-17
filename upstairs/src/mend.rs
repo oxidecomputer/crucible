@@ -7,20 +7,20 @@ use super::*;
  * that need repair.
  */
 
-/*
+/**
  * This information is collected from each downstairs region in the same
  * region set.  It is used to find differences between them.
  */
 #[derive(Debug, Clone)]
-pub struct Reconcile {
+pub struct RegionMetadata {
     pub generation: Vec<u64>,
     pub flush_numbers: Vec<u64>,
     pub dirty: Vec<bool>,
 }
 
-/*
- * The source client ID of valid data in an extent with a mis-compare, and at
- * least one destination client ID where that data should go.
+/**
+ * The source client ID of valid data in an extent with a mis-compare, and
+ * at least one destination client ID where that data should go.
  */
 #[derive(Debug)]
 pub struct ExtentFix {
@@ -28,7 +28,7 @@ pub struct ExtentFix {
     pub dest: Vec<u8>,
 }
 
-/*
+/**
  * A hashmap of extents that need repair, indexed by extent numbers.
  */
 #[derive(Debug)]
@@ -43,16 +43,16 @@ impl DownstairsMend {
      * that need repair.
      */
     pub fn new(
-        c0: &Reconcile,
-        c1: &Reconcile,
-        c2: &Reconcile,
+        c0: &RegionMetadata,
+        c1: &RegionMetadata,
+        c2: &RegionMetadata,
     ) -> Option<DownstairsMend> {
         let mut dsm = DownstairsMend {
             mend: HashMap::new(),
         };
 
         /*
-         * Sanity check that all fields of the Reconcile struct have the
+         * Sanity check that all fields of the RegionMetadata struct have the
          * same length.  Pick one vec as the standard and compare.
          */
         let match_len = c0.generation.len();
@@ -92,7 +92,7 @@ impl DownstairsMend {
         }
 
         /*
-         * As we walk the extents in our Reconcile vec, keep track
+         * As we walk the extents in our RegionMetadata vec, keep track
          * of which extents we did not find a dirty bit set so we can
          * continue to check for differences in gen/flush but only for
          * extents we don't already know are a mismatch.
@@ -161,9 +161,9 @@ impl DownstairsMend {
  */
 fn make_repair_list(
     i: usize,
-    c0: &Reconcile,
-    c1: &Reconcile,
-    c2: &Reconcile,
+    c0: &RegionMetadata,
+    c1: &RegionMetadata,
+    c2: &RegionMetadata,
 ) -> ExtentFix {
     let source = find_source(i, c0, c1, c2);
     let dest = find_dest(i, source, c0, c1, c2);
@@ -186,7 +186,12 @@ fn make_repair_list(
  *
  * If there is still a tie at the end, then just pick one.
  */
-fn find_source(i: usize, c0: &Reconcile, c1: &Reconcile, c2: &Reconcile) -> u8 {
+fn find_source(
+    i: usize,
+    c0: &RegionMetadata,
+    c1: &RegionMetadata,
+    c2: &RegionMetadata,
+) -> u8 {
     /*
      * All three client IDs are candidates for the max generation number,
      * remove a client ID as we find it has a lower value than the others.
@@ -234,7 +239,7 @@ fn find_source(i: usize, c0: &Reconcile, c1: &Reconcile, c2: &Reconcile) -> u8 {
      * the same, or we have just two that are the same and have removed
      * the lower one.  Now look for a flush number that is greater.
      *
-     * Put the three downstairs Reconcile structs into an array with the
+     * Put the three downstairs RegionMetadata structs into an array with the
      * index being the client ID.  We use the max_gen vec to see if any
      * of the remaining client IDs have a higher flush number.
      */
@@ -304,15 +309,15 @@ fn find_source(i: usize, c0: &Reconcile, c1: &Reconcile, c2: &Reconcile) -> u8 {
 fn find_dest(
     i: usize,
     source: u8,
-    c0: &Reconcile,
-    c1: &Reconcile,
-    c2: &Reconcile,
+    c0: &RegionMetadata,
+    c1: &RegionMetadata,
+    c2: &RegionMetadata,
 ) -> Vec<u8> {
     assert!(source < 3);
     let mut dest: Vec<u8> = Vec::new();
 
     /*
-     * Put the three downstairs Reconcile structs into an array with the
+     * Put the three downstairs RegionMetadata structs into an array with the
      * index being the client ID.
      */
     let rec = vec![c0, c1, c2];
@@ -359,7 +364,7 @@ mod test {
     fn reconcile_one() {
         // Verify simple reconcile
 
-        let dsr = Reconcile {
+        let dsr = RegionMetadata {
             generation: vec![1, 1, 1],
             flush_numbers: vec![3, 3, 3],
             dirty: vec![false, false, false],
@@ -373,12 +378,12 @@ mod test {
     fn reconcile_gen_length_bad() {
         // Verify reconcile fails when generation vec length does
         // not agree between downstairs.
-        let dsr = Reconcile {
+        let dsr = RegionMetadata {
             generation: vec![1, 1, 1],
             flush_numbers: vec![3, 3, 3, 3],
             dirty: vec![false, false, false, false],
         };
-        let dsr_long = Reconcile {
+        let dsr_long = RegionMetadata {
             generation: vec![1, 1, 1, 1],
             flush_numbers: vec![3, 3, 3, 3],
             dirty: vec![false, false, false, false],
@@ -391,13 +396,13 @@ mod test {
     fn reconcile_flush_length_bad() {
         // Verify reconcile fails when flush vec length does not
         // agree between downstairs.
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![0, 0, 0, 1],
             flush_numbers: vec![0, 0, 0, 0],
             dirty: vec![false, false, false, false],
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![0, 0, 0, 1],
             flush_numbers: vec![0, 0, 0],
             dirty: vec![false, false, false, false],
@@ -410,13 +415,13 @@ mod test {
     fn reconcile_dirty_length_bad() {
         // Verify reconcile fails when dirty vec length does not
         // agree between downstairs.
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![0, 0, 0, 1],
             flush_numbers: vec![0, 0, 0, 0],
             dirty: vec![false, false, false],
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![0, 0, 0, 1],
             flush_numbers: vec![0, 0, 0, 0],
             dirty: vec![false, false, false, false],
@@ -428,7 +433,7 @@ mod test {
     #[should_panic]
     fn reconcile_length_mismatch() {
         // Verify reconcile fails when the length of the fields don't agree.
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![0, 0, 0, 1],
             flush_numbers: vec![0, 0, 0],
             dirty: vec![false, false, false],
@@ -440,7 +445,7 @@ mod test {
     fn reconcile_to_repair() {
         // Verify reconcile to_repair returns None when no mismatch
 
-        let dsr = Reconcile {
+        let dsr = RegionMetadata {
             generation: vec![1, 2, 3, 0],
             flush_numbers: vec![4, 5, 4, 0],
             dirty: vec![false, false, false, false],
@@ -460,19 +465,19 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let flush_numbers = vec![2, 1, 2, 1];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers: flush_numbers.clone(),
             dirty: vec![false, false, false, false],
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers,
             dirty: vec![false, false, true, false],
         };
 
-        let d3 = Reconcile {
+        let d3 = RegionMetadata {
             generation,
             flush_numbers: vec![2, 1, 3, 1],
             dirty: vec![false, false, true, false],
@@ -503,13 +508,13 @@ mod test {
         // Build the common elements to share.
         let flush_numbers = vec![2, 1, 2, 1];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![9, 8, 7, 7],
             flush_numbers: flush_numbers.clone(),
             dirty: vec![false, false, false, false],
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![9, 7, 7, 7],
             flush_numbers,
             dirty: vec![false, true, false, false],
@@ -535,13 +540,13 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let flush_numbers = vec![2, 1, 2, 1];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers: flush_numbers.clone(),
             dirty: vec![false, false, false, false],
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation,
             flush_numbers,
             dirty: vec![false, false, true, false],
@@ -569,7 +574,7 @@ mod test {
         // This test also has two extents with a mismatch, so we verify
         // that as well.
         //
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![9, 8, 7, 7],
             flush_numbers: vec![2, 1, 2, 1],
             dirty: vec![true, false, false, true],
@@ -602,13 +607,13 @@ mod test {
         let flush_numbers = vec![2, 1, 2, 1];
         let dirty = vec![false, false, false, false];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![9, 8, 7, 0],
             flush_numbers: flush_numbers.clone(),
             dirty: dirty.clone(),
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![8, 8, 7, 0],
             flush_numbers,
             dirty,
@@ -633,13 +638,13 @@ mod test {
         let flush_numbers = vec![2, 1, 2, 3];
         let dirty = vec![false, false, false, false];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![9, 8, 7, 0],
             flush_numbers: flush_numbers.clone(),
             dirty: dirty.clone(),
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![8, 8, 7, 0],
             flush_numbers,
             dirty,
@@ -671,19 +676,19 @@ mod test {
         let flush_numbers = vec![2, 1, 2, 3];
         let dirty = vec![false, false, false, false];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![7, 8, 7, 5],
             flush_numbers: flush_numbers.clone(),
             dirty: dirty.clone(),
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![8, 9, 7, 4],
             flush_numbers: flush_numbers.clone(),
             dirty: dirty.clone(),
         };
 
-        let d3 = Reconcile {
+        let d3 = RegionMetadata {
             generation: vec![8, 10, 7, 3],
             flush_numbers,
             dirty,
@@ -726,13 +731,13 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let dirty = vec![false, false, false, false];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers: vec![1, 1, 2, 1],
             dirty: dirty.clone(),
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation,
             flush_numbers: vec![2, 1, 2, 1],
             dirty,
@@ -762,19 +767,19 @@ mod test {
         let generation = vec![9, 8, 7, 7, 6, 5];
         let dirty = vec![false, false, false, false, false, false];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers: vec![1, 2, 3, 3, 1, 2],
             dirty: dirty.clone(),
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers: vec![2, 1, 2, 2, 3, 3],
             dirty: dirty.clone(),
         };
 
-        let d3 = Reconcile {
+        let d3 = RegionMetadata {
             generation,
             flush_numbers: vec![3, 3, 3, 1, 3, 2],
             dirty,
@@ -847,13 +852,13 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let dirty = vec![false, false, false, false];
 
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: generation.clone(),
             flush_numbers: vec![1, 1, 2, 1],
             dirty: dirty.clone(),
         };
 
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation,
             flush_numbers: vec![2, 1, 2, 3],
             dirty,
@@ -887,17 +892,17 @@ mod test {
         // there are multiple differences in multiple fields.
 
         // Generate some reconciliation data
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![9, 8, 7, 7],
             flush_numbers: vec![2, 1, 2, 1],
             dirty: vec![false, false, false, true],
         };
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![9, 7, 7, 7],
             flush_numbers: vec![2, 1, 2, 1],
             dirty: vec![false, false, true, true],
         };
-        let d3 = Reconcile {
+        let d3 = RegionMetadata {
             generation: vec![9, 8, 8, 7],
             flush_numbers: vec![3, 1, 2, 1],
             dirty: vec![true, false, false, true],
@@ -952,17 +957,17 @@ mod test {
         // two extents.
 
         // Generate some reconciliation data
-        let d1 = Reconcile {
+        let d1 = RegionMetadata {
             generation: vec![9, 7, 7, 7],
             flush_numbers: vec![1, 1, 2, 5],
             dirty: vec![false, false, false, false],
         };
-        let d2 = Reconcile {
+        let d2 = RegionMetadata {
             generation: vec![9, 8, 9, 8],
             flush_numbers: vec![2, 1, 1, 4],
             dirty: vec![false, false, false, false],
         };
-        let d3 = Reconcile {
+        let d3 = RegionMetadata {
             generation: vec![8, 8, 7, 9],
             flush_numbers: vec![3, 2, 3, 3],
             dirty: vec![false, false, false, false],

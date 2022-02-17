@@ -315,8 +315,6 @@ fn main() -> Result<()> {
         guest.activate(opt.gen)?;
     }
 
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
     println!("Wait for a show_work command to finish before sending IO");
     guest.show_work()?;
     /*
@@ -409,6 +407,14 @@ fn main() -> Result<()> {
         Workload::Dirty => {
             println!("Run dirty test");
             runtime.block_on(dirty_workload(&guest, &mut region_info))?;
+
+            /*
+             * Saving state here when we have not waited for a flush
+             * to finish means that the state recorded here may not be
+             * what ends up being in the downstairs.  All we guarantee is
+             * that everything before the flush will be there, and possibly
+             * things that came after the flush.
+             */
             if let Some(vo) = &opt.verify_out {
                 let cp = history_file(vo);
                 write_json(&cp, &region_info.write_count, true)?;

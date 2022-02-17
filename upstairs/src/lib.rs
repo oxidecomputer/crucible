@@ -37,7 +37,6 @@ use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
 mod info;
-mod mend;
 mod pseudo_file;
 mod test;
 
@@ -50,7 +49,8 @@ pub use in_memory::InMemoryBlockIO;
 pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
-pub use mend::{DownstairsMend, Reconcile};
+mod mend;
+pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
 pub trait BlockIO {
@@ -423,6 +423,10 @@ async fn proc_stream(
 /*
  * Once we have a connection to a downstairs, this task takes over and
  * handles the initial negotiation.
+ *
+ * The DsState of this downstairs when it leaves this function will
+ * determine if it goes into repair mode, or goes straight to receiving
+ * IO from the guest.
  */
 async fn proc<RT, WT>(
     target: &SocketAddr,
@@ -833,7 +837,7 @@ where
                          * comparison with the other downstairs in this
                          * region set.
                          */
-                        let dsr = Reconcile {
+                        let dsr = RegionMetadata {
                             generation: gen,
                             flush_numbers: flush.clone(),
                             dirty,
@@ -842,7 +846,7 @@ where
                         up.downstairs
                           .lock()
                           .unwrap()
-                          .reconcile
+                          .region_metadata
                           .insert(up_coms.client_id, dsr);
 
                         negotiated = 5;
@@ -967,13 +971,16 @@ where
         + std::marker::Send
         + 'static,
 {
-    println!("[{}] Starts cmd_loop", up_coms.client_id);
-
     /*
      * We set more_work if we arrive here on a re-connection, this will
-     * allow us to replay any outstanding work.
+     * allow us to replay any outstanding work.  If we don't arrive here
+     * on a reconnect, then we have to enter the reconcile loop and
+     * do any repairs that might be necessary.
      */
-    let mut more_work = up.ds_replay_active(up_coms.client_id);
+    let mut more_work = up.ds_is_replay(up_coms.client_id);
+    if !more_work {
+        do_reconcile_work(up, &mut fr, &mut fw, up_coms, lossy).await?;
+    }
 
     /*
      * To keep things alive, initiate a ping any time we have been idle for
@@ -992,6 +999,7 @@ where
      */
     let (tx, mut rx) = mpsc::channel::<Message>(100);
 
+    println!("[{}] Starts cmd_loop", up_coms.client_id);
     let pm_task = {
         let up_c = up.clone();
         let up_coms_c = up_coms.clone();
@@ -1168,14 +1176,189 @@ where
     }
 }
 
-/*
+/**
+ * When the upstairs is trying to transition to active, all downstairs
+ * connecting to the upstairs will pass through this function.
+ *
+ * This function is run by each downstairs task and is responsible for
+ * sending reconciliation work to the specific downstairs, and listening for
+ * the response.  All downstairs stay in repair mode until the repair queue
+ * is empty.
+ *
+ * If any downstairs disconnect during the repair, we abort the entire
+ * operation and require all downstairs to reconnect again and go back
+ * through the entire reconciliation process.  Because of this, the repair
+ * task and all downstairs tasks need to check state and listen for
+ * messages from each other that can indicate a problem.
+ */
+async fn do_reconcile_work<RT, WT>(
+    up: &Arc<Upstairs>,
+    fr: &mut FramedRead<RT, crucible_protocol::CrucibleDecoder>,
+    fw: &mut FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
+    up_coms: &mut UpComs,
+    _lossy: bool,
+) -> Result<()>
+where
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
+{
+    println!("[{}] Starts reconcile loop", up_coms.client_id);
+
+    /*
+     * We will arrive here (most likely) before the upstairs has
+     * determined if we need to reconcile or not.
+     * We both listen for messages coming from downstairs, and wait for
+     * reconciliation work notification to arrive from the upstairs task
+     * responsible for making all downstairs the same.
+     */
+    let mut ping_interval = deadline_secs(10);
+    let mut timeout_deadline = deadline_secs(50);
+    loop {
+        tokio::select! {
+            f = fr.next() => {
+                // When the downstairs responds, push the deadlines
+                timeout_deadline = deadline_secs(50);
+                ping_interval = deadline_secs(10);
+
+                match f.transpose()? {
+                    None => {
+                        bail!("[{}] None response during repair",
+                            up_coms.client_id);
+                    },
+                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                        up.ds_transition(up_coms.client_id, DsState::Disabled);
+                        if up.uuid != new_active_uuid {
+                            bail!("[{}] received disconnect from downstairs",
+                                up_coms.client_id
+                            );
+                        } else {
+                            bail!("[{}] bad disconnect from downstairs",
+                                up_coms.client_id
+                            );
+                        }
+                    }
+                    Some(Message::UuidMismatch(expected_uuid)) => {
+                        up.ds_transition(up_coms.client_id, DsState::Disabled);
+                        bail!(
+                            "[{}] received UuidMismatch, expecting {:?}!",
+                            up_coms.client_id, expected_uuid
+                        );
+                    }
+
+                    Some(Message::ExtentCloseAck(rep_id)) => {
+                        up.ds_repair_done_notify(
+                            up_coms.client_id,
+                            rep_id,
+                            &up_coms.ds_reconcile_done_tx,
+                        ).await?;
+                    }
+                    Some(Message::ExtentReopenAck(rep_id)) => {
+                        up.ds_repair_done_notify(
+                            up_coms.client_id,
+                            rep_id,
+                            &up_coms.ds_reconcile_done_tx,
+                        ).await?;
+                    }
+                    Some(m) => {
+                        println!(
+                            "[{}] In repair, No action taken for message {:?}",
+                            up_coms.client_id, m);
+                    }
+                }
+            }
+            _ = up_coms.ds_reconcile_work_rx.changed() => {
+                /*
+                 * When we have reconcile work to do, a message is sent
+                 * on this channel indicating that each downstairs should
+                 * either look for new work and/or check to see if the
+                 * reconciliation has completed.
+                 */
+                println!("[{}] received reconcile message", up_coms.client_id);
+
+                let job = up
+                    .downstairs
+                    .lock().unwrap().rep_in_progress(up_coms.client_id);
+                match job {
+                    Some(op) => {
+                        println!("[{}] submit {:?}", up_coms.client_id, op);
+                        fw.send(op).await?;
+                    },
+                    None => {
+                        /*
+                         * rep_in_progress will return None for four reasons,
+                         * figure out which reason
+                         */
+                        let st = up.ds_state(up_coms.client_id);
+                        if st == DsState::Active || st == DsState::Repair {
+                            // Option 1: work is done
+                            if up.downstairs.
+                                lock().
+                                unwrap().
+                                reconcile_task_list.
+                                is_empty() {
+                                println!(
+                                    "[{}] All repairs completed, exit",
+                                    up_coms.client_id
+                                );
+                                return Ok(());
+                            } else {
+                                // Option 2: more work, but not yet.
+                                assert_eq!(st, DsState::Repair);
+                                println!("[{}] still work to do, just not now",
+                                    up_coms.client_id);
+                            }
+                        } else if st == DsState::FailedRepair {
+                            // Option 3: Give up, and reconnect.
+                            bail!("[{}] Abort reconcile", up_coms.client_id);
+
+                        } else {
+                            // Option 4: wait for other downstairs to show up.
+                            println!(
+                                "[{}] Not yet in repair mode",
+                                up_coms.client_id
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+            _ = sleep_until(timeout_deadline) => {
+                bail!("[{}] Downstairs not responding, take offline",
+                    up_coms.client_id);
+            }
+            _ = sleep_until(ping_interval) => {
+                /*
+                 * To keep things alive, initiate a ping any time we have
+                 * been idle for (TBD) seconds.
+                 */
+                fw.send(Message::Ruok).await?;
+
+                /*
+                 * This task will not know about a disconnect request
+                 * unless we check for it here.
+                 * TODO: This code path is still not connected.
+                 */
+                if up.ds_deactivate(up_coms.client_id) {
+                    bail!("[{}] exits ping deactivation", up_coms.client_id);
+                }
+
+                ping_interval = deadline_secs(10);
+            }
+        }
+    }
+}
+
+/**
  * Things that allow the various tasks of Upstairs to communicate
  * with each other.
  */
 #[derive(Clone, Debug)]
 struct UpComs {
     /**
-     * The client ID who will be using these channels.
+     * The client ID (a downstairs) who will be using these channels.
      */
     client_id: u8,
     /**
@@ -1186,12 +1369,13 @@ struct UpComs {
     ds_work_rx: watch::Receiver<u64>,
     /**
      * This channel is used to transmit that the state of the connection
-     * to this downstairs has changed.
+     * to this downstairs has changed.  The receiver is the up_listen task.
      */
     ds_status_tx: mpsc::Sender<Condition>,
     /**
      * This channel is used to transmit that an IO request sent by the
-     * upstairs to all required downstairs has completed.
+     * upstairs to all required downstairs has completed. The receiver is
+     * the up_ds_listen() task.
      */
     ds_done_tx: mpsc::Sender<u64>,
     /**
@@ -1199,6 +1383,26 @@ struct UpComs {
      * promote this downstairs to active.
      */
     ds_active_rx: watch::Receiver<u64>,
+
+    /**
+     * This channel is used to receive notifications from the upstairs
+     * task that handles reconciliation.  A message indicates the
+     * downstairs task should look at the work queue and:
+     * - Exit repair and go to normal operations.
+     * - Exit repair and reset to new (reconciliation aborted).
+     * - Do new repair work (if there is new)
+     * - Do nothing (if other downstairs are not yet ready)
+     *
+     * It's possible to receive messages when there is nothing to do.
+     */
+    ds_reconcile_work_rx: watch::Receiver<u64>,
+
+    /**
+     * This channel is used to transmit that a reconcile command issued
+     * to all downstairs has completed.  The receiver is the up_listen
+     * task.
+     */
+    ds_reconcile_done_tx: mpsc::Sender<Repair>,
 }
 
 enum WrappedStream {
@@ -1331,7 +1535,11 @@ async fn looper(
             up_coms.client_id, up.uuid, target
         );
         connected = false;
-        up_coms
+        /*
+         * This can fail if we are shutting down and the other side of this
+         * task has already ended and we are still trying to message it.
+         */
+        if let Err(e) = up_coms
             .ds_status_tx
             .send(Condition {
                 target,
@@ -1339,7 +1547,27 @@ async fn looper(
                 client_id: up_coms.client_id,
             })
             .await
-            .unwrap();
+        {
+            eprintln!("{} Message to ds_status_tx failed: {:?}", target, e);
+        }
+    }
+}
+
+/*
+ * These counts describe the various states that a Downstairs IO can
+ * be in.
+ */
+#[derive(Debug, Default)]
+pub struct WorkCounts {
+    active: u64,  // New or in flight to downstairs.
+    error: u64,   // This IO had an error.
+    skipped: u64, // Skipped
+    done: u64,    // This IO has completed
+}
+
+impl WorkCounts {
+    fn completed_ok(&self) -> u64 {
+        self.done
     }
 }
 
@@ -1368,31 +1596,30 @@ struct Downstairs {
     active: HashMap<u64, DownstairsIO>,
     next_id: u64,
     completed: AllocRingBuffer<u64>,
-    /*
-     * On Startup, we collect info from each downstairs region that we use
-     * to make sure that all three regions in a region set are the same, and
-     * if not the same, to decide which data we will consider valid and
-     * make the other downstairs contain that same data.
+
+    /**
+     * On Startup, we collect info from each downstairs region. We use that
+     * info to make sure that all three regions in a region set are the
+     * same, and if not the same, to decide which data we will consider
+     * valid and make the other downstairs contain that same data.
+     *
+     * We also determine the next flush ID and verify the generation
+     * number.
      */
-    reconcile: HashMap<u8, Reconcile>,
-}
+    region_metadata: HashMap<u8, RegionMetadata>,
 
-/*
- * These counts describe the various states that a Downstairs IO can
- * be in.
- */
-#[derive(Debug, Default)]
-pub struct WorkCounts {
-    active: u64,  // New or in flight to downstairs.
-    error: u64,   // This IO had an error.
-    skipped: u64, // Skipped
-    done: u64,    // This IO has completed
-}
+    /**
+     * This holds the current piece of repair work that the three
+     * downstairs are working on.  It can be New, InProgress, Skipped,
+     * or Done.
+     */
+    reconcile_current_work: Option<ReconcileIO>,
 
-impl WorkCounts {
-    fn completed_ok(&self) -> u64 {
-        self.done
-    }
+    /**
+     * This queue holds the remaining work required to make all three
+     * downstairs in a region set the same.
+     */
+    reconcile_task_list: VecDeque<ReconcileIO>,
 }
 
 impl Default for Downstairs {
@@ -1405,7 +1632,9 @@ impl Default for Downstairs {
             active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
             next_id: 1000,
-            reconcile: HashMap::new(),
+            region_metadata: HashMap::new(),
+            reconcile_current_work: None,
+            reconcile_task_list: VecDeque::new(),
         }
     }
 }
@@ -1445,6 +1674,158 @@ impl Downstairs {
             IOState::InProgress => Some(job.work.clone()),
             _ => panic!("bad state in in_progress!"),
         }
+    }
+
+    /**
+     * Verify this Downstairs region set is still in a state where
+     * reconciliation can continue.
+     *
+     * We return an error if any downstairs state has changed and
+     * we have to abort this whole repair.  We also set any
+     * downstairs that believes it is still repairing to failed.
+     * This FailedRepair state is an indicator to a downstairs task
+     * that it should give up on repairing and close the connection
+     * to itself (which will enable the repair once all downstairs are
+     * ready).
+     */
+    fn repair_or_abort(&mut self) -> Result<()> {
+        let not_ready = self
+            .ds_state
+            .iter()
+            .filter(|state| **state != DsState::Repair)
+            .count();
+
+        if not_ready > 0 {
+            /*
+             * Something has changed, so abort this repair.
+             * Mark any downstairs that have not changed as failed
+             * and return error.
+             */
+            for (i, s) in self.ds_state.iter_mut().enumerate() {
+                if *s == DsState::Repair {
+                    *s = DsState::FailedRepair;
+                    println!("Mark {} as FAILED REPAIR", i);
+                }
+            }
+            println!("Clear out existing repair work queue");
+            self.reconcile_task_list = VecDeque::new();
+            self.reconcile_current_work = None;
+
+            bail!("Invalid DS state, aborting reconcile");
+        }
+        Ok(())
+    }
+
+    /**
+     * The caller (a downstairs repair task) is asking for any new work
+     * as part of a repair in progress.  If there is work, then we
+     * mark that work as InProgress for this client_id and return the
+     * work to the caller.
+     *
+     * We return None in the following situations:
+     *
+     * 1) We really are done with repair. The caller can verify this by
+     *    checking to see if there is still work on the queue.
+     * 2) We got an extra notification message (can happen if a downstairs
+     *    disconnected and reconnected) and we have already submitted
+     *    the current work for this client.  For this the caller should
+     *    sit tight and wait for more work.
+     * 3) The upstairs reconcile task has detected that a downstairs
+     *    has gone away and has given up on this reconcile. This is
+     *    indicated by the DsState not being Repair any longer.
+     *    The upstairs will retry the repair after all downstairs have
+     *    reconnected.
+     * 4) This downstairs had #3 above and exited, reconnected, and has
+     *    now come back around and is ready to start the repair again, but
+     *    the other downstairs are not yet ready, so this downstairs
+     *    should just continue waiting for work to show up.
+     */
+    fn rep_in_progress(&mut self, client_id: u8) -> Option<Message> {
+        if self.ds_state[client_id as usize] != DsState::Repair {
+            return None;
+        }
+        if let Some(job) = &mut self.reconcile_current_work {
+            let oldstate = job.state.insert(client_id, IOState::InProgress);
+
+            /*
+             * It is possible in reconnect states that multiple messages
+             * will back up on the message notify queue that there is new
+             * work for this client to do. Make sure we don't send the the
+             * same message twice.
+             */
+            if oldstate != Some(IOState::New) {
+                println!(
+                    "[{}] rep_in_progress ignore submitted job {:?}",
+                    client_id, job
+                );
+                return None;
+            }
+
+            Some(job.op.clone())
+        } else {
+            None
+        }
+    }
+
+    /**
+     * Mark a reconcile work request as done for this client and return
+     * true if all work requests are done
+     */
+    fn rep_done(&mut self, client_id: u8, rep_id: u64) -> bool {
+        if let Some(job) = &mut self.reconcile_current_work {
+            let oldstate = job.state.insert(client_id, IOState::Done);
+            assert_eq!(oldstate, Some(IOState::InProgress));
+            assert_eq!(job.id, rep_id);
+            let mut done = 0;
+
+            for (_, s) in job.state.iter() {
+                if s == &IOState::Done || s == &IOState::Skipped {
+                    done += 1;
+                }
+            }
+            done == 3
+        } else {
+            panic!(
+                "[{}] Attempted to complete job {} that does not exist",
+                client_id, rep_id
+            );
+        }
+    }
+
+    /**
+     * Take a hashmap with extents we need to fix and convert that to
+     * a queue of crucible messages we need to execute to perform the fix.
+     *
+     * The order of messages in the queue shall be the order they are
+     * performed, and no message can start until the previous message
+     * has been ack'd by all three downstairs.
+     */
+    fn convert_rc_to_messages(
+        &mut self,
+        mut rec_list: HashMap<u64, ExtentFix>,
+    ) {
+        let mut rep_id = 0;
+        println!("Full list: {:?}", rec_list);
+        for (ext, _) in rec_list.drain() {
+            /*
+             * XXX TODO: We are not repairing anything here yet.
+             * For every extent mismatch, we just close then re-open them.
+             * Coming soon will be the actual commands to send extents
+             * from one downstairs to another.
+             */
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose(rep_id, ext),
+            ));
+            rep_id += 1;
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentReopen(rep_id, ext),
+            ));
+            rep_id += 1;
+        }
+
+        println!("Task list: {:?}", self.reconcile_task_list);
     }
 
     /**
@@ -2291,6 +2672,32 @@ impl UpstairsState {
             up_state: UpState::Initializing,
         }
     }
+
+    /*
+     * Setting active means the upstairs has contacted all the necessary
+     * downstairs, verified they are consistent (or made them so)
+     * and is now ready to receive IO.  Going forward a downstairs
+     * that is disconnected can have a slightly different path to
+     * re-join than the original compare all downstairs to each other
+     * that happens on initial startup. This is because the running
+     * upstairs has some state it can use to re-verify a downstairs.
+     */
+    fn set_active(&mut self, uuid: Uuid) -> Result<(), CrucibleError> {
+        if self.up_state == UpState::Active {
+            crucible_bail!(UpstairsAlreadyActive);
+        } else if self.up_state == UpState::Deactivating {
+            /*
+             * We don't support deactivate interruption, so we have to
+             * let the currently running deactivation finish before we
+             * can accept an activation.
+             */
+            crucible_bail!(UpstairsDeactivating);
+        }
+        self.active_request = false;
+        self.up_state = UpState::Active;
+        println!("{} is now active", uuid);
+        Ok(())
+    }
 }
 
 /*
@@ -2435,6 +2842,23 @@ impl Upstairs {
         })
     }
 
+    /**
+     * Update the counters used by dtrace probes.
+     * This one method will update the fields of the
+     * up_status counter.
+     */
+    #[inline]
+    fn stat_update(&self, msg: &str) {
+        cdt::up__status!(|| {
+            let arg = Arg {
+                up_count: self.up_work_active(),
+                ds_count: self.ds_work_active(),
+                ds_state: self.ds_state_copy(),
+            };
+            (msg, arg)
+        });
+    }
+
     fn set_generation(&self, new_gen: u64) {
         let mut gen = self.generation.lock().unwrap();
         *gen = new_gen;
@@ -2453,22 +2877,10 @@ impl Upstairs {
      * that happens on initial startup. This is because the running
      * upstairs has some state it can use to re-verify a downstairs.
      */
+    #[cfg(test)]
     fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().unwrap();
-        if active.up_state == UpState::Active {
-            crucible_bail!(UpstairsAlreadyActive);
-        } else if active.up_state == UpState::Deactivating {
-            /*
-             * We don't support deactivate interruption, so we have to
-             * let the currently running deactivation finish before we
-             * can accept an activation.
-             */
-            crucible_bail!(UpstairsDeactivating);
-        }
-        active.active_request = false;
-        active.up_state = UpState::Active;
-        println!("{} set active", self.uuid);
-        Ok(())
+        active.set_active(self.uuid)
     }
 
     /*
@@ -3076,6 +3488,8 @@ impl Upstairs {
             DsState::Offline => DsState::Offline,
             DsState::_Migrating => DsState::Failed,
             DsState::Deactivated => DsState::New,
+            DsState::Repair => DsState::New,
+            DsState::FailedRepair => DsState::New,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -3094,10 +3508,15 @@ impl Upstairs {
     }
 
     /*
-     * Check and see if our DS was in replay and if so move
-     * it over to Active.  Return true if we did.
+     * Check and see what state our downstairs is in.  This check
+     * determines if we have a returning downstairs to an active
+     * upstairs, or we have a new upstairs trying to go active and
+     * we need to possibly reconcile the three downstairs.  We return
+     * true here if this downstairs can go active and start receiving
+     * IOs.  We return false if this downstairs should enter the
+     * repair path and reconcile with the other downstairs.
      */
-    fn ds_replay_active(&self, client_id: u8) -> bool {
+    fn ds_is_replay(&self, client_id: u8) -> bool {
         let mut ds = self.downstairs.lock().unwrap();
         if ds.ds_state[client_id as usize] == DsState::Replay {
             println!("[{}] Transition from Replay to Active", client_id);
@@ -3167,6 +3586,9 @@ impl Upstairs {
             DsState::WaitQuorum => {
                 assert_eq!(old_state, DsState::WaitActive);
             }
+            DsState::FailedRepair => {
+                assert_eq!(old_state, DsState::Repair);
+            }
             DsState::Repair => {
                 assert_ne!(up_state, UpState::Active);
                 assert_eq!(old_state, DsState::WaitQuorum);
@@ -3233,59 +3655,90 @@ impl Upstairs {
      * at it.
      */
     fn mismatch_list(&self, ds: &Downstairs) -> Option<DownstairsMend> {
-        let c0_rec = ds.reconcile.get(&0).unwrap();
-        let c1_rec = ds.reconcile.get(&1).unwrap();
-        let c2_rec = ds.reconcile.get(&2).unwrap();
+        let c0_rec = ds.region_metadata.get(&0).unwrap();
+        let c1_rec = ds.region_metadata.get(&1).unwrap();
+        let c2_rec = ds.region_metadata.get(&2).unwrap();
 
         DownstairsMend::new(c0_rec, c1_rec, c2_rec)
     }
 
-    /**
-     * Check and see if it is time for reconciliation between the
-     * different downstairs.  If all are in the proper state, then
-     * move forward and start the process.
-     *
-     * Return false if we are not ready, or if things failed.
-     * If we failed, then we will update the DsState for what failed.
-     *
-     * XXX How do we make sure our current generation number is higher
-     * than what we received from the downstairs?  Think about that
-     * failure case where one downstairs got a higher gen number, can
-     * that exist?
-     *
-     * XXX: dst and lastcast may be used when we repair the downstairs.
-     * If so, they lose the _  If not, then they will be removed.
+    /*
+     * Check and see if the downstairs are ready for the next repair
+     * command.  Send a message if so.
      */
-    fn ds_reconciliation(&self, _dst: &[Target], _lastcast: &mut u64) -> bool {
-        /*
-         * Reconciliation only happens during initialization.
-         */
-        let active = self.active.lock().unwrap();
-        if active.up_state != UpState::Initializing {
-            return false;
+    async fn ds_repair_done_notify(
+        &self,
+        client_id: u8,
+        rep_id: u64,
+        ds_reconcile_done_tx: &mpsc::Sender<Repair>,
+    ) -> Result<()> {
+        if self.downstairs.lock().unwrap().rep_done(client_id, rep_id) {
+            println!("[{}] It's time to notify for {}", client_id, rep_id);
+            if let Err(e) = ds_reconcile_done_tx
+                .send(Repair {
+                    repair: true,
+                    client_id,
+                    rep_id,
+                })
+                .await
+            {
+                bail!("[{}] Failed to notify {} {:?}", client_id, rep_id, e);
+            }
         }
-        let up_state = active.up_state;
-        let mut ds = self.downstairs.lock().unwrap();
-        drop(active);
-        /*
-         * Make sure all downstairs are in the correct state before we
-         * proceed.
-         */
-        let not_ready = ds
-            .ds_state
-            .iter()
-            .filter(|state| **state != DsState::WaitQuorum)
-            .count();
-        if not_ready > 0 {
-            println!("Waiting for {} more clients to be ready", not_ready);
-            return false;
-        }
-        /*
-         * If all downstairs are in WQ state, then this assertion
-         * should be true.
-         */
-        assert_eq!(up_state, UpState::Initializing);
+        Ok(())
+    }
 
+    /**
+     * Get the next repair message from the repair message queue.
+     * Make sure the current message has completed.
+     *
+     * We return true if we have more work to do (after setting
+     * reconcile_current_work to that work.
+     *
+     * We return false if there is no more work to do.
+     *
+     * repair_or_abort() will check that all downstairs are in the
+     * proper state to continue repairing.
+     *
+     */
+    async fn new_rec_work(&self) -> Result<bool> {
+        let mut ds = self.downstairs.lock().unwrap();
+        /*
+         * Make sure all downstairs are still in the correct
+         * state before we put the next piece of work on the
+         * list for the downstairs to do.
+         */
+        ds.repair_or_abort()?;
+
+        if let Some(rio) = ds.reconcile_task_list.pop_front() {
+            println!("Pop front: {:?}", rio);
+
+            // Assert if not None, then job is all done.
+            if let Some(job) = &mut ds.reconcile_current_work {
+                let mut done = 0;
+                for (_, s) in job.state.iter() {
+                    if s == &IOState::Done || s == &IOState::Skipped {
+                        done += 1;
+                    }
+                }
+                assert_eq!(done, 3);
+            }
+
+            ds.reconcile_current_work = Some(rio);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /**
+     * Compare downstairs region metadata and based on the results:
+     *
+     * Determine the global flush number for this region set.
+     * Verify the guest given gen number is highest (TODO)
+     * Decide if we need repair, and if so create the repair list
+     */
+    fn collate_downstairs(&self, ds: &mut Downstairs) -> bool {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -3297,7 +3750,7 @@ impl Upstairs {
          */
         let mut max_flush = 0;
         let mut max_gen = 0;
-        for (cid, rec) in &ds.reconcile {
+        for (cid, rec) in &ds.region_metadata {
             let mf = rec.flush_numbers.iter().max().unwrap() + 1;
             if mf > max_flush {
                 max_flush = mf;
@@ -3361,71 +3814,328 @@ impl Upstairs {
         }
         println!("Next flush: {}", max_flush);
 
-        if let Some(to_repair) = self.mismatch_list(&ds) {
-            println!("Found some extents to repair: {:?}", to_repair);
-
+        /*
+         * Determine what extents don't match and what to do
+         * about that
+         */
+        let reconcile_list = self.mismatch_list(ds);
+        if let Some(reconcile_list) = reconcile_list {
             /*
-             * TODO: Move the state transition logic an all this into
-             * something specific for the DsState type.
-             * Or, at least use the ds_transition() method here instead
-             * of manually doing it.  You will have to deal with locking
-             * correctly, so pay attention.
-             * (This is issue #153)
+             * We transition all the downstairs to needing repair here
+             * while we have the downstairs lock.  This will insure that
+             * all downstairs enter the repair path.
              */
             ds.ds_state.iter_mut().for_each(|ds_state| {
                 println!("Transition from {:?} to Repair", *ds_state);
+                /*
+                 * This is a panic and not an error because we should
+                 * not call this method without already verifying the
+                 * downstairs are in the proper state.
+                 */
                 assert_eq!(*ds_state, DsState::WaitQuorum);
                 *ds_state = DsState::Repair;
             });
 
-            /*
-             * TODO: Next steps here are to take the mismatch list
-             * and go make the downstairs all agree.
-             *
-             * For now, we do nothing and continue, which means you
-             * can possibly get different data than you expect (if
-             * the downstairs don't agree with each other).
-             */
+            println!(
+                "Found {:?} extents that need repair",
+                reconcile_list.mend.len()
+            );
+            ds.convert_rc_to_messages(reconcile_list.mend);
+            true
         } else {
             println!("All extents match");
+            false
+        }
+    }
+
+    /**
+     * This is where an upstairs task will coordinate the actual work of
+     * making all downstairs look like each other.  The repair work
+     * list has already been constructed.
+     *
+     * The basic loop here is
+     * - take a job from the front of the reconcile_task_list and set
+     *   reconcile_current_work to that job.
+     * - Send the three downstairs a message saying they should look for
+     *   work.
+     * - Wait for the third downstairs to finish to ACK the message.
+     *
+     * In addition to the regular steps above, we have to continually check
+     * that none of the downstairs have gone away while we were waiting
+     * for an ACK, or before submitting more work.  If we do encounter such
+     * a situation, we have to inform the other downstairs that we are
+     * aborting this repair, clear the repair work, and return error.
+     */
+    async fn do_reconciliation(
+        &self,
+        dst: &[Target],
+        lastcast: &mut u64,
+        ds_reconcile_done_rx: &mut mpsc::Receiver<Repair>,
+        repair_commands: usize,
+    ) -> Result<()> {
+        let mut completed = 0;
+        loop {
+            /*
+             * If we get an error here, all Downstairs have to reset and
+             * we should clear the work queue as everything starts over
+             * after getting the latest state from each downstairs and
+             * building a new repair list.
+             */
+            let res = self.new_rec_work().await;
+            match res {
+                Ok(true) => {
+                    send_reconcile_work(dst, *lastcast);
+                    *lastcast += 1;
+                    println!("Sent repair work, now wait for resp");
+                    let mut progress_check = deadline_secs(20);
+
+                    /*
+                     * What to do if a downstairs goes away and never
+                     * comes back?  At some point we will either need to
+                     * give up, or accept an abort signal from outside to
+                     * help us get moving again. TODO!
+                     */
+                    let mut work_done = false;
+                    while !work_done {
+                        tokio::select! {
+                            c = ds_reconcile_done_rx.recv() => {
+                                if let Some(c) = c {
+                                    println!(
+                                        "Completion from [{}]  id:{}  status:{}",
+                                        c.client_id, c.rep_id, c.repair,
+                                    );
+                                    work_done = true;
+                                    completed += 1;
+                                } else {
+                                    println!("Got None from reconcile_done_rx");
+                                }
+                            }
+                            _ = sleep_until(progress_check) => {
+                                /*
+                                 * This may not be an error.  We check every
+                                 * so often just to make sure a downstairs
+                                 * did not go away while we were waiting for
+                                 * an ACK from that downstairs.
+                                 */
+                                println!("progress_check");
+                                progress_check = deadline_secs(20);
+                                self.ds_state_show();
+                                let mut ds = self.downstairs.lock().unwrap();
+                                if let Err(e) = ds.repair_or_abort() {
+                                    println!("Aborting reconcile");
+                                    /*
+                                     * After abort, we send one last message to
+                                     * all the downstairs which will trigger
+                                     * any that were waiting for more work
+                                     * to also abort.
+                                     */
+                                    send_reconcile_work(dst, *lastcast);
+                                    *lastcast += 1;
+                                    bail!("Timeout with {}", e);
+                                }
+                            }
+                        }
+                        self.stat_update("repair");
+                        println!(
+                            "[{}/{}] Repair commands completed",
+                            completed, repair_commands,
+                        );
+                    }
+                }
+                Ok(false) => {
+                    break;
+                }
+                Err(e) => {
+                    println!("Aborting reconcile");
+                    /*
+                     * After aborting, we send one last message to
+                     * all the downstairs which will trigger any that
+                     * were waiting for more work to abort.
+                     */
+                    send_reconcile_work(dst, *lastcast);
+                    *lastcast += 1;
+                    bail!("Error: {}", e);
+                }
+            }
+        }
+        println!("All repair completed, clear queue and notify");
+        self.downstairs.lock().unwrap().reconcile_current_work = None;
+        Ok(())
+    }
+
+    /**
+     * Check and see if there are the required number of downstairs
+     * connected to combine the three into a region set.
+     *
+     * Return false if we are not ready, or if things failed.
+     * If we failed, then we will update the DsState for what failed.
+     *
+     * XXX How do we make sure our current generation number is higher
+     * than what we received from the downstairs?  Think about that
+     * failure case where one downstairs got a higher gen number, can
+     * that exist?
+     *
+     * If we have a problem here, we can't activate the upstairs.
+     */
+    async fn connect_region_set(
+        &self,
+        dst: &[Target],
+        lastcast: &mut u64,
+        ds_reconcile_done_rx: &mut mpsc::Receiver<Repair>,
+    ) -> Result<()> {
+        /*
+         * Reconciliation only happens during initialization.
+         * Look at all three downstairs region information collected.
+         * Determine the highest flush number and make sure our generation
+         * is high enough.
+         */
+        let need_repair;
+        let repair_commands;
+        {
+            let active = self.active.lock().unwrap();
+            if active.up_state != UpState::Initializing {
+                return Ok(());
+            }
+            let mut ds = self.downstairs.lock().unwrap();
+            drop(active);
+            /*
+             * Make sure all downstairs are in the correct state before we
+             * proceed.
+             */
+            let not_ready = ds
+                .ds_state
+                .iter()
+                .filter(|state| **state != DsState::WaitQuorum)
+                .count();
+            if not_ready > 0 {
+                println!("Waiting for {} more clients to be ready", not_ready);
+                return Ok(());
+            }
+
+            /*
+             * While holding the downstairs lock, we figure out if
+             * there is any reconciliation to do, and if so, we build
+             * the list of operations that will repair the extents that
+             * are not in sync
+             */
+            need_repair = self.collate_downstairs(&mut ds);
+            repair_commands = ds.reconcile_task_list.len();
         }
 
-        println!("Fake reconciliation has finished!!!");
-        assert_eq!(ds.active.len(), 0);
+        if need_repair {
+            self.do_reconciliation(
+                dst,
+                lastcast,
+                ds_reconcile_done_rx,
+                repair_commands,
+            )
+            .await?;
 
-        /*
-         * Now that we have completed reconciliation, we move all
-         * the downstairs to the next state.  If we fail here, it means
-         * something interrupted our repair and we have to start over.
-         *
-         * If repairing, then it still should be repairing.
-         * If not repairing then it should be WaitQuorum.
-         *
-         * Depending on how the repair is implemented, we may or may
-         * not expect a possible state change from a downstairs during
-         * the repair process.  If we release the downstairs lock, then
-         * we must recheck the states.
-         */
-        ds.ds_state.iter_mut().for_each(|ds_state| {
-            println!("Transition from {:?} to Active", *ds_state);
-            if *ds_state != DsState::WaitQuorum && *ds_state != DsState::Repair
-            {
+            let mut active = self.active.lock().unwrap();
+            let mut ds = self.downstairs.lock().unwrap();
+            /*
+             * Now that we have completed reconciliation, we move all
+             * the downstairs to the next state.  If we fail here, it means
+             * something interrupted our repair and we have to start over.
+             *
+             * As we repaired, downstairs should all be DsState::Repair.
+             *
+             * As we have released the downstairs lock while repairing, we
+             * have to verify that the downstairs are all in the state we
+             * expect them to be.  Any change means we abort and require
+             * all downstairs to reconnect, even if repair work is finished
+             * as a disconnected DS does not yet know it is all done with
+             * work and could have its state reset to New.
+             */
+
+            assert_eq!(ds.active.len(), 0);
+            assert_eq!(ds.reconcile_task_list.len(), 0);
+
+            let ready = ds
+                .ds_state
+                .iter()
+                .filter(|s| **s == DsState::Repair)
+                .count();
+
+            if ready != 3 {
                 /*
-                 * Write more code */
-                panic!(
-                    "Invalid state transition {:?} -> DsState::Active",
-                    *ds_state
-                );
+                 * Some downstairs was not in the proper state any longer,
+                 * so we need to abort this reconciliation and start
+                 * everyone over.  Move all the downstairs that thought
+                 * they were still repairing to FailedRepair which will
+                 * trigger a reconnect.
+                 */
+                for (i, s) in ds.ds_state.iter_mut().enumerate() {
+                    if *s == DsState::Repair {
+                        *s = DsState::FailedRepair;
+                        println!("Mark {} as FAILED REPAIR in final check", i);
+                    }
+                }
+                /*
+                 * We don't exit here, as we want the downstairs to all
+                 * be notified there is a need to reset and go back through
+                 * repair because someone did not complete it.
+                 */
+            } else {
+                println!("All required repair work is now completed");
+                println!("Set Downstairs and Upstairs active after repairs");
+                if active.up_state != UpState::Initializing {
+                    bail!("Upstairs in unexpected state while reconciling");
+                }
+
+                for s in ds.ds_state.iter_mut() {
+                    *s = DsState::Active;
+                }
+                active.set_active(self.uuid)?;
             }
-            *ds_state = DsState::Active;
-        });
+        } else {
+            /*
+             * No repair was needed, but make sure all DS are in the state
+             * we expect them to be.
+             */
+            let mut active = self.active.lock().unwrap();
+            let mut ds = self.downstairs.lock().unwrap();
+
+            let ready = ds
+                .ds_state
+                .iter()
+                .filter(|s| **s == DsState::WaitQuorum)
+                .count();
+
+            if ready != 3 {
+                bail!("Unexpected Downstairs state after collation.");
+            } else {
+                println!("No repair work was required");
+                println!("Set Downstairs and Upstairs active");
+                if active.up_state != UpState::Initializing {
+                    bail!("Upstairs in unexpected state while reconciling");
+                }
+                for s in ds.ds_state.iter_mut() {
+                    *s = DsState::Active;
+                }
+                active.set_active(self.uuid)?;
+                println!("{} Set Active after no repair", self.uuid);
+            }
+        }
 
         /*
-         * As a final step, set the upstairs active, which should
-         * allow incoming IO
+         * We have to send a final message that all downstairs who should
+         * be waiting in the reconcile task that all repair work is done
+         * (even if none was required) and they should proceed to being
+         * active and accepting commands on the ds_work_ message channel.
          */
-        self.set_active().unwrap();
-        true
+        assert!(!self
+            .downstairs
+            .lock()
+            .unwrap()
+            .reconcile_current_work
+            .is_some());
+
+        println!("Notify all downstairs for a final check of reconcile queue.");
+        send_reconcile_work(dst, *lastcast);
+        *lastcast += 1;
+
+        Ok(())
     }
 
     /**
@@ -3743,7 +4453,7 @@ enum DsState {
     /*
      * Failed when attempting to make consistent.
      */
-    _FailedRepair,
+    FailedRepair,
     /*
      * Ready for and/or currently receiving IO
      */
@@ -3829,6 +4539,22 @@ impl DownstairsIO {
     }
 }
 
+#[derive(Debug)]
+struct ReconcileIO {
+    id: u64,
+    op: Message,
+    state: HashMap<u8, IOState>,
+}
+
+impl ReconcileIO {
+    fn new(id: u64, op: Message) -> ReconcileIO {
+        let mut state = HashMap::new();
+        for cl in 0..3 {
+            state.insert(cl, IOState::New);
+        }
+        ReconcileIO { id, op, state }
+    }
+}
 /*
  * Crucible to storage IO operations.
  */
@@ -4554,21 +5280,21 @@ impl BlockReqWaiter {
  * A task on the Crucible side will receive a notification that a new
  * operation has landed on the reqs queue and will take action:
  *
- *   Pop the request off the reqs queue.
+ * * Pop the request off the reqs queue.
  *
- *   Copy (and optionally encrypt) any data buffers provided to us by the
+ * * Copy (and optionally encrypt) any data buffers provided to us by the
  *   Guest.
  *
- *   Create one or more downstairs DownstairsIO structures.
+ * * Create one or more downstairs DownstairsIO structures.
  *
- *   Create a GtoS tracking structure with the id's for each
- *   downstairs task and the read result buffer if required.
+ * * Create a GtoS tracking structure with the id's for each downstairs task
+ *   and the read result buffer if required.
  *
- *   Add the GtoS struct to the in GuestWork active work hashmap.
+ * * Add the GtoS struct to the in GuestWork active work hashmap.
  *
- *   Put all the DownstairsIO structures on the downstairs work queue.
+ * * Put all the DownstairsIO structures on the downstairs work queue.
  *
- *   Send notification to the upstairs tasks that there is new work.
+ * * Send notification to the upstairs tasks that there is new work.
  *
  * Work here will be added to storage side queues and the responses will
  * be waited on and processed when they arrive.
@@ -5037,7 +5763,7 @@ impl BlockIO for Guest {
                 println!(
                     "Upstairs is not yet active, waiting in activate function"
                 );
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
 
@@ -5100,10 +5826,25 @@ impl Default for Guest {
     }
 }
 
+#[derive(Debug)]
+struct Repair {
+    repair: bool,
+    client_id: u8,
+    rep_id: u64,
+}
+
+/**
+ * This struct holds the address of a downstairs, and the message channels
+ * used to:
+ * Send a message there is new work.
+ * Send a message there is an activation request from the guest.
+ * Send a message there is repair work to do.
+ */
 pub struct Target {
     target: SocketAddr,
     ds_work_tx: watch::Sender<u64>,
     ds_active_tx: watch::Sender<u64>,
+    ds_reconcile_work_tx: watch::Sender<u64>,
 }
 
 #[derive(Debug)]
@@ -5123,6 +5864,22 @@ fn send_work(t: &[Target], val: u64) {
         if let Err(e) = res {
             println!(
                 "ERROR {:#?} Failed to notify {:?} of work {}",
+                e, d_client.target, val,
+            );
+        }
+    }
+}
+
+/**
+ * Send reconcile work to all the targets.
+ * If a send fails, report an error.
+ */
+fn send_reconcile_work(t: &[Target], val: u64) {
+    for d_client in t.iter() {
+        let res = d_client.ds_reconcile_work_tx.send(val);
+        if let Err(e) = res {
+            println!(
+                "ERROR {:#?} Failed to notify {:?} of reconcile work {}",
                 e, d_client.target, val,
             );
         }
@@ -5368,6 +6125,9 @@ async fn process_new_io(
     }
 }
 
+/**
+ * Stat counters struct used by DTrace
+ */
 #[derive(Clone, Debug, Serialize)]
 pub struct Arg {
     up_count: u32,
@@ -5376,32 +6136,22 @@ pub struct Arg {
 }
 
 /**
- * Update the counters used by dtrace probes.
- * This one method will update the fields of the
- * up_status counter.
- */
-#[inline]
-fn stat_update(up: &Arc<Upstairs>, msg: &str) {
-    cdt::up__status!(|| {
-        let arg = Arg {
-            up_count: up.up_work_active(),
-            ds_count: up.ds_work_active(),
-            ds_state: up.ds_state_copy(),
-        };
-        (msg, arg)
-    });
-}
-
-/*
- * This task will loop forever and wait for three downstairs to get into the
- * ready state. We are notified of that through the ds_status_rx channel.
- * Once we have three connections, we then also listen for work requests
- * to come over the guest channel.
+ * This method is a task that will loop forever and wait for three
+ * downstairs to get into the ready state. We are notified of that through
+ * the ds_status_rx channel.  Once we have three connections, we then also
+ * listen for work requests to come over the guest channel.
+ *
+ * The ds_reconcile_done channel is used during reconciliation to indicate
+ * to this task (in the ds_reconcile() function) that a downstairs has
+ * completed a reconcile request.
+ *
+ * This task drives any reconciliation if necessary.
  */
 async fn up_listen(
     up: &Arc<Upstairs>,
     dst: Vec<Target>,
     mut ds_status_rx: mpsc::Receiver<Condition>,
+    mut ds_reconcile_done_rx: mpsc::Receiver<Repair>,
 ) {
     println!("Wait for all three downstairs to come online");
     let mut lastcast = 1;
@@ -5416,7 +6166,7 @@ async fn up_listen(
     let leak_tick = tokio::time::Duration::from_millis(LEAK_MS as u64);
     let mut leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
 
-    stat_update(up, "start");
+    up.stat_update("start");
     let mut flush_check = deadline_secs(5);
     let mut show_work_interval = deadline_secs(5);
     loop {
@@ -5434,18 +6184,31 @@ async fn up_listen(
                     );
                     up.ds_state_show();
                     /*
-                     * If this just connected, see if the
-                     * reconciliation can now pass.
+                     * If this just connected, see if we now have enough
+                     * downstairs to make a valid region set.
                      */
                     if c.connected {
-                        up.ds_reconciliation(&dst, &mut lastcast);
+                        if let Err(e) = up.connect_region_set(
+                            &dst,
+                            &mut lastcast,
+                            &mut ds_reconcile_done_rx,
+                        ).await {
+                            println!(
+                                "Reconciliation attempt reported error {}",
+                                e);
+                        }
                     } else {
-                        println!("[{}] is offline {} ", c.client_id, c.target);
+                        println!("[{}] goes offline {} ", c.client_id, c.target);
                     }
                 } else {
-                    // I think this is a panic?  Or exit.. I don't think
-                    // that ds_status_rx should ever go away.
-                    panic!("#### ? #### DISCONNECTED due to None! ####");
+                    /*
+                     * This message channel should only return None if we
+                     * are in the process of shutting down.  Log a message
+                     * here and let the shutdown finish.  If there is a
+                     * bug somewhere, at least we are leaving this
+                     * breadcrumb behind.
+                     */
+                    println!("up_listen reports status_rx -> None ");
                 }
             }
             req = up.guest.recv() => {
@@ -5485,7 +6248,7 @@ async fn up_listen(
                  * a flush, we can also use this to update the dtrace
                  * counters with some regularity.
                  */
-                stat_update(up, "loop");
+                up.stat_update("loop");
 
                 flush_check = deadline_secs(5);
             }
@@ -5526,6 +6289,13 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * we create to connect to a downstairs.
      */
     let (ds_status_tx, ds_status_rx) = mpsc::channel::<Condition>(32);
+
+    /*
+     * Use this channel to receive updates on the completion of reconcile
+     * work requests.
+     */
+    let (ds_reconcile_done_tx, ds_reconcile_done_rx) =
+        mpsc::channel::<Repair>(32);
 
     /*
      * Use this channel to indicate in the upstairs that all downstairs
@@ -5572,6 +6342,12 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
              * check for work to do in the central structure.
              */
             let (ds_work_tx, ds_work_rx) = watch::channel(1);
+            /*
+             * Create the channel used to submit reconcile work to each
+             * downstairs (when work is required).
+             */
+            let (ds_reconcile_work_tx, ds_reconcile_work_rx) =
+                watch::channel(1);
 
             // Notify when it's time to go active.
             let (ds_active_tx, ds_active_rx) = watch::channel(0);
@@ -5584,6 +6360,8 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
                 ds_status_tx: ds_status_tx.clone(),
                 ds_done_tx: ds_done_tx.clone(),
                 ds_active_rx,
+                ds_reconcile_work_rx,
+                ds_reconcile_done_tx: ds_reconcile_done_tx.clone(),
             };
             let tls_context = tls_context.clone();
             tokio::spawn(async move {
@@ -5595,6 +6373,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
                 target: *dst,
                 ds_work_tx,
                 ds_active_tx,
+                ds_reconcile_work_tx,
             }
         })
         .collect::<Vec<_>>();
@@ -5602,6 +6381,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     // Drop here, otherwise receivers will be kept waiting if looper quits
     drop(ds_done_tx);
     drop(ds_status_tx);
+    drop(ds_reconcile_done_tx);
 
     // If requested, start the info server on the given address:port
     if let Some(info) = opt.info {
@@ -5617,7 +6397,7 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Once connected, we then take work requests from the guest and
      * submit them into the upstairs
      */
-    up_listen(&up, dst, ds_status_rx).await;
+    up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx).await;
 
     Ok(())
 }
