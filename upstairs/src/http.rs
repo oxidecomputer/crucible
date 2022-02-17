@@ -18,7 +18,9 @@ use std::sync::Arc;
 use super::*;
 
 /**
- * Publish some stats on a http port from the upstairs internal struct.
+ * Start up a dropshot server along side the Upstairs. This offers a way for
+ * Nexus or Propolis to send Snapshot commands. Also, publish some stats on
+ * a `/info` from the Upstairs internal struct.
  */
 pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     /*
