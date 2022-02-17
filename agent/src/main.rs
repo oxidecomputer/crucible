@@ -875,29 +875,36 @@ fn worker_region_destroy(
         chars.as_str().to_string()
     };
 
-    let cmd = Command::new("zfs")
-        .arg("destroy")
-        .arg(dataset_name.clone())
-        .output()?;
+    // Retry a few times: apply_smf will remove the corresponding downstairs
+    // instance but this may take a few seconds to propagate.
+    for i in 0..5 {
+        let cmd = Command::new("zfs")
+            .arg("destroy")
+            .arg(dataset_name.clone())
+            .output()?;
 
-    if !cmd.status.success() {
-        let err = String::from_utf8_lossy(&cmd.stderr);
-        let out = String::from_utf8_lossy(&cmd.stdout);
+        if !cmd.status.success() {
+            let err = String::from_utf8_lossy(&cmd.stderr);
+            let out = String::from_utf8_lossy(&cmd.stdout);
 
-        error!(
-            log,
-            "zfs dataset {:?} delete failed: out {:?} err {:?}",
-            dataset_name,
-            out,
-            err,
-        );
+            error!(
+                log,
+                "zfs dataset {:?} delete attempt {} failed: out {:?} err {:?}",
+                dataset_name,
+                i,
+                out,
+                err,
+            );
 
-        bail!("zfs dataset delete failure");
+            if i == 4 {
+                bail!("zfs dataset delete failure");
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        } else {
+            break;
+        }
     }
-
-    /*
-     * `apply_smf` will then remove the corresponding instance
-     */
 
     Ok(())
 }
