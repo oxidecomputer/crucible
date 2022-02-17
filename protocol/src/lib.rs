@@ -155,7 +155,7 @@ pub enum Message {
 
     /*
      * Flush: Uuid, job id, dependencies, flush number generation number,
-     * and        optional snapshot details
+     *        and optional snapshot details
      * FlushAck: Uuid, job id, result
      */
     Flush(Uuid, u64, Vec<u64>, u64, u64, Option<SnapshotDetails>),
