@@ -1738,7 +1738,12 @@ async fn main() -> Result<()> {
             }
 
             let read_only = mode == Mode::Ro;
-            let d = create_downstairs(&data, lossy, return_errors, read_only)?;
+            let d = build_downstairs_for_region(
+                &data,
+                lossy,
+                return_errors,
+                read_only,
+            )?;
 
             start_downstairs(
                 d,
@@ -1818,7 +1823,7 @@ fn create_region(
     Ok(region)
 }
 
-fn create_downstairs(
+fn build_downstairs_for_region(
     data: &Path,
     lossy: bool,
     return_errors: bool,

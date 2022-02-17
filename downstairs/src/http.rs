@@ -59,7 +59,7 @@ pub async fn run_downstairs_for_region(
         ));
     }
 
-    let d = create_downstairs(
+    let d = build_downstairs_for_region(
         &run_params.data,
         run_params.lossy,
         run_params.return_errors,
