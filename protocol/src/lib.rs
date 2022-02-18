@@ -105,6 +105,11 @@ impl ReadResponse {
  * These enums are for messages sent between an Upstairs and a Downstairs
  */
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct SnapshotDetails {
+    pub snapshot_name: String,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     /**
      * Initial negotiation: version, upstairs uuid.
@@ -170,7 +175,12 @@ pub enum Message {
     Write(Uuid, u64, Vec<u64>, Vec<Write>),
     WriteAck(Uuid, u64, Result<(), CrucibleError>),
 
-    Flush(Uuid, u64, Vec<u64>, u64, u64),
+    /*
+     * Flush: Uuid, job id, dependencies, flush number generation number,
+     *        and optional snapshot details
+     * FlushAck: Uuid, job id, result
+     */
+    Flush(Uuid, u64, Vec<u64>, u64, u64, Option<SnapshotDetails>),
     FlushAck(Uuid, u64, Result<(), CrucibleError>),
 
     /*

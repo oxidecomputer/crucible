@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
 use crucible_common::*;
-use crucible_protocol::EncryptionContext;
+use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -433,6 +433,7 @@ impl Extent {
         dir: P,
         def: &RegionDefinition,
         number: u32,
+        read_only: bool,
     ) -> Result<Extent> {
         /*
          * Store extent data in files within a directory hierarchy so that
@@ -446,22 +447,23 @@ impl Extent {
         /*
          * Open the extent file and verify the size is as we expect.
          */
-        let file = match OpenOptions::new().read(true).write(true).open(&path) {
-            Err(e) => {
-                bail!("Error: e {} No extent file found for {:?}", e, path);
-            }
-            Ok(f) => {
-                let cur_size = f.metadata().unwrap().len();
-                if size != cur_size {
-                    bail!(
-                        "File size {:?} does not match expected {:?}",
-                        size,
-                        cur_size
-                    );
+        let file =
+            match OpenOptions::new().read(true).write(!read_only).open(&path) {
+                Err(e) => {
+                    bail!("Error: e {} No extent file found for {:?}", e, path);
                 }
-                f
-            }
-        };
+                Ok(f) => {
+                    let cur_size = f.metadata().unwrap().len();
+                    if size != cur_size {
+                        bail!(
+                            "File size {:?} does not match expected {:?}",
+                            size,
+                            cur_size
+                        );
+                    }
+                    f
+                }
+            };
 
         /*
          * Open a connection to the metadata db
@@ -809,6 +811,7 @@ pub struct Region {
     dir: PathBuf,
     def: RegionDefinition,
     pub extents: Vec<Extent>,
+    read_only: bool,
 }
 
 impl Region {
@@ -842,6 +845,7 @@ impl Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
+            read_only: false,
         };
 
         region.open_extents(true)?;
@@ -856,6 +860,7 @@ impl Region {
         dir: P,
         options: RegionOptions,
         verbose: bool,
+        read_only: bool,
     ) -> Result<Region> {
         options.validate()?;
 
@@ -872,6 +877,7 @@ impl Region {
         if verbose {
             println!("Opened existing region file {:?}", cp);
         }
+
         /*
          * Open every extent that presently exists.
          */
@@ -879,6 +885,7 @@ impl Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
+            read_only,
         };
 
         region.open_extents(false)?;
@@ -904,7 +911,8 @@ impl Region {
             if create {
                 new_extent = Extent::create(&self.dir, &self.def, eid)?;
             } else {
-                new_extent = Extent::open(&self.dir, &self.def, eid)?;
+                new_extent =
+                    Extent::open(&self.dir, &self.def, eid, self.read_only)?;
             }
             self.extents.push(new_extent);
             assert_eq!(self.extents[eid as usize].number, eid);
@@ -919,6 +927,8 @@ impl Region {
      * Open any extents that are not.
      */
     pub fn reopen_all_extents(&mut self) -> Result<()> {
+        assert!(!self.read_only);
+
         let mut to_open = Vec::new();
         for (i, extent) in self.extents.iter().enumerate() {
             if extent.inner.is_none() {
@@ -938,12 +948,19 @@ impl Region {
      */
     pub fn reopen_extent(&mut self, eid: usize) -> Result<(), CrucibleError> {
         /*
-         * Make sure the extent is currently closed, and matches our eid
+         * Make sure the extent :
+         *
+         * - is currently closed
+         * - matches our eid
+         * - is not read-only
          */
         println!("reopen extent {}  {:?}", eid, self.extents[eid].inner);
         assert!(!self.extents[eid].inner.is_some());
         assert_eq!(self.extents[eid].number, eid as u32);
-        let new_extent = Extent::open(&self.dir, &self.def, eid as u32)?;
+        assert!(!self.read_only);
+
+        let new_extent =
+            Extent::open(&self.dir, &self.def, eid as u32, self.read_only)?;
         self.extents[eid] = new_extent;
         Ok(())
     }
@@ -953,6 +970,11 @@ impl Region {
      * and what is requested, go out and create the new extent files.
      */
     pub fn extend(&mut self, newsize: u32) -> Result<()> {
+        if self.read_only {
+            // XXX return CrucibleError instead of anyhow?
+            bail!(CrucibleError::ModifyingReadOnlyRegion.to_string());
+        }
+
         if newsize < self.def.extent_count() {
             bail!(
                 "will not truncate {} -> {} for now",
@@ -1041,6 +1063,10 @@ impl Region {
         &self,
         writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
+        if self.read_only {
+            crucible_bail!(ModifyingReadOnlyRegion);
+        }
+
         /*
          * Before anything, validate hashes
          */
@@ -1124,12 +1150,69 @@ impl Region {
         &self,
         flush_number: u64,
         gen_number: u64,
+        snapshot_details: &Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
+        // It should be ok to Flush a read-only region, but not take a snapshot.
+        // Most likely this read-only region *is* a snapshot, so that's
+        // redundant :)
+        if self.read_only && snapshot_details.is_some() {
+            crucible_bail!(ModifyingReadOnlyRegion);
+        }
+
         // XXX How to we convert between usize and u32 correctly?
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
             extent.flush_block(flush_number, gen_number)?;
         }
+
+        // snapshots currently only work with ZFS
+        if cfg!(feature = "zfs_snapshot") {
+            if let Some(snapshot_details) = snapshot_details {
+                // Check if the path exists, return an error if it does
+                let test_path = format!(
+                    "{}/.zfs/snapshot/{}",
+                    self.dir.clone().into_os_string().into_string().unwrap(),
+                    snapshot_details.snapshot_name,
+                );
+
+                if std::path::Path::new(&test_path).is_dir() {
+                    crucible_bail!(
+                        SnapshotExistsAlready,
+                        "{}",
+                        snapshot_details.snapshot_name,
+                    );
+                }
+
+                // Drop leading slash
+                let fs =
+                    self.dir.clone().into_os_string().into_string().unwrap();
+                let mut chars = fs.chars();
+                chars.next();
+                let fs = chars.as_str();
+
+                let output = std::process::Command::new("zfs")
+                    .args([
+                        "snapshot",
+                        format!("{}@{}", fs, snapshot_details.snapshot_name)
+                            .as_str(),
+                    ])
+                    .output()
+                    .map_err(|e| {
+                        CrucibleError::SnapshotFailed(e.to_string())
+                    })?;
+
+                if !output.status.success() {
+                    crucible_bail!(
+                        SnapshotFailed,
+                        "{}",
+                        std::str::from_utf8(&output.stderr).map_err(|e| {
+                            CrucibleError::GenericError(e.to_string())
+                        })?,
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -1257,7 +1340,7 @@ mod test {
     fn new_existing_region() -> Result<()> {
         let dir = tempdir()?;
         let _ = Region::create(&dir, new_region_options());
-        let _ = Region::open(&dir, new_region_options(), false);
+        let _ = Region::open(&dir, new_region_options(), false, false);
         Ok(())
     }
 
@@ -1267,6 +1350,7 @@ mod test {
         let _ = Region::open(
             &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
+            false,
             false,
         )
         .unwrap();

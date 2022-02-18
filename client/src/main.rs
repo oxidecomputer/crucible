@@ -120,9 +120,9 @@ pub struct Opt {
     #[structopt(long)]
     root_cert_pem: Option<String>,
 
-    /// Start upstairs info server
+    /// Start upstairs http server
     #[structopt(long, global = true)]
-    info: Option<SocketAddr>,
+    http: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -264,7 +264,7 @@ fn main() -> Result<()> {
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
-        info: opt.info,
+        http: opt.http,
     };
 
     /*
@@ -679,7 +679,7 @@ async fn balloon_workload(
             let mut waiter = guest.write(offset, data)?;
             waiter.block_wait()?;
 
-            let mut waiter = guest.flush()?;
+            let mut waiter = guest.flush(None)?;
             waiter.block_wait()?;
 
             let length: usize = size * ri.block_size as usize;
@@ -738,7 +738,7 @@ async fn generic_workload(
         if op == 0 {
             // flush
             println!("{:4}/{:4} FLUSH", i, count);
-            let mut waiter = guest.flush()?;
+            let mut waiter = guest.flush(None)?;
             waiter.block_wait()?;
         } else {
             // Read or Write both need this
@@ -909,7 +909,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     }
 
     println!("Flush");
-    let mut waiter = guest.flush()?;
+    let mut waiter = guest.flush(None)?;
     waiter.block_wait()?;
 
     Ok(())
@@ -1017,7 +1017,7 @@ async fn rand_workload(
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
 
-        let mut waiter = guest.flush()?;
+        let mut waiter = guest.flush(None)?;
         waiter.block_wait()?;
 
         let length: usize = size * ri.block_size as usize;
@@ -1104,7 +1104,7 @@ async fn demo_workload(
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            let waiter = guest.flush()?;
+            let waiter = guest.flush(None)?;
             waiterlist.push(waiter);
         } else {
             // Read or Write both need this
@@ -1199,7 +1199,7 @@ fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     println!("Sending a flush");
-    let mut waiter = guest.flush()?;
+    let mut waiter = guest.flush(None)?;
     waiter.block_wait()?;
 
     let length: usize = 2 * ri.block_size as usize;
@@ -1239,7 +1239,7 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
 
-        let mut waiter = guest.flush()?;
+        let mut waiter = guest.flush(None)?;
         waiter.block_wait()?;
 
         let length: usize = ri.block_size as usize;
@@ -1353,7 +1353,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         // last command is a write or read and we have to wait x seconds for the
         // flush check to trigger.
         println!("Loop:{} send a final flush and wait", my_count);
-        let mut flush_waiter = guest.flush()?;
+        let mut flush_waiter = guest.flush(None)?;
         flush_waiter.block_wait()?;
 
         println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
@@ -1402,7 +1402,7 @@ async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
 
         // scope.wait_for("Flush step").await;
         println!("send flush");
-        guest.flush()?;
+        guest.flush(None)?;
 
         let mut data = BytesMut::with_capacity(512);
         data.put(&[0xbb; 512][..]);

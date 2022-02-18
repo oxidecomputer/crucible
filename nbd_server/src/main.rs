@@ -50,9 +50,9 @@ pub struct Opt {
     #[structopt(long)]
     root_cert_pem: Option<String>,
 
-    // Start upstairs info server
+    // Start upstairs http server
     #[structopt(long)]
-    info: Option<SocketAddr>,
+    http: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
-        info: opt.info,
+        http: opt.http,
     };
 
     /*
@@ -110,6 +110,7 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
 
     // sent to NBD client during handshake through Export struct
+    cpf.activate(opt.gen)?;
     println!("NBD advertised size as {} bytes", cpf.sz());
 
     for stream in listener.incoming() {

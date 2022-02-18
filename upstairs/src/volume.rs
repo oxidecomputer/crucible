@@ -451,9 +451,12 @@ impl BlockIO for Volume {
         BlockReqWaiter::immediate()
     }
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
+    fn flush(
+        &self,
+        snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            let mut waiter = sub_volume.flush()?;
+            let mut waiter = sub_volume.flush(snapshot_details.clone())?;
             waiter.block_wait()?;
         }
 
@@ -610,8 +613,11 @@ impl BlockIO for SubVolume {
         self.block_io.write(offset, data)
     }
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        self.block_io.flush()
+    fn flush(
+        &self,
+        snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.block_io.flush(snapshot_details)
     }
 
     fn show_work(&self) -> Result<WQCounts, CrucibleError> {

@@ -32,9 +32,9 @@ pub struct Opt {
     #[structopt(long)]
     root_cert_pem: Option<String>,
 
-    // Start upstairs info server
+    // Start upstairs http server
     #[structopt(long)]
-    info: Option<SocketAddr>,
+    http: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -143,7 +143,7 @@ fn main() -> Result<()> {
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
-        info: opt.info,
+        http: opt.http,
     };
 
     let runtime = Builder::new_multi_thread()
@@ -193,7 +193,7 @@ fn run_single_workload(guest: &Arc<Guest>) -> Result<()> {
         .block_wait()?;
 
     println!("send a flush");
-    guest.flush()?.block_wait()?;
+    guest.flush(None)?.block_wait()?;
 
     let read_offset = my_offset;
     const READ_SIZE: usize = 1024;

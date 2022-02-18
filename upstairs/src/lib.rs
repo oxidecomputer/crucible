@@ -36,7 +36,7 @@ use aes_gcm_siv::aead::{AeadInPlace, NewAead};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
-mod info;
+mod http;
 mod pseudo_file;
 mod test;
 
@@ -77,7 +77,10 @@ pub trait BlockIO {
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError>;
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError>;
+    fn flush(
+        &self,
+        snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError>;
 
     fn show_work(&self) -> Result<WQCounts, CrucibleError>;
 
@@ -131,7 +134,7 @@ pub struct CrucibleOpts {
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
-    pub info: Option<SocketAddr>,
+    pub http: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -363,6 +366,7 @@ where
                 dependencies,
                 flush_number,
                 gen_number,
+                snapshot_details,
             } => {
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush(
@@ -371,6 +375,7 @@ where
                     dependencies.clone(),
                     flush_number,
                     gen_number,
+                    snapshot_details,
                 ))
                 .await?
             }
@@ -1405,6 +1410,7 @@ struct UpComs {
     ds_reconcile_done_tx: mpsc::Sender<Repair>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum WrappedStream {
     Http(tokio::net::TcpStream),
     Https(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
@@ -2058,6 +2064,7 @@ impl Downstairs {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
                 gen_number: _gen_number,
+                snapshot_details: _,
             } => wc.error >= 2,
         };
 
@@ -2099,6 +2106,7 @@ impl Downstairs {
                 dependencies: _,
                 flush_number: _,
                 gen_number: _,
+                snapshot_details: _,
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
             }
@@ -2336,27 +2344,43 @@ impl Downstairs {
             );
         }
 
-        if matches!(newstate, IOState::Error(_)) {
-            // Mark this downstairs as bad if this was a write or flush
-            // XXX: reconcilation, retries?
-            // XXX: Errors should be reported to nexus
-            if matches!(
-                job.work,
-                IOop::Write {
-                    dependencies: _,
-                    writes: _,
-                } | IOop::Flush {
-                    dependencies: _,
-                    flush_number: _,
-                    gen_number: _
+        if let IOState::Error(e) = newstate {
+            // Some errors can be returned without considering the Downstairs
+            // bad. For example, it's still an error if a snapshot exists
+            // already but we should not increment downstairs_errors and
+            // transition that Downstairs to Failed - that downstairs is still
+            // able to serve IO.
+            match e {
+                CrucibleError::SnapshotExistsAlready(_) => {
+                    // pass
                 }
-            ) {
-                let errors: u64 = match self.downstairs_errors.get(&client_id) {
-                    Some(v) => *v,
-                    None => 0,
-                };
-                self.downstairs_errors.insert(client_id, errors + 1);
-                // XXX We don't count read errors here.
+                _ => {
+                    // Mark this downstairs as bad if this was a write or flush
+                    // XXX: reconcilation, retries?
+                    // XXX: Errors should be reported to nexus
+                    if matches!(
+                        job.work,
+                        IOop::Write {
+                            dependencies: _,
+                            writes: _,
+                        } | IOop::Flush {
+                            dependencies: _,
+                            flush_number: _,
+                            gen_number: _,
+                            snapshot_details: _,
+                        }
+                    ) {
+                        let errors: u64 =
+                            match self.downstairs_errors.get(&client_id) {
+                                Some(v) => *v,
+                                None => 0,
+                            };
+
+                        self.downstairs_errors.insert(client_id, errors + 1);
+
+                        // XXX We don't count read errors here.
+                    }
+                }
             }
         } else if job.ack_status == AckStatus::Acked {
             assert_eq!(newstate, IOState::Done);
@@ -2369,6 +2393,7 @@ impl Downstairs {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
                 gen_number: _gen_number,
+                snapshot_details: _,
             } = &job.work
             {
                 self.ds_last_flush[client_id as usize] = ds_id;
@@ -2411,6 +2436,7 @@ impl Downstairs {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
                     gen_number: _gen_number,
+                    snapshot_details: _,
                 } => {
                     assert!(read_data.is_empty());
                     /*
@@ -2435,6 +2461,7 @@ impl Downstairs {
                 }
             }
         }
+
         /*
          * If all 3 jobs are done, we can check here to see if we can
          * remove this job from the DS list. If we have completed the ack
@@ -2517,6 +2544,7 @@ impl Downstairs {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
                 gen_number: _gen_number,
+                snapshot_details: _,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -2792,7 +2820,7 @@ impl Upstairs {
             cert_pem: None,
             key_pem: None,
             root_cert_pem: None,
-            info: None,
+            http: None,
         };
         Self::new(
             &opts,
@@ -2986,7 +3014,7 @@ impl Upstairs {
          * Now, create the "final" flush and submit it to all the
          * downstairs queues.
          */
-        self.submit_flush_internal(gw, ds, sender)
+        self.submit_flush_internal(gw, ds, sender, None)
     }
 
     #[cfg(test)]
@@ -3189,12 +3217,16 @@ impl Upstairs {
 
     /*
      * If the sender is empty, it means this flush request came from
-     * the upstairs itself.  There is no real guest IO behind it.
+     * the upstairs itself. There is no real guest IO behind it.
+     *
+     * Flushes can optionally take a ZFS snapshot if the snapshot_details
+     * parameter is set.
      */
     #[instrument]
     pub fn submit_flush(
         &self,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
+        snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
         /*
          * Lock first the guest_work struct where this new job will go,
@@ -3204,7 +3236,7 @@ impl Upstairs {
         let gw = self.guest.guest_work.lock().unwrap();
         let downstairs = self.downstairs.lock().unwrap();
 
-        self.submit_flush_internal(gw, downstairs, sender)
+        self.submit_flush_internal(gw, downstairs, sender, snapshot_details)
     }
 
     fn submit_flush_internal(
@@ -3212,6 +3244,7 @@ impl Upstairs {
         mut gw: std::sync::MutexGuard<'_, GuestWork>,
         mut downstairs: std::sync::MutexGuard<'_, Downstairs>,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
+        snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
         self.set_flush_clear();
 
@@ -3249,6 +3282,7 @@ impl Upstairs {
             next_flush,
             gw_id,
             self.get_generation(),
+            snapshot_details,
         );
 
         let mut sub = HashMap::new();
@@ -4357,6 +4391,8 @@ impl Upstairs {
                 // here:
                 //
                 // self.ds_transition(client_id, DsState::Untrusted);
+            } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
+                // skip
             }
             /*
              * After work.complete, it's possible that the job is gone
@@ -4371,7 +4407,8 @@ impl Upstairs {
                     } | IOop::Flush {
                         dependencies: _,
                         flush_number: _,
-                        gen_number: _
+                        gen_number: _,
+                        snapshot_details: _,
                     }
                 ) {
                     self.ds_transition(client_id, DsState::Failed);
@@ -4572,6 +4609,7 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         flush_number: u64,
         gen_number: u64,
+        snapshot_details: Option<SnapshotDetails>,
     },
 }
 
@@ -4586,6 +4624,7 @@ impl IOop {
                 dependencies,
                 flush_number: _flush_number,
                 gen_number: _,
+                snapshot_details: _,
             } => dependencies,
             IOop::Read {
                 dependencies,
@@ -4853,23 +4892,47 @@ fn test_buffer_len_over_block_size() {
  */
 #[derive(Debug)]
 enum BlockOp {
-    Read { offset: Block, data: Buffer },
-    Write { offset: Block, data: Bytes },
-    Flush,
-    GoActive { gen: u64 },
+    Read {
+        offset: Block,
+        data: Buffer,
+    },
+    Write {
+        offset: Block,
+        data: Bytes,
+    },
+    Flush {
+        snapshot_details: Option<SnapshotDetails>,
+    },
+    GoActive {
+        gen: u64,
+    },
     Deactivate,
     // Query ops
-    QueryBlockSize { data: Arc<Mutex<u64>> },
-    QueryTotalSize { data: Arc<Mutex<u64>> },
-    QueryGuestIOReady { data: Arc<Mutex<bool>> },
-    QueryUpstairsUuid { data: Arc<Mutex<Uuid>> },
+    QueryBlockSize {
+        data: Arc<Mutex<u64>>,
+    },
+    QueryTotalSize {
+        data: Arc<Mutex<u64>>,
+    },
+    QueryGuestIOReady {
+        data: Arc<Mutex<bool>>,
+    },
+    QueryUpstairsUuid {
+        data: Arc<Mutex<Uuid>>,
+    },
     // Begin testing options.
-    QueryExtentSize { data: Arc<Mutex<Block>> },
-    QueryWorkQueue { data: Arc<Mutex<usize>> },
+    QueryExtentSize {
+        data: Arc<Mutex<Block>>,
+    },
+    QueryWorkQueue {
+        data: Arc<Mutex<usize>>,
+    },
     // Send an update to all tasks that there is work on the queue.
     Commit,
     // Show internal work queue, return outstanding IO requests.
-    ShowWork { data: Arc<Mutex<WQCounts>> },
+    ShowWork {
+        data: Arc<Mutex<WQCounts>>,
+    },
 }
 
 macro_rules! ceiling_div {
@@ -5622,12 +5685,15 @@ impl Guest {
         self.write(self.byte_offset_to_block(offset)?, data)
     }
 
-    pub fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
+    pub fn flush(
+        &self,
+        snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
         if !self.is_active() {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        Ok(self.send(BlockOp::Flush))
+        Ok(self.send(BlockOp::Flush { snapshot_details }))
     }
 
     pub fn set_active(&self) {
@@ -5802,8 +5868,11 @@ impl BlockIO for Guest {
         self.write(offset, data)
     }
 
-    fn flush(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        self.flush()
+    fn flush(
+        &self,
+        snapshot_details: Option<SnapshotDetails>,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.flush(snapshot_details)
     }
 
     fn show_work(&self) -> Result<WQCounts, CrucibleError> {
@@ -6056,7 +6125,7 @@ async fn process_new_io(
             send_work(dst, *lastcast);
             *lastcast += 1;
         }
-        BlockOp::Flush => {
+        BlockOp::Flush { snapshot_details } => {
             /*
              * Submit for read and write both check if the upstairs is
              * ready for guest IO or not.  Because the Upstairs itself can
@@ -6068,10 +6137,14 @@ async fn process_new_io(
                 let _ = req.send.send(Err(CrucibleError::UpstairsInactive));
                 return;
             }
-            if let Err(e) = up.submit_flush(Some(req.send.clone())) {
+
+            if let Err(e) =
+                up.submit_flush(Some(req.send.clone()), snapshot_details)
+            {
                 let _ = req.send.send(Err(e));
                 return;
             }
+
             send_work(dst, *lastcast);
             *lastcast += 1;
         }
@@ -6236,7 +6309,7 @@ async fn up_listen(
                 if up.flush_needed() {
                     println!("Need a flush");
 
-                    if let Err(e) = up.submit_flush(None) {
+                    if let Err(e) = up.submit_flush(None, None) {
                         println!("flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
@@ -6383,12 +6456,12 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     drop(ds_status_tx);
     drop(ds_reconcile_done_tx);
 
-    // If requested, start the info server on the given address:port
-    if let Some(info) = opt.info {
+    // If requested, start the http server on the given address:port
+    if let Some(http) = opt.http {
         let upi = Arc::clone(&up);
         tokio::spawn(async move {
-            let r = info::start_info(&upi, info).await;
-            println!("Info task finished with {:?}", r);
+            let r = http::start(&upi, http).await;
+            println!("HTTP task finished with {:?}", r);
         });
     }
     /*
@@ -6476,11 +6549,13 @@ fn create_flush(
     flush_number: u64,
     guest_id: u64,
     gen_number: u64,
+    snapshot_details: Option<SnapshotDetails>,
 ) -> DownstairsIO {
     let flush = IOop::Flush {
         dependencies,
         flush_number,
         gen_number,
+        snapshot_details,
     };
 
     let mut state = HashMap::new();
@@ -6566,6 +6641,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
                     gen_number: _gen_number,
+                    snapshot_details: _,
                 } => {
                     let job_type = "Flush".to_string();
                     (job_type, 0)

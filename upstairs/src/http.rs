@@ -5,9 +5,11 @@ use dropshot::ConfigDropshot;
 use dropshot::ConfigLogging;
 use dropshot::ConfigLoggingLevel;
 use dropshot::HttpError;
+use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
 use dropshot::HttpServerStarter;
 use dropshot::RequestContext;
+use dropshot::TypedBody;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,12 +18,11 @@ use std::sync::Arc;
 use super::*;
 
 /**
- * Publish some stats on a http port from the upstairs internal struct.
+ * Start up a dropshot server along side the Upstairs. This offers a way for
+ * Nexus or Propolis to send Snapshot commands. Also, publish some stats on
+ * a `/info` from the Upstairs internal struct.
  */
-pub async fn start_info(
-    up: &Arc<Upstairs>,
-    addr: SocketAddr,
-) -> Result<(), String> {
+pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     /*
      * Setup dropshot
      */
@@ -47,6 +48,7 @@ pub async fn start_info(
      */
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
+    api.register(take_snapshot).unwrap();
 
     /*
      * The functions that implement our API endpoints will share this
@@ -119,5 +121,47 @@ async fn upstairs_fill_info(
         state: act,
         up_jobs,
         ds_jobs,
+    }))
+}
+
+/**
+ * Signal to the Upstairs to take a snapshot
+ */
+#[derive(Deserialize, JsonSchema)]
+pub struct TakeSnapshotParams {
+    snapshot_name: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct TakeSnapshotResponse {
+    snapshot_name: String,
+}
+
+#[endpoint {
+    method = POST,
+    path = "/snapshot"
+}]
+async fn take_snapshot(
+    rqctx: Arc<RequestContext<UpstairsInfo>>,
+    take_snapshot_params: TypedBody<TakeSnapshotParams>,
+) -> Result<HttpResponseCreated<TakeSnapshotResponse>, HttpError> {
+    let apictx = rqctx.context();
+    let take_snapshot_params = take_snapshot_params.into_inner();
+
+    let mut waiter = apictx
+        .up
+        .guest
+        .flush(Some(SnapshotDetails {
+            snapshot_name: take_snapshot_params.snapshot_name.clone(),
+        }))
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    tokio::task::block_in_place(|| -> Result<(), CrucibleError> {
+        waiter.block_wait()
+    })
+    .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseCreated(TakeSnapshotResponse {
+        snapshot_name: take_snapshot_params.snapshot_name,
     }))
 }

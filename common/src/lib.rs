@@ -82,6 +82,15 @@ pub enum CrucibleError {
     #[error("Cannot receive blocks: {0}")]
     CannotReceiveBlocks(String),
 
+    #[error("Snapshot failed! {0}")]
+    SnapshotFailed(String),
+
+    #[error("Snapshot {0} exists already")]
+    SnapshotExistsAlready(String),
+
+    #[error("Attempting to modify read-only region!")]
+    ModifyingReadOnlyRegion,
+
     #[error("Invalid extent")]
     InvalidExtent,
 }

@@ -35,7 +35,8 @@ pub fn dump_region(
     let mut total_extents = 0;
 
     for (index, dir) in region_dir.iter().enumerate() {
-        let region = Region::open(&dir, Default::default(), false)?;
+        // Open Region read only
+        let region = Region::open(&dir, Default::default(), false, true)?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -338,7 +339,8 @@ fn show_extent(
          * in the Vec based on index.
          */
         for (index, dir) in region_dir.iter().enumerate() {
-            let region = Region::open(&dir, Default::default(), false)?;
+            // Open Region read only
+            let region = Region::open(&dir, Default::default(), false, true)?;
 
             let mut responses = region.region_read(&[ReadRequest {
                 eid: cmp_extent as u64,
@@ -453,7 +455,8 @@ fn show_extent_block(
      * in the Vec based on index.
      */
     for (index, dir) in region_dir.iter().enumerate() {
-        let region = Region::open(&dir, Default::default(), false)?;
+        // Open Region read only
+        let region = Region::open(&dir, Default::default(), false, true)?;
 
         let mut responses = region.region_read(&[ReadRequest {
             eid: cmp_extent as u64,
