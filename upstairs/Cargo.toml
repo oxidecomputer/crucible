@@ -9,10 +9,6 @@ edition = "2018"
 name = "crucible"
 path = "src/lib.rs"
 
-[[bin]]
-name = "crucible-upstairs"
-path = "src/main.rs"
-
 [features]
 asm = ["usdt/asm"]
 
