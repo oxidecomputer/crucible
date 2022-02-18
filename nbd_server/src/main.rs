@@ -50,9 +50,9 @@ pub struct Opt {
     #[structopt(long)]
     root_cert_pem: Option<String>,
 
-    // Start upstairs http server
+    // Start upstairs admin http server
     #[structopt(long)]
-    http: Option<SocketAddr>,
+    admin: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
-        http: opt.http,
+        admin: opt.admin,
     };
 
     /*

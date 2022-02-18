@@ -31,12 +31,12 @@ use uuid::Uuid;
 
 use slog::Drain;
 
+mod admin;
 mod dump;
-mod http;
 mod region;
 mod stats;
-use http::run_dropshot;
 
+use admin::run_dropshot;
 use dump::dump_region;
 use region::Region;
 use stats::*;
