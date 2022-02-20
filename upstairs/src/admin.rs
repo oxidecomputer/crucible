@@ -17,6 +17,23 @@ use std::sync::Arc;
 
 use super::*;
 
+/*
+ * Build the API.  If requested, dump it to stdout.
+ * This allows us to use the resulting output to build the client side.
+ */
+pub fn build_api(show: bool) -> Result<ApiDescription<UpstairsInfo>, String> {
+    let mut api = ApiDescription::new();
+    api.register(upstairs_fill_info).unwrap();
+    api.register(take_snapshot).unwrap();
+
+    if show {
+        api.openapi("Crucible-admin", "1")
+            .write(&mut std::io::stdout())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(api)
+}
+
 /**
  * Start up a dropshot server along side the Upstairs. This offers a way for
  * Nexus or Propolis to send Snapshot commands. Also, publish some stats on
@@ -46,9 +63,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     /*
      * Build a description of the API.
      */
-    let mut api = ApiDescription::new();
-    api.register(upstairs_fill_info).unwrap();
-    api.register(take_snapshot).unwrap();
+    let api = build_api(false)?;
 
     /*
      * The functions that implement our API endpoints will share this
@@ -74,7 +89,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
 /**
  * The state shared by handler functions
  */
-struct UpstairsInfo {
+pub struct UpstairsInfo {
     /**
      * Upstairs structure that is used to gather all the info stats
      */
@@ -97,8 +112,11 @@ impl UpstairsInfo {
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct UpstairsStats {
     state: UpState,
+    ds_state: Vec<DsState>,
     up_jobs: usize,
     ds_jobs: usize,
+    repair_done: usize,
+    repair_needed: usize,
 }
 
 /**
@@ -107,6 +125,7 @@ struct UpstairsStats {
 #[endpoint {
     method = GET,
     path = "/info",
+    unpublished = false,
 }]
 async fn upstairs_fill_info(
     rqctx: Arc<RequestContext<UpstairsInfo>>,
@@ -114,13 +133,20 @@ async fn upstairs_fill_info(
     let api_context = rqctx.context();
 
     let act = api_context.up.active.lock().unwrap().up_state;
+    let ds_state = api_context.up.ds_state_copy();
     let up_jobs = api_context.up.guest.guest_work.lock().unwrap().active.len();
-    let ds_jobs = api_context.up.downstairs.lock().unwrap().active.len();
+    let ds = api_context.up.downstairs.lock().unwrap();
+    let ds_jobs = ds.active.len();
+    let repair_done = ds.reconcile_repaired;
+    let repair_needed = ds.reconcile_repair_needed;
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
+        ds_state,
         up_jobs,
         ds_jobs,
+        repair_done,
+        repair_needed,
     }))
 }
 

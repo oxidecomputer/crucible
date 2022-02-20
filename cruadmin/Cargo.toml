@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "cruadmin"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2018"
+
+[dependencies]
+clap = { version = "3.0.12", features = ["derive", "env"] }
+crucible = { path = "../upstairs" }
+crucible-admin-client = { path = "../admin-client" }
+tokio = { version = "1.15.0", features = ["full"] }

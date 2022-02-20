@@ -15,3 +15,5 @@ core
 /x509/*.pem
 /x509/*.json
 /x509/*.csr
+/cruadmin/target
+/cruadmin/Cargo.lock
