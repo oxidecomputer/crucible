@@ -120,7 +120,7 @@ pub struct Opt {
     #[structopt(long)]
     root_cert_pem: Option<String>,
 
-    /// Start upstairs control http server
+    /// IP:Port for the upstairs control http server
     #[structopt(long, global = true)]
     control: Option<SocketAddr>,
 }
