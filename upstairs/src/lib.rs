@@ -36,7 +36,7 @@ use aes_gcm_siv::aead::{AeadInPlace, NewAead};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
-mod admin;
+pub mod control;
 mod pseudo_file;
 mod test;
 
@@ -134,7 +134,7 @@ pub struct CrucibleOpts {
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
-    pub admin: Option<SocketAddr>,
+    pub control: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -1626,6 +1626,13 @@ struct Downstairs {
      * downstairs in a region set the same.
      */
     reconcile_task_list: VecDeque<ReconcileIO>,
+
+    /**
+     * Count of extents repaired and needing repair since the start of
+     * this upstairs.
+     */
+    reconcile_repaired: usize,
+    reconcile_repair_needed: usize,
 }
 
 impl Default for Downstairs {
@@ -1641,6 +1648,8 @@ impl Default for Downstairs {
             region_metadata: HashMap::new(),
             reconcile_current_work: None,
             reconcile_task_list: VecDeque::new(),
+            reconcile_repaired: 0,
+            reconcile_repair_needed: 0,
         }
     }
 }
@@ -2820,7 +2829,7 @@ impl Upstairs {
             cert_pem: None,
             key_pem: None,
             root_cert_pem: None,
-            admin: None,
+            control: None,
         };
         Self::new(
             &opts,
@@ -3744,6 +3753,7 @@ impl Upstairs {
          */
         ds.repair_or_abort()?;
 
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
         if let Some(rio) = ds.reconcile_task_list.pop_front() {
             println!("Pop front: {:?}", rio);
 
@@ -3875,6 +3885,7 @@ impl Upstairs {
                 reconcile_list.mend.len()
             );
             ds.convert_rc_to_messages(reconcile_list.mend);
+            ds.reconcile_repair_needed = ds.reconcile_task_list.len();
             true
         } else {
             println!("All extents match");
@@ -3935,13 +3946,19 @@ impl Upstairs {
                             c = ds_reconcile_done_rx.recv() => {
                                 if let Some(c) = c {
                                     println!(
-                                        "Completion from [{}]  id:{}  status:{}",
+                                        "Completion from [{}] id:{} status:{}",
                                         c.client_id, c.rep_id, c.repair,
                                     );
                                     work_done = true;
                                     completed += 1;
+                                    self.downstairs
+                                        .lock()
+                                        .unwrap()
+                                        .reconcile_repaired += 1;
                                 } else {
-                                    println!("Got None from reconcile_done_rx");
+                                    println!(
+                                        "Got None from reconcile_done_rx"
+                                    );
                                 }
                             }
                             _ = sleep_until(progress_check) => {
@@ -4451,7 +4468,7 @@ impl FlushInfo {
  * XXX This very much still under development. Most of these are place
  * holders and the final set of states will change.
  */
-#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 enum DsState {
     /*
      * New connection
@@ -6456,12 +6473,12 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     drop(ds_status_tx);
     drop(ds_reconcile_done_tx);
 
-    // If requested, start the admin http server on the given address:port
-    if let Some(admin) = opt.admin {
+    // If requested, start the control http server on the given address:port
+    if let Some(control) = opt.control {
         let upi = Arc::clone(&up);
         tokio::spawn(async move {
-            let r = admin::start(&upi, admin).await;
-            println!("Admin HTTP task finished with {:?}", r);
+            let r = control::start(&upi, control).await;
+            println!("Control HTTP task finished with {:?}", r);
         });
     }
     /*

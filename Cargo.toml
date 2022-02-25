@@ -4,6 +4,8 @@ members = [
 	"agent-client",
 	"client",
 	"common",
+	"control-client",
+	"crucadm",
 	"downstairs",
 	"hammer",
 	"measure_iops",

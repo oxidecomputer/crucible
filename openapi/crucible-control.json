@@ -1,0 +1,153 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Crucible-control",
+    "version": "1"
+  },
+  "paths": {
+    "/info": {
+      "get": {
+        "summary": "Fetch the current value for all the stats in the UpstairsStats struct",
+        "operationId": "upstairs_fill_info",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstairsStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/snapshot": {
+      "post": {
+        "operationId": "take_snapshot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TakeSnapshotParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "successful creation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeSnapshotResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DsState": {
+        "type": "string",
+        "enum": [
+          "New",
+          "BadVersion",
+          "WaitActive",
+          "WaitQuorum",
+          "BadRegion",
+          "Disconnected",
+          "_Verifying",
+          "Repair",
+          "FailedRepair",
+          "Active",
+          "Failed",
+          "_Migrating",
+          "Offline",
+          "Replay",
+          "Deactivated",
+          "Disabled"
+        ]
+      },
+      "TakeSnapshotParams": {
+        "description": "Signal to the Upstairs to take a snapshot",
+        "type": "object",
+        "properties": {
+          "snapshot_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_name"
+        ]
+      },
+      "TakeSnapshotResponse": {
+        "type": "object",
+        "properties": {
+          "snapshot_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_name"
+        ]
+      },
+      "UpState": {
+        "type": "string",
+        "enum": [
+          "Initializing",
+          "Active",
+          "Deactivating"
+        ]
+      },
+      "UpstairsStats": {
+        "description": "`UpstairsInfo` holds the information gathered from the upstairs to fill a response to a GET request",
+        "type": "object",
+        "properties": {
+          "ds_jobs": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "ds_state": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DsState"
+            }
+          },
+          "repair_done": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "repair_needed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/UpState"
+          },
+          "up_jobs": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "ds_jobs",
+          "ds_state",
+          "repair_done",
+          "repair_needed",
+          "state",
+          "up_jobs"
+        ]
+      }
+    }
+  }
+}
