@@ -1,13 +1,13 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "admin",
+    "title": "Crucible-control",
     "version": "1"
   },
   "paths": {
     "/info": {
       "get": {
-        "description": "Fetch the current value for all the stats in the UpstairsStats struct",
+        "summary": "Fetch the current value for all the stats in the UpstairsStats struct",
         "operationId": "upstairs_fill_info",
         "responses": {
           "200": {

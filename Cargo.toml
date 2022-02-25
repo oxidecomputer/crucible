@@ -1,10 +1,11 @@
 [workspace]
 members = [
-	"admin-client",
 	"agent",
 	"agent-client",
 	"client",
 	"common",
+	"control-client",
+	"crucadm",
 	"downstairs",
 	"hammer",
 	"measure_iops",

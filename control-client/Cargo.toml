@@ -1,5 +1,5 @@
 [package]
-name = "crucible-admin-client"
+name = "crucible-control-client"
 version = "0.0.1"
 license = "MPL-2.0"
 edition = "2018"

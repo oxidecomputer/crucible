@@ -76,7 +76,7 @@ fn main() -> Result<()> {
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
-        admin: None,
+        control: None,
     };
 
     /*

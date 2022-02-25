@@ -1,27 +1,30 @@
 // Copyright 2022 Oxide Computer Company
 use clap::Parser;
-use crucible_admin_client::Client;
+use crucible_control_client::Client;
 
-/// Connect to crucible admin server
+/// Connect to crucible control server
 #[derive(Parser, Debug)]
 #[clap(about, long_about = None)]
 struct Args {
-    /// URL location of the Crucible admin server
+    /// URL location of the Crucible control server
     #[clap(short, long, default_value = "http://127.0.0.1:9999")]
-    admin: String,
+    control: String,
 }
 
 /*
- * Simple tool to connect to a crucible upstairs agent http port
+ * Simple tool to connect to a crucible upstairs control http port
  * and report back the results from a upstairs_fill_info command.
  */
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    println!("Connecting to Crucible Admin server at {:?}", args.admin);
+    println!(
+        "Connecting to Crucible Control server at {:?}",
+        args.control
+    );
 
-    let ca = Client::new(&args.admin);
+    let ca = Client::new(&args.control);
     let ui = ca.upstairs_fill_info().await;
     match ui {
         Ok(ui) => {
@@ -29,7 +32,7 @@ async fn main() {
             println!("Returned: {:?}", ui);
         }
         Err(e) => {
-            println!("Admin returned error: {}", e);
+            println!("Control returned error: {}", e);
         }
     }
 }

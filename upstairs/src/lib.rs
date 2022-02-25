@@ -36,7 +36,7 @@ use aes_gcm_siv::aead::{AeadInPlace, NewAead};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
-pub mod admin;
+pub mod control;
 mod pseudo_file;
 mod test;
 
@@ -134,7 +134,7 @@ pub struct CrucibleOpts {
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
-    pub admin: Option<SocketAddr>,
+    pub control: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -2829,7 +2829,7 @@ impl Upstairs {
             cert_pem: None,
             key_pem: None,
             root_cert_pem: None,
-            admin: None,
+            control: None,
         };
         Self::new(
             &opts,
@@ -6473,12 +6473,12 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     drop(ds_status_tx);
     drop(ds_reconcile_done_tx);
 
-    // If requested, start the admin http server on the given address:port
-    if let Some(admin) = opt.admin {
+    // If requested, start the control http server on the given address:port
+    if let Some(control) = opt.control {
         let upi = Arc::clone(&up);
         tokio::spawn(async move {
-            let r = admin::start(&upi, admin).await;
-            println!("Admin HTTP task finished with {:?}", r);
+            let r = control::start(&upi, control).await;
+            println!("Control HTTP task finished with {:?}", r);
         });
     }
     /*

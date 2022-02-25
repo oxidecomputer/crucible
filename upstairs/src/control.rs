@@ -27,7 +27,7 @@ pub fn build_api(show: bool) -> Result<ApiDescription<UpstairsInfo>, String> {
     api.register(take_snapshot).unwrap();
 
     if show {
-        api.openapi("Crucible-admin", "1")
+        api.openapi("Crucible-control", "1")
             .write(&mut std::io::stdout())
             .map_err(|e| e.to_string())?;
     }
