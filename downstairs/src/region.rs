@@ -1183,18 +1183,31 @@ impl Region {
                     );
                 }
 
-                // Drop leading slash
-                let fs =
+                // Look up dataset name for path (this works with any path, and
+                // will return the parent dataset).
+                let path =
                     self.dir.clone().into_os_string().into_string().unwrap();
-                let mut chars = fs.chars();
-                chars.next();
-                let fs = chars.as_str();
+
+                let dataset_name = std::process::Command::new("zfs")
+                    .args(["list", "-pH", "-o", "name", &path])
+                    .output()
+                    .map_err(|e| {
+                        CrucibleError::SnapshotFailed(e.to_string())
+                    })?;
+
+                let dataset_name = std::str::from_utf8(&dataset_name.stdout)
+                    .map_err(|e| {
+                        CrucibleError::SnapshotFailed(e.to_string())
+                    })?;
 
                 let output = std::process::Command::new("zfs")
                     .args([
                         "snapshot",
-                        format!("{}@{}", fs, snapshot_details.snapshot_name)
-                            .as_str(),
+                        format!(
+                            "{}@{}",
+                            dataset_name, snapshot_details.snapshot_name
+                        )
+                        .as_str(),
                     ])
                     .output()
                     .map_err(|e| {
