@@ -350,9 +350,8 @@ impl DataFile {
         path.push("regions");
         path.push(request.id.0.clone());
 
-        let dataset = ZFSDataset::new(
-            path.into_os_string().into_string().unwrap()
-        )?;
+        let dataset =
+            ZFSDataset::new(path.into_os_string().into_string().unwrap())?;
 
         let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 

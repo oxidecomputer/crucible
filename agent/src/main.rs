@@ -63,7 +63,7 @@ pub struct ZFSDataset {
 
 impl ZFSDataset {
     // From either dataset name or path, create the ZFSDataset object
-    pub fn new(dataset: String)-> Result<ZFSDataset> {
+    pub fn new(dataset: String) -> Result<ZFSDataset> {
         // Validate the argument is a dataset
         let cmd = std::process::Command::new("zfs")
             .arg("list")
@@ -169,7 +169,11 @@ impl ZFSDataset {
                 );
 
                 if i == 4 {
-                    bail!("zfs list mountpoint failed! out:{} err:{}", out, err);
+                    bail!(
+                        "zfs list mountpoint failed! out:{} err:{}",
+                        out,
+                        err
+                    );
                 }
 
                 std::thread::sleep(std::time::Duration::from_secs(2));
@@ -232,7 +236,10 @@ async fn main() -> Result<()> {
             );
 
             // Look up data directory from dataset mountpoint
-            let dataset = ZFSDataset::new(dataset.into_os_string().into_string().unwrap()).unwrap();
+            let dataset = ZFSDataset::new(
+                dataset.into_os_string().into_string().unwrap(),
+            )
+            .unwrap();
 
             let df = Arc::new(datafile::DataFile::new(
                 log.new(o!("component" => "datafile")),
@@ -241,7 +248,8 @@ async fn main() -> Result<()> {
                 lowport + 999, // TODO high port as an argument?
             )?);
 
-            let regions_dataset = dataset.ensure_child_dataset("regions").unwrap();
+            let regions_dataset =
+                dataset.ensure_child_dataset("regions").unwrap();
 
             /*
              * Ensure that the SMF service we will use exists already.  If
@@ -771,10 +779,16 @@ fn worker(
 
         while let Some(r) = &df.first_region_in_states(&[State::Requested]) {
             // if regions need to be created, do that before apply_smf.
-            let region_dataset = regions_dataset.ensure_child_dataset(&r.id.0).unwrap();
+            let region_dataset =
+                regions_dataset.ensure_child_dataset(&r.id.0).unwrap();
 
-            let res = worker_region_create(&log, &downstairs_program, r, &region_dataset.path().unwrap())
-                .and_then(|_| df.created(&r.id));
+            let res = worker_region_create(
+                &log,
+                &downstairs_program,
+                r,
+                &region_dataset.path().unwrap(),
+            )
+            .and_then(|_| df.created(&r.id));
 
             if let Err(e) = res {
                 error!(log, "region {:?} create failed: {:?}", r.id.0, e);
@@ -800,7 +814,8 @@ fn worker(
             {
                 // After SMF successfully shuts off downstairs, remove zfs
                 // dataset.
-                let region_dataset = regions_dataset.from_child_dataset(&r.id.0).unwrap();
+                let region_dataset =
+                    regions_dataset.from_child_dataset(&r.id.0).unwrap();
 
                 let res = worker_region_destroy(&log, r, region_dataset)
                     .and_then(|_| df.destroyed(&r.id));
