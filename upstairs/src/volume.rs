@@ -625,6 +625,59 @@ impl BlockIO for SubVolume {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum VolumeConstructionRequest {
+    Volume {
+        block_size: u64,
+        sub_volumes: Vec<VolumeConstructionRequest>,
+        read_only_parent: Option<Box<VolumeConstructionRequest>>,
+    },
+    Url {
+        block_size: u64,
+        url: String,
+    },
+    Region {
+        block_size: u64,
+        opts: CrucibleOpts,
+        gen: u64,
+    }
+}
+
+impl Volume {
+    pub fn construct(request: VolumeConstructionRequest) -> Result<Volume> {
+        match request {
+            VolumeConstructionRequest::Volume { block_size, sub_volumes, read_only_parent }  => {
+                let mut vol = Volume::new(block_size);
+
+                for subreq in sub_volumes {
+                    vol.add_subvolume(Arc::new(Volume::construct(subreq)?))?;
+                }
+
+                if let Some(read_only_parent) = read_only_parent {
+                    vol.add_read_only_parent(
+                        Arc::new(Volume::construct(*read_only_parent)?)
+                    )?;
+                }
+
+                Ok(vol)
+            },
+            VolumeConstructionRequest::Url { block_size, url } => {
+                let mut vol = Volume::new(block_size);
+                vol.add_subvolume(
+                    Arc::new(ReqwestBlockIO::new(block_size, url)?)
+                )?;
+                Ok(vol)
+            }
+            VolumeConstructionRequest::Region { block_size, opts, gen } => {
+                let mut vol = Volume::new(block_size);
+                vol.add_subvolume_create_guest(opts, gen)?;
+                Ok(vol)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1241,5 +1294,89 @@ mod test {
             .unwrap()
             .block_wait()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn construct_simple_volume() {
+        let _request = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            sub_volumes: vec![
+                VolumeConstructionRequest::Region {
+                    block_size: 512,
+                    opts: CrucibleOpts {
+                        target: vec![
+                            "127.0.0.1:123".parse().unwrap(),
+                            "127.0.0.1:456".parse().unwrap(),
+                            "127.0.0.1:789".parse().unwrap(),
+                        ],
+                        key: Some("key".to_string()),
+                        ..Default::default()
+                    },
+                    gen: 0,
+                },
+            ],
+            read_only_parent: None,
+        };
+
+        // XXX can't test this without a running set of downstairs
+        // let vol = Volume::construct(request).unwrap();
+    }
+
+    #[tokio::test]
+    async fn construct_snapshot_backed_vol() {
+        let _request = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            sub_volumes: vec![
+                VolumeConstructionRequest::Region {
+                    block_size: 512,
+                    opts: CrucibleOpts {
+                        target: vec![
+                            "127.0.0.1:123".parse().unwrap(),
+                            "127.0.0.1:456".parse().unwrap(),
+                            "127.0.0.1:789".parse().unwrap(),
+                        ],
+                        key: Some("key".to_string()),
+                        ..Default::default()
+                    },
+                    gen: 0,
+                },
+            ],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: 512,
+                    opts: CrucibleOpts {
+                        target: vec![
+                            "127.0.0.1:11111".parse().unwrap(),
+                            "127.0.0.1:22222".parse().unwrap(),
+                            "127.0.0.1:33333".parse().unwrap(),
+                        ],
+                        key: Some("key".to_string()),
+                        ..Default::default()
+                    },
+                    gen: 0,
+                },
+            )),
+        };
+
+        // XXX can't test this without a running set of downstairs
+        // let vol = Volume::construct(request).unwrap();
+    }
+
+    #[tokio::test]
+    async fn construct_read_only_iso_volume() {
+        let _request = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Url {
+                    block_size: 512,
+                    // You can boot anything as long as it's Alpine
+                    url: "https://fake.test/alpine.iso".to_string(),
+                },
+            )),
+        };
+
+        // XXX can't test this without a running set of downstairs
+        // let vol = Volume::construct(request).unwrap();
     }
 }
