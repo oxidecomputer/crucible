@@ -16,7 +16,7 @@
   <exec_method type='method' name='start'
     exec='/opt/oxide/crucible/bin/agent run
       -D /opt/oxide/crucible/bin/downstairs
-      -d %{config/datadir}
+      --dataset %{config/dataset}
       -l %{config/listen}
       -i %{config/uuid}
       -n %{config/nexus}
@@ -33,7 +33,7 @@
   </property_group>
 
   <property_group name='config' type='application'>
-    <propval name='datadir' type='astring' value='/data/crucible' />
+    <propval name='dataset' type='astring' value='' />
     <propval name='listen' type='astring' value='127.0.0.1:17000' />
     <propval name='uuid' type='astring' value='' />
     <propval name='nexus' type='astring' value='127.0.0.1:12221' />
