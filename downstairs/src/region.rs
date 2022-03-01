@@ -1198,7 +1198,8 @@ impl Region {
                 let dataset_name = std::str::from_utf8(&dataset_name.stdout)
                     .map_err(|e| {
                         CrucibleError::SnapshotFailed(e.to_string())
-                    })?;
+                    })?
+                    .trim_end(); // remove '\n' from end
 
                 let output = std::process::Command::new("zfs")
                     .args([
