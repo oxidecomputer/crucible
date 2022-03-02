@@ -41,7 +41,7 @@ mod pseudo_file;
 mod test;
 
 pub mod volume;
-pub use volume::Volume;
+pub use volume::{Volume, VolumeConstructionRequest};
 
 pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
