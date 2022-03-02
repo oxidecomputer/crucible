@@ -641,13 +641,17 @@ pub enum VolumeConstructionRequest {
         block_size: u64,
         opts: CrucibleOpts,
         gen: u64,
-    }
+    },
 }
 
 impl Volume {
     pub fn construct(request: VolumeConstructionRequest) -> Result<Volume> {
         match request {
-            VolumeConstructionRequest::Volume { block_size, sub_volumes, read_only_parent }  => {
+            VolumeConstructionRequest::Volume {
+                block_size,
+                sub_volumes,
+                read_only_parent,
+            } => {
                 let mut vol = Volume::new(block_size);
 
                 for subreq in sub_volumes {
@@ -655,21 +659,25 @@ impl Volume {
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
-                    vol.add_read_only_parent(
-                        Arc::new(Volume::construct(*read_only_parent)?)
-                    )?;
+                    vol.add_read_only_parent(Arc::new(Volume::construct(
+                        *read_only_parent,
+                    )?))?;
                 }
 
                 Ok(vol)
-            },
+            }
             VolumeConstructionRequest::Url { block_size, url } => {
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume(
-                    Arc::new(ReqwestBlockIO::new(block_size, url)?)
-                )?;
+                vol.add_subvolume(Arc::new(ReqwestBlockIO::new(
+                    block_size, url,
+                )?))?;
                 Ok(vol)
             }
-            VolumeConstructionRequest::Region { block_size, opts, gen } => {
+            VolumeConstructionRequest::Region {
+                block_size,
+                opts,
+                gen,
+            } => {
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume_create_guest(opts, gen)?;
                 Ok(vol)
@@ -1300,21 +1308,19 @@ mod test {
     async fn construct_simple_volume() {
         let _request = VolumeConstructionRequest::Volume {
             block_size: 512,
-            sub_volumes: vec![
-                VolumeConstructionRequest::Region {
-                    block_size: 512,
-                    opts: CrucibleOpts {
-                        target: vec![
-                            "127.0.0.1:123".parse().unwrap(),
-                            "127.0.0.1:456".parse().unwrap(),
-                            "127.0.0.1:789".parse().unwrap(),
-                        ],
-                        key: Some("key".to_string()),
-                        ..Default::default()
-                    },
-                    gen: 0,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                opts: CrucibleOpts {
+                    target: vec![
+                        "127.0.0.1:123".parse().unwrap(),
+                        "127.0.0.1:456".parse().unwrap(),
+                        "127.0.0.1:789".parse().unwrap(),
+                    ],
+                    key: Some("key".to_string()),
+                    ..Default::default()
                 },
-            ],
+                gen: 0,
+            }],
             read_only_parent: None,
         };
 
@@ -1326,21 +1332,19 @@ mod test {
     async fn construct_snapshot_backed_vol() {
         let _request = VolumeConstructionRequest::Volume {
             block_size: 512,
-            sub_volumes: vec![
-                VolumeConstructionRequest::Region {
-                    block_size: 512,
-                    opts: CrucibleOpts {
-                        target: vec![
-                            "127.0.0.1:123".parse().unwrap(),
-                            "127.0.0.1:456".parse().unwrap(),
-                            "127.0.0.1:789".parse().unwrap(),
-                        ],
-                        key: Some("key".to_string()),
-                        ..Default::default()
-                    },
-                    gen: 0,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                opts: CrucibleOpts {
+                    target: vec![
+                        "127.0.0.1:123".parse().unwrap(),
+                        "127.0.0.1:456".parse().unwrap(),
+                        "127.0.0.1:789".parse().unwrap(),
+                    ],
+                    key: Some("key".to_string()),
+                    ..Default::default()
                 },
-            ],
+                gen: 0,
+            }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size: 512,
@@ -1367,13 +1371,11 @@ mod test {
         let _request = VolumeConstructionRequest::Volume {
             block_size: 512,
             sub_volumes: vec![],
-            read_only_parent: Some(Box::new(
-                VolumeConstructionRequest::Url {
-                    block_size: 512,
-                    // You can boot anything as long as it's Alpine
-                    url: "https://fake.test/alpine.iso".to_string(),
-                },
-            )),
+            read_only_parent: Some(Box::new(VolumeConstructionRequest::Url {
+                block_size: 512,
+                // You can boot anything as long as it's Alpine
+                url: "https://fake.test/alpine.iso".to_string(),
+            })),
         };
 
         // XXX can't test this without a running set of downstairs
