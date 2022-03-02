@@ -41,7 +41,7 @@ mod pseudo_file;
 mod test;
 
 pub mod volume;
-pub use volume::Volume;
+pub use volume::{Volume, VolumeConstructionRequest};
 
 pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
@@ -126,7 +126,7 @@ mod cdt {
     fn ds__flush__io__done(_: u64, _: u64) {}
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CrucibleOpts {
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
