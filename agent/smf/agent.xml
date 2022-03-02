@@ -14,8 +14,8 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/opt/oxide/crucible/bin/agent run
-      -D /opt/oxide/crucible/bin/downstairs
+    exec='/opt/oxide/crucible/bin/crucible-agent run
+      -D /opt/oxide/crucible/bin/crucible-downstairs
       --dataset %{config/dataset}
       -l %{config/listen}
       -i %{config/uuid}

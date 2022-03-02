@@ -1,0 +1,8 @@
+[package.crucible]
+rust.binary_names = ["crucible-agent", "crucible-downstairs"]
+rust.release = true
+service_name = "crucible"
+zone = true
+[[package.crucible.paths]]
+from = "agent/smf"
+to = "/var/svc/manifest/site/crucible"
