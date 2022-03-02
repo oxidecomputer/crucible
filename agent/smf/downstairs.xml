@@ -14,7 +14,7 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/var/svc/manifest/site/crucible/downstairs_method_script.sh'
+    exec='/opt/oxide/crucible/bin/downstairs_method_script.sh'
     timeout_seconds='30'
     />
 
