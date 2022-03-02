@@ -35,10 +35,6 @@ enum Args {
         #[structopt(short = "l", parse(try_from_str))]
         listen: SocketAddr,
 
-        #[allow(dead_code)]
-        #[structopt(short = "i", parse(try_from_str))]
-        uuid: uuid::Uuid,
-
         #[structopt(short = "D", parse(try_from_str))]
         downstairs_program: PathBuf,
 
@@ -50,10 +46,6 @@ enum Args {
 
         #[structopt(short = "s", parse(try_from_str))]
         snapshot_prefix: String,
-
-        #[allow(dead_code)]
-        #[structopt(short = "n", parse(try_from_str))]
-        nexus: Option<SocketAddr>,
     },
 }
 
@@ -216,8 +208,6 @@ async fn main() -> Result<()> {
         Args::Run {
             dataset,
             listen,
-            uuid: _,
-            nexus: _,
             downstairs_program,
             lowport,
             downstairs_prefix,
