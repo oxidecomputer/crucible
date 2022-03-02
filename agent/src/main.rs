@@ -28,8 +28,9 @@ enum Args {
         output: PathBuf,
     },
     Run {
-        #[structopt(short = "d", parse(try_from_str))]
-        data_dir: PathBuf,
+        // zfs dataset to be used by the crucible agent
+        #[structopt(long, parse(try_from_str))]
+        dataset: PathBuf,
 
         #[structopt(short = "l", parse(try_from_str))]
         listen: SocketAddr,
@@ -56,6 +57,139 @@ enum Args {
     },
 }
 
+pub struct ZFSDataset {
+    dataset: String,
+}
+
+impl ZFSDataset {
+    // From either dataset name or path, create the ZFSDataset object
+    pub fn new(dataset: String) -> Result<ZFSDataset> {
+        // Validate the argument is a dataset
+        let cmd = std::process::Command::new("zfs")
+            .arg("list")
+            .arg("-pH")
+            .arg("-o")
+            .arg("name")
+            .arg(&dataset)
+            .output()?;
+
+        if !cmd.status.success() {
+            bail!("zfs list failed!");
+        }
+
+        Ok(ZFSDataset {
+            dataset: String::from_utf8(cmd.stdout)?.trim_end().to_string(),
+        })
+    }
+
+    pub fn from_child_dataset(&self, child: &str) -> Result<ZFSDataset> {
+        let dataset = format!("{}/{}", self.dataset, child);
+
+        // Does it exist already?
+        let cmd = std::process::Command::new("zfs")
+            .arg("list")
+            .arg(&dataset)
+            .output()?;
+
+        if cmd.status.success() {
+            return Ok(ZFSDataset { dataset });
+        }
+
+        bail!("Dataset does not exist!");
+    }
+
+    // Given "dataset", ensure that "dataset/child" exists, and return it.
+    pub fn ensure_child_dataset(&self, child: &str) -> Result<ZFSDataset> {
+        let dataset = format!("{}/{}", self.dataset, child);
+
+        // Does it exist already?
+        let cmd = std::process::Command::new("zfs")
+            .arg("list")
+            .arg(&dataset)
+            .output()?;
+
+        if cmd.status.success() {
+            return Ok(ZFSDataset { dataset });
+        }
+
+        // If not, create it
+        let cmd = std::process::Command::new("zfs")
+            .arg("create")
+            .arg(&dataset)
+            .output()?;
+
+        if !cmd.status.success() {
+            let out = String::from_utf8_lossy(&cmd.stdout);
+            let err = String::from_utf8_lossy(&cmd.stderr);
+            bail!("zfs create failed! out:{} err:{}", out, err);
+        }
+
+        Ok(ZFSDataset { dataset })
+    }
+
+    pub fn path(&self) -> Result<PathBuf> {
+        let cmd = std::process::Command::new("zfs")
+            .arg("list")
+            .arg("-pH")
+            .arg("-o")
+            .arg("mountpoint")
+            .arg(&self.dataset)
+            .output()?;
+
+        let out = String::from_utf8(cmd.stdout)?;
+
+        if !cmd.status.success() {
+            let err = String::from_utf8_lossy(&cmd.stderr);
+            bail!("zfs list mountpoint failed! out:{} err:{}", out, err);
+        }
+
+        Ok(Path::new(&out.trim_end()).to_path_buf())
+    }
+
+    pub fn destroy(self, log: &Logger) -> Result<()> {
+        // Retry a few times: apply_smf will remove the corresponding downstairs
+        // instance but this may take a few seconds to propagate.
+        for i in 0..5 {
+            let cmd = std::process::Command::new("zfs")
+                .arg("destroy")
+                .arg(&self.dataset)
+                .output()?;
+
+            if !cmd.status.success() {
+                let out = String::from_utf8_lossy(&cmd.stdout);
+                let err = String::from_utf8_lossy(&cmd.stderr);
+
+                error!(
+                    log,
+                    "zfs dataset {} delete attempt {} failed: out:{} err:{}",
+                    self.dataset,
+                    i,
+                    out,
+                    err,
+                );
+
+                if i == 4 {
+                    bail!(
+                        "zfs list mountpoint failed! out:{} err:{}",
+                        out,
+                        err
+                    );
+                }
+
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn dataset(&self) -> String {
+        self.dataset.clone()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     /*
@@ -80,7 +214,7 @@ async fn main() -> Result<()> {
             write_openapi(&mut f)
         }
         Args::Run {
-            data_dir,
+            dataset,
             listen,
             uuid: _,
             nexus: _,
@@ -94,39 +228,28 @@ async fn main() -> Result<()> {
             }
             .to_logger(PROG)?;
 
-            info!(log, "data directory: {:?}", data_dir);
+            info!(log, "dataset: {:?}", dataset);
             info!(log, "listen IP: {:?}", listen);
             info!(
                 log,
                 "SMF instance name downstairs_prefix: {:?}", downstairs_prefix
             );
 
-            /*
-             * create zfs dataset for the data directory, where the dataset
-             * name matches the path:
-             *
-             *     # zfs list data data/crucible
-             *     NAME            USED  AVAIL  REFER  MOUNTPOINT
-             *     data            189M   899G    96K  /data
-             *     data/crucible    96K   899G    96K  /data/crucible
-             */
-            ensure_dataset(&log, &data_dir)?;
+            // Look up data directory from dataset mountpoint
+            let dataset = ZFSDataset::new(
+                dataset.into_os_string().into_string().unwrap(),
+            )
+            .unwrap();
 
             let df = Arc::new(datafile::DataFile::new(
                 log.new(o!("component" => "datafile")),
-                &data_dir,
+                &dataset.path()?,
                 lowport,
                 lowport + 999, // TODO high port as an argument?
             )?);
 
-            let mut datapath = data_dir.clone();
-            datapath.push("regions");
-
-            /*
-             * Make sure regions is also a dataset, otherwise creating
-             * {data_dir}/regions/{uuid} will fail due to lack of parent.
-             */
-            ensure_dataset(&log, &datapath)?;
+            let regions_dataset =
+                dataset.ensure_child_dataset("regions").unwrap();
 
             /*
              * Ensure that the SMF service we will use exists already.  If
@@ -150,7 +273,7 @@ async fn main() -> Result<()> {
             apply_smf(
                 &log,
                 &df,
-                datapath.clone(),
+                regions_dataset.path().unwrap(),
                 &downstairs_prefix,
                 &snapshot_prefix,
             )?;
@@ -165,7 +288,7 @@ async fn main() -> Result<()> {
                 worker(
                     log0,
                     df0,
-                    datapath,
+                    regions_dataset,
                     downstairs_program,
                     downstairs_prefix,
                     snapshot_prefix,
@@ -175,62 +298,6 @@ async fn main() -> Result<()> {
             server::run_server(&log, listen, df).await
         }
     }
-}
-
-/**
- * Create a zfs dataset for a path if it doesn't exist. dataset name will
- * match the path, except for dropping the leading slash.
- */
-fn ensure_dataset(log: &Logger, dir: &Path) -> Result<()> {
-    let dataset = {
-        // drop the leading slash from the path
-        let dataset = dir
-            .to_str()
-            .ok_or_else(|| anyhow!("dir not UTF-8 valid!"))?;
-        let mut chars = dataset.chars();
-        chars.next();
-        chars.as_str()
-    };
-
-    // Test that this dataset doesn't already exist
-    let cmd = Command::new("zfs")
-        .env_clear()
-        .arg("list")
-        .arg("-H")
-        .arg(dataset)
-        .output()?;
-
-    if cmd.status.success() {
-        info!(
-            log,
-            "zfs dataset {:?} exists already, skipping creation", dataset,
-        );
-        return Ok(());
-    }
-
-    info!(log, "creating zfs dataset {}", dataset);
-    let cmd = Command::new("zfs")
-        .env_clear()
-        .arg("create")
-        .arg(dataset)
-        .output()?;
-
-    if cmd.status.success() {
-        info!(log, "zfs dataset {:?} created ok", dataset);
-    } else {
-        let err = String::from_utf8_lossy(&cmd.stderr);
-        let out = String::from_utf8_lossy(&cmd.stdout);
-        error!(
-            log,
-            "zfs dataset {:?} create failed: out {:?} err {:?}",
-            dataset,
-            out,
-            err,
-        );
-        bail!("zfs dataset create failure");
-    }
-
-    Ok(())
 }
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -682,11 +749,12 @@ mod test {
 fn worker(
     log: Logger,
     df: Arc<datafile::DataFile>,
-    datapath: PathBuf,
+    regions_dataset: ZFSDataset,
     downstairs_program: PathBuf,
     downstairs_prefix: String,
     snapshot_prefix: String,
 ) {
+    // XXX unwraps here ok?
     loop {
         /*
          * This loop fires whenever there's work to do. This work may be:
@@ -711,11 +779,16 @@ fn worker(
 
         while let Some(r) = &df.first_region_in_states(&[State::Requested]) {
             // if regions need to be created, do that before apply_smf.
-            let mut dir = datapath.clone();
-            dir.push(&r.id.0);
+            let region_dataset =
+                regions_dataset.ensure_child_dataset(&r.id.0).unwrap();
 
-            let res = worker_region_create(&log, &downstairs_program, r, &dir)
-                .and_then(|_| df.created(&r.id));
+            let res = worker_region_create(
+                &log,
+                &downstairs_program,
+                r,
+                &region_dataset.path().unwrap(),
+            )
+            .and_then(|_| df.created(&r.id));
 
             if let Err(e) = res {
                 error!(log, "region {:?} create failed: {:?}", r.id.0, e);
@@ -727,7 +800,7 @@ fn worker(
         let result = apply_smf(
             &log,
             &df,
-            datapath.clone(),
+            regions_dataset.path().unwrap(),
             &downstairs_prefix,
             &snapshot_prefix,
         );
@@ -739,16 +812,16 @@ fn worker(
 
             while let Some(r) = &df.first_region_in_states(&[State::Tombstoned])
             {
-                // After SMF successfully shuts off downstairs, remove
-                // zfs dataset
-                let mut dir = datapath.clone();
-                dir.push(&r.id.0);
+                // After SMF successfully shuts off downstairs, remove zfs
+                // dataset.
+                let region_dataset =
+                    regions_dataset.from_child_dataset(&r.id.0).unwrap();
 
-                let res = worker_region_destroy(&log, r, &dir)
+                let res = worker_region_destroy(&log, r, region_dataset)
                     .and_then(|_| df.destroyed(&r.id));
 
                 if let Err(e) = res {
-                    error!(log, "region {:?} destroy failed: {:?}", r.id.0, e,);
+                    error!(log, "region {:?} destroy failed: {:?}", r.id.0, e);
                     df.fail(&r.id);
                 }
             }
@@ -766,15 +839,6 @@ fn worker_region_create(
     dir: &Path,
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
-
-    /*
-     * Create zfs dataset for this region - snapshots taken by the downstairs
-     * will then only contain that region's data.
-     *
-     * This region's dataset will be named the same as the path without the
-     * leading slash.
-     */
-    ensure_dataset(&log, dir)?;
 
     /*
      * We may have crashed half way through a previous provision. To make
@@ -855,56 +919,17 @@ fn worker_region_create(
 fn worker_region_destroy(
     log: &Logger,
     region: &model::Region,
-    dir: &Path,
+    region_dataset: ZFSDataset,
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
 
-    if !dir.exists() {
-        info!(log, "directory {:?} already gone", dir);
-        return Ok(());
-    }
+    let region_dataset_name = region_dataset.dataset();
 
-    info!(log, "deleting zfs dataset {:?}", dir);
+    info!(log, "deleting zfs dataset {:?}", region_dataset_name);
 
-    // ZFS delete - will fail if snapshots exist
-    let dataset_name = {
-        let path = dir.to_str().unwrap().to_string();
-
-        let mut chars = path.chars();
-        chars.next();
-        chars.as_str().to_string()
-    };
-
-    // Retry a few times: apply_smf will remove the corresponding downstairs
-    // instance but this may take a few seconds to propagate.
-    for i in 0..5 {
-        let cmd = Command::new("zfs")
-            .arg("destroy")
-            .arg(dataset_name.clone())
-            .output()?;
-
-        if !cmd.status.success() {
-            let err = String::from_utf8_lossy(&cmd.stderr);
-            let out = String::from_utf8_lossy(&cmd.stdout);
-
-            error!(
-                log,
-                "zfs dataset {:?} delete attempt {} failed: out {:?} err {:?}",
-                dataset_name,
-                i,
-                out,
-                err,
-            );
-
-            if i == 4 {
-                bail!("zfs dataset delete failure");
-            }
-
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        } else {
-            break;
-        }
-    }
+    // Note: zfs destroy will fail if snapshots exist, but previous steps should
+    // prevent that scenario.
+    region_dataset.destroy(&log)?;
 
     Ok(())
 }

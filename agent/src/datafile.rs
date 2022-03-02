@@ -12,6 +12,8 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 
 use chrono::{TimeZone, Utc};
 
+use crate::ZFSDataset;
+
 pub struct DataFile {
     log: Logger,
     base_path: PathBuf,
@@ -347,30 +349,11 @@ impl DataFile {
         let mut path = self.base_path.to_path_buf();
         path.push("regions");
         path.push(request.id.0.clone());
-        path.push(".zfs");
-        path.push("snapshot");
-        path.push(request.name.clone());
 
-        info!(self.log, "checking path {:?}", path);
+        let dataset =
+            ZFSDataset::new(path.into_os_string().into_string().unwrap())?;
 
-        let path = std::fs::metadata(path)?;
-        if !path.is_dir() {
-            bail!("snapshot does not exist!");
-        }
-
-        let dataset_name = {
-            let mut path = self.base_path.to_path_buf();
-            path.push("regions");
-            path.push(request.id.0.clone());
-
-            let path = path.to_str().unwrap().to_string();
-
-            let mut chars = path.chars();
-            chars.next();
-            chars.as_str().to_string()
-        };
-
-        let snapshot_name = format!("{}@{}", dataset_name, request.name);
+        let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 
         let cmd = Command::new("zfs")
             .arg("destroy")
