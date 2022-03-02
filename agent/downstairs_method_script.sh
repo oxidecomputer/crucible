@@ -33,4 +33,4 @@ if [ "$val" != '""' ]; then
         args+=( "$val" )
 fi
 
-exec /opt/oxide/crucible/bin/downstairs run "${args[@]}"
+exec /opt/oxide/crucible/bin/crucible-downstairs run "${args[@]}"
