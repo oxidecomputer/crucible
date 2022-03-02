@@ -630,11 +630,7 @@ name = "crucible-package"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "flate2",
  "omicron-zone-package",
- "serde",
- "serde_json",
- "tar",
  "tokio",
 ]
 
