@@ -19,7 +19,7 @@ crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 structopt = "0.3"
-tokio = { version = "1.15", features = [ "full" ] }
+tokio = { version = "1.17", features = [ "full" ] }
 uuid = { version = "0.8", features = [ "serde", "v4" ] }
 
 [dev-dependencies]
