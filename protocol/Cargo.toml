@@ -6,7 +6,7 @@ license = "MPL-2.0"
 edition = "2018"
 
 [dependencies]
-tokio-util = { version = "0.6", features = [ "codec" ] }
+tokio-util = { version = "0.7", features = [ "codec" ] }
 bytes = { version = "1", features = ["serde"] }
 anyhow = "1"
 crucible-common = { path = "../common" }
