@@ -15,7 +15,7 @@ crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 slog = { version = "2.7" }
-slog-term = { version = "2.8" }
+slog-term = { version = "2.9" }
 slog-async = { version = "2.7" }
 schemars = { version = "0.8", features = [ "chrono", "uuid" ] }
 futures = "0.3"
