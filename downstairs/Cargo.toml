@@ -32,7 +32,7 @@ tokio-util = { version = "0.7", features = ["codec"]}
 tokio-rustls = { version = "0.23.2" }
 tracing = "0.1.29"
 toml = "0.5"
-opentelemetry = "0.16.0"
+opentelemetry = "0.17.0"
 opentelemetry-jaeger = { version = "0.15.0" }
 tracing-subscriber = "0.3.7"
 tracing-opentelemetry = "0.16.0"

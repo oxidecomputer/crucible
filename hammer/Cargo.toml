@@ -14,7 +14,7 @@ crucible-common = { path = "../common" }
 structopt = "0.3"
 rand = "0.8.4"
 tokio = { version = "1.17.0", features = ["full"] }
-opentelemetry = "0.16.0"
+opentelemetry = "0.17.0"
 opentelemetry-jaeger = { version = "0.15.0" }
 tracing-subscriber = "0.3.7"
 tracing-opentelemetry = "0.16.0"
