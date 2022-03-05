@@ -10,6 +10,6 @@ bytes = "1"
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 structopt = "0.3"
-rand = "0.8.4"
+rand = "0.8.5"
 tokio = { version = "1.17.0", features = ["full"] }
 statistical = "1.0.0"

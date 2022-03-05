@@ -23,7 +23,7 @@ crucible-scope = { path = "../scope" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 futures = "0.3"
 futures-core = "0.3"
-rand = "0.8.4"
+rand = "0.8.5"
 ringbuffer = "0.8"
 schemars = { version = "0.8.8", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
