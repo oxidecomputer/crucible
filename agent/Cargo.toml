@@ -8,7 +8,7 @@ edition = "2018"
 anyhow = "1"
 chrono = { version = "0.4", features = [ "serde" ] }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
-futures = "0.3.19"
+futures = "0.3.21"
 http = "0.2.6"
 hyper = "0.14"
 schemars = { version = "0.8", features = [ "chrono", "uuid" ] }
