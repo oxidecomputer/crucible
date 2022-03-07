@@ -34,6 +34,8 @@ enum CliCommand {
     Deactivate,
     /// Flush
     Flush,
+    /// Run Generic workload
+    Generic,
     /// Request region information
     Info,
     /// Report if the Upstairs is ready for guest IO
@@ -218,6 +220,9 @@ async fn cmd_to_msg(
         }
         CliCommand::Flush => {
             fw.send(CliMessage::Flush).await?;
+        }
+        CliCommand::Generic => {
+            fw.send(CliMessage::Generic).await?;
         }
         CliCommand::IsActive => {
             fw.send(CliMessage::IsActive).await?;
@@ -532,6 +537,26 @@ pub async fn start_cli_server(
                                 }
                                 Err(e) => {
                                     fw.send(CliMessage::Error(e)).await?;
+                                }
+                            }
+                        },
+                        Some(CliMessage::Generic) => {
+                            if ri.write_count.is_empty() {
+                                fw.send(CliMessage::Error(
+                                    CrucibleError::GenericError(
+                                        "Info not initialized".to_string()
+                                    )
+                                )).await?;
+                            } else {
+                                match generic_workload(guest, 20, &mut ri).await {
+                                    Ok(_) => {
+                                        fw.send(CliMessage::DoneOk).await?;
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("{}", e);
+                                        let e = CrucibleError::GenericError(msg);
+                                        fw.send(CliMessage::Error(e)).await?;
+                                    }
                                 }
                             }
                         },

@@ -27,6 +27,7 @@ pub enum CliMessage {
     Deactivate,
     // Generic command success
     DoneOk,
+    Generic,
     Read(usize, usize),
     RandRead,
     ReadResponse(Result<Vec<u8>, CrucibleError>),
@@ -241,6 +242,13 @@ mod tests {
     #[test]
     fn rt_write() -> Result<()> {
         let input = CliMessage::Write(32, 22);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_generic() -> Result<()> {
+        let input = CliMessage::Generic;
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

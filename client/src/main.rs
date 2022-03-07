@@ -927,11 +927,12 @@ async fn deactivate_workload(
     ri: &mut RegionInfo,
     mut gen: u64,
 ) -> Result<()> {
-    for c in 0..count {
+    for c in 1..=count {
         println!("{}/{} CLIENT: run rand test", c, count);
         generic_workload(guest, 20, ri).await?;
         println!("{}/{} CLIENT: Now disconnect", c, count);
         let mut waiter = guest.deactivate()?;
+        println!("{}/{} CLIENT: Now disconnect wait", c, count);
         waiter.block_wait()?;
         println!("{}/{} CLIENT: Now disconnect done.", c, count);
         let wc = guest.show_work()?;
@@ -953,6 +954,7 @@ async fn deactivate_workload(
     println!("One final");
     generic_workload(guest, 20, ri).await?;
 
+    println!("final verify");
     if let Err(e) = verify_volume(guest, ri) {
         bail!("Final volume verify failed: {:?}", e)
     }
@@ -976,7 +978,7 @@ async fn rand_workload(
     /*
      * TODO: Let the user select the number of loops
      */
-    for c in 0..count {
+    for c in 1..=count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
          * entire region.
@@ -1055,7 +1057,7 @@ async fn burst_workload(
     verify_out: &Option<PathBuf>,
 ) -> Result<()> {
     // TODO: let user pick loop count
-    for c in 0..count {
+    for c in 1..=count {
         demo_workload(guest, demo_count, ri).await?;
         let mut wc = guest.show_work()?;
         while wc.up_count + wc.ds_count != 0 {
@@ -1100,7 +1102,7 @@ async fn demo_workload(
     let mut waiterlist = Vec::new();
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
-    for i in 0..count {
+    for i in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
