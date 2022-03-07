@@ -16,9 +16,37 @@ if ! cargo build; then
     exit 1
 fi
 
-if [[ -d var/8801 ]] || [[ -d var/8802 ]] || [[ -d var/8803 ]]; then
-    echo " var/880* directories are already present"
-    exit 1
+delete=0
+encryption=0
+extent_size=100
+extent_count=20
+while getopts 'c:des:' opt; do
+    case "$opt" in
+        c)  extent_count=$OPTARG
+            echo "Using extent count $extent_count"
+            ;;
+        d)  delete=1
+            echo "delete and re-create any region dirs"
+            ;;
+        e)  encryption=1
+            echo "enable encryption"
+            ;;
+        s)  extent_size=$OPTARG
+            echo "Using extent size $extent_size"
+            ;;
+        *)  echo "Usage: $0 [de] [-c extent_count] [-s extent_size]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ $delete -eq 1 ]]; then
+    rm -rf var/8801 var/8802 var/8803
+else
+    if [[ -d var/8801 ]] || [[ -d var/8802 ]] || [[ -d var/8803 ]]; then
+        echo " var/880* directories are already present"
+        exit 1
+    fi
 fi
 
 cds="./target/debug/crucible-downstairs"
@@ -32,9 +60,17 @@ fi
 
 res=0
 for port in 8801 8802 8803; do
-    if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count 20 --extent-size 100; then
-        echo "Failed to create downstairs $port"
-        res=1
+    if [[ $encryption -eq 0 ]]; then
+        if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"; then
+            echo "Failed to create downstairs $port"
+            res=1
+        fi
+    else
+        if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size" --encrypted=true; then
+            echo "Failed to create downstairs $port"
+            res=1
+        fi
+
     fi
 done
 exit $res

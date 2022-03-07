@@ -301,7 +301,12 @@ fn main() -> Result<()> {
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
-        runtime.block_on(cli::start_cli_server(&guest, listen, port))?;
+        runtime.block_on(cli::start_cli_server(
+            &guest,
+            listen,
+            port,
+            opt.verify_in,
+        ))?;
         return Ok(());
     }
 

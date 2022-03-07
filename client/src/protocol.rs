@@ -30,7 +30,7 @@ pub enum CliMessage {
     Generic,
     Read(usize, usize),
     RandRead,
-    ReadResponse(Result<Vec<u8>, CrucibleError>),
+    ReadResponse(usize, Result<Vec<u8>, CrucibleError>),
     Write(usize, usize),
     RandWrite,
     Flush,

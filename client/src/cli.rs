@@ -40,6 +40,8 @@ enum CliCommand {
     Info,
     /// Report if the Upstairs is ready for guest IO
     IsActive,
+    /// Quit the CLI
+    Quit,
     /// Read from a given block offset
     Read {
         #[structopt(long, short)]
@@ -66,21 +68,6 @@ enum CliCommand {
     },
     /// Get the upstairs UUID
     Uuid,
-}
-
-/*
- * A wrapper around read that just picks a random offset.
- */
-fn rand_read(
-    guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-) -> Result<Vec<u8>, CrucibleError> {
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-    let size = 1;
-    let block_max = ri.total_blocks - size + 1;
-    let block_index = rng.gen_range(0..block_max);
-
-    cli_read(guest, ri, block_index, size)
 }
 
 /*
@@ -239,6 +226,10 @@ async fn cmd_to_msg(
             println!("No support for {:?}", cmd);
             return Ok(());
         }
+        _ => {
+            println!("No support for {:?}", cmd);
+            return Ok(());
+        }
     }
     /*
      * Now, wait for our response
@@ -254,9 +245,9 @@ async fn cmd_to_msg(
         Some(CliMessage::DoneOk) => {
             println!("Ok");
         }
-        Some(CliMessage::ReadResponse(resp)) => match resp {
+        Some(CliMessage::ReadResponse(offset, resp)) => match resp {
             Ok(data) => {
-                println!("Data: {:?}", data);
+                println!("[{}] Data: {:?}", offset, data);
             }
             Err(e) => {
                 println!("ERROR: {:?}", e);
@@ -343,6 +334,9 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                     }
                     // TODO: add a quit command
                     match CliCommand::from_iter_safe(cmds) {
+                        Ok(CliCommand::Quit) => {
+                            break;
+                        }
                         Ok(vc) => {
                             cmd_to_msg(vc, &mut fr, &mut fw).await?;
                             // TODO: Handle this error
@@ -375,6 +369,135 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
     Ok(())
 }
 
+/**
+ * Process a CLI command from the client, we are the server side.
+ */
+async fn process_cli_command(
+    guest: &Arc<Guest>,
+    fw: &mut FramedWrite<tokio::net::tcp::OwnedWriteHalf, CliEncoder>,
+    cmd: protocol::CliMessage,
+    ri: &mut RegionInfo,
+    wc_filled: &mut bool,
+    vi: Option<PathBuf>,
+) -> Result<()> {
+    match cmd {
+        CliMessage::Activate(gen) => match guest.activate(gen) {
+            Ok(_) => fw.send(CliMessage::DoneOk).await,
+            Err(e) => fw.send(CliMessage::Error(e)).await,
+        },
+        CliMessage::Deactivate => match guest.deactivate() {
+            Ok(mut waiter) => match waiter.block_wait() {
+                Ok(_) => fw.send(CliMessage::DoneOk).await,
+                Err(e) => fw.send(CliMessage::Error(e)).await,
+            },
+            Err(e) => fw.send(CliMessage::Error(e)).await,
+        },
+        CliMessage::Generic => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match generic_workload(guest, 20, ri).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
+                    }
+                }
+            }
+        }
+        CliMessage::Flush => match guest.flush(None) {
+            Ok(_) => fw.send(CliMessage::DoneOk).await,
+            Err(e) => fw.send(CliMessage::Error(e)).await,
+        },
+        CliMessage::IsActive => match guest.query_is_active() {
+            Ok(a) => fw.send(CliMessage::ActiveIs(a)).await,
+            Err(e) => fw.send(CliMessage::Error(e)).await,
+        },
+        CliMessage::InfoPlease => {
+            let new_ri = get_region_info(guest);
+            match new_ri {
+                Ok(new_ri) => {
+                    let bs = new_ri.block_size;
+                    let es = new_ri.extent_size.value;
+                    let ts = new_ri.total_size;
+                    *ri = new_ri;
+                    if !*wc_filled {
+                        update_region_info(guest, ri, vi.clone(), false)?;
+                        *wc_filled = true;
+                    }
+                    fw.send(CliMessage::Info(bs, es, ts)).await
+                }
+                Err(e) => fw.send(CliMessage::Error(e)).await,
+            }
+        }
+        CliMessage::RandRead => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                let size = 1;
+                let block_max = ri.total_blocks - size + 1;
+                let offset = rng.gen_range(0..block_max);
+
+                let res = cli_read(guest, ri, offset, size);
+                fw.send(CliMessage::ReadResponse(offset, res)).await
+            }
+        }
+        CliMessage::RandWrite => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match rand_write(guest, ri) {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
+                }
+            }
+        }
+        CliMessage::Read(offset, len) => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                let res = cli_read(guest, ri, offset, len);
+                fw.send(CliMessage::ReadResponse(offset, res)).await
+            }
+        }
+        CliMessage::Write(offset, len) => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match cli_write(guest, ri, offset, len) {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
+                }
+            }
+        }
+        CliMessage::Uuid => {
+            let uuid = guest.query_upstairs_uuid()?;
+            fw.send(CliMessage::MyUuid(uuid)).await
+        }
+        msg => {
+            println!("No code written for {:?}", msg);
+            Ok(())
+        }
+    }
+}
+
 /*
  * Server for a crucible client CLI.
  * This opens a network port and listens for commands from the cli_client.
@@ -388,6 +511,7 @@ pub async fn start_cli_server(
     guest: &Arc<Guest>,
     address: IpAddr,
     port: u16,
+    vi: Option<PathBuf>,
 ) -> Result<()> {
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
@@ -400,6 +524,15 @@ pub async fn start_cli_server(
     println!("Listening for a CLI connection on: {:?}", listen_on);
     let listener = TcpListener::bind(&listen_on).await?;
 
+    /*
+     * If we have write info data from previous runs, we can't update our
+     * internal region info struct until we actually connect to our
+     * downstairs and get that region info. Once we have it, we can
+     * populate it with what we expect for each block. If we have filled
+     * the write count struct once, or we did not provide any previous
+     * write counts, don't require it again.
+     */
+    let mut wc_filled = vi.is_none();
     loop {
         let (sock, raddr) = listener.accept().await?;
         println!("connection from {:?}", raddr);
@@ -424,163 +557,20 @@ pub async fn start_cli_server(
         loop {
             tokio::select! {
                 new_read = fr.next() => {
+
                     match new_read.transpose()? {
                         None => {
                             println!("Got nothing from socket");
                             break;
                         },
-                        Some(CliMessage::Uuid) => {
-                            let uuid = guest.query_upstairs_uuid()?;
-                            fw.send(CliMessage::MyUuid(uuid)).await?;
-                        },
-                        Some(CliMessage::InfoPlease) => {
-                            let new_ri = get_region_info(guest);
-                            match new_ri {
-                                Ok(new_ri) => {
-                                    let bs = new_ri.block_size;
-                                    let es = new_ri.extent_size.value;
-                                    let ts = new_ri.total_size;
-                                    ri = new_ri;
-                                    fw.send(CliMessage::Info(
-                                        bs, es, ts
-                                    )).await?;
-                                }
-                                Err(e) => {
-                                    fw.send(CliMessage::Error(e)).await?;
-                                }
-                            }
-                        },
-                        Some(CliMessage::Read(offset, len)) => {
-                            if ri.write_count.is_empty() {
-                                fw.send(CliMessage::Error(
-                                    CrucibleError::GenericError(
-                                        "Info not initialized".to_string()
-                                    )
-                                )).await?;
-                            } else {
-                                let res = cli_read(guest, &mut ri, offset, len);
-                                fw.send(CliMessage::ReadResponse(res)).await?;
-                            }
-                        },
-                        Some(CliMessage::RandRead) => {
-                            if ri.write_count.is_empty() {
-                                fw.send(CliMessage::Error(
-                                    CrucibleError::GenericError(
-                                        "Info not initialized".to_string()
-                                    )
-                                )).await?;
-                            } else {
-                                let res = rand_read(guest, &mut ri);
-                                fw.send(CliMessage::ReadResponse(res)).await?;
-                            }
-                        },
-                        Some(CliMessage::Write(offset, len)) => {
-                            if ri.write_count.is_empty() {
-                                fw.send(CliMessage::Error(
-                                    CrucibleError::GenericError(
-                                        "Info not initialized".to_string()
-                                    )
-                                )).await?;
-                            } else {
-                                match cli_write(guest, &mut ri, offset, len) {
-                                    Ok(_) => {
-                                        fw.send(CliMessage::DoneOk).await?;
-                                    }
-                                    Err(e) => {
-                                        fw.send(CliMessage::Error(e)).await?;
-                                    }
-                                }
-                            }
-                        },
-                        Some(CliMessage::RandWrite) => {
-                            if ri.write_count.is_empty() {
-                                fw.send(CliMessage::Error(
-                                    CrucibleError::GenericError(
-                                        "Info not initialized".to_string()
-                                    )
-                                )).await?;
-                            } else {
-                                match rand_write(guest, &mut ri) {
-                                    Ok(_) => {
-                                        fw.send(CliMessage::DoneOk).await?;
-                                    }
-                                    Err(e) => {
-                                        fw.send(CliMessage::Error(e)).await?;
-                                    }
-                                }
-                            }
-                        },
-                        Some(CliMessage::Activate(gen)) => {
-                            match guest.activate(gen) {
-                                Ok(_) => {
-                                    fw.send(CliMessage::DoneOk).await?;
-                                }
-                                Err(e) => {
-                                    fw.send(CliMessage::Error(e)).await?;
-                                }
-                            }
-                        },
-                        Some(CliMessage::IsActive) => {
-                            match guest.query_is_active() {
-                                Ok(a) => {
-                                    fw.send(CliMessage::ActiveIs(a)).await?;
-                                }
-                                Err(e) => {
-                                    fw.send(CliMessage::Error(e)).await?;
-                                }
-                            }
-                        },
-                        Some(CliMessage::Flush) => {
-                            match guest.flush(None) {
-                                Ok(_) => {
-                                    fw.send(CliMessage::DoneOk).await?;
-                                }
-                                Err(e) => {
-                                    fw.send(CliMessage::Error(e)).await?;
-                                }
-                            }
-                        },
-                        Some(CliMessage::Generic) => {
-                            if ri.write_count.is_empty() {
-                                fw.send(CliMessage::Error(
-                                    CrucibleError::GenericError(
-                                        "Info not initialized".to_string()
-                                    )
-                                )).await?;
-                            } else {
-                                match generic_workload(guest, 20, &mut ri).await {
-                                    Ok(_) => {
-                                        fw.send(CliMessage::DoneOk).await?;
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("{}", e);
-                                        let e = CrucibleError::GenericError(msg);
-                                        fw.send(CliMessage::Error(e)).await?;
-                                    }
-                                }
-                            }
-                        },
-                        Some(CliMessage::Deactivate) => {
-                            match guest.deactivate() {
-                                Ok(mut waiter) => {
-                                    match waiter.block_wait() {
-                                        Ok(_) => {
-                                            fw.send(CliMessage::DoneOk).await?;
-                                        }
-                                        Err(e) => {
-                                            fw.send(CliMessage::Error(
-                                                e
-                                            )).await?;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    fw.send(CliMessage::Error(e)).await?;
-                                }
-                            }
-                        },
-                        Some(msg) => {
-                            println!("No code written for {:?}", msg);
+                        Some(cmd) => {
+                            process_cli_command(
+                                guest,
+                                &mut fw,
+                                cmd,
+                                &mut ri,
+                                &mut wc_filled,
+                                vi.clone()).await?;
                         }
                     }
                 }
