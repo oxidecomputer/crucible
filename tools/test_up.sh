@@ -41,8 +41,22 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
-uuidprefix="12345678-1234-1234-1234-00000000"
 args=()
+
+case ${1} in
+    "unencrypted")
+        ;;
+    "encrypted")
+        args+=( --key "$(openssl rand -base64 32)" )
+        ;;
+    *)
+        echo "Usage: $0 encrypted|unencrypted"
+        echo " encrypted or unencrypted are the only valid choices"
+        exit 1
+        ;;
+esac
+
+uuidprefix="12345678-1234-1234-1234-00000000"
 downstairs=()
 port_base=8801
 for (( i = 0; i < 3; i++ )); do
@@ -66,16 +80,6 @@ for (( i = 0; i < 3; i++ )); do
     downstairs[$i]=$!
     set +o errexit
 done
-
-case ${1} in
-    "unencrypted")
-        ;;
-    "encrypted")
-        args+=( --key "$(openssl rand -base64 32)" )
-        ;;
-    *)
-        ;;
-esac
 
 res=0
 test_list="one span big dep deactivate balloon"
