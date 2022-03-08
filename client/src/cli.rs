@@ -332,7 +332,6 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                     if cmds[0].is_empty() {
                         continue;
                     }
-                    // TODO: add a quit command
                     match CliCommand::from_iter_safe(cmds) {
                         Ok(CliCommand::Quit) => {
                             break;
@@ -378,7 +377,7 @@ async fn process_cli_command(
     cmd: protocol::CliMessage,
     ri: &mut RegionInfo,
     wc_filled: &mut bool,
-    vi: Option<PathBuf>,
+    verify_input: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
         CliMessage::Activate(gen) => match guest.activate(gen) {
@@ -426,7 +425,12 @@ async fn process_cli_command(
                     let ts = new_ri.total_size;
                     *ri = new_ri;
                     if !*wc_filled {
-                        update_region_info(guest, ri, vi.clone(), false)?;
+                        update_region_info(
+                            guest,
+                            ri,
+                            verify_input.clone(),
+                            false,
+                        )?;
                         *wc_filled = true;
                     }
                     fw.send(CliMessage::Info(bs, es, ts)).await
@@ -511,7 +515,7 @@ pub async fn start_cli_server(
     guest: &Arc<Guest>,
     address: IpAddr,
     port: u16,
-    vi: Option<PathBuf>,
+    verify_input: Option<PathBuf>,
 ) -> Result<()> {
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
@@ -532,7 +536,7 @@ pub async fn start_cli_server(
      * the write count struct once, or we did not provide any previous
      * write counts, don't require it again.
      */
-    let mut wc_filled = vi.is_none();
+    let mut wc_filled = verify_input.is_none();
     loop {
         let (sock, raddr) = listener.accept().await?;
         println!("connection from {:?}", raddr);
@@ -570,7 +574,7 @@ pub async fn start_cli_server(
                                 cmd,
                                 &mut ri,
                                 &mut wc_filled,
-                                vi.clone()).await?;
+                                verify_input.clone()).await?;
                         }
                     }
                 }
