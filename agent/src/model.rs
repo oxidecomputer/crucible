@@ -17,7 +17,6 @@ pub enum State {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct Region {
     pub id: RegionId,
-    pub volume_id: String,
     pub state: State,
 
     // Creation parameters
@@ -109,7 +108,6 @@ impl Region {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct CreateRegion {
     pub id: RegionId,
-    pub volume_id: String,
 
     pub block_size: u64,
     pub extent_size: u64,
@@ -124,12 +122,7 @@ pub struct CreateRegion {
 
 impl CreateRegion {
     pub fn mismatch(&self, r: &Region) -> Option<String> {
-        if self.volume_id != r.volume_id {
-            Some(format!(
-                "volume ID {} instead of requested {}",
-                self.volume_id, r.volume_id
-            ))
-        } else if self.block_size != r.block_size {
+        if self.block_size != r.block_size {
             Some(format!(
                 "block size {} instead of requested {}",
                 self.block_size, r.block_size
@@ -283,7 +276,6 @@ mod test {
     fn basic() {
         let r = Region {
             id: RegionId("abc".to_string()),
-            volume_id: "def".to_string(),
             port_number: 1701,
             state: State::Requested,
             block_size: 4096,

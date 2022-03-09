@@ -5,6 +5,7 @@ set -o pipefail
 
 args=(
         '--data' "$(svcprop -c -p config/directory "${SMF_FMRI}")"
+        '--address' "$(svcprop -c -p config/address "${SMF_FMRI}")"
         '--port' "$(svcprop -c -p config/port "${SMF_FMRI}")"
         '--mode' "$(svcprop -c -p config/mode "${SMF_FMRI}")"
 )
@@ -34,3 +35,4 @@ if [ "$val" != '""' ]; then
 fi
 
 exec /opt/oxide/crucible/bin/crucible-downstairs run "${args[@]}"
+

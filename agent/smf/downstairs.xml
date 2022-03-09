@@ -26,6 +26,7 @@
 
   <property_group name='config' type='application'>
     <propval name='directory' type='astring' value='/dev/null' />
+    <propval name='address' type='astring' value='0.0.0.0' />
     <propval name='port' type='count' value='0' />
     <propval name='mode' type='astring' value='rw' />
     <propval name='cert_pem_path' type='astring' value='' />

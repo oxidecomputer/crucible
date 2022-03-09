@@ -197,7 +197,6 @@ impl DataFile {
 
         let r = Region {
             id: create.id.clone(),
-            volume_id: create.volume_id,
             state: State::Requested,
 
             block_size: create.block_size,
