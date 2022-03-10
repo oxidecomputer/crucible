@@ -625,7 +625,7 @@ impl BlockIO for SubVolume {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type")]
 pub enum VolumeConstructionRequest {
     Volume {

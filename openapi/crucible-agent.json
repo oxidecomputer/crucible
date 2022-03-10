@@ -360,9 +360,6 @@
           "root_pem": {
             "nullable": true,
             "type": "string"
-          },
-          "volume_id": {
-            "type": "string"
           }
         },
         "required": [
@@ -370,8 +367,7 @@
           "encrypted",
           "extent_count",
           "extent_size",
-          "id",
-          "volume_id"
+          "id"
         ]
       },
       "Error": {
@@ -457,9 +453,6 @@
           },
           "state": {
             "$ref": "#/components/schemas/State"
-          },
-          "volume_id": {
-            "type": "string"
           }
         },
         "required": [
@@ -469,8 +462,7 @@
           "extent_size",
           "id",
           "port_number",
-          "state",
-          "volume_id"
+          "state"
         ]
       },
       "RegionId": {
