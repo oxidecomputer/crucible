@@ -369,10 +369,6 @@ fn show_extent(
         let (status_letters, data_different) =
             return_status_letters(&dvec, |x| &x.data);
 
-        // With color, we need a larger alignment value to get the letters
-        // to line up exactly.  Even though we only need six spaces, the color
-        // control codes require more.
-
         // Print the data status letters
         for dir_index in 0..dir_count {
             data_columns[dir_index] = status_letters[dir_index].to_string();
