@@ -1,8 +1,10 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 use crate::region::ExtentMeta;
-use sha2::{Digest, Sha256};
 use std::convert::TryInto;
+
+use sha2::{Digest, Sha256};
+use termion::color;
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -211,29 +213,29 @@ fn return_status_letters<T, U: std::cmp::PartialEq>(
     let count = items.len();
 
     if accessor(&items[0]) == accessor(&items[1]) {
-        status_letters[0] += "A";
-        status_letters[1] += "A";
+        status_letters[0] = format!("{}A", color::Fg(color::Green));
+        status_letters[1] = format!("{}A", color::Fg(color::Green));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] += "A";
+                status_letters[2] = format!("{}A", color::Fg(color::Green));
             } else {
-                status_letters[2] += "C";
+                status_letters[2] = format!("{}C", color::Fg(color::Red));
                 different = true;
             }
         }
     } else {
         different = true;
-        status_letters[0] += "A";
-        status_letters[1] += "B";
+        status_letters[0] = format!("{}A", color::Fg(color::Green));
+        status_letters[1] = format!("{}B", color::Fg(color::Blue));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] += "A";
+                status_letters[2] = format!("{}A", color::Fg(color::Green));
             } else if accessor(&items[1]) == accessor(&items[2]) {
-                status_letters[2] += "B";
+                status_letters[2] = format!("{}B", color::Fg(color::Blue));
             } else {
-                status_letters[2] += "C";
+                status_letters[2] = format!("{}C", color::Fg(color::Red));
             }
         }
     }
@@ -298,17 +300,18 @@ fn show_extent(
     println!();
     println!();
 
+    // Print the header
     print!("{0:5} ", "BLOCK");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^5}", format!("DATA{}", index));
+        print!(" {0:^2}", format!("D{}", index));
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^6}", format!("ECTX{}", index));
+        print!(" {0:^2}", format!("E{}", index));
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^6}", format!("HASH{}", index));
+        print!(" {0:^2}", format!("H{}", index));
     }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
@@ -366,10 +369,13 @@ fn show_extent(
         let (status_letters, data_different) =
             return_status_letters(&dvec, |x| &x.data);
 
+        // With color, we need a larger alignment value to get the letters
+        // to line up exactly.  Even though we only need six spaces, the color
+        // control codes require more.
+
         // Print the data status letters
         for dir_index in 0..dir_count {
-            data_columns[dir_index] =
-                format!("{0:^5} ", status_letters[dir_index]);
+            data_columns[dir_index] = status_letters[dir_index].to_string();
         }
 
         // then, compare encryption_context_columns
@@ -379,7 +385,7 @@ fn show_extent(
         // Print nonce status letters
         for dir_index in 0..dir_count {
             encryption_context_columns[dir_index] =
-                format!("{0:^6} ", status_letters[dir_index]);
+                status_letters[dir_index].to_string();
         }
 
         // then, compare hashes
@@ -388,29 +394,30 @@ fn show_extent(
 
         // Print hash status letters
         for dir_index in 0..dir_count {
-            hash_columns[dir_index] =
-                format!("{0:^6} ", status_letters[dir_index]);
+            hash_columns[dir_index] = status_letters[dir_index].to_string();
         }
 
         let different = data_different || ec_different || hashes_different;
 
+        // Now that we have collected all the results, print them
         if !only_show_differences || different {
-            print!("{:5}  ", block);
+            print!("{}{:5} ", color::Fg(color::Reset), block);
 
             for column in data_columns.iter().take(dir_count) {
-                print!("{}", column);
+                print!("  {}", column);
             }
-            print!(" ");
+            print!("{} ", color::Fg(color::Reset));
             for column in encryption_context_columns.iter().take(dir_count) {
-                print!("{}", column);
+                print!("  {}", column);
             }
-            print!(" ");
+            print!("{} ", color::Fg(color::Reset));
             for column in hash_columns.iter().take(dir_count) {
-                print!("{}", column);
+                print!("  {}", column);
             }
 
+            print!("{}", color::Fg(color::Reset));
             if !only_show_differences {
-                print!("{0:^7}", if different { "<---" } else { "" });
+                print!(" {0:^4}", if different { "<---" } else { "" });
             }
 
             println!();
@@ -485,10 +492,11 @@ fn show_extent_block(
             let mut hasher = Sha256::new();
             hasher.update(&dvec[dir_index].data[..]);
             println!(
-                "{:>6}  {:64}  {:^3}",
+                "{:>6}  {:64}  {:^3}{}",
                 dir_index,
                 hex::encode(hasher.finalize()),
                 status_letters[dir_index],
+                color::Fg(color::Reset),
             );
         }
         println!();
