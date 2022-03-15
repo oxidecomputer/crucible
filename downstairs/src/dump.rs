@@ -1,8 +1,9 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 use crate::region::ExtentMeta;
-use sha2::{Digest, Sha256};
 use std::convert::TryInto;
+
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -201,6 +202,12 @@ pub fn dump_region(
     Ok(())
 }
 
+// Print the ASCII color code of the given value
+// Green: 32, Red: 31, Blue: 34
+fn sgr(n: u8) -> String {
+    format!("\x1b[{}m", n)
+}
+
 fn return_status_letters<T, U: std::cmp::PartialEq>(
     items: &[T],
     accessor: fn(&T) -> &U,
@@ -211,29 +218,29 @@ fn return_status_letters<T, U: std::cmp::PartialEq>(
     let count = items.len();
 
     if accessor(&items[0]) == accessor(&items[1]) {
-        status_letters[0] += "A";
-        status_letters[1] += "A";
+        status_letters[0] = format!("{}A{}", sgr(32), sgr(0));
+        status_letters[1] = format!("{}A{}", sgr(32), sgr(0));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] += "A";
+                status_letters[2] = format!("{}A{}", sgr(32), sgr(0));
             } else {
-                status_letters[2] += "C";
+                status_letters[2] = format!("{}C{}", sgr(31), sgr(0));
                 different = true;
             }
         }
     } else {
         different = true;
-        status_letters[0] += "A";
-        status_letters[1] += "B";
+        status_letters[0] = format!("{}A{}", sgr(32), sgr(0));
+        status_letters[1] = format!("{}B{}", sgr(34), sgr(0));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] += "A";
+                status_letters[2] = format!("{}A{}", sgr(32), sgr(0));
             } else if accessor(&items[1]) == accessor(&items[2]) {
-                status_letters[2] += "B";
+                status_letters[2] = format!("{}B{}", sgr(34), sgr(0));
             } else {
-                status_letters[2] += "C";
+                status_letters[2] = format!("{}C{}", sgr(31), sgr(0));
             }
         }
     }
@@ -298,17 +305,18 @@ fn show_extent(
     println!();
     println!();
 
+    // Print the header
     print!("{0:5} ", "BLOCK");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^5}", format!("DATA{}", index));
+        print!(" {0:^2}", format!("D{}", index));
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^6}", format!("ECTX{}", index));
+        print!(" {0:^2}", format!("E{}", index));
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^6}", format!("HASH{}", index));
+        print!(" {0:^2}", format!("H{}", index));
     }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
@@ -368,8 +376,7 @@ fn show_extent(
 
         // Print the data status letters
         for dir_index in 0..dir_count {
-            data_columns[dir_index] =
-                format!("{0:^5} ", status_letters[dir_index]);
+            data_columns[dir_index] = status_letters[dir_index].to_string();
         }
 
         // then, compare encryption_context_columns
@@ -379,7 +386,7 @@ fn show_extent(
         // Print nonce status letters
         for dir_index in 0..dir_count {
             encryption_context_columns[dir_index] =
-                format!("{0:^6} ", status_letters[dir_index]);
+                status_letters[dir_index].to_string();
         }
 
         // then, compare hashes
@@ -388,29 +395,29 @@ fn show_extent(
 
         // Print hash status letters
         for dir_index in 0..dir_count {
-            hash_columns[dir_index] =
-                format!("{0:^6} ", status_letters[dir_index]);
+            hash_columns[dir_index] = status_letters[dir_index].to_string();
         }
 
         let different = data_different || ec_different || hashes_different;
 
+        // Now that we have collected all the results, print them
         if !only_show_differences || different {
-            print!("{:5}  ", block);
+            print!("{:5} ", block);
 
             for column in data_columns.iter().take(dir_count) {
-                print!("{}", column);
+                print!("  {}", column);
             }
             print!(" ");
             for column in encryption_context_columns.iter().take(dir_count) {
-                print!("{}", column);
+                print!("  {}", column);
             }
             print!(" ");
             for column in hash_columns.iter().take(dir_count) {
-                print!("{}", column);
+                print!("  {}", column);
             }
 
             if !only_show_differences {
-                print!("{0:^7}", if different { "<---" } else { "" });
+                print!(" {0:^4}", if different { "<---" } else { "" });
             }
 
             println!();
