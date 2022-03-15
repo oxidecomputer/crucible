@@ -4,7 +4,6 @@ use crate::region::ExtentMeta;
 use std::convert::TryInto;
 
 use sha2::{Digest, Sha256};
-use termion::color;
 
 #[derive(Debug, Default)]
 struct ExtInfo {
@@ -203,6 +202,12 @@ pub fn dump_region(
     Ok(())
 }
 
+// Print the ASCII color code of the given value
+// Green: 32, Red: 31, Blue: 34
+fn sgr(n: u8) -> String {
+    format!("\x1b[{}m", n)
+}
+
 fn return_status_letters<T, U: std::cmp::PartialEq>(
     items: &[T],
     accessor: fn(&T) -> &U,
@@ -213,29 +218,29 @@ fn return_status_letters<T, U: std::cmp::PartialEq>(
     let count = items.len();
 
     if accessor(&items[0]) == accessor(&items[1]) {
-        status_letters[0] = format!("{}A", color::Fg(color::Green));
-        status_letters[1] = format!("{}A", color::Fg(color::Green));
+        status_letters[0] = format!("{}A{}", sgr(32), sgr(0));
+        status_letters[1] = format!("{}A{}", sgr(32), sgr(0));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] = format!("{}A", color::Fg(color::Green));
+                status_letters[2] = format!("{}A{}", sgr(32), sgr(0));
             } else {
-                status_letters[2] = format!("{}C", color::Fg(color::Red));
+                status_letters[2] = format!("{}C{}", sgr(31), sgr(0));
                 different = true;
             }
         }
     } else {
         different = true;
-        status_letters[0] = format!("{}A", color::Fg(color::Green));
-        status_letters[1] = format!("{}B", color::Fg(color::Blue));
+        status_letters[0] = format!("{}A{}", sgr(32), sgr(0));
+        status_letters[1] = format!("{}B{}", sgr(34), sgr(0));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] = format!("{}A", color::Fg(color::Green));
+                status_letters[2] = format!("{}A{}", sgr(32), sgr(0));
             } else if accessor(&items[1]) == accessor(&items[2]) {
-                status_letters[2] = format!("{}B", color::Fg(color::Blue));
+                status_letters[2] = format!("{}B{}", sgr(34), sgr(0));
             } else {
-                status_letters[2] = format!("{}C", color::Fg(color::Red));
+                status_letters[2] = format!("{}C{}", sgr(31), sgr(0));
             }
         }
     }
@@ -397,21 +402,20 @@ fn show_extent(
 
         // Now that we have collected all the results, print them
         if !only_show_differences || different {
-            print!("{}{:5} ", color::Fg(color::Reset), block);
+            print!("{:5} ", block);
 
             for column in data_columns.iter().take(dir_count) {
                 print!("  {}", column);
             }
-            print!("{} ", color::Fg(color::Reset));
+            print!(" ");
             for column in encryption_context_columns.iter().take(dir_count) {
                 print!("  {}", column);
             }
-            print!("{} ", color::Fg(color::Reset));
+            print!(" ");
             for column in hash_columns.iter().take(dir_count) {
                 print!("  {}", column);
             }
 
-            print!("{}", color::Fg(color::Reset));
             if !only_show_differences {
                 print!(" {0:^4}", if different { "<---" } else { "" });
             }
@@ -488,11 +492,10 @@ fn show_extent_block(
             let mut hasher = Sha256::new();
             hasher.update(&dvec[dir_index].data[..]);
             println!(
-                "{:>6}  {:64}  {:^3}{}",
+                "{:>6}  {:64}  {:^3}",
                 dir_index,
                 hex::encode(hasher.finalize()),
                 status_letters[dir_index],
-                color::Fg(color::Reset),
             );
         }
         println!();

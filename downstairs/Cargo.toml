@@ -27,7 +27,6 @@ rand = "0.8.5"
 ringbuffer = "0.8"
 serde = { version = "1", features = ["derive"] }
 structopt = "0.3"
-termion = "1.5"
 tokio = { version = "1.17.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 tokio-rustls = { version = "0.23.2" }
