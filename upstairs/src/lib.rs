@@ -1939,7 +1939,7 @@ impl Downstairs {
                             println!("Remove read data for {}", ds_id);
                             job.data = None;
                             job.ack_status = AckStatus::NotAcked;
-                            job.hashes = Vec::new();
+                            job.read_response_hashes = Vec::new();
                         }
                     } else {
                         /*
@@ -2300,7 +2300,7 @@ impl Downstairs {
         // With AE, responses can come back that are invalid given an encryption
         // context. Test this here. It will allow us to determine if the
         // decryption is bad and set the job result to error accordingly.
-        let mut read_hashes = Vec::new();
+        let mut read_response_hashes = Vec::new();
         let read_data: Result<Vec<ReadResponse>, CrucibleError> =
             if let Some(context) = &encryption_context {
                 if let Ok(mut responses) = responses {
@@ -2310,7 +2310,7 @@ impl Downstairs {
                                 Downstairs::validate_encrypted_read_response(
                                     x, context,
                                 )?;
-                            read_hashes.push(mh);
+                            read_response_hashes.push(mh);
                             Ok(())
                         });
 
@@ -2332,7 +2332,7 @@ impl Downstairs {
                                 Downstairs::validate_unencrypted_read_response(
                                     x,
                                 )?;
-                            read_hashes.push(mh);
+                            read_response_hashes.push(mh);
                             Ok(())
                         });
 
@@ -2431,11 +2431,14 @@ impl Downstairs {
                      */
                     let read_data: Vec<ReadResponse> = read_data.unwrap();
                     assert!(!read_data.is_empty());
-                    if job.hashes != read_hashes {
+                    if job.read_response_hashes != read_response_hashes {
                         // XXX Change to panic when reconciliation works
                         println!(
                             "[{}] read hash mismatch on {} {:?} {:?}",
-                            client_id, ds_id, job.hashes, read_hashes
+                            client_id,
+                            ds_id,
+                            job.read_response_hashes,
+                            read_response_hashes
                         );
                     }
                 }
@@ -2459,9 +2462,9 @@ impl Downstairs {
                     assert!(!read_data.is_empty());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        assert!(job.hashes.is_empty());
+                        assert!(job.read_response_hashes.is_empty());
                         job.data = Some(read_data);
-                        job.hashes = read_hashes;
+                        job.read_response_hashes = read_response_hashes;
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
@@ -2471,11 +2474,14 @@ impl Downstairs {
                          * compare our read hash to
                          * that and verify they are the same.
                          */
-                        if job.hashes != read_hashes {
+                        if job.read_response_hashes != read_response_hashes {
                             // XXX Change to panic when reconciliation works
                             println!(
                                 "[{}] read hash mismatch on {} {:?} {:?}",
-                                client_id, ds_id, job.hashes, read_hashes
+                                client_id,
+                                ds_id,
+                                job.read_response_hashes,
+                                read_response_hashes
                             );
                         }
                     }
@@ -4624,7 +4630,7 @@ struct DownstairsIO {
      * The hashes vec holds the valid hash(es) for the read.
      */
     data: Option<Vec<ReadResponse>>,
-    hashes: Vec<Option<u64>>,
+    read_response_hashes: Vec<Option<u64>>,
 }
 
 impl DownstairsIO {
@@ -6574,7 +6580,7 @@ fn create_write_eob(
         state,
         ack_status: AckStatus::NotAcked,
         data: None,
-        hashes: Vec::new(),
+        read_response_hashes: Vec::new(),
     }
 }
 
@@ -6606,7 +6612,7 @@ fn create_read_eob(
         state,
         ack_status: AckStatus::NotAcked,
         data: None,
-        hashes: Vec::new(),
+        read_response_hashes: Vec::new(),
     }
 }
 
@@ -6639,7 +6645,7 @@ fn create_flush(
         state,
         ack_status: AckStatus::NotAcked,
         data: None,
-        hashes: Vec::new(),
+        read_response_hashes: Vec::new(),
     }
 }
 
