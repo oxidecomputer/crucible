@@ -1022,6 +1022,415 @@ mod test {
     }
 
     #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch() {
+        // Test that a hash mismatch will trigger a panic.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![9],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // We must move the completed job along the process, this enables
+        // process_ds_completion to know to compare future jobs to this
+        // one.
+        //work.ack(id);
+
+        // Second read response, different hash
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_ack() {
+        // Test that a hash mismatch will trigger a panic.
+        // We check here after a ACK, because that is a different location.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![0],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // We must move the completed job along the process, this enables
+        // process_ds_completion to know to compare future jobs to this
+        // one.
+        work.ack(id);
+
+        // Second read response, it matches the first.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_third() {
+        // Test that a hash mismatch on the third response will trigger a panic.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+        work.in_progress(id, 2);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, it matches the first.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+
+        let r3 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![2],
+        )]);
+
+        work.process_ds_completion(id, 2, r3, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_third_ack() {
+        // Test that a hash mismatch on the third response will trigger a panic.
+        // This one checks after an ACK.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+        work.in_progress(id, 2);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, it matches the first.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.ack(id);
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+
+        let r3 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![2],
+        )]);
+
+        work.process_ds_completion(id, 2, r3, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_inside() {
+        // Test that a hash mismatch not at the first index will panic.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1, 2, 3, 4],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1, 2, 3, 9],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_len() {
+        // Test that a hash mismatch on the third response will trigger a panic.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1, 2],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_len2() {
+        // Test that a hash length mismatch will panic
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1, 0],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, hash vec has different length.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_no_hash() {
+        // Test that a missing hash first, then a hash later will panic.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
+    // Issue #238 XXX #[should_panic]
+    fn work_read_hash_mismatch_no_hash_next() {
+        // Test that a missing hash on the 2nd read response will panic
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut work = upstairs.downstairs.lock().unwrap();
+
+        let id = work.next_id();
+
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
+
+        work.enqueue(op);
+
+        work.in_progress(id, 0);
+        work.in_progress(id, 1);
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![],
+        )]);
+
+        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+            .unwrap();
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![1],
+        )]);
+
+        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            .unwrap();
+    }
+
+    #[test]
     fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();

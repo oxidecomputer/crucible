@@ -1939,6 +1939,7 @@ impl Downstairs {
                             println!("Remove read data for {}", ds_id);
                             job.data = None;
                             job.ack_status = AckStatus::NotAcked;
+                            job.read_response_hashes = Vec::new();
                         }
                     } else {
                         /*
@@ -2124,8 +2125,9 @@ impl Downstairs {
 
     fn validate_unencrypted_read_response(
         response: &mut ReadResponse,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<Option<u64>, CrucibleError> {
         // check integrity hashes - make sure at least one is correct.
+        let mut vh = None;
         if !response.hashes.is_empty() {
             let mut successful_hash = false;
 
@@ -2135,6 +2137,7 @@ impl Downstairs {
             for hash in response.hashes.iter().rev() {
                 if computed_hash == *hash {
                     successful_hash = true;
+                    vh = Some(*hash);
                     break;
                 }
             }
@@ -2154,13 +2157,13 @@ impl Downstairs {
             assert!(response.data[..].iter().all(|&x| x == 0));
         }
 
-        Ok(())
+        Ok(vh)
     }
 
     fn validate_encrypted_read_response(
         response: &mut ReadResponse,
         encryption_context: &Arc<EncryptionContext>,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<Option<u64>, CrucibleError> {
         // XXX because we don't have block generation numbers, an attacker
         // downstairs could:
         //
@@ -2168,6 +2171,7 @@ impl Downstairs {
         // 2) roll back a block by writing an old data and encryption context
         //
         // check for response encryption contexts here
+        let mut vh = None;
         if !response.encryption_contexts.is_empty() {
             let mut successful_decryption = false;
             let mut successful_hash = false;
@@ -2196,6 +2200,7 @@ impl Downstairs {
 
                 if computed_hash == response.hashes[i] {
                     successful_hash = true;
+                    vh = Some(computed_hash);
 
                     // Now that the integrity hash was verified, attempt
                     // decryption.
@@ -2249,7 +2254,7 @@ impl Downstairs {
             assert!(response.data[..].iter().all(|&x| x == 0));
         }
 
-        Ok(())
+        Ok(vh)
     }
 
     /**
@@ -2295,14 +2300,18 @@ impl Downstairs {
         // With AE, responses can come back that are invalid given an encryption
         // context. Test this here. It will allow us to determine if the
         // decryption is bad and set the job result to error accordingly.
+        let mut read_response_hashes = Vec::new();
         let read_data: Result<Vec<ReadResponse>, CrucibleError> =
             if let Some(context) = &encryption_context {
                 if let Ok(mut responses) = responses {
                     let result: Result<(), CrucibleError> =
                         responses.iter_mut().try_for_each(|x| {
-                            Downstairs::validate_encrypted_read_response(
-                                x, context,
-                            )
+                            let mh =
+                                Downstairs::validate_encrypted_read_response(
+                                    x, context,
+                                )?;
+                            read_response_hashes.push(mh);
+                            Ok(())
                         });
 
                     if let Some(error) = result.err() {
@@ -2319,7 +2328,12 @@ impl Downstairs {
                 if let Ok(mut responses) = responses {
                     let result: Result<(), CrucibleError> =
                         responses.iter_mut().try_for_each(|x| {
-                            Downstairs::validate_unencrypted_read_response(x)
+                            let mh =
+                                Downstairs::validate_unencrypted_read_response(
+                                    x,
+                                )?;
+                            read_response_hashes.push(mh);
+                            Ok(())
                         });
 
                     if let Some(error) = result.err() {
@@ -2398,14 +2412,37 @@ impl Downstairs {
              * more to do here.  If it's a flush, then we want to be
              * sure to update the last flush for this client.
              */
-            if let IOop::Flush {
-                dependencies: _dependencies,
-                flush_number: _flush_number,
-                gen_number: _gen_number,
-                snapshot_details: _,
-            } = &job.work
-            {
-                self.ds_last_flush[client_id as usize] = ds_id;
+            match &job.work {
+                IOop::Flush {
+                    dependencies: _dependencies,
+                    flush_number: _flush_number,
+                    gen_number: _gen_number,
+                    snapshot_details: _,
+                } => {
+                    self.ds_last_flush[client_id as usize] = ds_id;
+                }
+                IOop::Read {
+                    dependencies: _dependencies,
+                    requests: _,
+                } => {
+                    /*
+                     * For a read, make sure the data from a previous read
+                     * has the same hash
+                     */
+                    let read_data: Vec<ReadResponse> = read_data.unwrap();
+                    assert!(!read_data.is_empty());
+                    if job.read_response_hashes != read_response_hashes {
+                        // XXX Change to panic when reconciliation works
+                        println!(
+                            "[{}] read hash mismatch on {} {:?} {:?}",
+                            client_id,
+                            ds_id,
+                            job.read_response_hashes,
+                            read_response_hashes
+                        );
+                    }
+                }
+                _ => { /* Write IOs have no action here */ }
             }
         } else {
             assert_eq!(newstate, IOState::Done);
@@ -2425,10 +2462,28 @@ impl Downstairs {
                     assert!(!read_data.is_empty());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
+                        assert!(job.read_response_hashes.is_empty());
                         job.data = Some(read_data);
+                        job.read_response_hashes = read_response_hashes;
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
+                    } else {
+                        /*
+                         * If another job has finished already, we can
+                         * compare our read hash to
+                         * that and verify they are the same.
+                         */
+                        if job.read_response_hashes != read_response_hashes {
+                            // XXX Change to panic when reconciliation works
+                            println!(
+                                "[{}] read hash mismatch on {} {:?} {:?}",
+                                client_id,
+                                ds_id,
+                                job.read_response_hashes,
+                                read_response_hashes
+                            );
+                        }
                     }
                 }
                 IOop::Write {
@@ -4572,8 +4627,10 @@ struct DownstairsIO {
 
     /*
      * If the operation is a Read, this holds the resulting buffer
+     * The hashes vec holds the valid hash(es) for the read.
      */
     data: Option<Vec<ReadResponse>>,
+    read_response_hashes: Vec<Option<u64>>,
 }
 
 impl DownstairsIO {
@@ -6523,6 +6580,7 @@ fn create_write_eob(
         state,
         ack_status: AckStatus::NotAcked,
         data: None,
+        read_response_hashes: Vec::new(),
     }
 }
 
@@ -6554,6 +6612,7 @@ fn create_read_eob(
         state,
         ack_status: AckStatus::NotAcked,
         data: None,
+        read_response_hashes: Vec::new(),
     }
 }
 
@@ -6586,6 +6645,7 @@ fn create_flush(
         state,
         ack_status: AckStatus::NotAcked,
         data: None,
+        read_response_hashes: Vec::new(),
     }
 }
 

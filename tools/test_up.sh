@@ -40,6 +40,7 @@ testdir="/var/tmp/test_up"
 if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
+rm -f /tmp/test_fail.txt
 
 args=()
 
@@ -91,6 +92,7 @@ for tt in ${test_list}; do
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client $tt test"
+        echo "Failed crucible-client $tt test" >> /tmp/test_fail.txt
         echo ""
     else
         echo "Completed test: $tt"
@@ -107,6 +109,7 @@ if ! "$cc" one -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
+    echo "Failed repair test part 1" >> /tmp/test_fail.txt
     echo
 else
     echo "Repair part 1 passed"
@@ -136,6 +139,7 @@ if ! "$cc" one -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
+    echo "Failed repair test part 2" >> /tmp/test_fail.txt
     echo
 else
     echo "Repair part 2 passed"
@@ -146,6 +150,7 @@ if ! time cargo run -p crucible-hammer -- \
     "${args[@]}"; then
 
 	echo "Failed hammer test"
+    echo "Failed hammer test" >> /tmp/test_fail.txt
     (( res += 1 ))
 fi
 
@@ -157,6 +162,7 @@ if ! "$cc" rand -q --verify-out "$vfile" "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client rand verify test"
+    echo "Failed crucible-client rand verify test" >> /tmp/test_fail.txt
     echo ""
 else
     echo "$cc" rand -q --verify-in "$vfile" "${args[@]}"
@@ -164,6 +170,7 @@ else
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client rand verify part 2 test"
+        echo "Failed crucible-client rand verify part 2 test" >> /tmp/test_fail.txt
         echo ""
     else
         echo "Verify test passed"
@@ -182,6 +189,7 @@ if ! "$cds" dump "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test"
+    echo "Failed crucible-client dump test" >> /tmp/test_fail.txt
     echo ""
 else
     echo "dump test passed"
@@ -193,6 +201,7 @@ if ! "$cds" dump "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test 2"
+    echo "Failed crucible-client dump test 2" >> /tmp/test_fail.txt
     echo ""
 else
     echo "dump test 2 passed"
@@ -207,6 +216,7 @@ done
 echo ""
 if [[ $res != 0 ]]; then
     echo "$res Tests have failed"
+    cat /tmp/test_fail.txt
 else
     echo "All Tests have passed"
 fi
