@@ -17,6 +17,8 @@ pub use region::{
 
 pub mod x509;
 
+pub const REPAIR_PORT_OFFSET: u16 = 4000;
+
 #[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CrucibleError {
     #[error("Error: {0}")]

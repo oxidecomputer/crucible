@@ -1650,8 +1650,8 @@ impl Downstairs {
         // addresses from each downstairs.
         let mut ds_repair = HashMap::new();
         for (i, addr) in target.iter().enumerate() {
-            assert!(addr.port() < u16::MAX - 4000);
-            let port = addr.port() + 4000;
+            assert!(addr.port() < u16::MAX - REPAIR_PORT_OFFSET);
+            let port = addr.port() + REPAIR_PORT_OFFSET;
             let repair_addr = SocketAddr::new(addr.ip(), port);
             ds_repair.insert(i as u8, repair_addr);
         }
