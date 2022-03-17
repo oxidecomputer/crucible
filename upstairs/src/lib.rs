@@ -453,8 +453,11 @@ where
         let mut ds = up.downstairs.lock().unwrap();
         let my_state = ds.ds_state[up_coms.client_id as usize];
         println!(
-            "[{}] Proc runs for {} in state {:?}",
-            up_coms.client_id, target, my_state
+            "[{}] Proc runs for {} in state {:?} repair at: {:?}",
+            up_coms.client_id,
+            target,
+            my_state,
+            ds.repair_addr(up_coms.client_id),
         );
         // XXX Move this all to some state check place?
         if my_state != DsState::New
@@ -1588,6 +1591,12 @@ struct Downstairs {
      */
     ds_uuid: HashMap<u8, Uuid>,
     /*
+     * The IP:Port for repair when contacting the downstairs, hashed by
+     * the client index the upstairs gives it..
+     */
+    ds_repair: HashMap<u8, SocketAddr>,
+
+    /*
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
      * TODO: When growing to more than one region, should this become
@@ -1635,10 +1644,21 @@ struct Downstairs {
     reconcile_repair_needed: usize,
 }
 
-impl Default for Downstairs {
-    fn default() -> Self {
+impl Downstairs {
+    fn new(target: Vec<SocketAddr>) -> Self {
+        // Fill the repair hashmap based on the
+        // addresses from each downstairs.
+        let mut ds_repair = HashMap::new();
+        for (i, addr) in target.iter().enumerate() {
+            assert!(addr.port() < u16::MAX - 4000);
+            let port = addr.port() + 4000;
+            let repair_addr = SocketAddr::new(addr.ip(), port);
+            ds_repair.insert(i as u8, repair_addr);
+        }
+
         Self {
             ds_uuid: HashMap::new(),
+            ds_repair,
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
@@ -1652,9 +1672,6 @@ impl Default for Downstairs {
             reconcile_repair_needed: 0,
         }
     }
-}
-
-impl Downstairs {
     /**
      * Assign a new downstairs ID.
      */
@@ -1805,6 +1822,12 @@ impl Downstairs {
                 client_id, rep_id
             );
         }
+    }
+    /*
+     * Given a client ID, return the SocketAddr for repair to use.
+     */
+    fn repair_addr(&mut self, client_id: u8) -> SocketAddr {
+        *self.ds_repair.get(&client_id).unwrap()
     }
 
     /**
@@ -2903,6 +2926,14 @@ impl Upstairs {
          */
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
+        /*
+         * The repair port is the downstairs target port + 4000
+         * XXX How do we advertise/enforce this?
+         */
+        #[cfg(not(test))]
+        for addr in opt.target.iter() {
+            assert!(addr.port() < u16::MAX - 4000);
+        }
 
         // create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
@@ -2926,7 +2957,7 @@ impl Upstairs {
             uuid: Uuid::new_v4(),      // XXX get from Nexus?
             generation: Mutex::new(0), // XXX Also get from Nexus?
             guest,
-            downstairs: Mutex::new(Downstairs::default()),
+            downstairs: Mutex::new(Downstairs::new(opt.target.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
