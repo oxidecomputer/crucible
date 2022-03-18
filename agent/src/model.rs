@@ -3,9 +3,9 @@
 use std::path::Path;
 
 use chrono::prelude::*;
+use crucible_smf::scf_type_t::{self, *};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crucible_smf::scf_type_t::{self, *};
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]

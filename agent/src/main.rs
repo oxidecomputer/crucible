@@ -546,7 +546,8 @@ fn apply_smf(
             let properties = {
                 let mut properties = snapshot.get_smf_properties(&dir);
 
-                // The downstairs process will listen on the same IP as the agent
+                // The downstairs process will listen on the same IP as the
+                // agent
                 properties.push(crate::model::SmfProperty {
                     name: "address",
                     typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
