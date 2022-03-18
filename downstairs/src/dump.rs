@@ -173,20 +173,30 @@ pub fn dump_region(
             for dir_index in 0..dir_count {
                 if let Some(em) = ei.ei_hm.get(&(dir_index as u32)) {
                     gen_vec.insert(dir_index, em.gen_number);
-                    if gen_vec[0] != em.gen_number { different = true; }
-                    if em.gen_number > max_gen { max_gen = em.gen_number; }
+                    if gen_vec[0] != em.gen_number {
+                        different = true;
+                    }
+                    if em.gen_number > max_gen {
+                        max_gen = em.gen_number;
+                    }
                     flush_vec.insert(dir_index, em.flush_number);
-                    if flush_vec[0] != em.flush_number { different = true; }
-                    if em.flush_number > max_flush { max_flush = em.flush_number; }
+                    if flush_vec[0] != em.flush_number {
+                        different = true;
+                    }
+                    if em.flush_number > max_flush {
+                        max_flush = em.flush_number;
+                    }
                     dirty_vec.insert(dir_index, em.dirty);
-                    if dirty_vec[0] != em.dirty { different = true; }
+                    if dirty_vec[0] != em.dirty {
+                        different = true;
+                    }
                 } else {
                     println!("{:3}  column {} bad", en, dir_index);
                     bad_extent = true;
                 }
             }
             if bad_extent || (only_show_differences && !different) {
-                continue
+                continue;
             }
 
             print!("{:3} ", en);
@@ -273,7 +283,6 @@ fn color_vec(compare: &[u64]) -> Vec<u8> {
         if compare[2] < compare[1] {
             colors[2] = 31;
         }
-
     }
     colors
 }
