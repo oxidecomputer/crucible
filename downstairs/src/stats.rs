@@ -5,7 +5,7 @@ use dropshot::{ConfigDropshot, ConfigLogging, ConfigLoggingLevel};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use oximeter::{
     types::{Cumulative, Sample},
-    Error, Metric, Producer, Target,
+    Metric, MetricsError, Producer, Target,
 };
 use oximeter_producer::{Config, Server};
 
@@ -105,7 +105,7 @@ impl DsStatOuter {
 impl Producer for DsStatOuter {
     fn produce(
         &mut self,
-    ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, Error> {
+    ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, MetricsError> {
         let dss = executor::block_on(self.ds_stat_wrap.lock());
 
         let mut data = Vec::with_capacity(4);
