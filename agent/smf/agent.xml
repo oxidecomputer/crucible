@@ -18,8 +18,6 @@
       -D /opt/oxide/crucible/bin/crucible-downstairs
       --dataset %{config/dataset}
       -l %{config/listen}
-      -i %{config/uuid}
-      -n %{config/nexus}
       -P %{config/portbase}
       -p %{config/downstairs_prefix}
       -s %{config/snapshot_prefix}'

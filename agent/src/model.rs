@@ -1,8 +1,11 @@
 // Copyright 2021 Oxide Computer Company
 
+use std::path::Path;
+
 use chrono::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use crucible_smf::scf_type_t::{self, *};
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -36,9 +39,6 @@ pub struct Region {
 
     pub root_pem: Option<String>,
 }
-
-use crucible_smf::scf_type_t::{self, *};
-use std::path::Path;
 
 pub struct SmfProperty<'a> {
     pub name: &'a str,

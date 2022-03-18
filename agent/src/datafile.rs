@@ -6,6 +6,7 @@ use crucible_common::write_json;
 use serde::{Deserialize, Serialize};
 use slog::{crit, error, info, Logger};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -18,6 +19,7 @@ pub struct DataFile {
     log: Logger,
     base_path: PathBuf,
     conf_path: PathBuf,
+    listen: SocketAddr,
     port_min: u16,
     port_max: u16,
     bell: Condvar,
@@ -35,6 +37,7 @@ impl DataFile {
     pub fn new(
         log: Logger,
         base_path: &Path,
+        listen: SocketAddr,
         port_min: u16,
         port_max: u16,
     ) -> Result<DataFile> {
@@ -56,11 +59,16 @@ impl DataFile {
             log,
             base_path: base_path.to_path_buf(),
             conf_path: conf_path.to_path_buf(),
+            listen,
             port_min,
             port_max,
             bell: Condvar::new(),
             inner: Mutex::new(inner),
         })
+    }
+
+    pub fn get_listen_addr(&self) -> SocketAddr {
+        self.listen
     }
 
     pub fn regions(&self) -> Vec<Region> {
