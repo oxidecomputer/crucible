@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -10,8 +11,11 @@ use std::sync::{Mutex, MutexGuard};
 use anyhow::{bail, Result};
 use crucible_common::*;
 use crucible_protocol::{EncryptionContext, SnapshotDetails};
+use futures::TryStreamExt;
+use repair_client::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use tokio::macros::support::Pin;
 use tracing::instrument;
 
 #[derive(Debug)]
@@ -407,14 +411,72 @@ impl Default for ExtentMeta {
 }
 
 /**
- * Produce a PathBuf that refers to the backing file for extent "number",
- * anchored under "dir".
+ * Produce the string name of the data file for a given extent number
  */
-fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+pub fn extent_file_name(number: u32) -> String {
+    format!("{:03X}", number & 0xFFF)
+}
+
+/**
+ * Produce a PathBuf that refers to the containing directory for extent
+ * "number", anchored under "dir".
+ */
+pub fn extent_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
     out.push(format!("{:02X}", (number >> 24) & 0xFF));
     out.push(format!("{:03X}", (number >> 12) & 0xFFF));
-    out.push(format!("{:03X}", number & 0xFFF));
+    out
+}
+
+/**
+ * Produce a PathBuf that refers to the backing file for extent "number",
+ * anchored under "dir".
+ */
+pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+    let mut out = extent_dir(dir, number);
+    out.push(extent_file_name(number));
+    out
+}
+
+/**
+ * Produce a PathBuf that refers to the copy directory we create for
+ * a given extent "number",  This directory will hold the files we
+ * transfer from the source downstairs.
+ * anchored under "dir".
+ */
+pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+    let mut out = extent_dir(dir, number);
+    out.push(extent_file_name(number));
+    out.set_extension("copy".to_string());
+    out
+}
+
+/**
+ * Produce a PathBuf that refers to the replace directory we use for
+ * a given extent "number".  This directory is generated (see below) when
+ * all the files needed for repairing an extent have been added to the
+ * copy directory and we are ready to start replacing the extents files.
+ * anchored under "dir".  The actual generation of this directory will
+ * be done by renaming the copy directory.
+ */
+pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+    let mut out = extent_dir(dir, number);
+    out.push(extent_file_name(number));
+    out.set_extension("replace".to_string());
+    out
+}
+/**
+ * Produce a PathBuf that refers to the completed directory we use for
+ * a given extent "number".  This directory is generated (see below) when
+ * all the files needed for repairing an extent have been copied to their
+ * final destination and everything has been flushed.
+ * The actual generation of this directory will be done by renaming the
+ * replace directory.
+ */
+pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+    let mut out = extent_dir(dir, number);
+    out.push(extent_file_name(number));
+    out.set_extension("completed".to_string());
     out
 }
 
@@ -422,6 +484,22 @@ fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
     out.push("region.json");
     out
+}
+
+/**
+ * Remove the copy directory for the given extent number.
+ */
+pub fn remove_copy_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
+    let cp = copy_dir(dir, eid);
+
+    /*
+     * if the copy directory exists, remove it
+     */
+    if Path::new(&cp).exists() {
+        println!("Deleting copy dir: {:?}", cp);
+        std::fs::remove_dir_all(&cp)?;
+    }
+    Ok(())
 }
 
 impl Extent {
@@ -439,11 +517,12 @@ impl Extent {
          * Store extent data in files within a directory hierarchy so that
          * there are not too many files in any level of that hierarchy.
          */
-        let mut path = extent_path(dir, number);
+        let mut path = extent_path(&dir, number);
 
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
 
+        remove_copy_dir(&dir, number)?;
         /*
          * Open the extent file and verify the size is as we expect.
          */
@@ -509,7 +588,7 @@ impl Extent {
          * Store extent data in files within a directory hierarchy so that
          * there are not too many files in any level of that hierarchy.
          */
-        let mut path = extent_path(dir, number);
+        let mut path = extent_path(&dir, number);
 
         /*
          * Verify there are not existing extent files.
@@ -517,6 +596,7 @@ impl Extent {
         if Path::new(&path).exists() {
             bail!("Extent file already exists {:?}", path);
         }
+        remove_copy_dir(&dir, number)?;
 
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
@@ -602,6 +682,52 @@ impl Extent {
             extent_size: def.extent_size(),
             inner: Some(Mutex::new(Inner { file, metadb })),
         })
+    }
+
+    /**
+     * Create the copy directory for this extent.
+     */
+    fn create_copy_dir<P: AsRef<Path>>(&self, dir: P) -> Result<PathBuf> {
+        let cp = copy_dir(dir, self.number);
+
+        /*
+         * Verify the copy directory does not exist
+         */
+        if Path::new(&cp).exists() {
+            panic!("Extent copy directory already exists {:?}", cp);
+        }
+
+        println!("Create copy dir: {:?}", cp);
+        std::fs::create_dir_all(&cp)?;
+        Ok(cp)
+    }
+
+    /**
+     * Create the file that will hold a copy of an extent from a
+     * remote downstairs.
+     */
+    fn create_copy_file(
+        &self,
+        mut copy_dir: PathBuf,
+        extension: Option<&str>,
+    ) -> Result<File> {
+        let name = extent_file_name(self.number);
+        copy_dir.push(name);
+        if let Some(extension) = extension {
+            copy_dir.set_extension(extension);
+        }
+        let copy_path = copy_dir;
+
+        if Path::new(&copy_path).exists() {
+            panic!("copy file already exists {:?}", copy_path);
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&copy_path)?;
+        Ok(file)
     }
 
     pub fn inner(&self) -> MutexGuard<Inner> {
@@ -808,7 +934,7 @@ extern "C" {
  */
 #[derive(Debug)]
 pub struct Region {
-    dir: PathBuf,
+    pub dir: PathBuf,
     def: RegionDefinition,
     pub extents: Vec<Extent>,
     read_only: bool,
@@ -962,6 +1088,217 @@ impl Region {
         let new_extent =
             Extent::open(&self.dir, &self.def, eid as u32, self.read_only)?;
         self.extents[eid] = new_extent;
+        Ok(())
+    }
+
+    /**
+     * Repair an extent from another downstairs
+     *
+     * XXX This needs the source I.P. address and Port to issue commands
+     * to.
+     */
+    /*
+    * Repair extent.  We need to repair an extent in such a way that
+    * an interruption at any time can be recovered from.
+
+       Assuming we have an extent to recover, on the destination side,
+       in the directory with the extent we are repairing.
+
+       ZZZ Add Josh's fsync directory and parent directory.
+
+       Let us assume we are repairing extent 012
+
+          Copy
+          Replace
+          Completed
+
+        1. Make new 012.copy dir  (extent name plus: .copy)
+        2. Get all extent files from source side, put in 021.copy directory
+        3. fsync files we just downloaded?
+        4. Rename 012.copy dir to 012.replace dir.
+        5. fsync extent dir: 00/000/ (where the extent files live)
+        6. Remove any files in extent dir that don't exist in replacing dir
+        7. Replace current extent 012 files with same name file
+          from 012.replace dir
+        8. ?? fsync file after move?
+        9. ?? fsync extent dir?
+       10. Rename 012.replace dir to 012.completed dir.
+       11. fsync extent dir (so dir rename is persisted)
+       12. Delete completed dir.
+
+       This means, on Extent open or startup:
+       A. If xxx.Copy directory found, delete it.
+       B. If xxx.Completed directory found, delete it.
+       C. If xxx.Replace dir found start at step 4 above and continue
+       on through 6.
+       D. Open extent.
+    */
+    pub async fn repair_extent(
+        &mut self,
+        eid: usize,
+        source: u8,
+        repair_addr: SocketAddr,
+    ) -> Result<(), CrucibleError> {
+        /*
+         * Make sure the extent:
+         * is currently closed, matches our eid, is not read-only
+         */
+        assert!(!self.extents[eid].inner.is_some());
+        assert_eq!(self.extents[eid].number, eid as u32);
+        assert!(!self.read_only);
+
+        self.get_extent_copy(eid, source, repair_addr)
+            .await?;
+
+        // Returning from this means we have copied all our files and
+        // moved the recover dir to replace dir.
+        // Copy the files from recover_dir to this directory.
+
+        self.move_replacement_extent(eid).await?;
+        // ZZZ start here, copy files using efn above from repair dir
+        // to dest dir.  Hard code it first?
+        // Figure out rust copy file command.
+        // std::fs::copy( )?
+
+        Ok(())
+    }
+
+    /**
+     * Copy the contents of the replacement directory on to the extent
+     * files in the extent directory.
+     *
+     * ZZZ We must handle the destination extent having more files than
+     * the source, and being sure to remove the extra destination files
+     * before completing the operation.
+     */
+    pub async fn move_replacement_extent(
+        &mut self,
+        eid: usize,
+    ) -> Result<(), CrucibleError> {
+
+        let destination_dir = extent_dir(&self.dir, eid as u32);
+        let extent_file_name = extent_file_name(eid as u32);
+        let replace_dir = replace_dir(&self.dir, eid as u32);
+        let completed_dir = completed_dir(&self.dir, eid as u32);
+
+        assert!(Path::new(&replace_dir).exists());
+        assert!(!Path::new(&completed_dir).exists());
+
+        // Setup the original and replacement file names.
+        let mut new_file = replace_dir.clone();
+        new_file.push(extent_file_name.clone());
+
+        let mut original_file = destination_dir.clone();
+        original_file.push(extent_file_name);
+        println!(
+            "Put stuff from {:?} in {:?}",
+            replace_dir, destination_dir,
+        );
+
+        if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
+            panic!("first cp got: {:?} {:?} {:?}",
+                e, new_file, original_file);
+        }
+
+        new_file.set_extension("db");
+        original_file.set_extension("db");
+        if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
+            panic!("second cp got: {:?}", e);
+        }
+
+        new_file.set_extension("db-shm");
+        original_file.set_extension("db-shm");
+        if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
+            panic!("third cp got: {:?}", e);
+        }
+
+        new_file.set_extension("db-wal");
+        original_file.set_extension("db-wal");
+        if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
+            panic!("fourth cp got: {:?}", e);
+        }
+
+        // ZZZ Do we need to fsync all the files we just copied?
+
+        // After we have all files: move the copy dir.
+        println!("Now move directory {:?} to {:?}", replace_dir, completed_dir);
+        std::fs::rename(replace_dir.clone(), completed_dir.clone())?;
+        println!("Moved .replace to -> {:?}", completed_dir);
+
+        // fsync the parent directory (the extent dir)
+
+        std::fs::remove_dir_all(&completed_dir)?;
+        Ok(())
+    }
+
+    /*
+     * Connect to the source and pull over all the extent files for the
+     * given extent ID.
+     * The files are loaded into the copy_dir for the given extent.
+     * After all the files have been copied locally, we rename the
+     * copy_dir to replace_dir.
+     */
+    pub async fn get_extent_copy(
+        &mut self,
+        eid: usize,
+        source: u8,
+        repair_addr: SocketAddr,
+    ) -> Result<(), CrucibleError> {
+        // Make sure copy, replace, cleanup dirs don't exist yet.
+        // We don't need them yet, but if they exist, then something
+        // is wrong.
+        let rd = replace_dir(&self.dir, eid as u32);
+        if rd.exists() {
+            crucible_bail!(
+                IoError,
+                "Replace directory: {:?} already exists",
+                rd,
+            );
+        }
+
+        println!(
+            "replace extent {} {:?} from {} {:?}",
+            eid, self.extents[eid].inner, source, repair_addr,
+        );
+        let url = format!("http://{:?}", repair_addr);
+        println!("Getting extents from {}", url);
+
+        let extent = &self.extents[eid];
+        let copy_dir = extent.create_copy_dir(&self.dir)?;
+
+        let repair_server = Client::new(&url);
+
+        let extent_copy =
+            extent.create_copy_file(copy_dir.clone(), None).unwrap();
+        let repair_stream = repair_server.get_extent(eid as u32).await.unwrap();
+        save_stream_to_file(extent_copy, repair_stream.into_inner()).await?;
+
+        let extent_db = extent
+            .create_copy_file(copy_dir.clone(), Some("db"))
+            .unwrap();
+        let repair_stream = repair_server.get_db(eid as u32).await.unwrap();
+        save_stream_to_file(extent_db, repair_stream.into_inner()).await?;
+
+        // Handle these next two not existing.  ZZZ
+        let extent_shm = extent
+            .create_copy_file(copy_dir.clone(), Some("db-shm"))
+            .unwrap();
+        let repair_stream = repair_server.get_shm(eid as u32).await.unwrap();
+        save_stream_to_file(extent_shm, repair_stream.into_inner()).await?;
+
+        let extent_wal = extent
+            .create_copy_file(copy_dir.clone(), Some("db-wal"))
+            .unwrap();
+        let repair_stream = repair_server.get_wal(eid as u32).await.unwrap();
+        save_stream_to_file(extent_wal, repair_stream.into_inner()).await?;
+
+        // After we have all files: move the repair dir.
+        // ZZZ remove the destination directory before rename
+        println!("Now move directory {:?} to {:?}", copy_dir, rd);
+        std::fs::rename(copy_dir.clone(), rd.clone())?;
+        println!("Moved repair to -> {:?}", rd);
+        // fsync the parent directory (the extent dir)
+
         Ok(())
     }
 
@@ -1142,6 +1479,28 @@ impl Region {
     }
 
     /*
+     * Send a flush to just the given extent. The provided flush number is
+     * what an extent should use if a flush is required.
+     */
+    #[instrument]
+    pub fn region_flush_extent(
+        &self,
+        eid: usize,
+        flush_number: u64,
+        gen_number: u64,
+    ) -> Result<(), CrucibleError> {
+        println!(
+            "Flush just extent {} with f:{} and g:{}",
+            eid, flush_number, gen_number
+        );
+
+        let extent = &self.extents[eid];
+        extent.flush_block(flush_number, gen_number)?;
+
+        Ok(())
+    }
+
+    /*
      * Send a flush to all extents. The provided flush number is
      * what an extent should use if a flush is required.
      */
@@ -1229,6 +1588,37 @@ impl Region {
     }
 }
 
+/**
+ * Given the stream returned to us from the progenitor endpoint, and a file,
+ * stream the data from the endpoint into the file.  When it is all done,
+ * we then fsync the file.
+ */
+pub async fn save_stream_to_file(
+    mut file: File,
+    mut stream: Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = std::result::Result<crucible::Bytes, reqwest::Error>,
+                > + std::marker::Send,
+        >,
+    >,
+) -> Result<(), CrucibleError> {
+    loop {
+        match stream.try_next().await {
+            Ok(Some(bytes)) => {
+                file.write_all(&bytes).unwrap();
+            }
+            Ok(None) => break,
+            Err(e) => panic!("extent stream {}", e),
+        }
+    }
+    if unsafe { fsync(file.as_raw_fd()) } == -1 {
+        let e = std::io::Error::last_os_error();
+        crucible_bail!(IoError, "repair {:?}: fsync failure: {:?}", file, e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1281,6 +1671,42 @@ mod test {
     }
 
     #[test]
+    fn copy_extent_dir() -> Result<()> {
+        // Create the region, make three extents
+        // Create the copy directory, make sure it exists.
+        // Remove the copy directory, make sure it goes away.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        let ext_one = &mut region.extents[1];
+        let cp = copy_dir(&dir, 1);
+
+        assert!(ext_one.create_copy_dir(&dir).is_ok());
+        assert!(Path::new(&cp).exists());
+        assert!(remove_copy_dir(&dir, 1).is_ok());
+        assert!(!Path::new(&cp).exists());
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic]
+    // ZZZ make this only panic on last assertion
+    fn copy_extent_dir_twice() -> () {
+        // Create the region, make three extents
+        // Create the copy directory, make sure it exists.
+        // Verify a second create will fail.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options()).unwrap();
+        region.extend(3).unwrap();
+
+        let ext_one = &mut region.extents[1];
+        let _ = ext_one.create_copy_dir(&dir);
+        assert!(ext_one.create_copy_dir(&dir).is_ok());
+        ()
+    }
+
+    #[test]
     fn close_extent() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
@@ -1292,6 +1718,8 @@ mod test {
         ext_one.close()?;
         assert!(!ext_one.inner.is_some());
 
+        // Make copy directory for this extent
+        let cp = ext_one.create_copy_dir(&dir)?;
         // Reopen extent 1
         region.reopen_extent(1)?;
 
@@ -1301,6 +1729,9 @@ mod test {
 
         // Make sure the eid matches
         assert_eq!(ext_one.number, 1);
+
+        // Make sure the copy directory is gone
+        assert!(!Path::new(&cp).exists());
 
         Ok(())
     }
@@ -1430,10 +1861,58 @@ mod test {
     }
 
     #[test]
+    fn extent_name_basic() {
+        assert_eq!(extent_file_name(4), "004");
+    }
+    #[test]
+    fn extent_name_basic_two() {
+        assert_eq!(extent_file_name(10), "00A");
+    }
+    #[test]
+    fn extent_name_basic_three() {
+        assert_eq!(extent_file_name(59), "03B");
+    }
+    #[test]
+    fn extent_name_max() {
+        assert_eq!(extent_file_name(u32::MAX), "FFF");
+    }
+    #[test]
+    fn extent_name_min() {
+        assert_eq!(extent_file_name(u32::MIN), "000");
+    }
+
+    #[test]
+    fn extent_dir_basic() {
+        assert_eq!(extent_dir("/var/region", 4), p("/var/region/00/000/"));
+    }
+
+    #[test]
+    fn extent_dir_max() {
+        assert_eq!(
+            extent_dir("/var/region", u32::MAX),
+            p("/var/region/FF/FFF")
+        );
+    }
+    #[test]
+    fn extent_dir_min() {
+        assert_eq!(
+            extent_dir("/var/region", u32::MIN),
+            p("/var/region/00/000/")
+        );
+    }
+
+    #[test]
     fn extent_path_min() {
         assert_eq!(
             extent_path("/var/region", u32::MIN),
             p("/var/region/00/000/000")
+        );
+    }
+    #[test]
+    fn copy_path_basic() {
+        assert_eq!(
+            copy_dir("/var/region", 4),
+            p("/var/region/00/000/004.copy")
         );
     }
 

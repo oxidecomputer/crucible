@@ -12,6 +12,7 @@ members = [
     "nbd_server",
     "package",
     "protocol",
+    "repair-client",
     "scope",
     "smf",
     "upstairs",

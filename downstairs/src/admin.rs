@@ -69,7 +69,7 @@ pub async fn run_downstairs_for_region(
 
     let dd = d.clone();
     tokio::spawn(async move {
-        // XXX result eaten here!
+        // XXX result ignored here!
         let _ = start_downstairs(
             dd,
             run_params.address,

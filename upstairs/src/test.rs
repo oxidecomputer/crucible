@@ -3672,13 +3672,17 @@ mod test {
         // TODO: This will grow as the protocol is finalized.
         let up = Upstairs::default();
         let mut ds = up.downstairs.lock().unwrap();
+        let r = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
+        for i in 0..3 {
+            ds.ds_repair.insert(i as u8, r);
+        }
         let mut rec_list = HashMap::new();
         let ef = ExtentFix {
             source: 0,
             dest: vec![1, 2],
         };
         rec_list.insert(0, ef);
-        ds.convert_rc_to_messages(rec_list);
+        ds.convert_rc_to_messages(rec_list, 1, 2);
         // TODO: When we finalize the message, update this test
         // to expect more.
         assert!(!ds.reconcile_task_list.is_empty());

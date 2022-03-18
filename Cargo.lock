@@ -479,7 +479,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
  "reqwest",
  "schemars",
  "serde",
@@ -535,7 +535,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
  "reqwest",
  "schemars",
  "serde",
@@ -557,6 +557,10 @@ dependencies = [
  "futures",
  "futures-core",
  "hex",
+ "http",
+ "hyper",
+ "hyper-staticfile",
+ "mime_guess",
  "omicron-common",
  "opentelemetry 0.17.0",
  "opentelemetry-jaeger",
@@ -564,10 +568,13 @@ dependencies = [
  "oximeter-producer",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
+ "repair-client",
+ "reqwest",
  "ringbuffer",
  "rusqlite",
  "schemars",
  "serde",
+ "serde_json",
  "sha2",
  "slog",
  "slog-async",
@@ -1255,6 +1262,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
+
+[[package]]
 name = "httparse"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1301,6 +1314,25 @@ dependencies = [
  "rustls",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "hyper-staticfile"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d5ff45ea721e295c400e4c65b1c855d43d329b8ae8ec12520ab1860a240debf"
+dependencies = [
+ "futures-util",
+ "http",
+ "http-range",
+ "httpdate",
+ "hyper",
+ "mime_guess",
+ "percent-encoding",
+ "rand 0.8.5",
+ "tokio",
+ "url",
+ "winapi",
 ]
 
 [[package]]
@@ -1513,6 +1545,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a60c7ce501c71e03a9c9c0d35b861413ae925bd979cc7a4e30d060069aaac8d"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4192263c238a5f0d0c6bfd21f336a313a4ce1c450542449ca191bb657b4642ef"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1590,11 +1632,11 @@ dependencies = [
 [[package]]
 name = "nexus-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#6a98020b9de0f0ae42fc2ac593e1576b7b7c21e8"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#8a26d6992dafea6f5052083b2362d13b8e94dfa6"
 dependencies = [
  "chrono",
  "omicron-common",
- "progenitor",
+ "progenitor 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
  "reqwest",
  "serde",
  "serde_json",
@@ -1756,7 +1798,7 @@ dependencies = [
  "ipnetwork",
  "macaddr",
  "parse-display",
- "progenitor",
+ "progenitor 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
  "rand 0.8.5",
  "reqwest",
  "ring",
@@ -2258,14 +2300,42 @@ dependencies = [
 [[package]]
 name = "progenitor"
 version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=pin#76ecc98e6ac6b60dc7930079a32138e65622e441"
+dependencies = [
+ "anyhow",
+ "getopts",
+ "openapiv3",
+ "progenitor-client 0.0.0 (git+https://github.com/oxidecomputer/progenitor?branch=pin)",
+ "progenitor-impl 0.0.0 (git+https://github.com/oxidecomputer/progenitor?branch=pin)",
+ "progenitor-macro 0.0.0 (git+https://github.com/oxidecomputer/progenitor?branch=pin)",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "progenitor"
+version = "0.0.0"
 source = "git+https://github.com/oxidecomputer/progenitor#b7bbb5cdffdfc4ddf5bc7c1a45d34760130e48a0"
 dependencies = [
  "anyhow",
  "getopts",
  "openapiv3",
- "progenitor-client",
- "progenitor-impl",
- "progenitor-macro",
+ "progenitor-client 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
+ "progenitor-impl 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
+ "progenitor-macro 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "progenitor-client"
+version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=pin#76ecc98e6ac6b60dc7930079a32138e65622e441"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "percent-encoding",
+ "reqwest",
  "serde",
  "serde_json",
 ]
@@ -2281,6 +2351,28 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "progenitor-impl"
+version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=pin#76ecc98e6ac6b60dc7930079a32138e65622e441"
+dependencies = [
+ "convert_case",
+ "getopts",
+ "indexmap",
+ "openapiv3",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustfmt-wrapper",
+ "schemars",
+ "serde",
+ "serde_json",
+ "syn",
+ "thiserror",
+ "typify",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -2308,11 +2400,26 @@ dependencies = [
 [[package]]
 name = "progenitor-macro"
 version = "0.0.0"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=pin#76ecc98e6ac6b60dc7930079a32138e65622e441"
+dependencies = [
+ "openapiv3",
+ "proc-macro2",
+ "progenitor-impl 0.0.0 (git+https://github.com/oxidecomputer/progenitor?branch=pin)",
+ "quote",
+ "serde",
+ "serde_json",
+ "serde_tokenstream",
+ "syn",
+]
+
+[[package]]
+name = "progenitor-macro"
+version = "0.0.0"
 source = "git+https://github.com/oxidecomputer/progenitor#b7bbb5cdffdfc4ddf5bc7c1a45d34760130e48a0"
 dependencies = [
  "openapiv3",
  "proc-macro2",
- "progenitor-impl",
+ "progenitor-impl 0.0.0 (git+https://github.com/oxidecomputer/progenitor)",
  "quote",
  "serde",
  "serde_json",
@@ -2527,6 +2634,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3acd125665422973a33ac9d3dd2df85edad0f4ae9b00dafb1a05e43a9f5ef8e7"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "repair-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "percent-encoding",
+ "progenitor 0.0.0 (git+https://github.com/oxidecomputer/progenitor?branch=pin)",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3667,6 +3788,15 @@ name = "ucd-trie"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56dee185309b50d1f11bfedef0fe6d036842e3fb77413abef29f8f8d1c5d4c1c"
+
+[[package]]
+name = "unicase"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50f37be617794602aabbeee0be4f259dc1778fabe05e2d67ee8f79326d5cb4f6"
+dependencies = [
+ "version_check",
+]
 
 [[package]]
 name = "unicode-bidi"

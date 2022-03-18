@@ -141,52 +141,74 @@ pub fn dump_region(
     let mut ext_num = all_extents.keys().collect::<Vec<&u32>>();
     ext_num.sort_unstable();
 
-    print!("EXT");
-    for _ in 0..dir_count {
-        print!("      GEN FLUSH_ID D");
+    print!("EXT ");
+    for i in 0..dir_count {
+        print!(" GEN{}", i);
+    }
+    print!(" ");
+    for i in 0..dir_count {
+        print!("  FL{}", i);
+    }
+    print!(" ");
+    for i in 0..dir_count {
+        print!(" D{}", i);
     }
     println!();
 
+    // If our extent is invalid, then there is some other problem,
+    // but, whomever is using this tool is probably trying to figure
+    // out what is wrong, and we should make an effort to show what
+    // we can.
     let mut difference_found = false;
+    let mut max_gen = 0;
+    let mut max_flush = 0;
     for en in ext_num.iter() {
         if let Some(ei) = all_extents.get(en) {
-            let mut columns: [String; 3] =
-                ["".to_string(), "".to_string(), "".to_string()];
-
-            for (dir_index, column) in
-                columns.iter_mut().enumerate().take(dir_count)
-            {
-                if let Some(em) = ei.ei_hm.get(&(dir_index as u32)) {
-                    let dirty = if em.dirty {
-                        "D".to_string()
-                    } else {
-                        " ".to_string()
-                    };
-                    *column = format!(
-                        "{:8} {:8} {} ",
-                        em.gen_number, em.flush_number, dirty
-                    );
-                } else {
-                    *column = "-".to_string();
-                }
-            }
-
+            let mut bad_extent = false;
             let mut different = false;
+            let mut gen_vec: Vec<u64> = Vec::with_capacity(dir_count);
+            let mut flush_vec: Vec<u64> = Vec::with_capacity(dir_count);
+            let mut dirty_vec: Vec<bool> = Vec::with_capacity(dir_count);
 
-            for dir_index in 1..dir_count {
-                if columns[dir_index - 1] != columns[dir_index] {
-                    different = true;
-                    break;
+            for dir_index in 0..dir_count {
+                if let Some(em) = ei.ei_hm.get(&(dir_index as u32)) {
+                    gen_vec.insert(dir_index, em.gen_number);
+                    if gen_vec[0] != em.gen_number { different = true; }
+                    if em.gen_number > max_gen { max_gen = em.gen_number; }
+                    flush_vec.insert(dir_index, em.flush_number);
+                    if flush_vec[0] != em.flush_number { different = true; }
+                    if em.flush_number > max_flush { max_flush = em.flush_number; }
+                    dirty_vec.insert(dir_index, em.dirty);
+                    if dirty_vec[0] != em.dirty { different = true; }
+                } else {
+                    println!("{:3}  column {} bad", en, dir_index);
+                    bad_extent = true;
                 }
             }
-
-            if !only_show_differences || different {
-                print!("{:3} ", en);
-                for column in columns.iter().take(dir_count) {
-                    print!("{}", column);
-                }
-                println!();
+            if bad_extent || (only_show_differences && !different) {
+                continue
             }
+
+            print!("{:3} ", en);
+
+            let color = color_vec(&gen_vec);
+            for i in 0..dir_count {
+                print!(" {}{:4}", sgr(color[i]), gen_vec[i]);
+            }
+            print!("{} ", sgr(0));
+            let color = color_vec(&flush_vec);
+            for i in 0..dir_count {
+                print!(" {}{:4}", sgr(color[i]), flush_vec[i]);
+            }
+            print!("{} ", sgr(0));
+            for i in 0..dir_count {
+                if dirty_vec[i] {
+                    print!("  {}T", sgr(31));
+                } else {
+                    print!("  {}F", sgr(32));
+                }
+            }
+            println!("{}", sgr(0));
 
             difference_found |= different;
         } else {
@@ -195,6 +217,7 @@ pub fn dump_region(
         }
     }
 
+    println!("Max gen: {},  Max flush: {}", max_gen, max_flush);
     if difference_found {
         bail!("Difference in extent metadata found!");
     }
@@ -203,9 +226,56 @@ pub fn dump_region(
 }
 
 // Print the ASCII color code of the given value
-// Green: 32, Red: 31, Blue: 34
+// Clear: 0, Green: 32, Red: 31, Blue: 34
 fn sgr(n: u8) -> String {
     format!("\x1b[{}m", n)
+}
+
+// Return a Vec of the display color selections for an input vec.
+// The determination for color is based on the highest value found in
+// the Vec.  If everything is the same, then all colors are green, if
+// there is any inequality, then the highest value is green and all others
+// are red.
+// The resulting vec can be used by the sgr() function to print the proper
+// color during display.
+fn color_vec(compare: &[u64]) -> Vec<u8> {
+    let len = compare.len();
+    let mut colors;
+
+    // Set everything to 32 (green) then switch any to 31 (red) that
+    // are less.
+    assert!(len <= 3);
+    if len == 1 {
+        return vec![32];
+    } else if len == 2 {
+        colors = vec![32, 32];
+    } else {
+        colors = vec![32, 32, 32];
+    }
+
+    if compare[0] < compare[1] {
+        colors[0] = 31;
+    }
+    if compare[1] < compare[0] {
+        colors[1] = 31;
+    }
+
+    if len == 3 {
+        if compare[0] < compare[2] {
+            colors[0] = 31;
+        }
+        if compare[1] < compare[2] {
+            colors[1] = 31;
+        }
+        if compare[2] < compare[0] {
+            colors[2] = 31;
+        }
+        if compare[2] < compare[1] {
+            colors[2] = 31;
+        }
+
+    }
+    colors
 }
 
 fn return_status_letters<T, U: std::cmp::PartialEq>(
@@ -676,4 +746,96 @@ fn show_extent_block(
     }
 
     Ok(())
+}
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn color_compare() {
+        // All the same, all green
+        let cm = vec![2, 2, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 32, 32]);
+    }
+    #[test]
+    fn color_compare_one() {
+        // All the same, all green, size 1
+        let cm = vec![2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32]);
+    }
+    #[test]
+    fn color_compare_two() {
+        // All the same, all green size 2
+        let cm = vec![2, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 32]);
+    }
+    #[test]
+    fn color_compare_two_red0() {
+        let cm = vec![2, 3];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32]);
+    }
+    #[test]
+    fn color_compare_two_red1() {
+        let cm = vec![4, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31]);
+    }
+    #[test]
+    fn color_compare_red0() {
+        let cm = vec![1, 2, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32, 32]);
+    }
+    #[test]
+    fn color_compare_red1() {
+        let cm = vec![4, 2, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31, 32]);
+    }
+    #[test]
+    fn color_compare_red2() {
+        let cm = vec![8, 8, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 32, 31]);
+    }
+    #[test]
+    fn color_compare_red02() {
+        let cm = vec![1, 3, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32, 31]);
+    }
+    #[test]
+    fn color_compare_red02_2() {
+        let cm = vec![2, 3, 1];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32, 31]);
+    }
+    #[test]
+    fn color_compare_red01() {
+        let cm = vec![3, 2, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 31, 32]);
+    }
+    #[test]
+    fn color_compare_red01_2() {
+        let cm = vec![2, 3, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 31, 32]);
+    }
+    #[test]
+    fn color_compare_red12() {
+        let cm = vec![5, 3, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31, 31]);
+    }
+    #[test]
+    fn color_compare_red12_2() {
+        let cm = vec![5, 4, 3];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31, 31]);
+    }
 }
