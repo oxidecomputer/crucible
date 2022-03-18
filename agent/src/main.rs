@@ -403,7 +403,11 @@ fn apply_smf(
         let properties = {
             let mut properties = r.get_smf_properties(&dir);
 
-            // The downstairs process will listen on the same IP as the agent
+            // Instruct downstairs process to listen on the same IP as the
+            // agent, because there is currently only one address in the
+            // crucible zone that both processes must share and that address is
+            // what will be used by other zones. In the future this could be a
+            // parameter that comes along with the region POST parameters.
             properties.push(crate::model::SmfProperty {
                 name: "address",
                 typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
@@ -546,8 +550,12 @@ fn apply_smf(
             let properties = {
                 let mut properties = snapshot.get_smf_properties(&dir);
 
-                // The downstairs process will listen on the same IP as the
-                // agent
+                // Instruct downstairs process to listen on the same IP as the
+                // agent, because there is currently only one address in the
+                // crucible zone that both processes must share and that address
+                // is what will be used by other zones. In the future this could
+                // be a parameter that comes along with the region POST
+                // parameters.
                 properties.push(crate::model::SmfProperty {
                     name: "address",
                     typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
