@@ -234,6 +234,7 @@ async fn main() -> Result<()> {
             let df = Arc::new(datafile::DataFile::new(
                 log.new(o!("component" => "datafile")),
                 &dataset.path()?,
+                listen,
                 lowport,
                 lowport + 999, // TODO high port as an argument?
             )?);
@@ -399,7 +400,22 @@ fn apply_smf(
         let mut dir = datapath.clone();
         dir.push(&r.id.0);
 
-        let properties = r.get_smf_properties(&dir);
+        let properties = {
+            let mut properties = r.get_smf_properties(&dir);
+
+            // Instruct downstairs process to listen on the same IP as the
+            // agent, because there is currently only one address in the
+            // crucible zone that both processes must share and that address is
+            // what will be used by other zones. In the future this could be a
+            // parameter that comes along with the region POST parameters.
+            properties.push(crate::model::SmfProperty {
+                name: "address",
+                typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
+                val: df.get_listen_addr().ip().to_string(),
+            });
+
+            properties
+        };
 
         let inst = if let Some(inst) = svc.get_instance(&name)? {
             inst
@@ -531,7 +547,23 @@ fn apply_smf(
             dir.push("snapshot");
             dir.push(snapshot.name.clone());
 
-            let properties = snapshot.get_smf_properties(&dir);
+            let properties = {
+                let mut properties = snapshot.get_smf_properties(&dir);
+
+                // Instruct downstairs process to listen on the same IP as the
+                // agent, because there is currently only one address in the
+                // crucible zone that both processes must share and that address
+                // is what will be used by other zones. In the future this could
+                // be a parameter that comes along with the region POST
+                // parameters.
+                properties.push(crate::model::SmfProperty {
+                    name: "address",
+                    typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
+                    val: df.get_listen_addr().ip().to_string(),
+                });
+
+                properties
+            };
 
             let inst = if let Some(inst) = svc.get_instance(&name)? {
                 inst
