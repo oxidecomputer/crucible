@@ -3917,8 +3917,10 @@ impl Upstairs {
          * nexus, we are manually increasing it here.  Whatever the highest
          * number we find during our initial scan, we add one and use that.
          * When we start receiving a gen from outside, then we need to
-         * take this out.  If the caller has requested a generation number,
-         * then we trust that and let things move forward with it.
+         * take this out.  To support reconciliation working correctly, the
+         * generation coming from Propolis/Nexus must be larger than what
+         * we find on the downstairs, as the correct generation number is
+         * required to break ties under some failure conditions.
          */
         let cur_max_gen = self.get_generation();
         if cur_max_gen == 0 {
@@ -3926,13 +3928,15 @@ impl Upstairs {
             self.set_generation(max_gen);
         } else if cur_max_gen < max_gen {
             /*
-             * This may eventually be a panic, or require some cleanup if
-             * generation numbers are higher than we expect. XXX
+             * This may eventually be a panic, or a refusal to start the
+             * upstairs if we find generation numbers higher than we expect.
+             * XXX
              */
             println!(
-                "Warning: found gen number {}, larger than requested: {}",
+                "Warning: found/using gen number {}, larger than requested: {}",
                 max_gen, cur_max_gen,
             );
+            self.set_generation(max_gen);
         }
 
         /*
