@@ -41,10 +41,10 @@ while getopts 'c:des:' opt; do
 done
 
 if [[ $delete -eq 1 ]]; then
-    rm -rf var/8801 var/8802 var/8803
+    rm -rf var/8810 var/8820 var/8830
 else
-    if [[ -d var/8801 ]] || [[ -d var/8802 ]] || [[ -d var/8803 ]]; then
-        echo " var/880* directories are already present"
+    if [[ -d var/8810 ]] || [[ -d var/8820 ]] || [[ -d var/8830 ]]; then
+        echo " var/88.. directories are already present"
         exit 1
     fi
 fi
@@ -59,7 +59,7 @@ if [[ ! -f ${cds} ]]; then
 fi
 
 res=0
-for port in 8801 8802 8803; do
+for port in 8810 8820 8830; do
     if [[ $encryption -eq 0 ]]; then
         if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"; then
             echo "Failed to create downstairs $port"
