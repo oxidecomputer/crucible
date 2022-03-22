@@ -1777,9 +1777,9 @@ dependencies = [
 
 [[package]]
 name = "omicron-zone-package"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efd2e4dbdcf6781c86cee71b7d30a7fed585fd1653dd896c2347ff2239b553aa"
+checksum = "50c3d76964fd0a5af63d548222e2badb60dafd71c4315178ba22b70574cd56aa"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1791,6 +1791,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "walkdir",
 ]
 
 [[package]]
