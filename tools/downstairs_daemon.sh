@@ -119,10 +119,11 @@ if ! cargo build; then
 fi
 
 # If this port base is different than default, then good luck..
-port_base=8801
+port_base=8810
 missing=0
 for (( i = 0; i < 3; i++ )); do
-    (( port = port_base + i ))
+    (( port_step = i * 10 ))
+    (( port = port_base + port_step ))
     if [[ ! -d var/${port} ]]; then
         echo "Missing var/${port} directory"
         missing=1
@@ -150,12 +151,12 @@ if [[ -d ${testdir} ]]; then
 fi
 
 mkdir -p ${testdir}
-downstairs_daemon 8801 2>/dev/null &
-dsd_pid[0]=$!
-downstairs_daemon 8802 2>/dev/null &
-dsd_pid[1]=$!
-downstairs_daemon 8803 2>/dev/null &
-dsd_pid[2]=$!
+for (( i = 0; i < 3; i++ )); do
+    (( port_step = i * 10 ))
+    (( port = port_base + port_step ))
+    downstairs_daemon "$port" 2>/dev/null &
+    dsd_pid["$i"]=$!
+done
 
 echo "Downstairs have been started"
 

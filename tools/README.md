@@ -3,7 +3,7 @@
 Various scripts used for Crucible
 
 ## create-generic-sd.sh
-A simple script to create three downstairs regions at var/380[1-3]
+A simple script to create three downstairs regions at var/88[1-3]0
 
 ## downstairs_daemon.sh
 A highly custom script that starts three downstairs in a loop and will
@@ -42,7 +42,7 @@ alan@cat:crucible$ pfexec dtrace -s tools/ds_state.d
 
 ## hammer-loop.sh
 A loop test that runs the crucible-hammer test in a loop.  It is expected
-that you already have downstairs running on port 380[1-3].
+that you already have downstairs running on port 88[1-3]0.
 The test will check for panic or assert in the output and stop if it
 detects them or a test exits with an error.
 

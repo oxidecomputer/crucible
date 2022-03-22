@@ -26,19 +26,19 @@ different window) on the same machine.  Each should have a unique UUID, port,
 and directory where the region files will be.  Once each is created we will
 then `run` them.
 ```
-$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3801
-$ cargo run -q -p crucible-downstairs -- run -p 3801 -d var/3801
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3810
+$ cargo run -q -p crucible-downstairs -- run -p 3810 -d var/3810
 ...
 ```
 
 ```
-$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3802
-$ cargo run -q -p crucible-downstairs -- run -p 3802 -d var/3802
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3820
+$ cargo run -q -p crucible-downstairs -- run -p 3820 -d var/3820
 ```
 
 ```
-$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3803
-$ cargo run -q -p crucible-downstairs -- run -p 3803 -d var/3803
+$ cargo run -q -p crucible-downstairs -- create -u $(uuidgen) -d var/3830
+$ cargo run -q -p crucible-downstairs -- run -p 3830 -d var/3830
 ```
 
 Once all three are started, you can connect to them by using the crucible
@@ -46,25 +46,25 @@ client program that will start the upstairs side of crucible for you, run
 a write/flush/read, then exit.
 
 ```
-$ cargo run -q -p crucible -- -t 127.0.0.1:3803 -t 127.0.0.1:3802 -t 127.0.0.1:3801
-raw options: Opt { target: [127.0.0.1:3803, 127.0.0.1:3802, 127.0.0.1:3801] }
+$ cargo run -q -p crucible -- -t 127.0.0.1:3830 -t 127.0.0.1:3820 -t 127.0.0.1:3810
+raw options: Opt { target: [127.0.0.1:3830, 127.0.0.1:3820, 127.0.0.1:3810] }
 runtime is spawned
 DTrace probes registered ok
-127.0.0.1:3802[1] connecting to 127.0.0.1:3802
-127.0.0.1:3803[0] connecting to 127.0.0.1:3803
-127.0.0.1:3801[2] connecting to 127.0.0.1:3801
-127.0.0.1:3802[1] ok, connected to 127.0.0.1:3802
-127.0.0.1:3803[0] ok, connected to 127.0.0.1:3803
-127.0.0.1:3801[2] ok, connected to 127.0.0.1:3801
-127.0.0.1:3801 Evaluate new downstairs : bs:512 es:100 ec:10 versions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+127.0.0.1:3820[1] connecting to 127.0.0.1:3820
+127.0.0.1:3830[0] connecting to 127.0.0.1:3830
+127.0.0.1:3810[2] connecting to 127.0.0.1:3810
+127.0.0.1:3820[1] ok, connected to 127.0.0.1:3820
+127.0.0.1:3830[0] ok, connected to 127.0.0.1:3830
+127.0.0.1:3810[2] ok, connected to 127.0.0.1:3810
+127.0.0.1:3810 Evaluate new downstairs : bs:512 es:100 ec:10 versions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 Set inital Extent versions to [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 Next flush: 1
 Global using: bs:512 es:100 ec:10
-127.0.0.1:3803 Evaluate new downstairs : bs:512 es:100 ec:10 versions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-#### 127.0.0.1:3801 #### CONNECTED ######## 1/3
-#### 127.0.0.1:3803 #### CONNECTED ######## 2/3
-127.0.0.1:3802 Evaluate new downstairs : bs:512 es:100 ec:10 versions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-#### 127.0.0.1:3802 #### CONNECTED ######## 3/3
+127.0.0.1:3830 Evaluate new downstairs : bs:512 es:100 ec:10 versions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+#### 127.0.0.1:3810 #### CONNECTED ######## 1/3
+#### 127.0.0.1:3830 #### CONNECTED ######## 2/3
+127.0.0.1:3820 Evaluate new downstairs : bs:512 es:100 ec:10 versions: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+#### 127.0.0.1:3820 #### CONNECTED ######## 3/3
 send a write
 send a flush
 nwo: [(0, 99, 512), (1, 0, 512)] from offset:50688 data: 0x7fb053008200 len:1024
@@ -106,12 +106,12 @@ On the console of each Downstairs, you will see a connection; e.g.,
 
 ```
 ...
-raw options: Opt { address: 0.0.0.0, port: 3801, data: "var/3801", create: true }
+raw options: Opt { address: 0.0.0.0, port: 3810, data: "var/3810", create: true }
 Create new extent directory
-created new region file "var/3801/region.json"
+created new region file "var/3810/region.json"
 Current flush_numbers: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 Startup Extent values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-listening on 0.0.0.0:3801
+listening on 0.0.0.0:3810
 connection from 127.0.0.1:65030  connections count:1
 Current flush_numbers: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 Write       rn:1000 eid:0 dep:[] bo:99
@@ -177,7 +177,7 @@ Run a Jaeger container in order to collect and visualize traces:
 
 Pass an option to crucible-downstairs to send traces to Jaeger:
 
-    $ cargo run -q -p crucible-downstairs -- run -p 3803 -d var/3803 --trace-endpoint localhost:6831
+    $ cargo run -q -p crucible-downstairs -- run -p 3830 -d var/3830 --trace-endpoint localhost:6831
 
 Then, go to `http://localhost:16686` to see the Jaeger UI.
 
@@ -196,13 +196,13 @@ Replace the UUID below with the UUID for the downstairs you wish to view.
 The available stats are: connect, flush, read, write.
 
 ```
-cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3801-3801-3801-000000003801 | jq
+cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3810-3810-3810-000000003810 | jq
 ```
 
 Here is a deeper example, to just print the latest count for flush:
 ```
-LAST_FLUSH=$(cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3801-3801-3801-000000003801 | jq '.[].measurements[].timestamp '| sort -n | tail -1)
-cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3801-3801-3801-000000003801 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
+LAST_FLUSH=$(cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3810-3810-3810-000000003810 | jq '.[].measurements[].timestamp '| sort -n | tail -1)
+cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3810-3810-3810-000000003810 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
 ```
 
 ## License

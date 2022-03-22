@@ -59,9 +59,10 @@ esac
 
 uuidprefix="12345678-1234-1234-1234-00000000"
 downstairs=()
-port_base=8801
+port_base=8810
 for (( i = 0; i < 3; i++ )); do
-    (( port = port_base + i ))
+    (( port_step = i * 10 ))
+    (( port = port_base + port_step ))
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
@@ -179,7 +180,7 @@ fi
 
 # The dump args look different than other downstairs commands
 args=()
-for (( i = 0; i < 3; i++ )); do
+for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
     args+=( -d "$dir" )

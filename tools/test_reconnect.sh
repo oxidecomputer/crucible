@@ -36,8 +36,8 @@ if ! ps -p $dsd_pid > /dev/null; then
 fi
 
 args=()
-port_base=8801
-for (( i = 0; i < 3; i++ )); do
+port_base=8810
+for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     args+=( -t "127.0.0.1:$port" )
 done
