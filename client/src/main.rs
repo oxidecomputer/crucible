@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -584,6 +585,14 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     assert_eq!(ri.write_count.len(), ri.total_blocks);
 
     println!("Read and Verify all blocks (0..{})", ri.total_blocks);
+
+    let pb = ProgressBar::new(ri.total_blocks as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
+        )
+        .progress_chars("#>-"));
+
     for block_index in 0..ri.total_blocks {
         let vec: Vec<u8> = vec![255; ri.block_size as usize];
         let data = crucible::Buffer::from_vec(vec);
@@ -594,9 +603,12 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
         let dl = data.as_vec().to_vec();
         if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+            pb.finish_with_message("Error");
             bail!("Error at {}", block_index);
         }
+        pb.set_position(block_index as u64);
     }
+    pb.finish();
     Ok(())
 }
 /*
@@ -779,6 +791,13 @@ async fn balloon_workload(
  * Write then read (and verify) to every possible block.
  */
 async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    let pb = ProgressBar::new(ri.total_blocks as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
+        )
+        .progress_chars("#>-"));
+
     for block_index in 0..ri.total_blocks {
         ri.write_count[block_index] += 1;
 
@@ -790,15 +809,14 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         let offset =
             Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-        if block_index % 100 == 0 {
-            println!("Write at block:{}/{}", block_index, ri.total_blocks);
-        }
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
+        pb.set_position(block_index as u64);
     }
 
     let mut waiter = guest.flush(None)?;
     waiter.block_wait()?;
+    pb.finish();
 
     verify_volume(guest, ri)?;
     Ok(())
