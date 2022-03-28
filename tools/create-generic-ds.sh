@@ -16,12 +16,16 @@ if ! cargo build; then
     exit 1
 fi
 
+block_size=512
 delete=0
 encryption=0
 extent_size=100
 extent_count=20
-while getopts 'c:des:' opt; do
+while getopts 'b:c:des:' opt; do
     case "$opt" in
+        b)  block_size=$OPTARG
+            echo "Using block size $block_size"
+            ;;
         c)  extent_count=$OPTARG
             echo "Using extent count $extent_count"
             ;;
@@ -61,12 +65,12 @@ fi
 res=0
 for port in 8810 8820 8830; do
     if [[ $encryption -eq 0 ]]; then
-        if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"; then
+        if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size" --block-size "$block_size"; then
             echo "Failed to create downstairs $port"
             res=1
         fi
     else
-        if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size" --encrypted=true; then
+        if ! cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted=true; then
             echo "Failed to create downstairs $port"
             res=1
         fi

@@ -6416,8 +6416,6 @@ async fn up_listen(
                  * than necessary.
                  */
                 if up.flush_needed() {
-                    println!("Need a flush");
-
                     if let Err(e) = up.submit_flush(None, None) {
                         println!("flush send failed:{:?}", e);
                         // XXX What to do here?

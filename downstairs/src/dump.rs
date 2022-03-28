@@ -211,8 +211,8 @@ pub fn dump_region(
                 print!(" {}{:4}", sgr(color[i]), flush_vec[i]);
             }
             print!("{} ", sgr(0));
-            for i in 0..dir_count {
-                if dirty_vec[i] {
+            for dv in dirty_vec.iter().take(dir_count) {
+                if *dv {
                     print!("  {}T", sgr(31));
                 } else {
                     print!("  {}F", sgr(32));

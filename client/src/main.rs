@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -43,10 +44,12 @@ enum Workload {
     Demo,
     Dep,
     Dirty,
+    Fill,
     Generic,
     Nothing,
     One,
     Rand,
+    Repair,
     Span,
     Verify,
 }
@@ -98,9 +101,17 @@ pub struct Opt {
     #[structopt(long, global = true)]
     retry_activate: bool,
 
-    /*
+    /**
+     * In addition to any tests, verify the volume on startup.
+     * This only has value if verify_in is also set.
+     */
+    #[structopt(long, global = true)]
+    verify: bool,
+
+    /**
      * For tests that support it, load the expected write count from
-     * the provided file.
+     * the provided file.  The addition of a --verify option will also
+     * have the test verify what it imports from the file is valid.
      */
     #[structopt(long, global = true, parse(from_os_str), name = "INFILE")]
     verify_in: Option<PathBuf>,
@@ -256,6 +267,9 @@ fn main() -> Result<()> {
     if opt.workload == Workload::Verify && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
     }
+    if opt.verify && opt.verify_in.is_none() {
+        bail!("Initial verify requires verify_in file");
+    }
 
     let crucible_opts = CrucibleOpts {
         target: opt.target,
@@ -343,7 +357,7 @@ fn main() -> Result<()> {
      * info from the verify file, and verify it matches what we expect
      * if we are expecting anything.
      */
-    update_region_info(&guest, &mut region_info, opt.verify_in, true)?;
+    update_region_info(&guest, &mut region_info, opt.verify_in, opt.verify)?;
 
     /*
      * Call the function for the workload option passed from the command
@@ -411,7 +425,18 @@ fn main() -> Result<()> {
 
         Workload::Dirty => {
             println!("Run dirty test");
-            runtime.block_on(dirty_workload(&guest, &mut region_info))?;
+            let count = {
+                if opt.count == 0 {
+                    10
+                } else {
+                    opt.count
+                }
+            };
+            runtime.block_on(dirty_workload(
+                &guest,
+                &mut region_info,
+                count,
+            ))?;
 
             /*
              * Saving state here when we have not waited for a flush
@@ -428,10 +453,22 @@ fn main() -> Result<()> {
             return Ok(());
         }
 
+        Workload::Fill => {
+            println!("Fill test");
+            runtime.block_on(fill_workload(&guest, &mut region_info))?;
+        }
+
         Workload::Generic => {
+            let count = {
+                if opt.count == 0 {
+                    500
+                } else {
+                    opt.count
+                }
+            };
             runtime.block_on(generic_workload(
                 &guest,
-                500,
+                count,
                 &mut region_info,
             ))?;
         }
@@ -454,7 +491,36 @@ fn main() -> Result<()> {
         }
         Workload::Rand => {
             println!("Run random test");
-            runtime.block_on(rand_workload(&guest, 1000, &mut region_info))?;
+            let count = {
+                if opt.count == 0 {
+                    10
+                } else {
+                    opt.count
+                }
+            };
+            runtime.block_on(rand_workload(&guest, count, &mut region_info))?;
+        }
+        Workload::Repair => {
+            println!("Run Repair workload");
+            let count = {
+                if opt.count == 0 {
+                    10
+                } else {
+                    opt.count
+                }
+            };
+            runtime.block_on(repair_workload(
+                &guest,
+                count,
+                &mut region_info,
+            ))?;
+            drop(guest);
+            if let Some(vo) = &opt.verify_out {
+                let cp = history_file(vo);
+                write_json(&cp, &region_info.write_count, true)?;
+                println!("Wrote out file {:?}", cp);
+            }
+            return Ok(());
         }
         Workload::Span => {
             println!("Span test");
@@ -466,8 +532,13 @@ fn main() -> Result<()> {
              * this turns into a read verify loop, sleep for some duration
              * and then re-check the volume.
              */
+            if !opt.verify {
+                if let Err(e) = verify_volume(&guest, &mut region_info) {
+                    bail!("Initial volume verify failed: {:?}", e)
+                }
+            }
             if opt.quit {
-                println!("Verify test completed at import");
+                println!("Verify test completed");
             } else {
                 println!("Verify read loop begins");
                 loop {
@@ -514,6 +585,14 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     assert_eq!(ri.write_count.len(), ri.total_blocks);
 
     println!("Read and Verify all blocks (0..{})", ri.total_blocks);
+
+    let pb = ProgressBar::new(ri.total_blocks as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
+        )
+        .progress_chars("#>-"));
+
     for block_index in 0..ri.total_blocks {
         let vec: Vec<u8> = vec![255; ri.block_size as usize];
         let data = crucible::Buffer::from_vec(vec);
@@ -524,9 +603,12 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
         let dl = data.as_vec().to_vec();
         if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+            pb.finish_with_message("Error");
             bail!("Error at {}", block_index);
         }
+        pb.set_position(block_index as u64);
     }
+    pb.finish();
     Ok(())
 }
 /*
@@ -706,6 +788,41 @@ async fn balloon_workload(
 }
 
 /*
+ * Write then read (and verify) to every possible block.
+ */
+async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+    let pb = ProgressBar::new(ri.total_blocks as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
+        )
+        .progress_chars("#>-"));
+
+    for block_index in 0..ri.total_blocks {
+        ri.write_count[block_index] += 1;
+
+        let vec = fill_vec(block_index, 1, &ri.write_count, ri.block_size);
+        let data = Bytes::from(vec);
+        /*
+         * Convert block_index to its byte value.
+         */
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+        let mut waiter = guest.write(offset, data)?;
+        waiter.block_wait()?;
+        pb.set_position(block_index as u64);
+    }
+
+    let mut waiter = guest.flush(None)?;
+    waiter.block_wait()?;
+    pb.finish();
+
+    verify_volume(guest, ri)?;
+    Ok(())
+}
+
+/*
  * Print out the contents of the write count vector where each line
  * is an extent and each column is a block.
  */
@@ -735,9 +852,6 @@ async fn generic_workload(
      */
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    /*
-     * TODO: Let the user select the number of loops
-     */
     for i in 0..count {
         let op = rng.gen_range(0..10);
         if op == 0 {
@@ -816,7 +930,11 @@ async fn generic_workload(
  * We are trying to leave extents "dirty" so we want to exit before the
  * automatic flush can come through and sync our data.
  */
-async fn dirty_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn dirty_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    count: u32,
+) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -834,7 +952,7 @@ async fn dirty_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
      * IO size.
      */
     let block_max = ri.total_blocks - size + 1;
-    for _ in 0..10 {
+    for c in 1..=count {
         let block_index = rng.gen_range(0..block_max) as usize;
         /*
          * Convert offset and length to their byte values.
@@ -850,7 +968,13 @@ async fn dirty_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
         let data = Bytes::from(vec);
 
-        println!("Write at block {}, len:{}", offset.value, data.len());
+        println!(
+            "[{}/{}] Write at block {}, len:{}",
+            c,
+            count,
+            offset.value,
+            data.len()
+        );
 
         let waiter = guest.write(offset, data)?;
         waiterlist.push(waiter);
@@ -980,9 +1104,6 @@ async fn rand_workload(
      */
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    /*
-     * TODO: Let the user select the number of loops
-     */
     for c in 1..=count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
@@ -1088,6 +1209,87 @@ async fn burst_workload(
         );
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
+    Ok(())
+}
+
+/*
+ * issue some random number of IOs, then wait for an ACK for all.
+ * We try to exit this test and leave jobs outstanding.
+ */
+async fn repair_workload(
+    guest: &Arc<Guest>,
+    count: u32,
+    ri: &mut RegionInfo,
+) -> Result<()> {
+    // TODO: Allow the user to specify a seed here.
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    let mut waiterlist = Vec::new();
+    // TODO: Allow user to request r/w/f percentage (how???)
+    for c in 1..=count {
+        let op = rng.gen_range(0..10);
+        if op == 0 {
+            // flush
+            println!("{:4}/{:4} Flush", c, count);
+            let waiter = guest.flush(None)?;
+            waiterlist.push(waiter);
+        } else {
+            // Read or Write both need this
+            // Pick a random size (in blocks) for the IO, up to 10
+            let size = rng.gen_range(1..=10) as usize;
+
+            // Once we have our IO size, decide where the starting offset should
+            // be, which is the total possible size minus the randomly chosen
+            // IO size.
+            let block_max = ri.total_blocks - size + 1;
+            let block_index = rng.gen_range(0..block_max) as usize;
+
+            // Convert offset and length to their byte values.
+            let offset =
+                Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+            if op <= 4 {
+                // Write
+                // Update the write count for all blocks we plan to write to.
+                for i in 0..size {
+                    ri.write_count[block_index + i] += 1;
+                }
+
+                let vec =
+                    fill_vec(block_index, size, &ri.write_count, ri.block_size);
+                let data = Bytes::from(vec);
+
+                println!(
+                    "{:4}/{:4} Write at block {:5}, len:{:7}",
+                    c,
+                    count,
+                    offset.value,
+                    data.len()
+                );
+                let waiter = guest.write(offset, data)?;
+                waiterlist.push(waiter);
+            } else {
+                // Read
+                let length: usize = size * ri.block_size as usize;
+                let vec: Vec<u8> = vec![255; length];
+                let data = crucible::Buffer::from_vec(vec);
+                println!(
+                    "{:4}/{:4} Read  at block {:5}, len:{:7}",
+                    c,
+                    count,
+                    offset.value,
+                    data.len()
+                );
+                let waiter = guest.read(offset, data.clone())?;
+                waiterlist.push(waiter);
+            }
+        }
+    }
+    println!("loop over {} waiters", waiterlist.len());
+    for wa in waiterlist.iter_mut() {
+        wa.block_wait()?;
+    }
+
     Ok(())
 }
 
