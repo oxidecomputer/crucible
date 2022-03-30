@@ -1255,20 +1255,16 @@ where
                             up_coms.client_id, expected_uuid
                         );
                     }
-
-                    Some(Message::ExtentCloseAck(rep_id)) => {
-                        up.ds_repair_done_notify(
-                            up_coms.client_id,
-                            rep_id,
-                            &up_coms.ds_reconcile_done_tx,
-                        ).await?;
-                    }
-                    Some(Message::ExtentReopenAck(rep_id)) => {
-                        up.ds_repair_done_notify(
-                            up_coms.client_id,
-                            rep_id,
-                            &up_coms.ds_reconcile_done_tx,
-                        ).await?;
+                    Some(Message::RepairAckId(rep_id)) => {
+                        if up.downstairs.lock().unwrap().rep_done(
+                            up_coms.client_id, rep_id
+                        ) {
+                            up.ds_repair_done_notify(
+                                up_coms.client_id,
+                                rep_id,
+                                &up_coms.ds_reconcile_done_tx,
+                            ).await?;
+                        }
                     }
                     Some(m) => {
                         println!(
@@ -1286,13 +1282,51 @@ where
                  */
                 println!("[{}] received reconcile message", up_coms.client_id);
 
-                let job = up
-                    .downstairs
-                    .lock().unwrap().rep_in_progress(up_coms.client_id);
+                /*
+                 * We use rep_done to indicate this was job where our client
+                 * did not have any actual work to send to the downstairs.
+                 * It indicates that, we don't need a response from the
+                 * downstairs and can go ahead and mark this rep_id as
+                 * completed for this client and move forward.
+                 */
+                let mut rep_done = None;
+                let job = up.
+                    downstairs
+                    .lock()
+                    .unwrap()
+                    .rep_in_progress(up_coms.client_id);
                 match job {
                     Some(op) => {
-                        println!("[{}] submit {:?}", up_coms.client_id, op);
-                        fw.send(op).await?;
+                        println!("[{}] client {:?}", up_coms.client_id, op);
+                        /*
+                         * If there is work to do, check to see if it is
+                         * a repair job.  If so, only send that to the actual
+                         * clients that need to get it.  The source downstairs
+                         * does not get a message for this operation.
+                         *
+                         * If the work is an extent flush, then only send the
+                         * message to the source extent, the other downstairs
+                         * do not get a message.
+                         */
+                        match op {
+                            Message::ExtentRepair(rep_id, _, src, _, _) => {
+                                if up_coms.client_id == src {
+                                    rep_done = Some(rep_id);
+                                } else {
+                                    fw.send(op).await?;
+                                }
+                            },
+                            Message::ExtentFlush(rep_id, _, src, _, _) => {
+                                if up_coms.client_id != src {
+                                    rep_done = Some(rep_id);
+                                } else {
+                                    fw.send(op).await?;
+                                }
+                            },
+                            op => {
+                                fw.send(op).await?;
+                            }
+                        }
                     },
                     None => {
                         /*
@@ -1330,6 +1364,25 @@ where
                             );
                             continue;
                         }
+                    }
+                }
+                /*
+                 * If rep_done is Some, it means this client had nothing
+                 * to send to the downstairs, and we can go ahead and mark
+                 * this rep_id as completed, which will trigger sending a
+                 * notify if all other downstairs are also complete.
+                 */
+                if let Some(rep_id) = rep_done {
+                    if up.downstairs.lock().unwrap().rep_done(up_coms.client_id, rep_id) {
+                        println!("[{}] self notify as src for {}",
+                            up_coms.client_id,
+                            rep_id
+                        );
+                        up.ds_repair_done_notify(
+                            up_coms.client_id,
+                            rep_id,
+                            &up_coms.ds_reconcile_done_tx,
+                        ).await?;
                     }
                 }
             }
@@ -1672,6 +1725,7 @@ impl Downstairs {
             reconcile_repair_needed: 0,
         }
     }
+
     /**
      * Assign a new downstairs ID.
      */
@@ -1792,7 +1846,7 @@ impl Downstairs {
                 );
                 return None;
             }
-
+            println!("[{}] rep_in_progress: return {:?}", client_id, job);
             Some(job.op.clone())
         } else {
             None
@@ -1840,22 +1894,40 @@ impl Downstairs {
      */
     fn convert_rc_to_messages(
         &mut self,
-        mut rec_list: HashMap<u64, ExtentFix>,
+        mut rec_list: HashMap<usize, ExtentFix>,
+        max_flush: u64,
+        max_gen: u64,
     ) {
         let mut rep_id = 0;
-        println!("Full list: {:?}", rec_list);
-        for (ext, _) in rec_list.drain() {
+        println!("Full repair list: {:?}", rec_list);
+        for (ext, ef) in rec_list.drain() {
             /*
-             * XXX TODO: We are not repairing anything here yet.
-             * For every extent mismatch, we just close then re-open them.
-             * Coming soon will be the actual commands to send extents
-             * from one downstairs to another.
+             * For each extent needing repair, we put the following
+             * tasks on the reconcile task list.
+             * Flush (the source) extent with latest gen/flush#.
+             * Close extent (on all ds)
+             * Send repair command to bad extents
+             * Reopen extent.
              */
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentFlush(
+                    rep_id, ext, ef.source, max_flush, max_gen,
+                ),
+            ));
+            rep_id += 1;
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
                 Message::ExtentClose(rep_id, ext),
             ));
             rep_id += 1;
+            let repair = self.repair_addr(ef.source);
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentRepair(rep_id, ext, ef.source, repair, ef.dest),
+            ));
+            rep_id += 1;
+
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
                 Message::ExtentReopen(rep_id, ext),
@@ -2425,6 +2497,8 @@ impl Downstairs {
                         self.downstairs_errors.insert(client_id, errors + 1);
 
                         // XXX We don't count read errors here.
+                    } else {
+                        println!("[{}] {} read error", client_id, ds_id);
                     }
                 }
             }
@@ -3792,8 +3866,8 @@ impl Upstairs {
     }
 
     /*
-     * Check and see if the downstairs are ready for the next repair
-     * command.  Send a message if so.
+     *  Send a message that indicates the downstairs are ready for the
+     *  next repair command.
      */
     async fn ds_repair_done_notify(
         &self,
@@ -3801,18 +3875,16 @@ impl Upstairs {
         rep_id: u64,
         ds_reconcile_done_tx: &mpsc::Sender<Repair>,
     ) -> Result<()> {
-        if self.downstairs.lock().unwrap().rep_done(client_id, rep_id) {
-            println!("[{}] It's time to notify for {}", client_id, rep_id);
-            if let Err(e) = ds_reconcile_done_tx
-                .send(Repair {
-                    repair: true,
-                    client_id,
-                    rep_id,
-                })
-                .await
-            {
-                bail!("[{}] Failed to notify {} {:?}", client_id, rep_id, e);
-            }
+        println!("[{}] It's time to notify for {}", client_id, rep_id);
+        if let Err(e) = ds_reconcile_done_tx
+            .send(Repair {
+                repair: true,
+                client_id,
+                rep_id,
+            })
+            .await
+        {
+            bail!("[{}] Failed to notify {} {:?}", client_id, rep_id, e);
         }
         Ok(())
     }
@@ -3974,7 +4046,7 @@ impl Upstairs {
                 "Found {:?} extents that need repair",
                 reconcile_list.mend.len()
             );
-            ds.convert_rc_to_messages(reconcile_list.mend);
+            ds.convert_rc_to_messages(reconcile_list.mend, max_flush, max_gen);
             ds.reconcile_repair_needed = ds.reconcile_task_list.len();
             true
         } else {
@@ -4341,9 +4413,11 @@ impl Upstairs {
     }
 
     /*
-     * TODO: This should just store the region info for a downstairs at
-     * some place we can later look at and compare.  For now, we do some
-     * of that work now.
+     * Store the downstairs UUID, or compare to what we stored before
+     * for a given client ID.  Do a sanity check that this downstairs
+     * Region Definition matches the other downstairs.  If we don't have
+     * any Region info yet, then use the provided RegionDefinition as
+     * the source to compare the other downstairs with.
      */
     fn add_ds_region(
         &self,

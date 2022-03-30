@@ -14,18 +14,25 @@ crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
-slog = { version = "2.7" }
-slog-term = { version = "2.9" }
-slog-async = { version = "2.7" }
-schemars = { version = "0.8", features = [ "chrono", "uuid" ] }
 futures = "0.3"
 futures-core = "0.3"
+http = "0.2.6"
+hyper = { version = "0.14", features = [ "full" ] }
+hyper-staticfile = "0.8"
+mime_guess = "2.0.3"
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 rand = "0.8.5"
+repair-client = { path = "../repair-client" }
+reqwest = { version = "0.11", features = ["json"] }
 ringbuffer = "0.8"
+schemars = { version = "0.8.8", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.79"
+slog = { version = "2.7" }
+slog-term = { version = "2.9" }
+slog-async = { version = "2.7" }
 structopt = "0.3"
 tokio = { version = "1.17.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
@@ -42,8 +49,8 @@ hex = "0.4"
 sha2 = "0.10"
 
 [dev-dependencies]
-tempfile = "3"
 rand_chacha = "0.3.1"
+tempfile = "3"
 
 [features]
 default = []
