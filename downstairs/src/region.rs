@@ -1114,7 +1114,7 @@ impl Region {
      *
      * Let us assume we are repairing extent 012
      *  1. Make new 012.copy dir  (extent name plus: .copy)
-     *  2. Get all extent files from source side, put in 021.copy directory
+     *  2. Get all extent files from source side, put in 012.copy directory
      *  3. fsync files we just downloaded
      *  4. Rename 012.copy dir to 012.replace dir
      *  5. fsync extent directory ( 00/000/ where the extent files live)
@@ -1127,7 +1127,7 @@ impl Region {
      * 11. fsync extent dir again (so dir rename is persisted)
      * 12. Delete completed dir.
      *
-     *  This also requires the following behavior on Extent open:
+     *  This also requires the following behavior on every extent open:
      *   A. If xxx.Copy directory found, delete it.
      *   B. If xxx.Completed directory found, delete it.
      *   C. If xxx.Replace dir found start at step 4 above and continue
