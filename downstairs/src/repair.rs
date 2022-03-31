@@ -348,6 +348,7 @@ mod test {
 
         Ok(())
     }
+
     #[tokio::test]
     async fn extent_expected_files_short_with_close() -> Result<()> {
         // Verify that the list of files returned for an extent matches

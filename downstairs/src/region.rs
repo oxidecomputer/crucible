@@ -490,7 +490,7 @@ fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 /**
- * Remove directories associated with repair expect for the replace
+ * Remove directories associated with repair except for the replace
  * directory. Replace is handled specifically during extent open.
  */
 pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
@@ -504,6 +504,34 @@ pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/**
+ * Validate a list of repair files.
+ * There are either two or four files we expect to find, any more or less
+ * and we have a bad list.
+ */
+pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
+    println!("validate {} with {:?}", eid, files);
+    let count = files.len();
+    if count != 4 && count != 2 {
+        false
+    } else {
+        let eid = eid as u32;
+        for ss in files.iter() {
+            match &*ss {
+                d if *d == extent_file_name(eid, None)
+                    || *d == extent_file_name(eid, Some("db")) => {}
+                d if count == 4
+                    && (*d == extent_file_name(eid, Some("db-shm"))
+                        || *d == extent_file_name(eid, Some("db-wal"))) => {}
+                _ => {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Extent {
@@ -1121,11 +1149,16 @@ impl Region {
      *  6. Replace current extent 012 files with copied files of same name
      *    from 012.replace dir
      *  7. Remove any files in extent dir that don't exist in replacing dir
+     *     For example, if the replacement extent has 012 and 012.db, but
+     *     the current (bad) extent has 012 012.db 012.db-shm
+     *     and 012.db-wal, we want to remove the 012.db-shm and 012.db-wal
+     *     files when we replace 012 and 012.db with the new versions.
      *  8. fsync files after copying them (new location).
      *  9. fsync containing extent dir
      * 10. Rename 012.replace dir to 012.completed dir.
      * 11. fsync extent dir again (so dir rename is persisted)
      * 12. Delete completed dir.
+     * 13. fsync extent dir again (so dir rename is persisted)
      *
      *  This also requires the following behavior on every extent open:
      *   A. If xxx.Copy directory found, delete it.
@@ -1199,23 +1232,16 @@ impl Region {
         // The repair file list should always contain the extent data
         // file itself, and the .db file (metadata) for that extent.
         // Missing these means the repair will not succeed.
-        let filename = extent_file_name(eid as u32, None);
-        if !repair_files.contains(&filename) {
-            // XXX Panic now, but this will eventually bail and abort
-            // the repair and let the upper layers handle it.
-            panic!("Repair file list missing data file {}", filename);
+        // Optionally, there could be both .db-shm and .db-wal.
+        if !validate_repair_files(eid, &repair_files) {
+            panic!("Invalid repair file list: {:?}", repair_files);
         }
+
         let extent_copy =
             extent.create_copy_file(copy_dir.clone(), None).unwrap();
         let repair_stream = repair_server.get_extent(eid as u32).await.unwrap();
         save_stream_to_file(extent_copy, repair_stream.into_inner()).await?;
 
-        let filename = extent_file_name(eid as u32, Some("db"));
-        if !repair_files.contains(&filename) {
-            // XXX Panic now, but this will eventually bail and abort
-            // the repair and let the upper layers handle it.
-            panic!("Repair file list missing db file {}", filename);
-        }
         let extent_db = extent
             .create_copy_file(copy_dir.clone(), Some("db"))
             .unwrap();
@@ -1231,8 +1257,6 @@ impl Region {
             let repair_stream =
                 repair_server.get_shm(eid as u32).await.unwrap();
             save_stream_to_file(extent_shm, repair_stream.into_inner()).await?;
-        } else if repair_files.len() != 2 {
-            panic!("Unknown files on repair list: {:?}", repair_files);
         }
 
         let filename = extent_file_name(eid as u32, Some("db-wal"));
@@ -1243,9 +1267,6 @@ impl Region {
             let repair_stream =
                 repair_server.get_wal(eid as u32).await.unwrap();
             save_stream_to_file(extent_wal, repair_stream.into_inner()).await?;
-        }
-        if repair_files.len() > 4 {
-            panic!("Unknown extra files on repair list: {:?}", repair_files);
         }
 
         // After we have all files: move the repair dir.
@@ -1860,6 +1881,7 @@ mod test {
 
         Ok(())
     }
+
     #[test]
     fn reopen_extent_cleanup_replay() -> Result<()> {
         // Verify on extent open that a replacement directory will
@@ -2048,6 +2070,70 @@ mod test {
         assert!(Path::new(&rd).exists());
 
         Ok(())
+    }
+
+    #[test]
+    fn validate_repair_files_empty() {
+        // No repair files is a failure
+        assert_eq!(validate_repair_files(1, &Vec::new()), false);
+    }
+
+    #[test]
+    fn validate_repair_files_good() {
+        // This is an expected list of files for an extent
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+
+        assert!(validate_repair_files(1, &good_files));
+    }
+
+    #[test]
+    fn validate_repair_files_also_good() {
+        // This is also an expected list of files for an extent
+        let good_files: Vec<String> =
+            vec!["001".to_string(), "001.db".to_string()];
+        assert!(validate_repair_files(1, &good_files));
+    }
+
+    #[test]
+    fn validate_repair_files_offbyon() {
+        // Incorrect file names for extent 2
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+
+        assert_eq!(validate_repair_files(2, &good_files), false);
+    }
+
+    #[test]
+    fn validate_repair_files_too_good() {
+        // Duplicate file in list
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+        assert_eq!(validate_repair_files(1, &good_files), false);
+    }
+
+    #[test]
+    fn validate_repair_files_not_good_enough() {
+        // We require 2 or 4 files, not 3
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-wal".to_string(),
+        ];
+        assert_eq!(validate_repair_files(1, &good_files), false);
     }
 
     #[test]

@@ -27,9 +27,15 @@ function cleanup() {
     kill "$ds1_pid" 2> /dev/null
     kill "$ds2_pid" 2> /dev/null
     kill "$ds3_pid" 2> /dev/null
+    kill "$slow_pid" 2> /dev/null
 }
 
 verify_file=/tmp/repair_test_verify.data
+
+# Change these to pick which downstairs will be the one out of sync.
+slow_port=8820
+slow_log=/tmp/ds2
+slow_pid=$ds2_pid
 
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
 # Do initial volume population.
@@ -41,14 +47,14 @@ then
 fi
 
 # Stop a downstairs, we will restart with lossy in the loop
-kill "$ds3_pid"
+kill "$slow_pid"
 
 # Start loop
 for (( i = 0; i < 30; i += 1 )); do
 
     # restart downstairs with lossy
-    ${cds} run -d var/8820 -p 8830 --lossy &> /tmp/ds2 &
-    ds3_pid=$!
+    ${cds} run -d var/"${slow_port}" -p "${slow_port}" --lossy &> "${slow_log}" &
+    slow_pid=$!
 
     if ! ${cc} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30
     then
@@ -59,7 +65,7 @@ for (( i = 0; i < 30; i += 1 )); do
 
     echo ""
     # Stop --lossy downstairs
-    kill "$ds3_pid"
+    kill "$slow_pid"
     sleep 2
 
     # Did we get any mismatches?
@@ -69,8 +75,8 @@ for (( i = 0; i < 30; i += 1 )); do
     sleep 2
     echo ""
     # Start downstairs without lossy
-    ${cds} run -d var/8830 -p 8830 &> /tmp/ds2 &
-    ds3_pid=$!
+    ${cds} run -d var/"$slow_port" -p "$slow_port" &> "$slow_log" &
+    slow_pid=$!
 
     echo "Verifying data now"
     if ! ${cc} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -q > /tmp/verify_out
@@ -82,7 +88,7 @@ for (( i = 0; i < 30; i += 1 )); do
     fi
 
     # stop a downstairs
-    kill "$ds3_pid"
+    kill "$slow_pid"
 done
 
 echo "Tests all done at $(date)"
