@@ -2496,8 +2496,8 @@ impl Downstairs {
 
                         self.downstairs_errors.insert(client_id, errors + 1);
 
-                        // XXX We don't count read errors here.
                     } else {
+                        // XXX We don't count read errors here.
                         println!("[{}] {} read error", client_id, ds_id);
                     }
                 }

@@ -3764,13 +3764,7 @@ mod test {
         assert_eq!(Some(&IOState::New), rio.state.get(&1));
         assert_eq!(Some(&IOState::New), rio.state.get(&2));
     }
-    /*
-     *
-              let result = std::panic::catch_unwind(||
-                  ext_one.create_copy_dir(&dir).unwrap()
-              );
-              assert!(result.is_err());
-    */
+
     #[test]
     fn reconcile_rc_to_message_two() {
         // Convert another extent fix to the crucible repair messages that
