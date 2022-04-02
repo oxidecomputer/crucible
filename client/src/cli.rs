@@ -1,9 +1,13 @@
 // Copyright 2022 Oxide Computer Company
+use std::borrow::Cow;
 use std::net::SocketAddr;
 
+use crossterm::style::Color;
 use futures::{SinkExt, StreamExt};
-use rustyline::error::ReadlineError;
-use rustyline::Editor;
+use reedline::{
+    FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
+    Signal,
+};
 use structopt::clap::AppSettings;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -286,6 +290,49 @@ async fn cmd_to_msg(
     Ok(())
 }
 
+// Generic prompt stuff for reedline.
+#[derive(Clone)]
+pub struct CliPrompt;
+impl Prompt for CliPrompt {
+    fn render_prompt_left(&self) -> Cow<str> {
+        Cow::Owned(String::from(">> "))
+    }
+
+    fn render_prompt_right(&self) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+
+    fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        _history_search: PromptHistorySearch,
+    ) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+    fn get_prompt_color(&self) -> Color {
+        Color::White
+    }
+}
+
+impl Default for CliPrompt {
+    fn default() -> Self {
+        CliPrompt::new()
+    }
+}
+
+impl CliPrompt {
+    pub fn new() -> CliPrompt {
+        CliPrompt {}
+    }
+}
+
 /*
  * The CLI just sends commands to the cli_server where all the logic
  * lives, including any state about what blocks were written.
@@ -336,17 +383,18 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         let mut fr = FramedRead::new(r, CliDecoder::new());
         let mut fw = FramedWrite::new(w, CliEncoder::new());
 
-        let mut rl = Editor::<()>::new();
+        let history = Box::new(
+            FileBackedHistory::with_file(50, "history.txt".into())
+                .expect("Error configuring history with file"),
+        );
+        let mut line_editor = Reedline::create()?.with_history(history)?;
+        let prompt = CliPrompt::new();
 
-        if rl.load_history(".cli_history.txt").is_err() {
-            println!("No previous history.");
-        }
         loop {
-            let readline = rl.readline(">> ");
-            match readline {
-                Ok(line) => {
-                    rl.add_history_entry(line.as_str());
-                    let cmds: Vec<&str> = line.trim().split(' ').collect();
+            let sig = line_editor.read_line(&prompt)?;
+            match sig {
+                Signal::Success(buffer) => {
+                    let cmds: Vec<&str> = buffer.trim().split(' ').collect();
 
                     // Empty command, just ignore it and loop.
                     if cmds[0].is_empty() {
@@ -365,24 +413,17 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                         }
                     }
                 }
-                Err(ReadlineError::Interrupted) => {
+                Signal::CtrlD | Signal::CtrlC => {
                     println!("CTRL-C");
                     break;
                 }
-                Err(ReadlineError::Eof) => {
-                    println!("CTRL-D");
-                    break;
-                }
-                Err(err) => {
-                    println!("CLI Error: {:?}", err);
-                    break;
+                Signal::CtrlL => {
+                    line_editor.clear_screen().unwrap();
                 }
             }
         }
         // TODO: Figure out how to handle a disconnect from the crucible
         // side and let things continue.
-
-        rl.save_history(".cli_history.txt").unwrap();
         break;
     }
     Ok(())
