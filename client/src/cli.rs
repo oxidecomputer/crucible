@@ -1,9 +1,13 @@
 // Copyright 2022 Oxide Computer Company
+use std::borrow::Cow;
 use std::net::SocketAddr;
 
+use crossterm::style::Color;
 use futures::{SinkExt, StreamExt};
-use rustyline::error::ReadlineError;
-use rustyline::Editor;
+use reedline::{
+    FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
+    Signal,
+};
 use structopt::clap::AppSettings;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -32,6 +36,15 @@ enum CliCommand {
     },
     /// Deactivate the upstairs
     Deactivate,
+    /// Report the expected read count for an offset.
+    Expected {
+        #[structopt(long, short)]
+        offset: usize,
+    },
+    /// Export the current write count to the verify out file
+    Export,
+    /// Run the fill then verify test.
+    Fill,
     /// Flush
     Flush,
     /// Run Generic workload
@@ -193,6 +206,15 @@ async fn cmd_to_msg(
         CliCommand::Deactivate => {
             fw.send(CliMessage::Deactivate).await?;
         }
+        CliCommand::Expected { offset } => {
+            fw.send(CliMessage::Expected(offset)).await?;
+        }
+        CliCommand::Export => {
+            fw.send(CliMessage::Export).await?;
+        }
+        CliCommand::Fill => {
+            fw.send(CliMessage::Fill).await?;
+        }
         CliCommand::Read { offset, len } => {
             fw.send(CliMessage::Read(offset, len)).await?;
         }
@@ -223,8 +245,7 @@ async fn cmd_to_msg(
             return Ok(());
         }
         CliCommand::Verify => {
-            println!("No support for {:?}", cmd);
-            return Ok(());
+            fw.send(CliMessage::Verify).await?;
         }
         _ => {
             println!("No support for {:?}", cmd);
@@ -245,6 +266,9 @@ async fn cmd_to_msg(
         Some(CliMessage::DoneOk) => {
             println!("Ok");
         }
+        Some(CliMessage::ExpectedResponse(offset, data)) => {
+            println!("[{}] Expt: {:?}", offset, data);
+        }
         Some(CliMessage::ReadResponse(offset, resp)) => match resp {
             Ok(data) => {
                 println!("[{}] Data: {:?}", offset, data);
@@ -264,6 +288,49 @@ async fn cmd_to_msg(
         }
     }
     Ok(())
+}
+
+// Generic prompt stuff for reedline.
+#[derive(Clone)]
+pub struct CliPrompt;
+impl Prompt for CliPrompt {
+    fn render_prompt_left(&self) -> Cow<str> {
+        Cow::Owned(String::from(">> "))
+    }
+
+    fn render_prompt_right(&self) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+
+    fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        _history_search: PromptHistorySearch,
+    ) -> Cow<str> {
+        Cow::Owned(String::from(""))
+    }
+    fn get_prompt_color(&self) -> Color {
+        Color::White
+    }
+}
+
+impl Default for CliPrompt {
+    fn default() -> Self {
+        CliPrompt::new()
+    }
+}
+
+impl CliPrompt {
+    pub fn new() -> CliPrompt {
+        CliPrompt {}
+    }
 }
 
 /*
@@ -316,17 +383,18 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         let mut fr = FramedRead::new(r, CliDecoder::new());
         let mut fw = FramedWrite::new(w, CliEncoder::new());
 
-        let mut rl = Editor::<()>::new();
+        let history = Box::new(
+            FileBackedHistory::with_file(50, "history.txt".into())
+                .expect("Error configuring history with file"),
+        );
+        let mut line_editor = Reedline::create()?.with_history(history)?;
+        let prompt = CliPrompt::new();
 
-        if rl.load_history(".cli_history.txt").is_err() {
-            println!("No previous history.");
-        }
         loop {
-            let readline = rl.readline(">> ");
-            match readline {
-                Ok(line) => {
-                    rl.add_history_entry(line.as_str());
-                    let cmds: Vec<&str> = line.trim().split(' ').collect();
+            let sig = line_editor.read_line(&prompt)?;
+            match sig {
+                Signal::Success(buffer) => {
+                    let cmds: Vec<&str> = buffer.trim().split(' ').collect();
 
                     // Empty command, just ignore it and loop.
                     if cmds[0].is_empty() {
@@ -345,24 +413,17 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                         }
                     }
                 }
-                Err(ReadlineError::Interrupted) => {
+                Signal::CtrlD | Signal::CtrlC => {
                     println!("CTRL-C");
                     break;
                 }
-                Err(ReadlineError::Eof) => {
-                    println!("CTRL-D");
-                    break;
-                }
-                Err(err) => {
-                    println!("CLI Error: {:?}", err);
-                    break;
+                Signal::CtrlL => {
+                    line_editor.clear_screen().unwrap();
                 }
             }
         }
         // TODO: Figure out how to handle a disconnect from the crucible
         // side and let things continue.
-
-        rl.save_history(".cli_history.txt").unwrap();
         break;
     }
     Ok(())
@@ -378,6 +439,7 @@ async fn process_cli_command(
     ri: &mut RegionInfo,
     wc_filled: &mut bool,
     verify_input: Option<PathBuf>,
+    verify_output: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
         CliMessage::Activate(gen) => match guest.activate(gen) {
@@ -391,6 +453,50 @@ async fn process_cli_command(
             },
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
+        CliMessage::Expected(offset) => {
+            if !*wc_filled {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Internal write count buffer not filled".to_string(),
+                )))
+                .await
+            } else if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Internal write count buffer empty".to_string(),
+                )))
+                .await
+            } else {
+                let mut vec: Vec<u8> = vec![255; 2];
+                vec[0] = (offset % 255) as u8;
+                vec[1] = (ri.write_count[offset] % 255) as u8;
+                fw.send(CliMessage::ExpectedResponse(offset, vec)).await
+            }
+        }
+        CliMessage::Export => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else if let Some(vo) = verify_output {
+                println!("Exporting write history to {:?}", vo);
+                let cp = history_file(vo.clone());
+                match write_json(&cp, &ri.write_count, true) {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        println!("Failed writing to {:?} with {}", vo, e);
+                        fw.send(CliMessage::Error(CrucibleError::GenericError(
+                            "Failed writing to file".to_string(),
+                        )))
+                        .await
+                    }
+                }
+            } else {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "No verify-out file provided".to_string(),
+                )))
+                .await
+            }
+        }
         CliMessage::Generic => {
             if ri.write_count.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
@@ -402,6 +508,23 @@ async fn process_cli_command(
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("{}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
+                    }
+                }
+            }
+        }
+        CliMessage::Fill => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match fill_workload(guest, ri).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("Fill/Verify failed with {}", e);
                         let e = CrucibleError::GenericError(msg);
                         fw.send(CliMessage::Error(e)).await
                     }
@@ -424,6 +547,12 @@ async fn process_cli_command(
                     let es = new_ri.extent_size.value;
                     let ts = new_ri.total_size;
                     *ri = new_ri;
+                    /*
+                     * We may only want to read input from the file once.
+                     * Maybe make a command to specifically do it, but it
+                     * seems like once we go active we won't need to run
+                     * it again.
+                     */
                     if !*wc_filled {
                         update_region_info(
                             guest,
@@ -495,6 +624,25 @@ async fn process_cli_command(
             let uuid = guest.query_upstairs_uuid()?;
             fw.send(CliMessage::MyUuid(uuid)).await
         }
+        CliMessage::Verify => {
+            if ri.write_count.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match verify_volume(guest, ri) {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        println!("Verify failed with {:?}", e);
+                        fw.send(CliMessage::Error(CrucibleError::GenericError(
+                            "Verify failed".to_string(),
+                        )))
+                        .await
+                    }
+                }
+            }
+        }
         msg => {
             println!("No code written for {:?}", msg);
             Ok(())
@@ -516,6 +664,7 @@ pub async fn start_cli_server(
     address: IpAddr,
     port: u16,
     verify_input: Option<PathBuf>,
+    verify_output: Option<PathBuf>,
 ) -> Result<()> {
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
@@ -528,6 +677,18 @@ pub async fn start_cli_server(
     println!("Listening for a CLI connection on: {:?}", listen_on);
     let listener = TcpListener::bind(&listen_on).await?;
 
+    /*
+     * If write_count len is zero, then the RegionInfo has
+     * not been filled.
+     */
+    let mut ri: RegionInfo = RegionInfo {
+        block_size: 0,
+        extent_size: Block::new_512(0),
+        total_size: 0,
+        total_blocks: 0,
+        write_count: Vec::new(),
+        max_block_io: 0,
+    };
     /*
      * If we have write info data from previous runs, we can't update our
      * internal region info struct until we actually connect to our
@@ -545,19 +706,6 @@ pub async fn start_cli_server(
         let mut fr = FramedRead::new(read, CliDecoder::new());
         let mut fw = FramedWrite::new(write, CliEncoder::new());
 
-        /*
-         * If write_count len is zero, then the RegionInfo has
-         * not been filled.
-         */
-        let mut ri: RegionInfo = RegionInfo {
-            block_size: 0,
-            extent_size: Block::new_512(0),
-            total_size: 0,
-            total_blocks: 0,
-            write_count: Vec::new(),
-            max_block_io: 0,
-        };
-
         loop {
             tokio::select! {
                 new_read = fr.next() => {
@@ -574,7 +722,9 @@ pub async fn start_cli_server(
                                 cmd,
                                 &mut ri,
                                 &mut wc_filled,
-                                verify_input.clone()).await?;
+                                verify_input.clone(),
+                                verify_output.clone()
+                            ).await?;
                         }
                     }
                 }

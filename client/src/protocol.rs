@@ -16,25 +16,34 @@ use crucible_common::CrucibleError;
 /// checks any read data.
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CliMessage {
-    Uuid,
-    MyUuid(Uuid),
-    InfoPlease,
-    Info(u64, u64, u64),
-    Error(CrucibleError),
     Activate(u64),
-    IsActive,
     ActiveIs(bool),
     Deactivate,
     // Generic command success
     DoneOk,
+    Error(CrucibleError),
+    // Print the expected read count output for a block
+    Expected(usize),
+    ExpectedResponse(usize, Vec<u8>),
+    // Record the current write count to the verify-out file.
+    Export,
+    // Run the fill test.
+    Fill,
+    Flush,
     Generic,
+    Info(u64, u64, u64),
+    InfoPlease,
+    IsActive,
+    MyUuid(Uuid),
     Read(usize, usize),
     RandRead,
     ReadResponse(usize, Result<Vec<u8>, CrucibleError>),
-    Write(usize, usize),
     RandWrite,
-    Flush,
+    // Run the Verify test.
+    Verify,
+    Write(usize, usize),
     Unknown(u32, BytesMut),
+    Uuid,
 }
 
 #[derive(Debug)]

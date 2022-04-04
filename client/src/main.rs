@@ -226,7 +226,7 @@ fn update_region_info(
             Ok(write_count) => write_count,
             Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
         };
-        println!("Load write count information from file {:?}", cp);
+        println!("Loading write count information from file {:?}", cp);
         if ri.write_count.len() != ri.total_blocks {
             bail!(
                 "Verify file {:?} blocks:{} does not match regions:{}",
@@ -320,6 +320,7 @@ fn main() -> Result<()> {
             listen,
             port,
             opt.verify_in,
+            opt.verify_out,
         ))?;
         return Ok(());
     }
@@ -593,11 +594,21 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         )
         .progress_chars("#>-"));
 
-    for block_index in 0..ri.total_blocks {
-        let vec: Vec<u8> = vec![255; ri.block_size as usize];
-        let data = crucible::Buffer::from_vec(vec);
+    let io_sz = 100;
+    let mut block_index = 0;
+    while block_index < ri.total_blocks {
         let offset =
             Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+        let next_io_blocks = if block_index + io_sz > ri.total_blocks {
+            ri.total_blocks - block_index
+        } else {
+            io_sz
+        };
+
+        let length: usize = next_io_blocks * ri.block_size as usize;
+        let vec: Vec<u8> = vec![255; length];
+        let data = crucible::Buffer::from_vec(vec);
         let mut waiter = guest.read(offset, data.clone())?;
         waiter.block_wait()?;
 
@@ -606,11 +617,14 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
             pb.finish_with_message("Error");
             bail!("Error at {}", block_index);
         }
+
+        block_index += next_io_blocks;
         pb.set_position(block_index as u64);
     }
     pb.finish();
     Ok(())
 }
+
 /*
  * Given the write count vec and the index, pick the seed value we use when
  * writing or expect when reading block.
@@ -798,19 +812,35 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         )
         .progress_chars("#>-"));
 
-    for block_index in 0..ri.total_blocks {
-        ri.write_count[block_index] += 1;
+    let io_sz = 100;
 
-        let vec = fill_vec(block_index, 1, &ri.write_count, ri.block_size);
-        let data = Bytes::from(vec);
-        /*
-         * Convert block_index to its byte value.
-         */
+    let mut block_index = 0;
+    while block_index < ri.total_blocks {
         let offset =
             Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
+        let next_io_blocks = if block_index + io_sz > ri.total_blocks {
+            ri.total_blocks - block_index
+        } else {
+            io_sz
+        };
+
+        for i in 0..next_io_blocks {
+            ri.write_count[block_index + i] += 1;
+        }
+
+        let vec = fill_vec(
+            block_index,
+            next_io_blocks,
+            &ri.write_count,
+            ri.block_size,
+        );
+        let data = Bytes::from(vec);
+
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
+
+        block_index += next_io_blocks;
         pb.set_position(block_index as u64);
     }
 
@@ -1473,26 +1503,61 @@ fn biggest_io_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Based on our protocol, send the biggest IO we can.
      */
-    let biggest_io_in_blocks =
-        crucible_protocol::CrucibleEncoder::max_io_blocks(
-            ri.block_size as usize,
-        )?;
+    println!("determine blocks for large io");
+    let biggest_io_in_blocks = {
+        let crucible_max_io =
+            crucible_protocol::CrucibleEncoder::max_io_blocks(
+                ri.block_size as usize,
+            )?;
 
-    for block_index in 0..(ri.total_blocks - biggest_io_in_blocks) {
+        if crucible_max_io < ri.total_blocks {
+            crucible_max_io
+        } else {
+            println!(
+                "Volume total blocks {} smaller than max IO blocks {}",
+                ri.total_blocks, crucible_max_io,
+            );
+            ri.total_blocks
+        }
+    };
+
+    println!(
+        "Using {} as the largest single IO (in blocks)",
+        biggest_io_in_blocks
+    );
+    let mut block_index = 0;
+    while block_index < ri.total_blocks {
         let offset =
             Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-        let sz = biggest_io_in_blocks * (ri.block_size as usize);
-        let mut data = Vec::with_capacity(sz);
-        data.resize(sz, 1);
+        let next_io_blocks =
+            if block_index + biggest_io_in_blocks > ri.total_blocks {
+                ri.total_blocks - block_index
+            } else {
+                biggest_io_in_blocks
+            };
+
+        for i in 0..next_io_blocks {
+            ri.write_count[block_index + i] += 1;
+        }
+
+        let vec = fill_vec(
+            block_index,
+            next_io_blocks,
+            &ri.write_count,
+            ri.block_size,
+        );
+        let data = Bytes::from(vec);
 
         println!(
             "IO at block:{}  size in blocks:{}",
-            block_index, biggest_io_in_blocks
+            block_index, next_io_blocks
         );
 
-        let mut waiter = guest.write(offset, Bytes::from(data))?;
+        let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
+
+        block_index += next_io_blocks;
     }
 
     Ok(())
