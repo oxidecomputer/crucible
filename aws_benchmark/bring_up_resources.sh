@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -o errexit
 set -o pipefail
 
@@ -46,6 +46,12 @@ source .venv/bin/activate
 
 if ! pip show ansible;
 then
+    os_name=$(uname)
+    if [[ "$os_name" == 'Darwin' ]]; then
+        echo "Setting CPP flags for openssl on Mac"
+        export CPPFLAGS=-I/usr/local/opt/openssl/include
+        export LDFLAGS=-L/usr/local/opt/openssl/lib
+    fi
     pip install "ansible==5.0.1"
 fi
 

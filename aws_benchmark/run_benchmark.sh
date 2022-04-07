@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -o errexit
 set -o pipefail
 
@@ -16,10 +16,9 @@ do
 done
 
 ## 25 (or user configurable) real runs
-rm results.txt
+rm -f results.txt
 for i in $(seq 1 "${RUNS:-25}");
 do
     ssh -o "StrictHostKeyChecking no" "${user}@$(terraform output -raw upstairs_ip)" \
         "cd /opt/crucible/ && /usr/bin/time -p ./bench.sh 2>&1" | tee -a results.txt
 done
-
