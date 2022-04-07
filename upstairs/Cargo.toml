@@ -39,6 +39,8 @@ aes-gcm-siv = "0.10.3"
 rand_chacha = "0.3.1"
 reqwest = { version = "0.11.10", features = ["default", "blocking" ] }
 
-
 [dev-dependencies]
 tokio-test = "*"
+
+[build-dependencies]
+version_check = "0.9.4"

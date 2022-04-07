@@ -1,5 +1,10 @@
 // Copyright 2021 Oxide Computer Company
-#![feature(asm)]
+#![cfg_attr(not(usdt_stable_asm), feature(asm))]
+#![cfg_attr(
+    all(target_os = "macos", not(usdt_stable_asm_sym)),
+    feature(asm_sym)
+)]
+
 use futures::executor;
 use futures::lock::{Mutex, MutexGuard};
 use std::collections::HashMap;

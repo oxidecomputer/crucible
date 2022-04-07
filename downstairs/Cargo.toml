@@ -45,6 +45,9 @@ sha2 = "0.10"
 tempfile = "3"
 rand_chacha = "0.3.1"
 
+[build-dependencies]
+version_check = "0.9.4"
+
 [features]
 default = []
 zfs_snapshot = []
