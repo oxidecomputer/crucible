@@ -25,7 +25,6 @@ program_required virtualenv
 program_required python3
 program_required pip
 program_required aws
-program_required ansible-playbook
 
 # bring up resources, run the benchmark, and clean up
 ./bring_up_resources.sh "${OS}" "${REGION}"
