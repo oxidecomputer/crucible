@@ -33,7 +33,7 @@ tokio-rustls = { version = "0.23.3" }
 tracing = "0.1.32"
 toml = "0.5"
 opentelemetry = "0.17.0"
-opentelemetry-jaeger = { version = "0.15.0" }
+opentelemetry-jaeger = { version = "0.16.0" }
 tracing-subscriber = "0.3.9"
 tracing-opentelemetry = "0.16.0"
 uuid = { version = "0.8", features = [ "serde", "v4" ] }
