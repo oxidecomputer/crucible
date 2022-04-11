@@ -196,9 +196,19 @@ else
     echo "dump test passed"
 fi
 
-args+=( -e 1 )
-echo "$cds" dump "${args[@]}"
-if ! "$cds" dump "${args[@]}"; then
+echo "$cds" dump "${args[@]}" -e 1
+if ! "$cds" dump "${args[@]}" -e 1; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed crucible-client dump test 2"
+    echo "Failed crucible-client dump test 2" >> /tmp/test_fail.txt
+    echo ""
+else
+    echo "dump test 2 passed"
+fi
+
+echo "$cds" dump "${args[@]}" -b 20
+if ! "$cds" dump "${args[@]}" -b 20 ; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test 2"
