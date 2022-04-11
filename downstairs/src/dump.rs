@@ -71,7 +71,6 @@ pub fn dump_region(
                             total_extents as u64 * blocks_per_extent - 1,
                         );
                     }
-                    println!("block {} is extent {}", b, ce);
                     cmp_extent = Some(ce);
                 }
             }
