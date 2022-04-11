@@ -5,122 +5,6 @@
     "version": "1"
   },
   "paths": {
-    "/extent/{eid}/data": {
-      "get": {
-        "summary": "Stream the contents of the data file for the given extent ID",
-        "operationId": "get_extent",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "eid",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "style": "simple"
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": "",
-            "content": {
-              "*/*": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/extent/{eid}/db": {
-      "get": {
-        "summary": "Stream the contents of the metadata .db file for the given extent ID",
-        "operationId": "get_db",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "eid",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "style": "simple"
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": "",
-            "content": {
-              "*/*": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/extent/{eid}/db-shm": {
-      "get": {
-        "summary": "Stream the contents of the metadata .db-shm file for the given extent ID",
-        "operationId": "get_shm",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "eid",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "style": "simple"
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": "",
-            "content": {
-              "*/*": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/extent/{eid}/db-wal": {
-      "get": {
-        "summary": "Stream the contents of the metadata .db-wal file for the given extent ID",
-        "operationId": "get_wal",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "eid",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "style": "simple"
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": "",
-            "content": {
-              "*/*": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
     "/extent/{eid}/files": {
       "get": {
         "summary": "For a given extent, return a vec of strings representing the names of",
@@ -155,6 +39,43 @@
           },
           "5XX": {
             "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/newextent/{eid}/{fileType}": {
+      "get": {
+        "operationId": "get_extent_file",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "eid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "fileType",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/FileType"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": "",
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            }
           }
         }
       }
@@ -205,6 +126,15 @@
         },
         "required": [
           "files"
+        ]
+      },
+      "FileType": {
+        "type": "string",
+        "enum": [
+          "data",
+          "db",
+          "db-shm",
+          "db-wal"
         ]
       }
     }

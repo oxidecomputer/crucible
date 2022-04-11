@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::fmt;
 use std::fs::{rename, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
@@ -12,6 +13,7 @@ use anyhow::{bail, Result};
 use crucible_common::*;
 use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use futures::TryStreamExt;
+use repair_client::types::FileType;
 use repair_client::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -409,10 +411,44 @@ impl Default for ExtentMeta {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ExtentExtension {
+    Db,
+    DbShm,
+    DbWal,
+}
+
+impl fmt::Display for ExtentExtension {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ExtentExtension::Db => write!(f, "db"),
+            ExtentExtension::DbShm => write!(f, "db-shm"),
+            ExtentExtension::DbWal => write!(f, "db-wal"),
+        }
+    }
+}
+
+/**
+ * Take an ExtentExtension and translate it into the corresponding
+ * FileType from the repair client.
+ */
+impl ExtentExtension {
+    fn to_file_type(&self) -> FileType {
+        match self {
+            ExtentExtension::Db => FileType::Db,
+            ExtentExtension::DbShm => FileType::DbShm,
+            ExtentExtension::DbWal => FileType::DbWal,
+        }
+    }
+}
+
 /**
  * Produce the string name of the data file for a given extent number
  */
-pub fn extent_file_name(number: u32, extension: Option<&str>) -> String {
+pub fn extent_file_name(
+    number: u32,
+    extension: Option<ExtentExtension>,
+) -> String {
     if let Some(extension) = extension {
         format!("{:03X}.{}", number & 0xFFF, extension)
     } else {
@@ -507,31 +543,27 @@ pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
 }
 
 /**
- * Validate a list of repair files.
+ * Validate a list of sorted repair files.
  * There are either two or four files we expect to find, any more or less
- * and we have a bad list.
+ * and we have a bad list.  No duplicates.
  */
 pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
     println!("validate {} with {:?}", eid, files);
-    let count = files.len();
-    if count != 4 && count != 2 {
-        false
-    } else {
-        let eid = eid as u32;
-        for ss in files.iter() {
-            match &*ss {
-                d if *d == extent_file_name(eid, None)
-                    || *d == extent_file_name(eid, Some("db")) => {}
-                d if count == 4
-                    && (*d == extent_file_name(eid, Some("db-shm"))
-                        || *d == extent_file_name(eid, Some("db-wal"))) => {}
-                _ => {
-                    return false;
-                }
-            }
-        }
-        true
-    }
+    let eid = eid as u32;
+
+    let some = vec![
+        extent_file_name(eid, None),
+        extent_file_name(eid, Some(ExtentExtension::Db)),
+    ];
+
+    let mut all = some.clone();
+    all.extend(vec![
+        extent_file_name(eid, Some(ExtentExtension::DbShm)),
+        extent_file_name(eid, Some(ExtentExtension::DbWal)),
+    ]);
+
+    // Either we have some or all.
+    files == some || files == all
 }
 
 impl Extent {
@@ -753,12 +785,13 @@ impl Extent {
     fn create_copy_file(
         &self,
         mut copy_dir: PathBuf,
-        extension: Option<&str>,
+        extension: Option<ExtentExtension>,
     ) -> Result<File> {
         let name = extent_file_name(self.number, None);
         copy_dir.push(name);
         if let Some(extension) = extension {
-            copy_dir.set_extension(extension);
+            let ext = format!("{}", extension);
+            copy_dir.set_extension(ext);
         }
         let copy_path = copy_dir;
 
@@ -1161,9 +1194,9 @@ impl Region {
      * 13. fsync extent dir again (so dir rename is persisted)
      *
      *  This also requires the following behavior on every extent open:
-     *   A. If xxx.Copy directory found, delete it.
-     *   B. If xxx.Completed directory found, delete it.
-     *   C. If xxx.Replace dir found start at step 4 above and continue
+     *   A. If xxx.copy directory found, delete it.
+     *   B. If xxx.completed directory found, delete it.
+     *   C. If xxx.replace dir found start at step 4 above and continue
      *      on through 6.
      *   D. Only then, open extent.
      */
@@ -1200,9 +1233,11 @@ impl Region {
         eid: usize,
         repair_addr: SocketAddr,
     ) -> Result<(), CrucibleError> {
+        // An extent must be closed before we replace its files.
         assert!(self.extents[eid].inner.is_none());
-        // Make sure copy, replace, cleanup dirs don't exist yet.
-        // We don't need them yet, but if they exist, then something
+
+        // Make sure copy, replace, and cleanup directories don't exist yet.
+        // We don't need them yet, but if they do exist, then something
         // is wrong.
         let rd = replace_dir(&self.dir, eid as u32);
         if rd.exists() {
@@ -1220,13 +1255,14 @@ impl Region {
         let url = format!("http://{:?}", repair_addr);
         let repair_server = Client::new(&url);
 
-        let repair_files = repair_server
+        let mut repair_files = repair_server
             .get_files_for_extent(eid as u32)
             .await
             .unwrap()
             .into_inner()
             .files;
 
+        repair_files.sort();
         println!("Found repair files: {:?}", repair_files);
 
         // The repair file list should always contain the extent data
@@ -1237,36 +1273,39 @@ impl Region {
             panic!("Invalid repair file list: {:?}", repair_files);
         }
 
+        // First, copy the main extent data file.
         let extent_copy =
             extent.create_copy_file(copy_dir.clone(), None).unwrap();
-        let repair_stream = repair_server.get_extent(eid as u32).await.unwrap();
+        let repair_stream = repair_server
+            .get_extent_file(eid as u32, FileType::Data)
+            .await
+            .unwrap();
         save_stream_to_file(extent_copy, repair_stream.into_inner()).await?;
 
+        // The .db file is also required to exist for any valid extent.
         let extent_db = extent
-            .create_copy_file(copy_dir.clone(), Some("db"))
+            .create_copy_file(copy_dir.clone(), Some(ExtentExtension::Db))
             .unwrap();
-        let repair_stream = repair_server.get_db(eid as u32).await.unwrap();
+        let repair_stream = repair_server
+            .get_extent_file(eid as u32, FileType::Db)
+            .await
+            .unwrap();
         save_stream_to_file(extent_db, repair_stream.into_inner()).await?;
 
         // These next two are optional.
-        let filename = extent_file_name(eid as u32, Some("db-shm"));
-        if repair_files.contains(&filename) {
-            let extent_shm = extent
-                .create_copy_file(copy_dir.clone(), Some("db-shm"))
-                .unwrap();
-            let repair_stream =
-                repair_server.get_shm(eid as u32).await.unwrap();
-            save_stream_to_file(extent_shm, repair_stream.into_inner()).await?;
-        }
-
-        let filename = extent_file_name(eid as u32, Some("db-wal"));
-        if repair_files.contains(&filename) {
-            let extent_wal = extent
-                .create_copy_file(copy_dir.clone(), Some("db-wal"))
-                .unwrap();
-            let repair_stream =
-                repair_server.get_wal(eid as u32).await.unwrap();
-            save_stream_to_file(extent_wal, repair_stream.into_inner()).await?;
+        for opt_file in &[ExtentExtension::DbShm, ExtentExtension::DbWal] {
+            let filename = extent_file_name(eid as u32, Some(opt_file.clone()));
+            if repair_files.contains(&filename) {
+                let extent_shm = extent
+                    .create_copy_file(copy_dir.clone(), Some(opt_file.clone()))
+                    .unwrap();
+                let repair_stream = repair_server
+                    .get_extent_file(eid as u32, opt_file.to_file_type())
+                    .await
+                    .unwrap();
+                save_stream_to_file(extent_shm, repair_stream.into_inner())
+                    .await?;
+            }
         }
 
         // After we have all files: move the repair dir.
@@ -1586,7 +1625,7 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     assert!(Path::new(&replace_dir).exists());
     assert!(!Path::new(&completed_dir).exists());
 
-    println!("Move stuff from {:?} in {:?}", replace_dir, destination_dir,);
+    println!("Copy files from {:?} in {:?}", replace_dir, destination_dir,);
 
     // Setup the original and replacement file names.
     let mut new_file = replace_dir.clone();
@@ -2100,6 +2139,38 @@ mod test {
     }
 
     #[test]
+    fn validate_repair_files_duplicate() {
+        // duplicate file names for extent 2
+        let good_files: Vec<String> =
+            vec!["002".to_string(), "002".to_string()];
+        assert_eq!(validate_repair_files(2, &good_files), false);
+    }
+
+    #[test]
+    fn validate_repair_files_duplicate_pair() {
+        // duplicate file names for extent 2
+        let good_files: Vec<String> = vec![
+            "002".to_string(),
+            "002".to_string(),
+            "002.db".to_string(),
+            "002.db".to_string(),
+        ];
+        assert_eq!(validate_repair_files(2, &good_files), false);
+    }
+
+    #[test]
+    fn validate_repair_files_quad_duplicate() {
+        // This is an expected list of files for an extent
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-shm".to_string(),
+        ];
+        assert_eq!(validate_repair_files(1, &good_files), false);
+    }
+
+    #[test]
     fn validate_repair_files_offbyon() {
         // Incorrect file names for extent 2
         let good_files: Vec<String> = vec![
@@ -2266,7 +2337,21 @@ mod test {
     }
     #[test]
     fn extent_name_basic_ext() {
-        assert_eq!(extent_file_name(4, Some("db")), "004.db");
+        assert_eq!(extent_file_name(4, Some(ExtentExtension::Db)), "004.db");
+    }
+    #[test]
+    fn extent_name_basic_ext_shm() {
+        assert_eq!(
+            extent_file_name(4, Some(ExtentExtension::DbShm)),
+            "004.db-shm"
+        );
+    }
+    #[test]
+    fn extent_name_basic_ext_wal() {
+        assert_eq!(
+            extent_file_name(4, Some(ExtentExtension::DbWal)),
+            "004.db-wal"
+        );
     }
     #[test]
     fn extent_name_basic_two() {

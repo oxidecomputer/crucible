@@ -18,7 +18,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::*;
-use crate::region::{extent_dir, extent_file_name, extent_path};
+use crate::region::{
+    extent_dir, extent_file_name, extent_path, ExtentExtension,
+};
 
 /**
  * Our context is the root of the region we want to serve.
@@ -35,10 +37,7 @@ pub fn build_api(
     show: bool,
 ) -> Result<ApiDescription<FileServerContext>, String> {
     let mut api = ApiDescription::new();
-    api.register(get_extent).unwrap();
-    api.register(get_db).unwrap();
-    api.register(get_shm).unwrap();
-    api.register(get_wal).unwrap();
+    api.register(get_extent_file).unwrap();
     api.register(get_files_for_extent).unwrap();
 
     if show {
@@ -109,82 +108,55 @@ pub struct Eid {
     eid: u32,
 }
 
-/**
- * Stream the contents of the data file for the given extent ID
- */
-#[endpoint {
-    method = GET,
-    path = "/extent/{eid}/data",
-    unpublished = false,
-}]
-async fn get_extent(
-    rqctx: Arc<RequestContext<FileServerContext>>,
-    path: Path<Eid>,
-) -> Result<Response<Body>, HttpError> {
-    let eid = path.into_inner().eid;
-    let extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
-
-    get_file(extent_path).await
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FileType {
+    #[serde(rename = "data")]
+    Data,
+    #[serde(rename = "db")]
+    Database,
+    #[serde(rename = "db-shm")]
+    DatabaseSharedMemory,
+    #[serde(rename = "db-wal")]
+    DatabaseLog,
 }
 
-/**
- * Stream the contents of the metadata .db file for the given extent ID
- */
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSpec {
+    eid: u32,
+    file_type: FileType,
+}
+
 #[endpoint {
     method = GET,
-    path = "/extent/{eid}/db",
-    unpublished = false,
+    path = "/newextent/{eid}/{fileType}",
 }]
-async fn get_db(
+async fn get_extent_file(
     rqctx: Arc<RequestContext<FileServerContext>>,
-    path: Path<Eid>,
+    path: Path<FileSpec>,
 ) -> Result<Response<Body>, HttpError> {
-    let eid = path.into_inner().eid;
+    let fs = path.into_inner();
+    let eid = fs.eid;
+
     let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
-    extent_path.set_extension("db");
+    match fs.file_type {
+        FileType::Database => {
+            extent_path.set_extension("db");
+        }
+        FileType::DatabaseSharedMemory => {
+            extent_path.set_extension("db-wal");
+        }
+        FileType::DatabaseLog => {
+            extent_path.set_extension("db-shm");
+        }
+        FileType::Data => (),
+    };
 
-    get_file(extent_path).await
+    get_a_file(extent_path).await
 }
 
-/**
- * Stream the contents of the metadata .db-shm file for the given extent ID
- */
-#[endpoint {
-    method = GET,
-    path = "/extent/{eid}/db-shm",
-    unpublished = false,
-}]
-async fn get_shm(
-    rqctx: Arc<RequestContext<FileServerContext>>,
-    path: Path<Eid>,
-) -> Result<Response<Body>, HttpError> {
-    let eid = path.into_inner().eid;
-    let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
-    extent_path.set_extension("db-shm");
-
-    get_file(extent_path).await
-}
-
-/**
- * Stream the contents of the metadata .db-wal file for the given extent ID
- */
-#[endpoint {
-    method = GET,
-    path = "/extent/{eid}/db-wal",
-    unpublished = false,
-}]
-async fn get_wal(
-    rqctx: Arc<RequestContext<FileServerContext>>,
-    path: Path<Eid>,
-) -> Result<Response<Body>, HttpError> {
-    let eid = path.into_inner().eid;
-    let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
-    extent_path.set_extension("db-wal");
-
-    get_file(extent_path).await
-}
-
-async fn get_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
+async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
     println!("Request for file {:?}", path);
     /*
      * Make sure our file is neither a link nor a directory.
@@ -224,7 +196,6 @@ struct ExtentFiles {
 #[endpoint {
     method = GET,
     path = "/extent/{eid}/files",
-    unpublished = false,
 }]
 async fn get_files_for_extent(
     rqctx: Arc<RequestContext<FileServerContext>>,
@@ -248,38 +219,34 @@ async fn get_files_for_extent(
     }
 }
 
+/**
+ * Return the list of extent files we have in our region directory
+ * that correspond to the given extent.  Return an error if any
+ * of the required files are missing.
+ */
 async fn extent_file_list(
     extent_dir: PathBuf,
     eid: u32,
 ) -> Result<ExtentFiles, HttpError> {
-    let mut full_name = extent_dir;
-
-    let extent_name = extent_file_name(eid, None);
-    full_name.push(extent_name.clone());
     let mut files = Vec::new();
-    // The data file should always exist
-    if !full_name.exists() {
-        return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
-    }
-    files.push(extent_name);
-    // The db file should always exist.
-    full_name.set_extension("db");
-    if !full_name.exists() {
-        return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
-    }
-    files.push(extent_file_name(eid, Some("db")));
+    let possible_files = vec![
+        (extent_file_name(eid, None), true),
+        (extent_file_name(eid, Some(ExtentExtension::Db)), true),
+        (extent_file_name(eid, Some(ExtentExtension::DbShm)), false),
+        (extent_file_name(eid, Some(ExtentExtension::DbWal)), false),
+    ];
 
-    // The db-shm file may exist.
-    full_name.set_extension("db-shm");
-    if full_name.exists() {
-        println!("Exists: {:?}", full_name.file_name().unwrap());
-        files.push(extent_file_name(eid, Some("db-shm")));
+    for (file, required) in possible_files.into_iter() {
+        let mut fullname = extent_dir.clone();
+        fullname.push(file.clone());
+        if fullname.exists() {
+            files.push(file);
+        } else if required {
+            println!("Needed file {} is missing", file);
+            return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
+        }
     }
-    // The db-wal file may exist.
-    full_name.set_extension("db-wal");
-    if full_name.exists() {
-        files.push(extent_file_name(eid, Some("db-wal")));
-    }
+
     Ok(ExtentFiles { files })
 }
 
@@ -310,8 +277,8 @@ mod test {
         region.extend(3)?;
 
         // Determine the directory and name for expected extent files.
-        let extent_dir = extent_dir(&dir, 1);
-        let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
+        let ed = extent_dir(&dir, 1);
+        let mut ex_files = extent_file_list(ed, 1).await.unwrap();
         ex_files.files.sort();
         let expected = vec!["001", "001.db", "001.db-shm", "001.db-wal"];
         println!("files: {:?}", ex_files.files);
@@ -380,6 +347,49 @@ mod test {
         let expected = vec!["001", "001.db"];
         println!("files: {:?}", ex_files.files);
         assert_eq!(ex_files.files, expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extent_expected_files_fail() -> Result<()> {
+        // Verify that we get an error if the expected extent.db file
+        // is missing.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        // Determine the directory and name for expected extent files.
+        let extent_dir = extent_dir(&dir, 2);
+
+        // Delete db
+        let mut rm_file = extent_dir.clone();
+        rm_file.push(extent_file_name(2, None));
+        rm_file.set_extension("db");
+        std::fs::remove_file(&rm_file).unwrap();
+
+        assert!(extent_file_list(extent_dir, 2).await.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extent_expected_files_fail_two() -> Result<()> {
+        // Verify that we get an error if the expected extent file
+        // is missing.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        // Determine the directory and name for expected extent files.
+        let extent_dir = extent_dir(&dir, 1);
+
+        // Delete db
+        let mut rm_file = extent_dir.clone();
+        rm_file.push(extent_file_name(1, None));
+        std::fs::remove_file(&rm_file).unwrap();
+
+        assert!(extent_file_list(extent_dir, 1).await.is_err());
 
         Ok(())
     }
