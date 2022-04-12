@@ -18,10 +18,13 @@ struct ExtInfo {
  */
 pub fn dump_region(
     region_dir: Vec<PathBuf>,
-    cmp_extent: Option<u32>,
+    mut cmp_extent: Option<u32>,
     block: Option<u64>,
     only_show_differences: bool,
 ) -> Result<()> {
+    if cmp_extent.is_some() && block.is_some() {
+        bail!("Either a specific block, or a specific extent, not both");
+    }
     /*
      * We are building a two level hashmap.
      * The first level index is the extent number.
@@ -35,6 +38,7 @@ pub fn dump_region(
     let mut blocks_per_extent = 0;
     let mut total_extents = 0;
 
+    assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
         let region = Region::open(&dir, Default::default(), false, true)?;
@@ -50,6 +54,26 @@ pub fn dump_region(
          */
         for e in &region.extents {
             let en = e.number();
+
+            /*
+             * If we want just a specific block, then figure out what extent
+             * that block belongs to so we can just display the
+             * requested information. We only need to do this
+             * once.
+             */
+            if cmp_extent.is_none() {
+                if let Some(b) = block {
+                    let ce = (b / blocks_per_extent) as u32;
+                    if ce >= total_extents {
+                        bail!(
+                            "Requested block {} > max block {}",
+                            b,
+                            total_extents as u64 * blocks_per_extent - 1,
+                        );
+                    }
+                    cmp_extent = Some(ce);
+                }
+            }
 
             /*
              * If we are looking at one extent in detail, we skip all the
@@ -108,18 +132,11 @@ pub fn dump_region(
          * If we only want details about one block, show that
          */
         if let Some(block) = block {
-            if block >= blocks_per_extent {
-                bail!(
-                    "Requested block {} is higher than {}!",
-                    block,
-                    blocks_per_extent
-                );
-            }
-
             return show_extent_block(
                 region_dir,
                 ce,
                 block,
+                blocks_per_extent,
                 only_show_differences,
             );
         }
@@ -142,6 +159,7 @@ pub fn dump_region(
     ext_num.sort_unstable();
 
     print!("EXT ");
+    print!("   BLOCKS");
     for i in 0..dir_count {
         print!(" GEN{}", i);
     }
@@ -200,6 +218,11 @@ pub fn dump_region(
             }
 
             print!("{:3} ", en);
+            print!(
+                "{:04}-{:04}",
+                blocks_per_extent * (**en as u64),
+                blocks_per_extent * (**en as u64) + blocks_per_extent - 1
+            );
 
             let color = color_vec(&gen_vec);
             for i in 0..dir_count {
@@ -480,8 +503,9 @@ fn show_extent(
         let different = data_different || ec_different || hashes_different;
 
         // Now that we have collected all the results, print them
+        let real_block = (blocks_per_extent * cmp_extent as u64) + block;
         if !only_show_differences || different {
-            print!("{:5} ", block);
+            print!("{:5} ", real_block);
 
             for column in data_columns.iter().take(dir_count) {
                 print!("  {}", column);
@@ -523,9 +547,14 @@ fn show_extent_block(
     region_dir: Vec<PathBuf>,
     cmp_extent: u32,
     block: u64,
+    blocks_per_extent: u64,
     only_show_differences: bool,
 ) -> Result<()> {
-    println!("Extent {} Block {}", cmp_extent, block);
+    let block_in_extent = block % blocks_per_extent;
+    println!(
+        "Extent {} Block in extent {}  Actual block {}",
+        cmp_extent, block_in_extent, block,
+    );
     println!();
 
     let dir_count = region_dir.len();
@@ -546,7 +575,7 @@ fn show_extent_block(
 
         let mut responses = region.region_read(&[ReadRequest {
             eid: cmp_extent as u64,
-            offset: Block::new_with_ddef(block, &region.def()),
+            offset: Block::new_with_ddef(block_in_extent, &region.def()),
             num_blocks: 1,
         }])?;
         let response = responses.pop().unwrap();
