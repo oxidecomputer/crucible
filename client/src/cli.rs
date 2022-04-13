@@ -34,6 +34,8 @@ enum CliCommand {
         #[structopt(long, short, default_value = "1")]
         gen: u64,
     },
+    /// Commit the current write_log data to the minimum expected counts.
+    Commit,
     /// Deactivate the upstairs
     Deactivate,
     /// Report the expected read count for an offset.
@@ -89,7 +91,7 @@ enum CliCommand {
  * Verify the data is as we expect using the client based validation.
  * Note that if you have not written to a block yet and you are not
  * importing a verify file, this will default to passing.  Only when
- * there is non zero data in the ri.write_count will we have something
+ * there is non zero data in the ri.write_log will we have something
  * to verify against.
  *
  * After verify, we truncate the data to 10 fields and return that so
@@ -115,7 +117,7 @@ fn cli_read(
     waiter.block_wait()?;
 
     let mut dl = data.as_vec().to_vec();
-    if !validate_vec(dl.clone(), block_index, &ri.write_count, ri.block_size) {
+    if !validate_vec(dl.clone(), block_index, &ri.write_log, ri.block_size) {
         println!("Data mismatch error at {}", block_index);
         Err(CrucibleError::GenericError("Data mismatch".to_string()))
     } else {
@@ -167,9 +169,9 @@ fn cli_write(
     /*
      * Update the write count for the block we plan to write to.
      */
-    ri.write_count[block_index] += 1;
+    ri.write_log.update_wc(block_index);
 
-    let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
+    let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
     let data = Bytes::from(vec);
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
@@ -202,6 +204,9 @@ async fn cmd_to_msg(
         }
         CliCommand::Activate { gen } => {
             fw.send(CliMessage::Activate(gen)).await?;
+        }
+        CliCommand::Commit => {
+            fw.send(CliMessage::Commit).await?;
         }
         CliCommand::Deactivate => {
             fw.send(CliMessage::Deactivate).await?;
@@ -453,13 +458,24 @@ async fn process_cli_command(
             },
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
+        CliMessage::Commit => {
+            if ri.write_log.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                ri.write_log.commit();
+                fw.send(CliMessage::DoneOk).await
+            }
+        }
         CliMessage::Expected(offset) => {
             if !*wc_filled {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Internal write count buffer not filled".to_string(),
                 )))
                 .await
-            } else if ri.write_count.is_empty() {
+            } else if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Internal write count buffer empty".to_string(),
                 )))
@@ -467,12 +483,12 @@ async fn process_cli_command(
             } else {
                 let mut vec: Vec<u8> = vec![255; 2];
                 vec[0] = (offset % 255) as u8;
-                vec[1] = (ri.write_count[offset] % 255) as u8;
+                vec[1] = (ri.write_log.get_seed(offset) % 255) as u8;
                 fw.send(CliMessage::ExpectedResponse(offset, vec)).await
             }
         }
         CliMessage::Export => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -480,7 +496,7 @@ async fn process_cli_command(
             } else if let Some(vo) = verify_output {
                 println!("Exporting write history to {:?}", vo);
                 let cp = history_file(vo.clone());
-                match write_json(&cp, &ri.write_count, true) {
+                match write_json(&cp, &ri.write_log, true) {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         println!("Failed writing to {:?} with {}", vo, e);
@@ -498,7 +514,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::Generic => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -515,7 +531,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::Fill => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -554,13 +570,10 @@ async fn process_cli_command(
                      * it again.
                      */
                     if !*wc_filled {
-                        update_region_info(
-                            guest,
-                            ri,
-                            verify_input.clone(),
-                            false,
-                        )?;
-                        *wc_filled = true;
+                        if let Some(vi) = verify_input {
+                            load_write_log(guest, ri, vi, false)?;
+                            *wc_filled = true;
+                        }
                     }
                     fw.send(CliMessage::Info(bs, es, ts)).await
                 }
@@ -568,7 +581,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::RandRead => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -584,7 +597,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::RandWrite => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -597,7 +610,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::Read(offset, len) => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -608,7 +621,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::Write(offset, len) => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -625,7 +638,7 @@ async fn process_cli_command(
             fw.send(CliMessage::MyUuid(uuid)).await
         }
         CliMessage::Verify => {
-            if ri.write_count.is_empty() {
+            if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
@@ -678,7 +691,7 @@ pub async fn start_cli_server(
     let listener = TcpListener::bind(&listen_on).await?;
 
     /*
-     * If write_count len is zero, then the RegionInfo has
+     * If write_log len is zero, then the RegionInfo has
      * not been filled.
      */
     let mut ri: RegionInfo = RegionInfo {
@@ -686,7 +699,7 @@ pub async fn start_cli_server(
         extent_size: Block::new_512(0),
         total_size: 0,
         total_blocks: 0,
-        write_count: Vec::new(),
+        write_log: WriteLog::new(0),
         max_block_io: 0,
     };
     /*

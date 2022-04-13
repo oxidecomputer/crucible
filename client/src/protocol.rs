@@ -18,6 +18,8 @@ use crucible_common::CrucibleError;
 pub enum CliMessage {
     Activate(u64),
     ActiveIs(bool),
+    // Tell the cliserver to commit the current write log
+    Commit,
     Deactivate,
     // Generic command success
     DoneOk,
@@ -216,6 +218,13 @@ mod tests {
     #[test]
     fn rt_activate() -> Result<()> {
         let input = CliMessage::Activate(99);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_commit() -> Result<()> {
+        let input = CliMessage::Commit;
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
