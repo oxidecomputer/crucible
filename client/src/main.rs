@@ -11,6 +11,7 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use tokio::runtime::Builder;
+use tokio::time::{Duration, Instant};
 
 mod cli;
 mod protocol;
@@ -48,6 +49,14 @@ enum Workload {
     Generic,
     Nothing,
     One,
+    Perf {
+        /// Size in blocks of each IO
+        #[structopt(long, default_value = "1")]
+        io_size: usize,
+        /// Number of outstanding IOs at the same time.
+        #[structopt(long, default_value = "1")]
+        io_depth: usize,
+    },
     Rand,
     Repair,
     Span,
@@ -335,8 +344,8 @@ fn main() -> Result<()> {
         guest.activate(opt.gen)?;
     }
 
-    println!("Wait for a show_work command to finish before sending IO");
-    guest.show_work()?;
+    println!("Wait for a query_work_queue command to finish before sending IO");
+    guest.query_work_queue()?;
     /*
      * Create the interactive input scope that will generate and send
      * work to the Crucible thread that listens to work from outside
@@ -477,6 +486,28 @@ fn main() -> Result<()> {
         Workload::One => {
             println!("One test");
             runtime.block_on(one_workload(&guest, &mut region_info))?;
+        }
+        Workload::Perf { io_size, io_depth } => {
+            println!("Perf test");
+            let ops = {
+                if opt.count == 0 {
+                    1000_usize
+                } else {
+                    opt.count as usize
+                }
+            };
+            for _ in 0..2 {
+                runtime.block_on(perf_workload(
+                    &guest,
+                    &mut region_info,
+                    ops,
+                    io_depth,
+                    io_size,
+                ))?;
+            }
+            if opt.quit {
+                return Ok(());
+            }
         }
         Workload::Nothing => {
             println!("Do nothing test, just start");
@@ -1017,6 +1048,154 @@ async fn dirty_workload(
     Ok(())
 }
 
+/*
+ * Display the summary results from a perf run.
+ */
+fn perf_summary(
+    msg: &str,
+    count: usize,
+    io_depth: usize,
+    times: Vec<Duration>,
+    total_time: Duration,
+) {
+    // Convert all the Durations into floats.
+    let mut times = times
+        .iter()
+        .map(|x| x.as_secs() as f32 + (x.subsec_nanos() as f32 / 1e9))
+        .collect::<Vec<f32>>();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Determine the number of seconds as a float elapsed to perform
+    // all the IOs. Then, divide the total operations performed to get
+    // the average IOPs
+    let time_f =
+        total_time.as_secs() as f32 + (total_time.subsec_nanos() as f32 / 1e9);
+
+    println!(
+        "{}:{:.2}sec {} {} iops:{:.2} \
+        mean:{:.5} stdv:{:.5} \
+        min:{:.5} max:{:.5}",
+        msg,
+        time_f,
+        count,
+        io_depth,
+        count as f32 / time_f,
+        statistical::mean(&times),
+        statistical::standard_deviation(&times, None),
+        times.first().unwrap(),
+        times.last().unwrap(),
+    );
+}
+
+/**
+ * A simple IO test in two stages: 100% random writes, then 100% random
+ * reads. The caller can select:
+ * io_depth: The number of outstanding IOs issued at a time
+ * blocks_per_io: The size of each io (in multiple of block size).
+ * count: The number of loops to perform for each test (all IOs in io_depth
+ *        are considered as a single loop).
+ * A summary is printed at the end of each stage.
+ */
+async fn perf_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    count: usize,
+    io_depth: usize,
+    blocks_per_io: usize,
+) -> Result<()> {
+    let mut rng = rand::thread_rng();
+    let io_size = blocks_per_io * ri.block_size as usize;
+
+    let write_buffers: Vec<Bytes> = (0..io_depth)
+        .map(|_| {
+            Bytes::from(
+                (0..io_size)
+                    .map(|_| rng.sample(rand::distributions::Standard))
+                    .collect::<Vec<u8>>(),
+            )
+        })
+        .collect();
+    let read_buffers: Vec<Buffer> = (0..io_depth)
+        .map(|_| Buffer::new(io_size as usize))
+        .collect();
+
+    println!(
+        "Performance test io_size:({}){} io_depth:{} total ops:{}",
+        blocks_per_io, io_size, io_depth, count,
+    );
+    // To make a random block offset modulus, we take the total
+    // block number and subtract the IO size in blocks.
+    let offset_mod =
+        rng.gen::<u64>() % (ri.total_blocks - blocks_per_io) as u64;
+
+    let mut wtime = Vec::with_capacity(count);
+    let big_start = Instant::now();
+    for _ in 0..count {
+        let burst_start = Instant::now();
+        let mut write_waiters = Vec::with_capacity(io_depth);
+        for write_buffer in write_buffers.iter().take(io_depth) {
+            let offset: u64 = rng.gen::<u64>() % offset_mod;
+            // println!("Write at: {}", offset);
+
+            let waiter = guest.write_to_byte_offset(
+                offset * ri.block_size,
+                write_buffer.clone(),
+            )?;
+            write_waiters.push(waiter);
+        }
+
+        for mut waiter in write_waiters {
+            waiter.block_wait()?;
+        }
+        wtime.push(burst_start.elapsed());
+    }
+    let big_end = big_start.elapsed();
+
+    guest.flush(None)?;
+    perf_summary("rwrites", count, io_depth, wtime, big_end);
+
+    // Before we start reads, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue()?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    let mut rtime = Vec::with_capacity(count);
+    let big_start = Instant::now();
+    for _ in 0..count {
+        let burst_start = Instant::now();
+        let mut read_waiters = Vec::with_capacity(io_depth);
+        for read_buffer in read_buffers.iter().take(io_depth) {
+            let offset: u64 = rng.gen::<u64>() % offset_mod;
+
+            let waiter = guest.read_from_byte_offset(
+                offset * ri.block_size,
+                read_buffer.clone(),
+            )?;
+            read_waiters.push(waiter);
+        }
+        for mut waiter in read_waiters {
+            waiter.block_wait()?;
+        }
+        rtime.push(burst_start.elapsed());
+    }
+    let big_end = big_start.elapsed();
+
+    perf_summary(" rreads", count, io_depth, rtime, big_end);
+
+    guest.flush(None)?;
+    // Before we return, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue()?;
+        if wc.up_count + wc.ds_count == 0 {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(4));
+    }
+}
 /*
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.

@@ -39,7 +39,7 @@ downstairs_restart() {
         fi
 
         # Pick a PID and kill it
-        ds_pids=( $(pgrep -fl target/debug/crucible-downstairs | awk '{print $1}') )
+        ds_pids=( $(pgrep -fl ${cds} | awk '{print $1}') )
 
         # Sometimes there are no downstairs running.
         if [[ ${#ds_pids[@]} -gt 0 ]]; then
@@ -51,7 +51,7 @@ downstairs_restart() {
         fi
     done
     # Run a final cleanup
-    ds=$(pgrep -fl target/debug/crucible-downstairs | awk '{print $1}')
+    ds=$(pgrep -fl ${cds} | awk '{print $1}')
     for pid in ${ds}; do
         kill "$pid"
     done
@@ -69,8 +69,7 @@ downstairs_daemon() {
     echo "" > "$errfile"
     echo "$(date) Starting downstairs ${port}"
     while :; do
-        cargo run -q -p crucible-downstairs -- run -p "$port" \
-                -d var/"$port">> "$outfile" 2> "$errfile"
+        ${cds} run -p "$port" -d var/"$port">> "$outfile" 2> "$errfile"
         res=$?
         if [[ $res -ne 143 ]]; then
             echo "Downstairs $port exited with: $res"
@@ -93,15 +92,20 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
 run_on_start=0
-while getopts 'u' opt; do
+release_build=0
+while getopts 'ru' opt; do
     case "$opt" in
         u)  run_on_start=1
-			echo "Run on start"
-			;;
+            echo "Run on start"
+            ;;
+        r)  release_build=1
+            echo "Building with release"
+            ;;
         *)  echo "Usage: $0 [-u]" >&2
-			echo "u: Don't restart downstairs initially"
+            echo "u: Don't restart downstairs initially"
+            echo "r: Use release build for downstairs"
             exit 1
-		    ;;
+            ;;
     esac
 done
 
@@ -112,11 +116,30 @@ if pgrep -fl target/debug/crucible-downstairs; then
     echo 'Some downstairs already running?' >&2
     exit 1
 fi
-
-if ! cargo build; then
-    echo "Initial Build failed, no tests ran"
+if pgrep -fl target/release/crucible-downstairs; then
+    echo 'Some downstairs already running?' >&2
     exit 1
 fi
+
+if [[ release_build -eq 1 ]] ; then
+    if ! cargo build --release; then
+        echo "Initial Build failed, no tests ran"
+        exit 1
+    fi
+    cds="target/release/crucible-downstairs"
+else
+    if ! cargo build; then
+        echo "Initial Build failed, no tests ran"
+        exit 1
+    fi
+    cds="target/debug/crucible-downstairs"
+fi
+
+if [[ ! -f ${cds} ]]; then
+    echo "Can't find crucible binary at $cds"
+    exit 1
+fi
+
 
 # If this port base is different than default, then good luck..
 port_base=8810
@@ -139,11 +162,7 @@ else
     echo "Using existing region directories"
 fi
 
-cds="./target/debug/crucible-downstairs"
-if [[ ! -f ${cds} ]]; then
-    echo "Can't find crucible binary at $cds"
-    exit 1
-fi
+echo "Using $cds for crucible downstairs"
 
 testdir="/var/tmp/ds_test"
 if [[ -d ${testdir} ]]; then
@@ -190,7 +209,7 @@ while :; do
 done
 
 # Cleanup leftovers
-ds=$(pgrep -fl target/debug/crucible-downstairs | awk '{print $1}')
+ds=$(pgrep -fl ${cds} | awk '{print $1}')
 for pid in ${ds}; do
     kill "$pid"
 done

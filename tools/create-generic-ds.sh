@@ -53,9 +53,9 @@ else
     fi
 fi
 
-cds="./target/debug/crucible-downstairs"
+cds="./target/release/crucible-downstairs"
 if [[ ! -f ${cds} ]]; then
-    cds="./target/release/crucible-downstairs"
+    cds="./target/debug/crucible-downstairs"
     if [[ ! -f ${cds} ]]; then
         echo "Can't find crucible binary at $cds"
         exit 1
