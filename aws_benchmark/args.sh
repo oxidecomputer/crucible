@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 if [[ ${#} -lt 2 ]];
 then
@@ -39,6 +39,7 @@ case "${OS}" in
                  | tail -n1 | awk '{ print $1 }')
         echo "ubuntu ami: ${ami_id} $(aws ec2 describe-images --region "${REGION}" --image-id "${ami_id}" --query 'Images[*].[Name]' --output text)"
 
+        export ami_id="$ami_id"
         export instance_type="m5d.2xlarge"
         export user_data_path="ubuntu_user_data.sh"
         export user="ubuntu"
@@ -55,6 +56,7 @@ case "${OS}" in
 
         # TODO: rpz's ena patch for m5d? need an updated helios-full-* image.
         # need: 6f443ebc1fb4fec01d6e8fa8ca4648182ed215bb, so helios version at least 20793
+        export ami_id="$ami_id"
         export instance_type="m4.2xlarge"
         export user_data_path="helios_user_data.sh"
         export user="helios"
