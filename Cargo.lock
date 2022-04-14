@@ -567,6 +567,7 @@ dependencies = [
  "ringbuffer",
  "serde",
  "serde_json",
+ "statistical",
  "structopt",
  "tokio",
  "tokio-util 0.7.0",

@@ -5037,7 +5037,7 @@ enum BlockOp {
         data: Arc<Mutex<Block>>,
     },
     QueryWorkQueue {
-        data: Arc<Mutex<usize>>,
+        data: Arc<Mutex<WQCounts>>,
     },
     // Send an update to all tasks that there is work on the queue.
     Commit,
@@ -5277,10 +5277,6 @@ impl GuestWork {
         let id = self.next_gw_id;
         self.next_gw_id += 1;
         id
-    }
-
-    fn active_count(&mut self) -> usize {
-        self.active.len()
     }
 
     /**
@@ -5876,15 +5872,21 @@ impl Guest {
         return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
     }
 
-    pub fn query_work_queue(&self) -> Result<usize, CrucibleError> {
+    pub fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
         if !self.is_active() {
             return Err(CrucibleError::UpstairsInactive);
         }
+        let wc = WQCounts {
+            up_count: 0,
+            ds_count: 0,
+        };
 
-        let data = Arc::new(Mutex::new(0));
-        let work_queue_query = BlockOp::QueryWorkQueue { data: data.clone() };
-        self.send(work_queue_query).block_wait()?;
-        return Ok(*data.lock().map_err(|_| CrucibleError::DataLockError)?);
+        let data = Arc::new(Mutex::new(wc));
+        let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
+        self.send(qwq).block_wait().unwrap();
+
+        let wc = data.lock().unwrap();
+        Ok(*wc)
     }
 
     pub fn commit(&self) -> Result<(), CrucibleError> {
@@ -6291,8 +6293,10 @@ async fn process_new_io(
             let _ = req.send.send(Ok(()));
         }
         BlockOp::QueryWorkQueue { data } => {
-            *data.lock().unwrap() =
-                up.guest.guest_work.lock().unwrap().active_count();
+            *data.lock().unwrap() = WQCounts {
+                up_count: up.guest.guest_work.lock().unwrap().active.len(),
+                ds_count: up.downstairs.lock().unwrap().active.len(),
+            };
             let _ = req.send.send(Ok(()));
         }
         BlockOp::ShowWork { data } => {
