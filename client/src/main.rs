@@ -149,7 +149,7 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
 
 /*
  * All the tests need this basic info about the region.
- * Not all tests make use of the write_count yet, but perhaps someday..
+ * Not all tests make use of the write_log yet, but perhaps someday..
  */
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegionInfo {
@@ -157,13 +157,12 @@ pub struct RegionInfo {
     extent_size: Block,
     total_size: u64,
     total_blocks: usize,
-    write_count: Vec<u32>,
+    write_log: WriteLog,
     max_block_io: usize,
 }
 
 /*
  * All the tests need this basic set of information about the region.
- * We also load and verify the write count if an input file is provided.
  */
 fn get_region_info(guest: &Arc<Guest>) -> Result<RegionInfo, CrucibleError> {
     /*
@@ -196,52 +195,191 @@ fn get_region_info(guest: &Arc<Guest>) -> Result<RegionInfo, CrucibleError> {
     );
 
     /*
-     * Create an array that tracks the number of writes to each block, so
-     * we can know what to expect for reads.
+     * Create the write log that tracks the number of writes to each block,
+     * so we can know what to expect for reads.
      */
-    let write_count = vec![0_u32; total_blocks];
+    let write_log = WriteLog::new(total_blocks);
 
     Ok(RegionInfo {
         block_size,
         extent_size,
         total_size,
         total_blocks,
-        write_count,
+        write_log,
         max_block_io,
     })
 }
 
-fn update_region_info(
+/**
+ * The write log is a recording of the number of times we have written to
+ * a specific block (index in the Vec).  The write count is used to generate
+ * a known pattern to either fill the block with, or to expect from the
+ * block when reading.
+ *
+ * This is fine for an initial fill/verify framework of sorts, but there
+ * are many kinds of errors this will not find.  There are also many high
+ * performance better coverage kinds of data integrity tests, and the intent
+ * here is to balance urgency with rigor in that we can make use of external
+ * tests for the more complicated cases, and catch the easy ones here.
+ *
+ * In addition to the current write count, we make a second copy of the
+ * write count when the commit method is called.  This can be used to record
+ * the write count of a region at a specific time (like a flush) and then
+ * later used to verify that a given block has data in it from at minimum
+ * that commit, but up to the current write count.
+ *
+ * The "seed" is the current counter as a u8 for a given block.
+ */
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WriteLog {
+    count_cur: Vec<u32>,
+    count_min: Vec<u32>,
+}
+
+impl WriteLog {
+    pub fn new(size: usize) -> Self {
+        let count_cur = vec![0_u32; size];
+        let count_min = vec![0_u32; size];
+
+        WriteLog {
+            count_cur,
+            count_min,
+        }
+    }
+
+    pub fn is_empty(&mut self) -> bool {
+        self.count_cur.is_empty()
+    }
+
+    pub fn len(&mut self) -> usize {
+        self.count_cur.len()
+    }
+
+    // If the write count is zero then we have no record of what this
+    // block contains.
+    pub fn unwritten(&self, index: usize) -> bool {
+        self.count_cur[index] == 0
+    }
+
+    // This is called when we are about to write to a block and we want
+    // to indicate that the write counter should be updated.
+    pub fn update_wc(&mut self, index: usize) {
+        assert!(self.count_cur[index] >= self.count_min[index]);
+        // TODO: handle more than u32 max writes to the same location.
+        self.count_cur[index] += 1;
+    }
+
+    // This returns the value we should expect to find at the given index,
+    // and will fit in a u8.  If we are using the seed to fill a write
+    // volume, then update_wc() should be called first to increment the
+    // counter before we get a new seed.
+    fn get_seed(&self, index: usize) -> u8 {
+        (self.count_cur[index] % 250) as u8
+    }
+
+    // This is called before a test where we expect to be recovering and we
+    // want to record the current write log values as a minimum of what
+    // we expect the counters to be.
+    pub fn commit(&mut self) {
+        self.count_min = self.count_cur.clone();
+    }
+
+    // In repair/recovery, when there is IO after a flush, it's possible
+    // that data never made it to storage.  We are asking to verify a
+    // given value is in the range of possible values that could exist
+    // for the index. Any valid value in the range between count_min to
+    // count_cur.
+    //
+    // For this to work correctly, the test must issue a commit() of the
+    // WriteLog when it knows that the current write count is the minimum.
+    // This is only acceptable in a very specific recovery/repair situation
+    // and not part of a normal test.
+    //
+    // If update is set to true, then we also change the count_cur to match
+    // the given value (correct to be a u32 and not a u8).
+    pub fn validate_seed_range(
+        &mut self,
+        index: usize,
+        value: u8,
+        update: bool,
+    ) -> bool {
+        let max = (self.count_cur[index] % 250) as u8;
+        let min = (self.count_min[index] % 250) as u8;
+
+        let res;
+        let mut new_max = self.count_cur[index];
+        // A little bit of work here when max rolls over and is < min.
+        // Because we need to handle the update case, we also need
+        // to determine what the "correct" count_cur should be if we
+        // are going to update our internal counter to match the value
+        // passed to us from the caller.
+        if min > max {
+            if value >= min && value < 250 {
+                res = true;
+                new_max = self.count_cur[index] + 250 - value as u32;
+                println!("new max {}", new_max);
+            } else if value <= max {
+                res = true;
+                new_max = self.count_cur[index] + (max - value) as u32;
+                println!("2new max {}", new_max);
+            } else {
+                res = false;
+            }
+        } else if value >= min && value <= max {
+            res = true;
+            new_max = self.count_cur[index] - (max - value) as u32;
+        } else {
+            res = false;
+        }
+        if update {
+            println!("actual new max {}", new_max);
+            self.count_cur[index] = new_max;
+        }
+        res
+    }
+
+    // Set the current write count to a specific value.
+    // You should only be using this if you know what you are doing.
+    pub fn set_wc(&mut self, index: usize, value: u32) {
+        self.count_cur[index] = value;
+    }
+
+    // Set the write count value for the minimum.
+    // You should only be using this if you know what you are doing.
+    pub fn set_wc_min(&mut self, index: usize, value: u32) {
+        self.count_min[index] = value;
+    }
+}
+
+fn load_write_log(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
-    vi: Option<PathBuf>,
+    vi: PathBuf,
     verify: bool,
 ) -> Result<()> {
     /*
-     * If requested, fill the write count from a provided file.
+     * Fill the write count from a provided file.
      */
-    if let Some(vi) = &vi {
-        let cp = history_file(vi);
-        ri.write_count = match read_json(&cp) {
-            Ok(write_count) => write_count,
-            Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
-        };
-        println!("Loading write count information from file {:?}", cp);
-        if ri.write_count.len() != ri.total_blocks {
-            bail!(
-                "Verify file {:?} blocks:{} does not match regions:{}",
-                cp,
-                ri.write_count.len(),
-                ri.total_blocks
-            );
-        }
-        /*
-         * Only verify the volume if requested.
-         */
-        if verify {
-            if let Err(e) = verify_volume(guest, ri) {
-                bail!("Initial volume verify failed: {:?}", e)
-            }
+    let cp = history_file(vi);
+    ri.write_log = match read_json(&cp) {
+        Ok(write_log) => write_log,
+        Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
+    };
+    println!("Loading write count information from file {:?}", cp);
+    if ri.write_log.len() != ri.total_blocks {
+        bail!(
+            "Verify file {:?} blocks:{} does not match regions:{}",
+            cp,
+            ri.write_log.len(),
+            ri.total_blocks
+        );
+    }
+    /*
+     * Only verify the volume if requested.
+     */
+    if verify {
+        if let Err(e) = verify_volume(guest, ri) {
+            bail!("Initial volume verify failed: {:?}", e)
         }
     }
     Ok(())
@@ -358,7 +496,9 @@ fn main() -> Result<()> {
      * info from the verify file, and verify it matches what we expect
      * if we are expecting anything.
      */
-    update_region_info(&guest, &mut region_info, opt.verify_in, opt.verify)?;
+    if let Some(verify_in) = opt.verify_in {
+        load_write_log(&guest, &mut region_info, verify_in, opt.verify)?;
+    }
 
     /*
      * Call the function for the workload option passed from the command
@@ -448,7 +588,7 @@ fn main() -> Result<()> {
              */
             if let Some(vo) = &opt.verify_out {
                 let cp = history_file(vo);
-                write_json(&cp, &region_info.write_count, true)?;
+                write_json(&cp, &region_info.write_log, true)?;
                 println!("Wrote out file {:?}", cp);
             }
             return Ok(());
@@ -518,7 +658,7 @@ fn main() -> Result<()> {
             drop(guest);
             if let Some(vo) = &opt.verify_out {
                 let cp = history_file(vo);
-                write_json(&cp, &region_info.write_count, true)?;
+                write_json(&cp, &region_info.write_log, true)?;
                 println!("Wrote out file {:?}", cp);
             }
             return Ok(());
@@ -563,7 +703,7 @@ fn main() -> Result<()> {
 
     if let Some(vo) = &opt.verify_out {
         let cp = history_file(vo);
-        write_json(&cp, &region_info.write_count, true)?;
+        write_json(&cp, &region_info.write_log, true)?;
         println!("Wrote out file {:?}", cp);
     }
 
@@ -583,7 +723,7 @@ fn main() -> Result<()> {
  * Read/Verify every possible block, one block at a time.
  */
 fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
-    assert_eq!(ri.write_count.len(), ri.total_blocks);
+    assert_eq!(ri.write_log.len(), ri.total_blocks);
 
     println!("Read and Verify all blocks (0..{})", ri.total_blocks);
 
@@ -613,7 +753,7 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+        if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
             pb.finish_with_message("Error");
             bail!("Error at {}", block_index);
         }
@@ -626,29 +766,19 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 }
 
 /*
- * Given the write count vec and the index, pick the seed value we use when
- * writing or expect when reading block.
- * TODO: This can be improved on.  The mod at 250 was me leaving some room
- * for some special values, though I may or may not use them.
- */
-fn get_seed(index: usize, wc: &[u32]) -> u8 {
-    (wc[index] % 250) as u8
-}
-
-/*
  * Fill a vec based on the write count at our index.
- * This is fine for an initial fill/verify framework of sorts, but there
- * are many kinds of errors this will not find.  There are also many high
- * performance better coverage kinds of data integrity tests, and the intent
- * here is to balance urgency with rigor in that we can make use of external
- * tests for the more complicated cases, and catch the easy ones here.
  *
  * block_index: What block we started reading from.
  * blocks:      The length of the read in blocks.
  * wc:          The write count vec, indexed by block number.
  * bs:          Crucible's block size.
  */
-fn fill_vec(block_index: usize, blocks: usize, wc: &[u32], bs: u64) -> Vec<u8> {
+fn fill_vec(
+    block_index: usize,
+    blocks: usize,
+    wl: &WriteLog,
+    bs: u64,
+) -> Vec<u8> {
     assert_ne!(blocks, 0);
     assert_ne!(bs, 0);
     /*
@@ -665,7 +795,7 @@ fn fill_vec(block_index: usize, blocks: usize, wc: &[u32], bs: u64) -> Vec<u8> {
         /*
          * Fill the rest of the buffer with the new write count
          */
-        let seed = get_seed(block_offset, wc);
+        let seed = wl.get_seed(block_offset);
         for _ in 1..bs {
             vec.push(seed);
         }
@@ -680,13 +810,13 @@ fn fill_vec(block_index: usize, blocks: usize, wc: &[u32], bs: u64) -> Vec<u8> {
  *
  * data:        The filled in buffer to be verified.
  * block_index: What block we started reading from.
- * wc:          The write count vec, indexed by block number.
+ * wl:          The WriteLog struct where we store the write counter.
  * bs:          Crucible's block size.
  */
 fn validate_vec(
     data: Vec<u8>,
     block_index: usize,
-    wc: &[u32],
+    wl: &WriteLog,
     bs: u64,
 ) -> bool {
     let bs = bs as usize;
@@ -704,7 +834,7 @@ fn validate_vec(
         /*
          * Skip blocks we don't know the expected value of
          */
-        if wc[block_offset] == 0 {
+        if wl.unwritten(block_offset) {
             data_offset += bs;
             continue;
         }
@@ -724,12 +854,12 @@ fn validate_vec(
             res = false;
         }
 
-        let seed = get_seed(block_offset, wc);
+        let seed = wl.get_seed(block_offset);
         for i in 1..bs {
             if data[data_offset + i] != seed {
                 let byte_offset = bs as u64 * block_offset as u64;
                 println!(
-                    "BO:{} Offset:{}  Expected: {} != Got: {}",
+                    "BO:{} Offset:{}  Expected: {} != Got: {} NEW",
                     block_offset,
                     byte_offset + i as u64,
                     seed,
@@ -764,11 +894,10 @@ async fn balloon_workload(
              * Update the write count for all blocks we plan to write to.
              */
             for i in 0..size {
-                ri.write_count[block_index + i] += 1;
+                ri.write_log.update_wc(block_index + i);
             }
 
-            let vec =
-                fill_vec(block_index, size, &ri.write_count, ri.block_size);
+            let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
             let data = Bytes::from(vec);
             /*
              * Convert block_index to its byte value.
@@ -790,14 +919,13 @@ async fn balloon_workload(
             waiter.block_wait()?;
 
             let dl = data.as_vec().to_vec();
-            if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+            if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
                 bail!("Error at {}", block_index);
             }
         }
     }
 
     verify_volume(guest, ri)?;
-    print_write_count(ri);
     Ok(())
 }
 
@@ -826,15 +954,11 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         };
 
         for i in 0..next_io_blocks {
-            ri.write_count[block_index + i] += 1;
+            ri.write_log.update_wc(block_index + i);
         }
 
-        let vec = fill_vec(
-            block_index,
-            next_io_blocks,
-            &ri.write_count,
-            ri.block_size,
-        );
+        let vec =
+            fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
         let data = Bytes::from(vec);
 
         let mut waiter = guest.write(offset, data)?;
@@ -850,21 +974,6 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     verify_volume(guest, ri)?;
     Ok(())
-}
-
-/*
- * Print out the contents of the write count vector where each line
- * is an extent and each column is a block.
- */
-fn print_write_count(ri: &mut RegionInfo) {
-    println!(" Write IO count to each extent");
-    println!("###############################");
-    for (i, wc) in ri.write_count.iter().enumerate().take(ri.total_blocks) {
-        print!("{:5} ", wc);
-        if (i + 1) % (ri.extent_size.value as usize) == 0 {
-            println!();
-        }
-    }
 }
 
 /*
@@ -908,11 +1017,11 @@ async fn generic_workload(
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    ri.write_count[block_index + i] += 1;
+                    ri.write_log.update_wc(block_index + i);
                 }
 
                 let vec =
-                    fill_vec(block_index, size, &ri.write_count, ri.block_size);
+                    fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
                 println!(
@@ -940,12 +1049,8 @@ async fn generic_workload(
                 waiter.block_wait()?;
 
                 let dl = data.as_vec().to_vec();
-                if !validate_vec(
-                    dl,
-                    block_index,
-                    &ri.write_count,
-                    ri.block_size,
-                ) {
+                if !validate_vec(dl, block_index, &ri.write_log, ri.block_size)
+                {
                     bail!("Verify Error at {} len:{}", block_index, length);
                 }
             }
@@ -993,9 +1098,9 @@ async fn dirty_workload(
         /*
          * Update the write count for the block we plan to write to.
          */
-        ri.write_count[block_index] += 1;
+        ri.write_log.update_wc(block_index);
 
-        let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
+        let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
         let data = Bytes::from(vec);
 
         println!(
@@ -1044,9 +1149,9 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Update the write count for the block we plan to write to.
      */
-    ri.write_count[block_index] += 1;
+    ri.write_log.update_wc(block_index);
 
-    let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
+    let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
     let data = Bytes::from(vec);
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
@@ -1063,7 +1168,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     let dl = data.as_vec().to_vec();
-    if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+    if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
         bail!("Error at {}", block_index);
     }
 
@@ -1159,10 +1264,10 @@ async fn rand_workload(
          * Update the write count for all blocks we plan to write to.
          */
         for i in 0..size {
-            ri.write_count[block_index + i] += 1;
+            ri.write_log.update_wc(block_index + i);
         }
 
-        let vec = fill_vec(block_index, size, &ri.write_count, ri.block_size);
+        let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
         let data = Bytes::from(vec);
 
         println!(
@@ -1185,17 +1290,13 @@ async fn rand_workload(
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+        if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
             bail!("Error at {}", block_index);
         }
     }
 
     if let Err(e) = verify_volume(guest, ri) {
         bail!("Final volume verify failed: {:?}", e)
-    }
-
-    if count >= 10 {
-        print_write_count(ri);
     }
 
     Ok(())
@@ -1230,7 +1331,7 @@ async fn burst_workload(
         println!();
         if let Some(vo) = &verify_out {
             let cp = history_file(vo);
-            write_json(&cp, &ri.write_count, true)?;
+            write_json(&cp, &ri.write_log, true)?;
             println!("Wrote out file {:?} at this time", cp);
         }
         println!(
@@ -1282,11 +1383,11 @@ async fn repair_workload(
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    ri.write_count[block_index + i] += 1;
+                    ri.write_log.update_wc(block_index + i);
                 }
 
                 let vec =
-                    fill_vec(block_index, size, &ri.write_count, ri.block_size);
+                    fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
                 println!(
@@ -1364,11 +1465,11 @@ async fn demo_workload(
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    ri.write_count[block_index + i] += 1;
+                    ri.write_log.update_wc(block_index + i);
                 }
 
                 let vec =
-                    fill_vec(block_index, size, &ri.write_count, ri.block_size);
+                    fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
                 let waiter = guest.write(offset, data)?;
@@ -1426,11 +1527,11 @@ fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Update the counter for the blocks we are about to write.
      */
-    ri.write_count[block_index] += 1;
-    ri.write_count[block_index + 1] += 1;
+    ri.write_log.update_wc(block_index);
+    ri.write_log.update_wc(block_index + 1);
 
     let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
-    let vec = fill_vec(block_index, 2, &ri.write_count, ri.block_size);
+    let vec = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
@@ -1450,7 +1551,7 @@ fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     let dl = data.as_vec().to_vec();
-    if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+    if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
         bail!("Span read verify failed");
     }
     Ok(())
@@ -1465,9 +1566,9 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         /*
          * Update the write count for all blocks we plan to write to.
          */
-        ri.write_count[block_index] += 1;
+        ri.write_log.update_wc(block_index);
 
-        let vec = fill_vec(block_index, 1, &ri.write_count, ri.block_size);
+        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
         let data = Bytes::from(vec);
         /*
          * Convert block_index to its byte value.
@@ -1488,7 +1589,7 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl, block_index, &ri.write_count, ri.block_size) {
+        if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
             bail!("Verify error at block:{}", block_index);
         }
     }
@@ -1538,15 +1639,11 @@ fn biggest_io_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
             };
 
         for i in 0..next_io_blocks {
-            ri.write_count[block_index + i] += 1;
+            ri.write_log.update_wc(block_index + i);
         }
 
-        let vec = fill_vec(
-            block_index,
-            next_io_blocks,
-            &ri.write_count,
-            ri.block_size,
-        );
+        let vec =
+            fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
         let data = Bytes::from(vec);
 
         println!(
@@ -1696,57 +1793,221 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_wl_update() {
+        // Basic test to update write log
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.get_seed(1), 0);
+        // Non zero size is not empty
+        assert_eq!(write_log.is_empty(), false);
+    }
+
+    #[test]
+    fn test_wl_update_rollover() {
+        // Rollover of u8 at 250
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 249);
+        assert_eq!(write_log.get_seed(0), 249);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 0);
+        // Seed at zero does not mean the counter is zero
+        assert_eq!(write_log.unwritten(0), false);
+    }
+
+    #[test]
+    fn test_wl_empty() {
+        // No size is empty
+        let mut write_log = WriteLog::new(0);
+        assert_eq!(write_log.is_empty(), true);
+    }
+
+    #[test]
+    fn test_wl_update_commit() {
+        // Write log returns highest after a commit, zero on one side
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(0);
+        write_log.commit();
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.get_seed(1), 0);
+    }
+
+    #[test]
+    fn test_wl_update_commit_rollover() {
+        // Write log returns highest after a commit, but before u8 conversion
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 249);
+        write_log.commit();
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 0);
+    }
+
+    #[test]
+    fn test_wl_update_commit_2() {
+        // Write log keeps going up after a commit
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(1);
+        write_log.commit();
+        write_log.update_wc(1);
+        assert_eq!(write_log.get_seed(1), 2);
+    }
+
+    #[test]
+    fn test_wl_commit_range() {
+        // Verify that validate seed range returns true for all possible
+        // values between min and max
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        write_log.commit();
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        // 2 is the minimum
+        assert_eq!(write_log.validate_seed_range(1, 1, false), false);
+        assert_eq!(write_log.validate_seed_range(1, 2, false), true);
+        assert_eq!(write_log.validate_seed_range(1, 3, false), true);
+        assert_eq!(write_log.validate_seed_range(1, 4, false), true);
+        assert_eq!(write_log.validate_seed_range(1, 5, false), false);
+    }
+
+    #[test]
+    fn test_wl_commit_range_update() {
+        // Verify that a validate_seed_range also updates the internal
+        // max value to match the passed in value.
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        write_log.commit();
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        assert_eq!(write_log.get_seed(1), 4);
+        // Once we call this, it becomes the new expected value
+        assert_eq!(write_log.validate_seed_range(1, 3, true), true);
+        assert_eq!(write_log.get_seed(1), 3);
+    }
+    #[test]
+    fn test_wl_commit_range_update_min() {
+        // Verify that a validate_seed_range also updates the internal
+        // max value to match the passed in value.
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        write_log.commit();
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        assert_eq!(write_log.get_seed(1), 4);
+        // Once we call this, it becomes the new expected value
+        assert_eq!(write_log.validate_seed_range(1, 2, true), true);
+        assert_eq!(write_log.get_seed(1), 2);
+    }
+    #[test]
+    fn test_wl_commit_range_update_max() {
+        // Verify that a validate_seed_range also updates the internal
+        // max value to match the passed in value.
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        write_log.commit();
+        write_log.update_wc(1);
+        write_log.update_wc(1);
+        assert_eq!(write_log.get_seed(1), 4);
+        // Once we call this, it becomes the new expected value
+        assert_eq!(write_log.validate_seed_range(1, 4, true), true);
+        // Still the same after the update
+        assert_eq!(write_log.get_seed(1), 4);
+    }
+
+    #[test]
+    fn test_wl_commit_range_rollover() {
+        // validate seed range works if write log seed rolls over.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 248);
+        write_log.commit();
+        write_log.update_wc(0); // 249
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.validate_seed_range(0, 247, false), false);
+        assert_eq!(write_log.validate_seed_range(0, 248, false), true);
+        assert_eq!(write_log.validate_seed_range(0, 249, false), true);
+        assert_eq!(write_log.validate_seed_range(0, 0, false), true);
+        assert_eq!(write_log.validate_seed_range(0, 1, false), true);
+        assert_eq!(write_log.validate_seed_range(0, 2, false), false);
+    }
+
+    #[test]
+    fn test_wl_set() {
+        // Write log returns highest after a set
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(1, 4);
+        assert_eq!(write_log.get_seed(1), 4);
+    }
+
+    #[test]
+    fn test_wl_is_zero() {
+        // Write log returns true when unwritten
+        let mut write_log = WriteLog::new(10);
+        assert_eq!(write_log.unwritten(0), true);
+        // Even after updating a different index
+        write_log.update_wc(1);
+        assert_eq!(write_log.unwritten(0), true);
+    }
+
+    #[test]
     fn test_read_compare() {
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
-        write_count[0] = 1;
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(0);
 
-        let vec = fill_vec(0, 1, &write_count, bs);
-        assert_eq!(validate_vec(vec, 0, &write_count, bs), true);
+        let vec = fill_vec(0, 1, &write_log, bs);
+        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
+    }
+
+    #[test]
+    fn test_read_compare_commit() {
+        // Verify that a commit will still return the highest value even
+        // if we have not written to the other side of the WriteLog buffer.
+        let bs: u64 = 512;
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(0);
+
+        let vec = fill_vec(0, 1, &write_log, bs);
+        write_log.commit();
+        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
     }
 
     #[test]
     fn test_read_compare_fail() {
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
-        write_count[0] = 2;
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 2);
 
-        let vec = fill_vec(0, 1, &write_count, bs);
-        write_count[0] = 1;
-        assert_eq!(validate_vec(vec, 0, &write_count, bs), false);
+        let vec = fill_vec(0, 1, &write_log, bs);
+        write_log.update_wc(0);
+        assert_eq!(validate_vec(vec, 0, &write_log, bs), false);
     }
 
     #[test]
-    fn test_read_compare_fail_buf() {
+    fn test_read_compare_fail_under() {
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
-        write_count[0] = 2;
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 2);
 
-        let mut vec = fill_vec(0, 1, &write_count, bs);
-        vec[2] = 1;
-        assert_eq!(validate_vec(vec, 0, &write_count, bs), false);
-    }
-
-    #[test]
-    fn test_read_compare_fail_block() {
-        let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
-        write_count[0] = 2;
-
-        let mut vec = fill_vec(0, 1, &write_count, bs);
-        vec[0] = 3;
-        assert_eq!(validate_vec(vec, 0, &write_count, bs), false);
+        let vec = fill_vec(0, 1, &write_log, bs);
+        write_log.set_wc(0, 1);
+        assert_eq!(validate_vec(vec, 0, &write_log, bs), false);
     }
 
     #[test]
     fn test_read_compare_1() {
+        // Block 1 works the same as block 0
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
+        let mut write_log = WriteLog::new(10);
         let block_index = 1;
-        write_count[block_index] += 1;
+        write_log.update_wc(block_index);
 
-        let vec = fill_vec(block_index, 1, &write_count, bs);
-        assert_eq!(validate_vec(vec, block_index, &write_count, bs), true);
+        let vec = fill_vec(block_index, 1, &write_log, bs);
+        assert_eq!(validate_vec(vec, block_index, &write_log, bs), true);
     }
 
     #[test]
@@ -1757,80 +2018,107 @@ mod test {
         /*
          * Simulate having written to all blocks
          */
-        let write_count = vec![1_u32; total_blocks];
-        let vec = fill_vec(block_index, total_blocks, &write_count, bs);
+        let mut write_log = WriteLog::new(total_blocks);
+        for i in 0..total_blocks {
+            write_log.update_wc(i);
+        }
 
-        assert_eq!(validate_vec(vec, block_index, &write_count, bs), true);
+        let vec = fill_vec(block_index, total_blocks, &write_log, bs);
+        assert_eq!(validate_vec(vec, block_index, &write_log, bs), true);
     }
 
     #[test]
     fn test_read_compare_large_fail() {
+        // The last block in the data is wrong
         let bs: u64 = 512;
         let total_blocks = 100;
         let block_index = 0;
         /*
          * Simulate having written to all blocks
          */
-        let write_count = vec![1_u32; total_blocks];
-        let mut vec = fill_vec(block_index, total_blocks, &write_count, bs);
+        let mut write_log = WriteLog::new(total_blocks);
+        for i in 0..total_blocks {
+            write_log.update_wc(i);
+        }
+        let mut vec = fill_vec(block_index, total_blocks, &write_log, bs);
         let x = vec.len() - 1;
         vec[x] = 9;
-        assert_eq!(validate_vec(vec, block_index, &write_count, bs), false);
+        assert_eq!(validate_vec(vec, block_index, &write_log, bs), false);
     }
 
     #[test]
     fn test_read_compare_span() {
+        // Verify a region larger than one block
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
+        let mut write_log = WriteLog::new(10);
         let block_index = 1;
-        write_count[block_index] = 1;
-        write_count[block_index + 1] = 2;
-        write_count[block_index + 2] = 3;
+        write_log.set_wc(block_index, 1);
+        write_log.set_wc(block_index + 1, 2);
+        write_log.set_wc(block_index + 2, 3);
 
-        let vec = fill_vec(block_index, 3, &write_count, bs);
-        assert_eq!(validate_vec(vec, block_index, &write_count, bs), true);
+        let vec = fill_vec(block_index, 3, &write_log, bs);
+        assert_eq!(validate_vec(vec, block_index, &write_log, bs), true);
     }
 
     #[test]
     fn test_read_compare_span_fail() {
+        // Verify a data mismatch in a region larger than one block
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
+        let mut write_log = WriteLog::new(10);
         let block_index = 1;
-        write_count[block_index] = 1;
-        write_count[block_index + 1] = 2;
-        write_count[block_index + 2] = 3;
+        write_log.set_wc(block_index, 1);
+        write_log.set_wc(block_index + 1, 2);
+        write_log.set_wc(block_index + 2, 3);
 
-        let mut vec = fill_vec(block_index, 3, &write_count, bs);
+        let mut vec = fill_vec(block_index, 3, &write_log, bs);
         /*
          * Replace the first value in the second block
          */
         vec[(bs + 1) as usize] = 9;
-        assert_eq!(validate_vec(vec, block_index, &write_count, bs), false);
+        assert_eq!(validate_vec(vec, block_index, &write_log, bs), false);
     }
 
     #[test]
     fn test_read_compare_span_fail_2() {
+        // Verify the second value in the second block on a multi block
+        // span will be discovered and reported.
         let bs: u64 = 512;
-        let mut write_count = vec![0_u32; 10];
+        let mut write_log = WriteLog::new(10);
         let block_index = 1;
-        write_count[block_index] = 1;
-        write_count[block_index + 1] = 2;
-        write_count[block_index + 2] = 3;
+        write_log.set_wc(block_index, 1);
+        write_log.set_wc(block_index + 1, 2);
+        write_log.set_wc(block_index + 2, 3);
 
-        let mut vec = fill_vec(block_index, 3, &write_count, bs);
+        let mut vec = fill_vec(block_index, 3, &write_log, bs);
         /*
          * Replace the second value in the second block
          */
         vec[(bs + 2) as usize] = 9;
-        assert_eq!(validate_vec(vec, block_index, &write_count, bs), false);
+        assert_eq!(validate_vec(vec, block_index, &write_log, bs), false);
     }
 
     #[test]
     fn test_read_compare_empty() {
+        // A new array has no expectations.
         let bs: u64 = 512;
-        let write_count = vec![0_u32; 10];
+        let write_log = WriteLog::new(10);
 
-        let vec = fill_vec(0, 1, &write_count, bs);
-        assert_eq!(validate_vec(vec, 0, &write_count, bs), true);
+        let vec = fill_vec(0, 1, &write_log, bs);
+        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
+    }
+
+    #[test]
+    fn test_read_compare_empty_data() {
+        // A new array has no expectations, even if the buffer has
+        // data in it.
+        let bs: u64 = 512;
+        let write_log = WriteLog::new(10);
+        let mut fill_log = WriteLog::new(10);
+        fill_log.set_wc(1, 1);
+        fill_log.set_wc(2, 2);
+        fill_log.set_wc(3, 3);
+
+        let vec = fill_vec(0, 1, &fill_log, bs);
+        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
     }
 }
