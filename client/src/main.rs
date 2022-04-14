@@ -281,8 +281,6 @@ impl WriteLog {
     // want to record the current write log values as a minimum of what
     // we expect the counters to be.
     pub fn commit(&mut self) {
-        // The commit needs to walk the vec and make sure any minimum
-        // values are not lost
         self.count_min = self.count_cur.clone();
     }
 
