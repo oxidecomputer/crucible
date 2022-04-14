@@ -5279,10 +5279,6 @@ impl GuestWork {
         id
     }
 
-    fn _active_count(&mut self) -> usize {
-        self.active.len()
-    }
-
     /**
      * Move a GtoS job from the active to completed.
      * At this point we should have already sent the guest a message
