@@ -38,7 +38,12 @@ while getopts 'b:c:des:' opt; do
         s)  extent_size=$OPTARG
             echo "Using extent size $extent_size"
             ;;
-        *)  echo "Usage: $0 [de] [-c extent_count] [-s extent_size]" >&2
+        *)  echo "Usage: $0 [de] [-b #] [-c #] [-s #]" >&2
+            echo " -b block_size    Block size for the region" >&2
+            echo " -c extent_count  Total number of extent files" >&2
+            echo " -d                Delete existing var/88* direcories" >&2
+            echo " -e                Require encryption on the volume" >&2
+            echo " -s extent_size   Number of extents per extent file" >&2
             exit 1
             ;;
     esac
@@ -53,9 +58,9 @@ else
     fi
 fi
 
-cds="./target/release/crucible-downstairs"
+cds="./target/debug/crucible-downstairs"
 if [[ ! -f ${cds} ]]; then
-    cds="./target/debug/crucible-downstairs"
+    cds="./target/release/crucible-downstairs"
     if [[ ! -f ${cds} ]]; then
         echo "Can't find crucible binary at $cds"
         exit 1
