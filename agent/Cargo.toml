@@ -23,6 +23,6 @@ tokio = { version = "1.17", features = [ "full" ] }
 uuid = { version = "0.8", features = [ "serde", "v4" ] }
 
 [dev-dependencies]
-expectorate = "1.0.4"
+expectorate = "1.0.5"
 openapiv3 = "1.0"
 subprocess = "0.2.8"
