@@ -16,4 +16,4 @@ uuid = { version = "0.8", features = [ "serde", "v4" ] }
 twox-hash = "1.6.2"
 rusqlite = { version = "0.27" }
 tokio-rustls = { version = "0.23.3" }
-rustls-pemfile = { version = "0.3.0" }
+rustls-pemfile = { version = "1.0.0" }
