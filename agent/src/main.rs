@@ -321,7 +321,7 @@ fn apply_smf(
     let scope = scf.scope_local()?;
     let svc = scope
         .get_service(SERVICE)?
-        .ok_or(anyhow!("service missing"))?;
+        .ok_or_else(|| anyhow!("service missing"))?;
 
     /*
      * First, check to see if there are any instances that we do not expect,
