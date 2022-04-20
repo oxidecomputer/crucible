@@ -367,12 +367,17 @@ impl BlockIO for Volume {
                 waiter.block_wait()?;
 
                 let mut data_vec = data.as_vec();
+                let mut owned_vec = data.owned_vec();
+
                 let sub_data_vec = sub_buffer.as_vec();
                 let sub_owned_vec = sub_buffer.owned_vec();
                 let parent_data_vec = parent_buffer.as_vec();
 
                 // "ownership" comes back from the downstairs per byte but all
                 // writes occur per block. iterate over blocks here.
+                //
+                // A volume "owns" a block if the subvolume "owns" the block,
+                // *not* if the read only parent does.
                 for i in 0..(sz as u64 / self.block_size) {
                     let start_of_block = (i * self.block_size) as usize;
 
@@ -381,8 +386,11 @@ impl BlockIO for Volume {
                         for block_offset in 0..self.block_size {
                             let inside_block =
                                 start_of_block + block_offset as usize;
+
                             data_vec[data_index + inside_block] =
                                 sub_data_vec[inside_block];
+
+                            owned_vec[data_index + inside_block] = true;
                         }
                     } else {
                         // sub volume hasn't written to this block, use the
@@ -390,17 +398,24 @@ impl BlockIO for Volume {
                         for block_offset in 0..self.block_size {
                             let inside_block =
                                 start_of_block + block_offset as usize;
+
                             data_vec[data_index + inside_block] =
                                 parent_data_vec[inside_block];
+
+                            owned_vec[data_index + inside_block] = false;
                         }
                     }
                 }
             } else {
                 let mut data_vec = data.as_vec();
+                let mut owned_vec = data.owned_vec();
 
-                // no parent
+                // In the case where this volume has no read only parent,
+                // propagate the sub volume information up.
                 data_vec[data_index..(data_index + sz)]
                     .copy_from_slice(&sub_buffer.as_vec());
+                owned_vec[data_index..(data_index + sz)]
+                    .copy_from_slice(&sub_buffer.owned_vec());
             }
 
             data_index += sz;
@@ -689,6 +704,19 @@ impl Volume {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_single_block() -> Result<()> {
+        let sub_volume = SubVolume {
+            lba_range: 0..10,
+            block_io: Arc::new(Guest::new()),
+        };
+
+        // Coverage inside region
+        assert_eq!(sub_volume.lba_range_coverage(0, 1), Some(0..1));
+
+        Ok(())
+    }
 
     #[test]
     fn test_single_sub_volume_lba_coverage() -> Result<()> {
@@ -1302,6 +1330,146 @@ mod test {
             .unwrap()
             .block_wait()
             .unwrap();
+    }
+
+    #[test]
+    fn test_drop_then_recreate_test() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Write 0x55 into parent
+        let parent =
+            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        parent
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        let overlay =
+            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+
+        {
+            // Make a volume, verify orignal data, write new data to it, then
+            // let it fall out of scope
+            let mut volume = Volume::new(BLOCK_SIZE as u64);
+            volume.add_subvolume(overlay.clone())?;
+            volume.add_read_only_parent(parent.clone())?;
+
+            let buffer = Buffer::new(BLOCK_SIZE * 10);
+            volume
+                .read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )?
+                .block_wait()?;
+
+            assert_eq!(vec![0x55; BLOCK_SIZE * 10], *buffer.as_vec());
+
+            volume
+                .write(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    Bytes::from(vec![0xFF; BLOCK_SIZE * 10]),
+                )?
+                .block_wait()?;
+
+            let buffer = Buffer::new(BLOCK_SIZE * 10);
+            volume
+                .read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )?
+                .block_wait()?;
+
+            assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec());
+        }
+
+        // Create the same volume, verify data was written
+        // Note that add function order is reversed, it shouldn't matter
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_read_only_parent(parent)?;
+        volume.add_subvolume(overlay)?;
+
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_three_layers() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Write 0x55 into parent
+        let parent =
+            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        parent
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read parent, verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        parent
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0x55; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        let mut parent_volume = Volume::new(BLOCK_SIZE as u64);
+        parent_volume.add_subvolume(parent)?;
+
+        let overlay =
+            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume(overlay)?;
+        volume.add_read_only_parent(Arc::new(parent_volume))?;
+
+        // Now:
+        //
+        // Volume {
+        //   subvolumes: [
+        //     overlay
+        //   ]
+        //   read_only_parent: Volume {
+        //     subvolumes: [
+        //       parent
+        //    ]
+        //   }
+        // }
+
+        // Read whole volume, verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0x55; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Write over whole volume
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0xFF; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read whole volume, verify new contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
     }
 
     #[tokio::test]
