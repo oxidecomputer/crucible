@@ -7,8 +7,8 @@
   "paths": {
     "/extent/{eid}/files": {
       "get": {
-        "summary": "For a given extent, return a vec of strings representing the names of",
-        "description": "the files that exist for that extent.",
+        "summary": "Get the list of files related to an extent.",
+        "description": "For a given extent, return a vec of strings representing the names of the files that exist for that extent.",
         "operationId": "get_files_for_extent",
         "parameters": [
           {
@@ -29,7 +29,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ExtentFiles"
+                  "title": "Array_of_String",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -112,20 +116,6 @@
         "required": [
           "message",
           "request_id"
-        ]
-      },
-      "ExtentFiles": {
-        "type": "object",
-        "properties": {
-          "files": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "files"
         ]
       },
       "FileType": {

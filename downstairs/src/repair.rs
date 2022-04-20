@@ -15,12 +15,9 @@ use http::{Response, StatusCode};
 use hyper::Body;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde::Serialize;
 
 use super::*;
-use crate::region::{
-    extent_dir, extent_file_name, extent_path, ExtentExtension,
-};
+use crate::region::{extent_dir, extent_file_name, extent_path, ExtentType};
 
 /**
  * Our context is the root of the region we want to serve.
@@ -184,12 +181,9 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
     }
 }
 
-#[derive(Deserialize, Serialize, JsonSchema)]
-struct ExtentFiles {
-    files: Vec<String>,
-}
-
 /**
+ * Get the list of files related to an extent.
+ *
  * For a given extent, return a vec of strings representing the names of
  * the files that exist for that extent.
  */
@@ -200,7 +194,7 @@ struct ExtentFiles {
 async fn get_files_for_extent(
     rqctx: Arc<RequestContext<FileServerContext>>,
     path: Path<Eid>,
-) -> Result<HttpResponseOk<ExtentFiles>, HttpError> {
+) -> Result<HttpResponseOk<Vec<String>>, HttpError> {
     let eid = path.into_inner().eid;
     let extent_dir = extent_dir(rqctx.context().region_dir.clone(), eid);
 
@@ -227,13 +221,13 @@ async fn get_files_for_extent(
 async fn extent_file_list(
     extent_dir: PathBuf,
     eid: u32,
-) -> Result<ExtentFiles, HttpError> {
+) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
     let possible_files = vec![
-        (extent_file_name(eid, None), true),
-        (extent_file_name(eid, Some(ExtentExtension::Db)), true),
-        (extent_file_name(eid, Some(ExtentExtension::DbShm)), false),
-        (extent_file_name(eid, Some(ExtentExtension::DbWal)), false),
+        (extent_file_name(eid, ExtentType::Data), true),
+        (extent_file_name(eid, ExtentType::Db), true),
+        (extent_file_name(eid, ExtentType::DbShm), false),
+        (extent_file_name(eid, ExtentType::DbWal), false),
     ];
 
     for (file, required) in possible_files.into_iter() {
@@ -247,7 +241,7 @@ async fn extent_file_list(
         }
     }
 
-    Ok(ExtentFiles { files })
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -279,10 +273,10 @@ mod test {
         // Determine the directory and name for expected extent files.
         let ed = extent_dir(&dir, 1);
         let mut ex_files = extent_file_list(ed, 1).await.unwrap();
-        ex_files.files.sort();
+        ex_files.sort();
         let expected = vec!["001", "001.db", "001.db-shm", "001.db-wal"];
-        println!("files: {:?}", ex_files.files);
-        assert_eq!(ex_files.files, expected);
+        println!("files: {:?}", ex_files);
+        assert_eq!(ex_files, expected);
 
         Ok(())
     }
@@ -301,17 +295,17 @@ mod test {
 
         // Delete db-wal and db-shm
         let mut rm_file = extent_dir.clone();
-        rm_file.push(extent_file_name(1, None));
+        rm_file.push(extent_file_name(1, ExtentType::Data));
         rm_file.set_extension("db-wal");
         std::fs::remove_file(&rm_file).unwrap();
         rm_file.set_extension("db-shm");
         std::fs::remove_file(rm_file).unwrap();
 
         let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
-        ex_files.files.sort();
+        ex_files.sort();
         let expected = vec!["001", "001.db"];
-        println!("files: {:?}", ex_files.files);
-        assert_eq!(ex_files.files, expected);
+        println!("files: {:?}", ex_files);
+        assert_eq!(ex_files, expected);
 
         Ok(())
     }
@@ -336,17 +330,17 @@ mod test {
         // Delete db-wal and db-shm.  On illumos the close of the extent
         // may remove these for us, so we ignore errors on the removal.
         let mut rm_file = extent_dir.clone();
-        rm_file.push(extent_file_name(1, None));
+        rm_file.push(extent_file_name(1, ExtentType::Data));
         rm_file.set_extension("db-wal");
         let _ = std::fs::remove_file(&rm_file);
         rm_file.set_extension("db-shm");
         let _ = std::fs::remove_file(rm_file);
 
         let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
-        ex_files.files.sort();
+        ex_files.sort();
         let expected = vec!["001", "001.db"];
-        println!("files: {:?}", ex_files.files);
-        assert_eq!(ex_files.files, expected);
+        println!("files: {:?}", ex_files);
+        assert_eq!(ex_files, expected);
 
         Ok(())
     }
@@ -364,7 +358,7 @@ mod test {
 
         // Delete db
         let mut rm_file = extent_dir.clone();
-        rm_file.push(extent_file_name(2, None));
+        rm_file.push(extent_file_name(2, ExtentType::Data));
         rm_file.set_extension("db");
         std::fs::remove_file(&rm_file).unwrap();
 
@@ -386,7 +380,7 @@ mod test {
 
         // Delete db
         let mut rm_file = extent_dir.clone();
-        rm_file.push(extent_file_name(1, None));
+        rm_file.push(extent_file_name(1, ExtentType::Data));
         std::fs::remove_file(&rm_file).unwrap();
 
         assert!(extent_file_list(extent_dir, 1).await.is_err());

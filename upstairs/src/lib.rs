@@ -6400,7 +6400,51 @@ pub struct Arg {
  * to this task (in the ds_reconcile() function) that a downstairs has
  * completed a reconcile request.
  *
- * This task drives any reconciliation if necessary.
+ * This task drives any reconciliation if necessary.  If Repair is required,
+ * it happens in three phases.  Typically an interruption of repair will
+ * result in things starting over, but if actual repair work to an extent
+ * is completed, that extent won't need to be repaired again.
+ *
+ * The three phases are:
+ *
+ * Collect:
+ * When a Downstairs connects, the Upstairs collects the gen/flush/dirty
+ * (GFD) info from all extents.  This GFD information is stored and the
+ * Upstairs waits for all three Downstairs to attach.
+ *
+ * Compare:
+ * In the compare phase, the upstairs will walk the list of all extents
+ * and compare the G/F/D from each of the downstairs.  When there is a
+ * mismatch between downstairs (The dirty bit counts as a mismatch and will
+ * force a repair even if generation and flush numbers agree). For each
+ * mismatch, the upstairs determines which downstairs has the extent that
+ * should be the source, and which of the other downstairs extents needs
+ * repair. This list of mismatches (source, destination(s)) is collected.
+ * Once an upstairs has compiled its repair list, it will then generates a
+ * sequence of Upstairs ->  Downstairs repair commands to repair each
+ * extent that needs to be fixed.  For a given piece of repair work, the
+ * commands are:
+ * - Send a flush to source extent.
+ * - Close extent on all downstairs.
+ * - Send repair command to destination extents (with source extent
+ *   IP/Port).
+ * (See DS-DS Repair)
+ * - Reopen all extents.
+ *
+ * Repair:
+ * During repair Each command issued from the upstairs must be completed
+ * before the next will be sent. The Upstairs is responsible for walking
+ * the repair commands and sending them to the required downstairs, and
+ * waiting for them to finish.  The actual repair work for an extent
+ * takes place on the downstairs being repaired.
+ *
+ * Repair (ds to ds)
+ * Each downstairs runs a repair server (Dropshot) that listens for
+ * repair requests from other downstairs.  A downstairs with an extent
+ * that needs repair will contact the source downstairs and request the
+ * list of files for an extent, then request each file.  Once all files
+ * are local to the downstairs needing repair, it will replace the existing
+ * extent files with the new ones.
  */
 async fn up_listen(
     up: &Arc<Upstairs>,

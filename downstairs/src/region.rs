@@ -412,32 +412,35 @@ impl Default for ExtentMeta {
 }
 
 #[derive(Debug, Clone)]
-pub enum ExtentExtension {
+pub enum ExtentType {
+    Data,
     Db,
     DbShm,
     DbWal,
 }
 
-impl fmt::Display for ExtentExtension {
+impl fmt::Display for ExtentType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ExtentExtension::Db => write!(f, "db"),
-            ExtentExtension::DbShm => write!(f, "db-shm"),
-            ExtentExtension::DbWal => write!(f, "db-wal"),
+            ExtentType::Data => Ok(()),
+            ExtentType::Db => write!(f, "db"),
+            ExtentType::DbShm => write!(f, "db-shm"),
+            ExtentType::DbWal => write!(f, "db-wal"),
         }
     }
 }
 
 /**
- * Take an ExtentExtension and translate it into the corresponding
+ * Take an ExtentType and translate it into the corresponding
  * FileType from the repair client.
  */
-impl ExtentExtension {
+impl ExtentType {
     fn to_file_type(&self) -> FileType {
         match self {
-            ExtentExtension::Db => FileType::Db,
-            ExtentExtension::DbShm => FileType::DbShm,
-            ExtentExtension::DbWal => FileType::DbWal,
+            ExtentType::Data => FileType::Data,
+            ExtentType::Db => FileType::Db,
+            ExtentType::DbShm => FileType::DbShm,
+            ExtentType::DbWal => FileType::DbWal,
         }
     }
 }
@@ -445,14 +448,14 @@ impl ExtentExtension {
 /**
  * Produce the string name of the data file for a given extent number
  */
-pub fn extent_file_name(
-    number: u32,
-    extension: Option<ExtentExtension>,
-) -> String {
-    if let Some(extension) = extension {
-        format!("{:03X}.{}", number & 0xFFF, extension)
-    } else {
-        format!("{:03X}", number & 0xFFF)
+pub fn extent_file_name(number: u32, extent_type: ExtentType) -> String {
+    match extent_type {
+        ExtentType::Data => {
+            format!("{:03X}", number & 0xFFF)
+        }
+        ExtentType::Db | ExtentType::DbShm | ExtentType::DbWal => {
+            format!("{:03X}.{}", number & 0xFFF, extent_type)
+        }
     }
 }
 
@@ -473,7 +476,7 @@ pub fn extent_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  */
 pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, None));
+    out.push(extent_file_name(number, ExtentType::Data));
     out
 }
 
@@ -485,7 +488,7 @@ pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  */
 pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, None));
+    out.push(extent_file_name(number, ExtentType::Data));
     out.set_extension("copy".to_string());
     out
 }
@@ -500,7 +503,7 @@ pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  */
 pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, None));
+    out.push(extent_file_name(number, ExtentType::Data));
     out.set_extension("replace".to_string());
     out
 }
@@ -514,7 +517,7 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  */
 pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, None));
+    out.push(extent_file_name(number, ExtentType::Data));
     out.set_extension("completed".to_string());
     out
 }
@@ -552,14 +555,14 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
     let eid = eid as u32;
 
     let some = vec![
-        extent_file_name(eid, None),
-        extent_file_name(eid, Some(ExtentExtension::Db)),
+        extent_file_name(eid, ExtentType::Data),
+        extent_file_name(eid, ExtentType::Db),
     ];
 
     let mut all = some.clone();
     all.extend(vec![
-        extent_file_name(eid, Some(ExtentExtension::DbShm)),
-        extent_file_name(eid, Some(ExtentExtension::DbWal)),
+        extent_file_name(eid, ExtentType::DbShm),
+        extent_file_name(eid, ExtentType::DbWal),
     ]);
 
     // Either we have some or all.
@@ -785,9 +788,10 @@ impl Extent {
     fn create_copy_file(
         &self,
         mut copy_dir: PathBuf,
-        extension: Option<ExtentExtension>,
+        extension: Option<ExtentType>,
     ) -> Result<File> {
-        let name = extent_file_name(self.number, None);
+        // Get the base extent name before we consider the actual Type
+        let name = extent_file_name(self.number, ExtentType::Data);
         copy_dir.push(name);
         if let Some(extension) = extension {
             let ext = format!("{}", extension);
@@ -1259,8 +1263,7 @@ impl Region {
             .get_files_for_extent(eid as u32)
             .await
             .unwrap()
-            .into_inner()
-            .files;
+            .into_inner();
 
         repair_files.sort();
         println!("Found repair files: {:?}", repair_files);
@@ -1284,7 +1287,7 @@ impl Region {
 
         // The .db file is also required to exist for any valid extent.
         let extent_db = extent
-            .create_copy_file(copy_dir.clone(), Some(ExtentExtension::Db))
+            .create_copy_file(copy_dir.clone(), Some(ExtentType::Db))
             .unwrap();
         let repair_stream = repair_server
             .get_extent_file(eid as u32, FileType::Db)
@@ -1293,8 +1296,8 @@ impl Region {
         save_stream_to_file(extent_db, repair_stream.into_inner()).await?;
 
         // These next two are optional.
-        for opt_file in &[ExtentExtension::DbShm, ExtentExtension::DbWal] {
-            let filename = extent_file_name(eid as u32, Some(opt_file.clone()));
+        for opt_file in &[ExtentType::DbShm, ExtentType::DbWal] {
+            let filename = extent_file_name(eid as u32, opt_file.clone());
             if repair_files.contains(&filename) {
                 let extent_shm = extent
                     .create_copy_file(copy_dir.clone(), Some(opt_file.clone()))
@@ -1617,7 +1620,7 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     eid: usize,
 ) -> Result<(), CrucibleError> {
     let destination_dir = extent_dir(&region_dir, eid as u32);
-    let extent_file_name = extent_file_name(eid as u32, None);
+    let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
     let replace_dir = replace_dir(&region_dir, eid as u32);
     let completed_dir = completed_dir(&region_dir, eid as u32);
 
@@ -1942,7 +1945,7 @@ mod test {
         // We are simulating the copy of files from the "source" repair
         // extent by copying the files from extent zero into the copy
         // directory.
-        let dest_name = extent_file_name(1, None);
+        let dest_name = extent_file_name(1, ExtentType::Data);
         let mut source_path = extent_path(&dir, 0);
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
@@ -2007,7 +2010,7 @@ mod test {
         // We are simulating the copy of files from the "source" repair
         // extent by copying the files from extent zero into the copy
         // directory.
-        let dest_name = extent_file_name(1, None);
+        let dest_name = extent_file_name(1, ExtentType::Data);
         let mut source_path = extent_path(&dir, 0);
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
@@ -2083,7 +2086,7 @@ mod test {
         // We are simulating the copy of files from the "source" repair
         // extent by copying the files from extent zero into the copy
         // directory.
-        let dest_name = extent_file_name(1, None);
+        let dest_name = extent_file_name(1, ExtentType::Data);
         let mut source_path = extent_path(&dir, 0);
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
@@ -2333,41 +2336,35 @@ mod test {
 
     #[test]
     fn extent_name_basic() {
-        assert_eq!(extent_file_name(4, None), "004");
+        assert_eq!(extent_file_name(4, ExtentType::Data), "004");
     }
     #[test]
     fn extent_name_basic_ext() {
-        assert_eq!(extent_file_name(4, Some(ExtentExtension::Db)), "004.db");
+        assert_eq!(extent_file_name(4, ExtentType::Db), "004.db");
     }
     #[test]
     fn extent_name_basic_ext_shm() {
-        assert_eq!(
-            extent_file_name(4, Some(ExtentExtension::DbShm)),
-            "004.db-shm"
-        );
+        assert_eq!(extent_file_name(4, ExtentType::DbShm), "004.db-shm");
     }
     #[test]
     fn extent_name_basic_ext_wal() {
-        assert_eq!(
-            extent_file_name(4, Some(ExtentExtension::DbWal)),
-            "004.db-wal"
-        );
+        assert_eq!(extent_file_name(4, ExtentType::DbWal), "004.db-wal");
     }
     #[test]
     fn extent_name_basic_two() {
-        assert_eq!(extent_file_name(10, None), "00A");
+        assert_eq!(extent_file_name(10, ExtentType::Data), "00A");
     }
     #[test]
     fn extent_name_basic_three() {
-        assert_eq!(extent_file_name(59, None), "03B");
+        assert_eq!(extent_file_name(59, ExtentType::Data), "03B");
     }
     #[test]
     fn extent_name_max() {
-        assert_eq!(extent_file_name(u32::MAX, None), "FFF");
+        assert_eq!(extent_file_name(u32::MAX, ExtentType::Data), "FFF");
     }
     #[test]
     fn extent_name_min() {
-        assert_eq!(extent_file_name(u32::MIN, None), "000");
+        assert_eq!(extent_file_name(u32::MIN, ExtentType::Data), "000");
     }
 
     #[test]

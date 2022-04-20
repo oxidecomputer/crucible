@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# A test to break, then Repair a downstairs region that is out of sync with
+# the other regions.
+# This assumes you already have regions created.
+
 cargo build || echo "Failed to build"
 
 cds="./target/debug/crucible-downstairs"
@@ -50,7 +54,7 @@ fi
 kill "$slow_pid"
 
 # Start loop
-for (( i = 0; i < 30; i += 1 )); do
+for (( i = 0; i < 300; i += 1 )); do
 
     # restart downstairs with lossy
     ${cds} run -d var/"${slow_port}" -p "${slow_port}" --lossy &> "${slow_log}" &
