@@ -19,6 +19,7 @@ trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
     rm -f "$testdir"/up
+    rm -f "$testdir"/pause
     touch "$testdir"/stop
 }
 
@@ -27,6 +28,15 @@ function ctrl_c() {
 downstairs_restart() {
     while :; do
         if [[ -f ${testdir}/up ]]; then
+            sleep 5
+            continue
+        fi
+        if [[ -f ${testdir}/pause ]]; then
+            ds_pids=$(pgrep -fl ${cds} | awk '{print $1}')
+            for pid in ${ds_pids}; do
+                echo "pause downstairs, stop PID $pid"
+                kill "$pid"
+            done
             sleep 5
             continue
         fi
@@ -69,6 +79,11 @@ downstairs_daemon() {
     echo "" > "$errfile"
     echo "$(date) Starting downstairs ${port}"
     while :; do
+        if [[ -f ${testdir}/pause ]]; then
+            sleep 3
+            continue
+        fi
+
         ${cds} run -p "$port" -d var/"$port">> "$outfile" 2> "$errfile"
         res=$?
         if [[ $res -ne 143 ]]; then
@@ -140,6 +155,11 @@ if [[ ! -f ${cds} ]]; then
     exit 1
 fi
 
+os_name=$(uname)
+if [[ "$os_name" == 'Darwin' ]]; then
+    # stupid macos needs this to avoid popup hell.
+    codesign -s - -f "$cds"
+fi
 
 # If this port base is different than default, then good luck..
 port_base=8810
