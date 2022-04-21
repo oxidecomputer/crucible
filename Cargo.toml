@@ -8,6 +8,7 @@ members = [
     "crucadm",
     "downstairs",
     "hammer",
+    "integration_tests",
     "measure_iops",
     "nbd_server",
     "package",

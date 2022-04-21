@@ -1,0 +1,18 @@
+[package]
+name = "crucible-integration-tests"
+version = "0.1.0"
+authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer>", "James MacMahon <james@oxide.computer>"]
+license = "MPL-2.0"
+edition = "2018"
+
+[dev-dependencies]
+anyhow = "1"
+bytes = "1"
+crucible = { path = "../upstairs" }
+crucible-downstairs = { path = "../downstairs" }
+futures = "0.3"
+futures-core = "0.3"
+httptest = "0.15.4"
+tempfile = "3.3.0"
+tokio = { version = "1.17.0", features = ["full"] }
+uuid = { version = "0.8", features = [ "serde", "v4" ] }
