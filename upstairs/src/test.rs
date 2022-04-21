@@ -3668,20 +3668,200 @@ mod test {
 
     #[test]
     fn reconcile_rc_to_message() {
-        // Convert an extent fix to the crucible messages.
-        // TODO: This will grow as the protocol is finalized.
+        // Convert an extent fix to the crucible repair messages that
+        // are sent to the downstairs.  Verify that the resulting
+        // messages are what we expect
         let up = Upstairs::default();
         let mut ds = up.downstairs.lock().unwrap();
+        let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
+        let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
+        let r2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 803);
+        ds.ds_repair.insert(0, r0.clone());
+        ds.ds_repair.insert(1, r1);
+        ds.ds_repair.insert(2, r2);
+
+        let repair_extent = 9;
         let mut rec_list = HashMap::new();
         let ef = ExtentFix {
             source: 0,
             dest: vec![1, 2],
         };
-        rec_list.insert(0, ef);
-        ds.convert_rc_to_messages(rec_list);
-        // TODO: When we finalize the message, update this test
-        // to expect more.
-        assert!(!ds.reconcile_task_list.is_empty());
+        rec_list.insert(repair_extent, ef);
+        let max_flush = 22;
+        let max_gen = 33;
+        ds.convert_rc_to_messages(rec_list, max_flush, max_gen);
+
+        // Walk the list and check for messages we expect to find
+        assert_eq!(ds.reconcile_task_list.len(), 4);
+
+        // First task, flush
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 0);
+        match rio.op {
+            Message::ExtentFlush(rep_id, ext, source, mf, mg) => {
+                assert_eq!(rep_id, 0);
+                assert_eq!(ext, repair_extent);
+                assert_eq!(source, 0);
+                assert_eq!(mf, max_flush);
+                assert_eq!(mg, max_gen);
+            }
+            m => {
+                panic!("{:?} not ExtentFlush()", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+
+        // Second task, close extent
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 1);
+        match rio.op {
+            Message::ExtentClose(rep_id, ext) => {
+                assert_eq!(rep_id, 1);
+                assert_eq!(ext, repair_extent);
+            }
+            m => {
+                panic!("{:?} not ExtentClose()", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+
+        // Third task, repair extent
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 2);
+        match rio.op {
+            Message::ExtentRepair(rep_id, ext, source, repair, dest) => {
+                assert_eq!(rep_id, rio.id);
+                assert_eq!(ext, repair_extent);
+                assert_eq!(source, 0);
+                assert_eq!(repair, r0);
+                assert_eq!(dest, vec![1, 2]);
+            }
+            m => {
+                panic!("{:?} not ExtentRepair", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+
+        // Third task, close extent
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 3);
+        match rio.op {
+            Message::ExtentReopen(rep_id, ext) => {
+                assert_eq!(rep_id, 3);
+                assert_eq!(ext, repair_extent);
+            }
+            m => {
+                panic!("{:?} not ExtentClose()", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+    }
+
+    #[test]
+    fn reconcile_rc_to_message_two() {
+        // Convert another extent fix to the crucible repair messages that
+        // are sent to the downstairs.  Verify that the resulting
+        // messages are what we expect
+        let up = Upstairs::default();
+        let mut ds = up.downstairs.lock().unwrap();
+        let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
+        let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
+        let r2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 803);
+        ds.ds_repair.insert(0, r0.clone());
+        ds.ds_repair.insert(1, r1);
+        ds.ds_repair.insert(2, r2);
+
+        let repair_extent = 5;
+        let mut rec_list = HashMap::new();
+        let ef = ExtentFix {
+            source: 2,
+            dest: vec![0, 1],
+        };
+        rec_list.insert(repair_extent, ef);
+        let max_flush = 66;
+        let max_gen = 77;
+        ds.convert_rc_to_messages(rec_list, max_flush, max_gen);
+
+        // Walk the list and check for messages we expect to find
+        assert_eq!(ds.reconcile_task_list.len(), 4);
+
+        // First task, flush
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 0);
+        match rio.op {
+            Message::ExtentFlush(rep_id, ext, source, mf, mg) => {
+                assert_eq!(rep_id, 0);
+                assert_eq!(ext, repair_extent);
+                assert_eq!(source, 2);
+                assert_eq!(mf, max_flush);
+                assert_eq!(mg, max_gen);
+            }
+            m => {
+                panic!("{:?} not ExtentFlush()", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+
+        // Second task, close extent
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 1);
+        match rio.op {
+            Message::ExtentClose(rep_id, ext) => {
+                assert_eq!(rep_id, 1);
+                assert_eq!(ext, repair_extent);
+            }
+            m => {
+                panic!("{:?} not ExtentClose()", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+
+        // Third task, repair extent
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 2);
+        match rio.op {
+            Message::ExtentRepair(rep_id, ext, source, repair, dest) => {
+                assert_eq!(rep_id, rio.id);
+                assert_eq!(ext, repair_extent);
+                assert_eq!(source, 2);
+                assert_eq!(repair, r2);
+                assert_eq!(dest, vec![0, 1]);
+            }
+            m => {
+                panic!("{:?} not ExtentRepair", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
+
+        // Third task, close extent
+        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        assert_eq!(rio.id, 3);
+        match rio.op {
+            Message::ExtentReopen(rep_id, ext) => {
+                assert_eq!(rep_id, 3);
+                assert_eq!(ext, repair_extent);
+            }
+            m => {
+                panic!("{:?} not ExtentClose()", m);
+            }
+        }
+        assert_eq!(Some(&IOState::New), rio.state.get(&0));
+        assert_eq!(Some(&IOState::New), rio.state.get(&1));
+        assert_eq!(Some(&IOState::New), rio.state.get(&2));
     }
 
     #[test]

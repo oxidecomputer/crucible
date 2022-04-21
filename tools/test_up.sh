@@ -84,7 +84,7 @@ for (( i = 0; i < 3; i++ )); do
 done
 
 res=0
-test_list="one span big dep deactivate balloon"
+test_list="span big dep deactivate balloon"
 for tt in ${test_list}; do
     echo ""
     echo "Running test: $tt"
@@ -100,13 +100,37 @@ for tt in ${test_list}; do
     fi
 done
 
+echo "Running hammer"
+if ! time cargo run -p crucible-hammer -- \
+    "${args[@]}"; then
+
+	echo "Failed hammer test"
+    echo "Failed hammer test" >> /tmp/test_fail.txt
+    (( res += 1 ))
+fi
+
 # Repair test
+# This one goes last because it modified the args variable.
+# We also test the --verify-* args here as well.
+args+=( --verify-out "${testdir}/verify_file" )
+echo "$cc" fill -q "${args[@]}"
+if ! "$cc" fill -q "${args[@]}"; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed setup repair test"
+    echo "Failed setup repair test" >> /tmp/test_fail.txt
+    echo
+else
+    echo "Repair setup passed"
+fi
+
 echo "Copy the $port file"
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
-echo "$cc" "$tt" -q "${args[@]}"
-if ! "$cc" one -q "${args[@]}"; then
+args+=( --verify-in "${testdir}/verify_file" )
+echo "$cc" repair -q "${args[@]}"
+if ! "$cc" repair -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
@@ -136,7 +160,7 @@ downstairs[4]=$!
 echo ""
 echo ""
 echo "$cc" "$tt" -q "${args[@]}"
-if ! "$cc" one -q "${args[@]}"; then
+if ! "$cc" verify -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
@@ -144,38 +168,6 @@ if ! "$cc" one -q "${args[@]}"; then
     echo
 else
     echo "Repair part 2 passed"
-fi
-
-echo "Running hammer"
-if ! time cargo run -p crucible-hammer -- \
-    "${args[@]}"; then
-
-	echo "Failed hammer test"
-    echo "Failed hammer test" >> /tmp/test_fail.txt
-    (( res += 1 ))
-fi
-
-echo ""
-echo "Running verify test: $tt"
-vfile="${testdir}/verify"
-echo "$cc" rand -q --verify-out "$vfile" "${args[@]}"
-if ! "$cc" rand -q --verify-out "$vfile" "${args[@]}"; then
-    (( res += 1 ))
-    echo ""
-    echo "Failed crucible-client rand verify test"
-    echo "Failed crucible-client rand verify test" >> /tmp/test_fail.txt
-    echo ""
-else
-    echo "$cc" rand -q --verify-in "$vfile" "${args[@]}"
-    if ! "$cc" rand -q --verify-in "$vfile" "${args[@]}"; then
-        (( res += 1 ))
-        echo ""
-        echo "Failed crucible-client rand verify part 2 test"
-        echo "Failed crucible-client rand verify part 2 test" >> /tmp/test_fail.txt
-        echo ""
-    else
-        echo "Verify test passed"
-    fi
 fi
 
 # The dump args look different than other downstairs commands

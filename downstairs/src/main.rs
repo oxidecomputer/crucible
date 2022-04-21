@@ -24,6 +24,7 @@ use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
+use slog::Drain;
 use structopt::StructOpt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -34,11 +35,10 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use slog::Drain;
-
 mod admin;
 mod dump;
 mod region;
+mod repair;
 mod stats;
 
 use admin::run_dropshot;
@@ -139,17 +139,16 @@ enum Args {
         skip: u64,
     },
     Run {
-        #[structopt(short, long, default_value = "0.0.0.0")]
+        /// Address the downstairs will listen for the upstairs on.
+        #[structopt(short, long, default_value = "0.0.0.0", name = "ADDRESS")]
         address: IpAddr,
 
+        /// Directory where the region is located.
         #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
         data: PathBuf,
-        /*
-         * Test option, makes the search for new work sleep and sometimes
-         * skip doing work.  XXX Note that the flow control between upstairs
-         * and downstairs is not yet implemented.  By turning on this option
-         * it's possible to deadlock.
-         */
+
+        /// Test option, makes the search for new work sleep and sometimes
+        /// skip doing work.
         #[structopt(long)]
         lossy: bool,
 
@@ -157,9 +156,11 @@ enum Args {
          * If this option is provided along with the address:port of the
          * oximeter server, the downstairs will publish stats.
          */
-        #[structopt(long)]
+        /// Use this address:port to send stats to an Oximeter server.
+        #[structopt(long, name = "OXIMETER_ADDRESS:PORT")]
         oximeter: Option<SocketAddr>,
 
+        /// Listen on this port for the upstairs to connect to us.
         #[structopt(short, long, default_value = "9000")]
         port: u16,
 
@@ -180,6 +181,7 @@ enum Args {
         #[structopt(long, default_value = "rw")]
         mode: Mode,
     },
+    RepairAPI,
     Serve {
         #[structopt(short, long)]
         trace_endpoint: Option<String>,
@@ -530,14 +532,34 @@ where
             d.add_work(*uuid, *ds_id, new_read).await?;
             Some(*ds_id)
         }
+        Message::ExtentFlush(rep_id, eid, _cid, flush_number, gen_number) => {
+            println!(
+                "{} Flush extent {} with f:{} g:{}",
+                rep_id, eid, flush_number, gen_number
+            );
+            let msg = {
+                let d = ad.lock().await;
+                match d.region.region_flush_extent(
+                    *eid,
+                    *flush_number,
+                    *gen_number,
+                ) {
+                    Ok(()) => Message::RepairAckId(*rep_id),
+                    Err(e) => Message::ExtentError(*rep_id, *eid, e),
+                }
+            };
+            let mut fw = fw.lock().await;
+            fw.send(msg).await?;
+            return Ok(());
+        }
         Message::ExtentClose(rep_id, eid) => {
-            println!("{} Close extent {}", rep_id, eid);
+            println!("{} Close extent  {}", rep_id, eid);
             let msg = {
                 let mut d = ad.lock().await;
-                match d.region.extents.get_mut(*eid as usize) {
+                match d.region.extents.get_mut(*eid) {
                     Some(ext) => {
                         ext.close()?;
-                        Message::ExtentCloseAck(*rep_id)
+                        Message::RepairAckId(*rep_id)
                     }
                     None => Message::ExtentError(
                         *rep_id,
@@ -550,12 +572,28 @@ where
             fw.send(msg).await?;
             return Ok(());
         }
+        Message::ExtentRepair(rep_id, eid, sc, repair_addr, dest) => {
+            println!(
+                "{} Repair extent {} source:[{}] {:?} dest:{:?}",
+                rep_id, eid, sc, repair_addr, dest
+            );
+            let msg = {
+                let mut d = ad.lock().await;
+                match d.region.repair_extent(*eid, *repair_addr).await {
+                    Ok(()) => Message::RepairAckId(*rep_id),
+                    Err(e) => Message::ExtentError(*rep_id, *eid, e),
+                }
+            };
+            let mut fw = fw.lock().await;
+            fw.send(msg).await?;
+            return Ok(());
+        }
         Message::ExtentReopen(rep_id, eid) => {
             println!("{} Reopen extent {}", rep_id, eid);
             let msg = {
                 let mut d = ad.lock().await;
-                match d.region.reopen_extent(*eid as usize) {
-                    Ok(()) => Message::ExtentReopenAck(*rep_id),
+                match d.region.reopen_extent(*eid) {
+                    Ok(()) => Message::RepairAckId(*rep_id),
                     Err(e) => Message::ExtentError(*rep_id, *eid, e),
                 }
             };
@@ -1076,8 +1114,8 @@ where
  * downstairs work queue.
  */
 #[derive(Debug)]
-struct Downstairs {
-    region: Region,
+pub struct Downstairs {
+    pub region: Region,
     work: Mutex<Work>,
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
@@ -1805,6 +1843,10 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Args::RepairAPI => {
+            let _ = repair::build_api(true);
+            Ok(())
+        }
         Args::Serve {
             trace_endpoint,
             bind_addr,
@@ -1925,6 +1967,18 @@ async fn start_downstairs(
         });
     }
 
+    // Start the repair server on the same address at port + REPAIR_PORT_OFFSET
+    let rport = port + REPAIR_PORT_OFFSET;
+    let repair_address = match address {
+        IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
+        IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
+    };
+    let dss = d.clone();
+    tokio::spawn(async move {
+        let s = repair::repair_main(&dss, repair_address).await;
+        println!("Got {:?} from repair main", s);
+    });
+
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
         IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), port),
@@ -1933,7 +1987,6 @@ async fn start_downstairs(
     /*
      * Establish a listen server on the port.
      */
-    // let listen_on = SocketAddrV4::new(address, port);
     println!("Using address: {:?}", listen_on);
     let listener = TcpListener::bind(&listen_on).await?;
 

@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use std::cmp::Ordering;
+use std::net::SocketAddr;
 
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
@@ -148,16 +149,22 @@ pub enum Message {
      */
     /// Send a close the given extent ID on the downstairs.
     /// We send the downstairs the repair ID (rep_id) and the extent number.
-    ExtentClose(u64, u64),
-    /// Ack the close of an extent from the downstairs using the rep_id.
-    ExtentCloseAck(u64),
+    ExtentClose(u64, usize),
     /// Send a request (with rep_id) to reopen the given extent.
-    ExtentReopen(u64, u64),
+    ExtentReopen(u64, usize),
     /// Ack the Re-Open of an extent from the downstairs using the rep_id.
-    ExtentReopenAck(u64),
 
+    /// Flush just this extent on just this downstairs client.
+    /// rep_id, extent ID, downstairs client ID, flush number, gen number.
+    ExtentFlush(u64, usize, u8, u64, u64),
+    /// Replace an extent with data from the given downstairs.
+    /// rep_id, extent ID, source extent, Vec of extents to repair
+    ExtentRepair(u64, usize, u8, SocketAddr, Vec<u8>),
+
+    /// The given repair job ID has finished without error
+    RepairAckId(u64),
     /// A problem with the given extent
-    ExtentError(u64, u64, CrucibleError),
+    ExtentError(u64, usize, CrucibleError),
     /*
      * Metadata exchange
      */

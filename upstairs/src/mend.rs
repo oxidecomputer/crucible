@@ -34,7 +34,7 @@ pub struct ExtentFix {
 #[derive(Debug)]
 pub struct DownstairsMend {
     // Index by extent ID
-    pub mend: HashMap<u64, ExtentFix>,
+    pub mend: HashMap<usize, ExtentFix>,
 }
 
 impl DownstairsMend {
@@ -108,7 +108,7 @@ impl DownstairsMend {
             if *dirty0 || c1.dirty[i] || c2.dirty[i] {
                 println!("Extents {} dirty", i);
                 let ef = make_repair_list(i, c0, c1, c2);
-                dsm.mend.insert(i as u64, ef);
+                dsm.mend.insert(i, ef);
             } else {
                 to_check.push(i as usize);
             }
@@ -126,7 +126,7 @@ impl DownstairsMend {
             {
                 println!("Extent {} has flush number mismatch", i);
                 let ef = make_repair_list(*i, c0, c1, c2);
-                dsm.mend.insert(*i as u64, ef);
+                dsm.mend.insert(*i, ef);
             } else {
                 second_check.push(*i);
             }
@@ -142,7 +142,7 @@ impl DownstairsMend {
             {
                 println!("generation number mismatch {}", i);
                 let ef = make_repair_list(*i, c0, c1, c2);
-                dsm.mend.insert(*i as u64, ef);
+                dsm.mend.insert(*i, ef);
             }
         }
 
