@@ -47,6 +47,7 @@ uuid = { version = "0.8", features = [ "serde", "v4" ] }
 rusqlite = { version = "0.27" }
 hex = "0.4"
 sha2 = "0.10"
+rayon = "1.5.2"
 
 [dev-dependencies]
 rand_chacha = "0.3.1"
