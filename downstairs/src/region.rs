@@ -1,4 +1,5 @@
 // Copyright 2021 Oxide Computer Company
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
@@ -1113,15 +1114,21 @@ impl Region {
      */
     fn open_extents(&mut self, create: bool) -> Result<()> {
         let next_eid = self.extents.len() as u32;
+
+        let these_extents = (next_eid..self.def.extent_count())
+            .into_par_iter()
+            .map(|eid| {
+                if create {
+                    Extent::create(&self.dir, &self.def, eid)
+                } else {
+                    Extent::open(&self.dir, &self.def, eid, self.read_only)
+                }
+            })
+            .collect::<Result<Vec<Extent>>>()?;
+
+        self.extents.extend(these_extents);
+
         for eid in next_eid..self.def.extent_count() {
-            let new_extent: Extent;
-            if create {
-                new_extent = Extent::create(&self.dir, &self.def, eid)?;
-            } else {
-                new_extent =
-                    Extent::open(&self.dir, &self.def, eid, self.read_only)?;
-            }
-            self.extents.push(new_extent);
             assert_eq!(self.extents[eid as usize].number, eid);
         }
         assert_eq!(self.def.extent_count() as usize, self.extents.len());
