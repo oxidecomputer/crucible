@@ -157,6 +157,27 @@ echo ${cds} run -p "$port" -d "${testdir}/$port"
 ${cds} run -p "$port" -d "${testdir}/$port" &
 downstairs[4]=$!
 
+# Put a dump test in the middle of the repair test, so we
+# can see both a mismatch and that dump works.
+# The dump args look different than other downstairs commands
+dump_args=()
+for (( i = 0; i < 30; i += 10 )); do
+    (( port = port_base + i ))
+    dir="${testdir}/$port"
+    dump_args+=( -d "$dir" )
+done
+echo "$cds" dump "${dump_args[@]}"
+# This should return error (a mismatch!)
+if "$cds" dump "${dump_args[@]}"; then
+    (( res += 1 ))
+    echo ""
+    echo "repair dump test did not find the expected error"
+    echo "repair dump test did not find the expected error" >> /tmp/test_fail.txt
+    echo ""
+else
+    echo "dump test found error as expected"
+fi
+
 echo ""
 echo ""
 echo "$cc" "$tt" -q "${args[@]}"
@@ -170,15 +191,16 @@ else
     echo "Repair part 2 passed"
 fi
 
-# The dump args look different than other downstairs commands
-args=()
+# Now that repair has finished, make sure the dump command
+# does not detect any errors
+dump_args=()
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
-    args+=( -d "$dir" )
+    dump_args+=( -d "$dir" )
 done
-echo "$cds" dump "${args[@]}"
-if ! "$cds" dump "${args[@]}"; then
+echo "$cds" dump "${dump_args[@]}"
+if ! "$cds" dump "${dump_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test"
@@ -188,28 +210,27 @@ else
     echo "dump test passed"
 fi
 
-echo "$cds" dump "${args[@]}" -e 1
-if ! "$cds" dump "${args[@]}" -e 1; then
+echo "$cds" dump "${dump_args[@]}" -e 1
+if ! "$cds" dump "${dump_args[@]}" -e 1; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump test 2"
-    echo "Failed crucible-client dump test 2" >> /tmp/test_fail.txt
+    echo "Failed crucible-client dump extent"
+    echo "Failed crucible-client dump extent" >> /tmp/test_fail.txt
     echo ""
 else
-    echo "dump test 2 passed"
+    echo "dump extent test passed"
 fi
 
-echo "$cds" dump "${args[@]}" -b 20
-if ! "$cds" dump "${args[@]}" -b 20 ; then
+echo "$cds" dump "${dump_args[@]}" -b 20
+if ! "$cds" dump "${dump_args[@]}" -b 20 ; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump test 2"
-    echo "Failed crucible-client dump test 2" >> /tmp/test_fail.txt
+    echo "Failed crucible-client dump block 20"
+    echo "Failed crucible-client dump block 20" >> /tmp/test_fail.txt
     echo ""
 else
-    echo "dump test 2 passed"
+    echo "dump block test passed"
 fi
-
 echo "Upstairs tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do
     kill $pid >/dev/null 2>&1

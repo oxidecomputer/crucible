@@ -46,6 +46,7 @@ pub fn dump_region(
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
 
+        let max_block = total_extents as u64 * blocks_per_extent;
         /*
          * The extent number is the index in the overall hashmap.
          * For each entry in all_extents hashmap, we have an ExtInfo
@@ -68,7 +69,7 @@ pub fn dump_region(
                         bail!(
                             "Requested block {} > max block {}",
                             b,
-                            total_extents as u64 * blocks_per_extent - 1,
+                            max_block - 1,
                         );
                     }
                     cmp_extent = Some(ce);
@@ -159,7 +160,12 @@ pub fn dump_region(
     ext_num.sort_unstable();
 
     print!("EXT ");
-    print!("   BLOCKS");
+
+    // How much space we need to print the blocks
+    let max_block = total_extents as u64 * blocks_per_extent;
+    let block_width = std::cmp::max(3, max_block.to_string().len());
+    let block_header = std::cmp::max(7, block_width * 2 + 1);
+    print!("{:>0width$}", "BLOCKS", width = block_header);
     for i in 0..dir_count {
         print!(" GEN{}", i);
     }
@@ -219,9 +225,10 @@ pub fn dump_region(
 
             print!("{:3} ", en);
             print!(
-                "{:04}-{:04}",
+                "{:0width$}-{:0width$}",
                 blocks_per_extent * (**en as u64),
-                blocks_per_extent * (**en as u64) + blocks_per_extent - 1
+                blocks_per_extent * (**en as u64) + blocks_per_extent - 1,
+                width = block_width,
             );
 
             let color = color_vec(&gen_vec);
