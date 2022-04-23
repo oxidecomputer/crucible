@@ -2262,6 +2262,11 @@ impl Downstairs {
             if !successful_hash {
                 // no integrity hash was correct for this
                 // response
+                println!("No match computed hash:{:?}", computed_hash,);
+                for hash in response.hashes.iter().rev() {
+                    println!("No match          hash:{:?}", hash);
+                }
+
                 return Err(CrucibleError::HashMismatch);
             }
         } else {
@@ -2353,6 +2358,7 @@ impl Downstairs {
             }
 
             if !successful_hash {
+                println!("No match encrypted computed hash");
                 // no hash was correct
                 return Err(CrucibleError::HashMismatch);
             } else if !successful_decryption {
@@ -2526,8 +2532,8 @@ impl Downstairs {
                             // downstairs disconnects.  However XXX, someone
                             // should be told about this error.
                             println!(
-                                "[{}] {} read error {:?}",
-                                client_id, ds_id, e
+                                "[{}] {} read error {:?} {:?}",
+                                client_id, ds_id, e, job
                             );
                         }
                     }
@@ -2562,11 +2568,12 @@ impl Downstairs {
                     if job.read_response_hashes != read_response_hashes {
                         // XXX This error needs to go to Nexus
                         println!(
-                            "[{}] read hash mismatch on {} {:?} {:?}",
+                            "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
                             client_id,
                             ds_id,
                             job.read_response_hashes,
-                            read_response_hashes
+                            read_response_hashes,
+                            job
                         );
                     }
                 }
@@ -2605,11 +2612,12 @@ impl Downstairs {
                         if job.read_response_hashes != read_response_hashes {
                             // XXX This error needs to go to Nexus
                             println!(
-                                "[{}] read hash mismatch on {} {:?} {:?}",
+                                "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
                                 client_id,
                                 ds_id,
                                 job.read_response_hashes,
-                                read_response_hashes
+                                read_response_hashes,
+                                job,
                             );
                         }
                     }
@@ -4574,13 +4582,23 @@ impl Upstairs {
         }
 
         // Mark this ds_id for the client_id as completed.
-        let notify_guest = ds.process_ds_completion(
+        let notify_guest = match ds.process_ds_completion(
             ds_id,
             client_id,
             read_data,
             &self.encryption_context,
             up_state,
-        )?;
+        ) {
+            Err(e) => {
+                let job = ds.active.get_mut(&ds_id).unwrap();
+                println!(
+                    "[{}] ds_completion error: {:?} j:{} {:?} {:?} ",
+                    client_id, e, ds_id, &self.encryption_context, job,
+                );
+                return Err(e);
+            }
+            Ok(ng) => ng,
+        };
 
         // Mark this downstairs as bad if this was a write or flush
         if let Err(err) = ds.client_error(ds_id, client_id) {
