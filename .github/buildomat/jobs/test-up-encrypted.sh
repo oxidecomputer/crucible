@@ -19,7 +19,7 @@ set -o xtrace
 
 banner unpack
 mkdir -p /var/tmp/bins
-for t in "$input/bins/*.gz"; do
+for t in "$input/bins/"*.gz; do
 	b=$(basename "$t")
 	b=${b%.gz}
 	gunzip < "$t" > "/var/tmp/bins/$b"
