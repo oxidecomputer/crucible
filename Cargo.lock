@@ -518,6 +518,7 @@ dependencies = [
  "serde",
  "serde_json",
  "structopt",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-test",
