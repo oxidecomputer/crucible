@@ -657,6 +657,10 @@ pub enum VolumeConstructionRequest {
         opts: CrucibleOpts,
         gen: u64,
     },
+    File {
+        block_size: u64,
+        path: String,
+    },
 }
 
 impl Volume {
@@ -681,6 +685,7 @@ impl Volume {
 
                 Ok(vol)
             }
+
             VolumeConstructionRequest::Url { block_size, url } => {
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume(Arc::new(ReqwestBlockIO::new(
@@ -688,6 +693,7 @@ impl Volume {
                 )?))?;
                 Ok(vol)
             }
+
             VolumeConstructionRequest::Region {
                 block_size,
                 opts,
@@ -697,6 +703,14 @@ impl Volume {
                 vol.add_subvolume_create_guest(opts, gen)?;
                 Ok(vol)
             }
+
+            VolumeConstructionRequest::File { block_size, path } => {
+                let mut vol = Volume::new(block_size);
+                vol.add_subvolume(Arc::new(FileBlockIO::new(
+                    block_size, path,
+                )?))?;
+                Ok(vol)
+            }
         }
     }
 }
@@ -704,6 +718,9 @@ impl Volume {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
 
     #[test]
     fn test_single_block() -> Result<()> {
@@ -1473,30 +1490,6 @@ mod test {
     }
 
     #[tokio::test]
-    async fn construct_simple_volume() {
-        let _request = VolumeConstructionRequest::Volume {
-            block_size: 512,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size: 512,
-                opts: CrucibleOpts {
-                    target: vec![
-                        "127.0.0.1:123".parse().unwrap(),
-                        "127.0.0.1:456".parse().unwrap(),
-                        "127.0.0.1:789".parse().unwrap(),
-                    ],
-                    key: Some("key".to_string()),
-                    ..Default::default()
-                },
-                gen: 0,
-            }],
-            read_only_parent: None,
-        };
-
-        // XXX can't test this without a running set of downstairs
-        // let vol = Volume::construct(request).unwrap();
-    }
-
-    #[tokio::test]
     async fn construct_snapshot_backed_vol() {
         let _request = VolumeConstructionRequest::Volume {
             block_size: 512,
@@ -1548,5 +1541,46 @@ mod test {
 
         // XXX can't test this without a running set of downstairs
         // let vol = Volume::construct(request).unwrap();
+    }
+
+    #[tokio::test]
+    async fn construct_file_block_io() {
+        const BLOCK_SIZE: usize = 512;
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("disk.raw");
+
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(&vec![0u8; 512]).unwrap();
+        file.write_all(&vec![5u8; 512]).unwrap();
+
+        let request = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(VolumeConstructionRequest::File {
+                block_size: 512,
+                path: file_path.into_os_string().into_string().unwrap(),
+            })),
+        };
+
+        let volume = Volume::construct(request).unwrap();
+
+        let buffer = Buffer::new(BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .unwrap()
+            .block_wait()
+            .unwrap();
+
+        assert_eq!(vec![0x0; BLOCK_SIZE], *buffer.as_vec());
+
+        let buffer = Buffer::new(BLOCK_SIZE);
+        volume
+            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .unwrap()
+            .block_wait()
+            .unwrap();
+
+        assert_eq!(vec![0x5; BLOCK_SIZE], *buffer.as_vec());
     }
 }
