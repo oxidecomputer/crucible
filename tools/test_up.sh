@@ -15,26 +15,25 @@ set -o pipefail
 SECONDS=0
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BINDIR=${BINDIR:-$ROOT/target/debug}
 
 echo "$ROOT"
 cd "$ROOT"
 
-if pgrep -fl target/debug/crucible-downstairs; then
+if pgrep -fl crucible-downstairs; then
     echo 'Downstairs already running?' >&2
     exit 1
 fi
 
-if ! cargo build; then
-    echo "Initial Build failed, no tests ran"
-    exit 1
-fi
-
-cds="./target/debug/crucible-downstairs"
-cc="./target/debug/crucible-client"
-if [[ ! -f ${cds} ]] || [[ ! -f ${cc} ]]; then
-    echo "Can't find crucible binary at $cds or $cc"
-    exit 1
-fi
+cds="$BINDIR/crucible-downstairs"
+cc="$BINDIR/crucible-client"
+ch="$BINDIR/crucible-hammer"
+for bin in $cds $cc $ch; do
+    if [[ ! -f "$bin" ]]; then
+        echo "Can't find crucible binary at $bin" >&2
+        exit 1
+    fi
+done
 
 testdir="/var/tmp/test_up"
 if [[ -d ${testdir} ]]; then
@@ -101,10 +100,8 @@ for tt in ${test_list}; do
 done
 
 echo "Running hammer"
-if ! time cargo run -p crucible-hammer -- \
-    "${args[@]}"; then
-
-	echo "Failed hammer test"
+if ! time "$ch" "${args[@]}"; then
+    echo "Failed hammer test"
     echo "Failed hammer test" >> /tmp/test_fail.txt
     (( res += 1 ))
 fi
