@@ -10,8 +10,6 @@
 #:
 #: [dependencies.build]
 #: job = "build"
-#: [dependencies.test-up-encrypted]
-#: job = "test-up-encrypted"
 
 input="/input/build/work"
 
