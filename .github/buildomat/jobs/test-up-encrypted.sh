@@ -18,6 +18,14 @@ set -o pipefail
 set -o xtrace
 
 banner unpack
+echo input
+ls -ltr "/input"
+echo input/build
+ls -ltr "/input/build/"
+echo dollar_input
+ls -ltr "$input"
+echo bins
+ls -ltr "$input/bins"
 mkdir -p /var/tmp/bins
 for t in "$input/bins/"*.gz; do
 	b=$(basename "$t")

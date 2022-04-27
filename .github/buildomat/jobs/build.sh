@@ -32,6 +32,11 @@ for s in tools/test_up.sh; do
 	cp "$s" /work/scripts/
 done
 
+echo in_work_scripts
+ls -l /work/scripts
+echo in_work_bins
+ls -l /work/bins
+
 exit 0
 
 #banner test
