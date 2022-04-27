@@ -12,7 +12,11 @@
 #: job = "build"
 
 input="/input/build/work"
+
+printenv
+
 date
+banner newer
 echo first
 ls -ltr /
 echo input
@@ -21,10 +25,12 @@ echo build
 ls -ltr /input/build/
 echo work
 ls -ltr /input/build/work
-
 set -o errexit
 set -o pipefail
 set -o xtrace
+
+echo first bins
+ls -ltr /input/build/work/bins || true
 
 banner unpack
 mkdir -p /var/tmp/bins

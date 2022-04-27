@@ -13,7 +13,10 @@
 
 input="/input/build/work"
 
+printenv
+
 date
+banner newer
 echo first
 ls -ltr /
 echo input
@@ -31,9 +34,6 @@ ls -ltr /input/build/work/bins || true
 
 banner unpack
 mkdir -p /var/tmp/bins
-echo second ls
-ls -ltr /input/build/work/bins || true
-
 for t in "$input/bins/"*.gz; do
 	b=$(basename "$t")
 	b=${b%.gz}
