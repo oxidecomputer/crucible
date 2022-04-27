@@ -8,6 +8,8 @@
 #: ]
 #: skip_clone = true
 #:
+#: [dependencies.build]
+#: job = "build"
 #: [dependencies.test-up-encrypted]
 #: job = "test-up-encrypted"
 
@@ -16,7 +18,6 @@ input="/input/build/work"
 printenv
 
 date
-banner newer
 echo first
 ls -ltr /
 echo input
