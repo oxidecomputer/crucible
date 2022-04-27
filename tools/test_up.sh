@@ -59,12 +59,15 @@ esac
 uuidprefix="12345678-1234-1234-1234-00000000"
 downstairs=()
 port_base=8810
+
+echo "Creating and starting three downstairs"
 for (( i = 0; i < 3; i++ )); do
     (( port_step = i * 10 ))
     (( port = port_base + port_step ))
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
+    outdir="${testdir}/downstairs-${port}-out.txt"
     set -o errexit
     case ${1} in
         "unencrypted")
@@ -76,19 +79,21 @@ for (( i = 0; i < 3; i++ )); do
             ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true
             ;;
     esac
+    echo "Downstairs output log at $outdir"
     echo ${cds} run -p "$port" -d "$dir"
-    ${cds} run -p "$port" -d "$dir" &
+    ${cds} run -p "$port" -d "$dir" > "$outdir" 2>&1 &
     downstairs[$i]=$!
     set +o errexit
 done
 
+echo ""
+echo "Begin tests"
 res=0
 test_list="span big dep deactivate balloon"
 for tt in ${test_list}; do
-    echo ""
     echo "Running test: $tt"
-    echo "$cc" "$tt" -q "${args[@]}"
-    if ! "$cc" "$tt" -q "${args[@]}"; then
+    echo "$cc" "$tt" -q "${args[@]}" >> "${testdir}"/test_out.txt
+    if ! "$cc" "$tt" -q "${args[@]}" >> "${testdir}"/test_out.txt 2>&1; then
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client $tt test"
@@ -100,7 +105,7 @@ for tt in ${test_list}; do
 done
 
 echo "Running hammer"
-if ! time "$ch" "${args[@]}"; then
+if ! time "$ch" "${args[@]}" >> "${testdir}/test_out.txt" 2>&1; then
     echo "Failed hammer test"
     echo "Failed hammer test" >> /tmp/test_fail.txt
     (( res += 1 ))
