@@ -17,8 +17,16 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
+echo first
+ls -ltr /input/build/work
+echo first bins
+ls -ltr /input/build/work/bins
+
 banner unpack
 mkdir -p /var/tmp/bins
+echo second ls
+ls -ltr /input/build/work/bins
+
 for t in "$input/bins/"*.gz; do
 	b=$(basename "$t")
 	b=${b%.gz}
