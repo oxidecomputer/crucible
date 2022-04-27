@@ -45,3 +45,5 @@ export BINDIR=/var/tmp/bins
 
 banner test_up
 ptime -m bash "$input/scripts/test_up.sh" unencrypted
+
+# Save the output files?
