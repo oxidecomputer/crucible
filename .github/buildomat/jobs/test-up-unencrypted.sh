@@ -9,7 +9,7 @@
 #: skip_clone = true
 #:
 #: [dependencies.build]
-#: job = "builduup"
+#: job = "build"
 
 input="/input/build/work"
 
