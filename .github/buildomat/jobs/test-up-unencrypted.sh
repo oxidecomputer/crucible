@@ -13,19 +13,25 @@
 
 input="/input/build/work"
 
+echo first
+ls -ltr /
+echo input
+ls -ltr /input/
+echo build
+ls -ltr /input/build/
+echo work
+ls -ltr /input/build/work
 set -o errexit
 set -o pipefail
 set -o xtrace
 
-echo first
-ls -ltr /input/build/work
 echo first bins
-ls -ltr /input/build/work/bins
+ls -ltr /input/build/work/bins || true
 
 banner unpack
 mkdir -p /var/tmp/bins
 echo second ls
-ls -ltr /input/build/work/bins
+ls -ltr /input/build/work/bins || true
 
 for t in "$input/bins/"*.gz; do
 	b=$(basename "$t")
