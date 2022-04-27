@@ -9,10 +9,11 @@
 #: skip_clone = true
 #:
 #: [dependencies.build]
-#: job = "build"
+#: job = "builduup"
 
 input="/input/build/work"
 
+date
 echo first
 ls -ltr /
 echo input
