@@ -2180,18 +2180,64 @@ mod test {
     fn test_wl_commit_range() {
         // Verify that validate seed range returns true for all possible
         // values between min and max
+        let bi = 1; // Block index
         let mut write_log = WriteLog::new(10);
-        write_log.update_wc(1);
-        write_log.update_wc(1);
+        write_log.update_wc(bi); // 1
+        write_log.update_wc(bi); // 2
         write_log.commit();
-        write_log.update_wc(1);
-        write_log.update_wc(1);
+        write_log.update_wc(bi); // 3
+        write_log.update_wc(bi); // 4
+
         // 2 is the minimum
-        assert_eq!(write_log.validate_seed_range(1, 1, false), false);
-        assert_eq!(write_log.validate_seed_range(1, 2, false), true);
-        assert_eq!(write_log.validate_seed_range(1, 3, false), true);
-        assert_eq!(write_log.validate_seed_range(1, 4, false), true);
-        assert_eq!(write_log.validate_seed_range(1, 5, false), false);
+        assert_eq!(write_log.validate_seed_range(bi, 1, false), false);
+        assert_eq!(write_log.validate_seed_range(bi, 2, false), true);
+        assert_eq!(write_log.validate_seed_range(bi, 3, false), true);
+        assert_eq!(write_log.validate_seed_range(bi, 4, false), true);
+        assert_eq!(write_log.validate_seed_range(bi, 5, false), false);
+    }
+
+    #[test]
+    fn test_wl_commit_range_vv() {
+        // Test expected return values from Validate_vec when we are
+        // working with ranges.  An InRange will change the expected value for
+        // future calls.
+        let bi = 1; // Block index
+        let bs: u64 = 512;
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(bi); // 1
+        let vec_at_one = fill_vec(bi, 1, &write_log, bs);
+        write_log.update_wc(bi); // 2
+        write_log.commit();
+        let vec_at_two = fill_vec(bi, 1, &write_log, bs);
+        write_log.update_wc(bi); // 3
+        write_log.update_wc(bi); // 4
+        let vec_at_four = fill_vec(bi, 1, &write_log, bs);
+
+        // Too low
+        assert_eq!(
+            validate_vec(vec_at_one, bi, &mut write_log, bs, true),
+            ValidateStatus::Bad
+        );
+        // The current good. Ignore range
+        assert_eq!(
+            validate_vec(vec_at_four.clone(), bi, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
+        // In range, but will change the future
+        assert_eq!(
+            validate_vec(vec_at_two.clone(), bi, &mut write_log, bs, true),
+            ValidateStatus::InRange
+        );
+        // The new good. The previous InRange should now be Good.
+        assert_eq!(
+            validate_vec(vec_at_two, bi, &mut write_log, bs, true),
+            ValidateStatus::Good
+        );
+        // The original good is now bad.
+        assert_eq!(
+            validate_vec(vec_at_four.clone(), bi, &mut write_log, bs, true),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
@@ -2475,7 +2521,17 @@ mod test {
         fill_log.set_wc(2, 2);
         fill_log.set_wc(3, 3);
 
+        // This should seed our fill_vec with zeros, as we don't
+        // have any expectations for block 0.
         let vec = fill_vec(0, 1, &fill_log, bs);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
+
+        // Now fill the vec as if it read data from an already written block.
+        // We fake this by using block one's data (which should be 1).
+        let vec = fill_vec(1, 1, &fill_log, bs);
         assert_eq!(
             validate_vec(vec, 0, &mut write_log, bs, false),
             ValidateStatus::Good
