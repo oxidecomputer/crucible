@@ -1305,8 +1305,7 @@ async fn perf_workload(
 
     guest.flush(None)?;
     perf_summary("rwrites", count, io_depth, wtime.clone(), big_end);
-    if wtr.is_some() {
-        let wtr = wtr.as_mut().unwrap();
+    if let Some(wtr) = wtr {
         perf_csv(wtr, "rwrite", count, io_depth, blocks_per_io, wtime.clone());
     }
 
@@ -1342,8 +1341,7 @@ async fn perf_workload(
 
     perf_summary(" rreads", count, io_depth, rtime.clone(), big_end);
 
-    if wtr.is_some() {
-        let wtr = wtr.as_mut().unwrap();
+    if let Some(wtr) = wtr {
         perf_csv(wtr, "rread", count, io_depth, blocks_per_io, rtime.clone());
     }
 
