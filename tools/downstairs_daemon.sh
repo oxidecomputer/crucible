@@ -214,15 +214,18 @@ while :; do
     for pid in ${dsd_pid[*]}; do
         if ! ps -p $pid > /dev/null; then
             if [[ -f ${testdir}/stop ]]; then
+                rm -f ${testdir}/up
                 echo "Stop requested for $pid"
             else
                 echo "Downstairs PID: $pid is gone, check $testdir for errors"
+                rm -f ${testdir}/up
                 touch ${testdir}/stop
             fi
         fi
     done
     if [[ -f ${testdir}/stop ]]; then
         echo "Stopping loop"
+        rm -f ${testdir}/up
         break
     fi
     sleep 10
@@ -235,10 +238,11 @@ for pid in ${ds}; do
 done
 
 echo "Downstairs will all now stop for good"
+rm -f ${testdir}/up
+rm -f ${testdir}/pause
 for pid in ${dsd_pid[*]}; do
     kill "$pid"
     wait "$pid"
 done
 
-rm -f ${testdir}/up
 rm -f ${testdir}/stop

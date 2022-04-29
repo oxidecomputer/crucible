@@ -158,17 +158,29 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
     /*
      * Make sure our file is neither a link nor a directory.
      */
-    let m = path
-        .symlink_metadata()
-        .map_err(|_| HttpError::for_bad_request(None, "ENOENT".to_string()))?;
+    let m = path.symlink_metadata().map_err(|e| {
+        HttpError::for_bad_request(
+            None,
+            format!("Failed to get {:?} metadata: {:#}", path, e),
+        )
+    })?;
 
     if m.file_type().is_symlink() {
-        Err(HttpError::for_bad_request(None, "EMLINK".to_string()))
+        Err(HttpError::for_bad_request(
+            None,
+            "File is symlink".to_string(),
+        ))
     } else if path.is_dir() {
-        Err(HttpError::for_bad_request(None, "EBADF".to_string()))
+        Err(HttpError::for_bad_request(
+            None,
+            "Expected a file, found a directory".to_string(),
+        ))
     } else {
-        let file = tokio::fs::File::open(&path).await.map_err(|_| {
-            HttpError::for_bad_request(None, "EBADF".to_string())
+        let file = tokio::fs::File::open(&path).await.map_err(|e| {
+            HttpError::for_bad_request(
+                None,
+                format!("file {:?}: {:#}", path, e),
+            )
         })?;
 
         let file_stream = hyper_staticfile::FileBytesStream::new(file);
@@ -199,14 +211,22 @@ async fn get_files_for_extent(
     let extent_dir = extent_dir(rqctx.context().region_dir.clone(), eid);
 
     // Some sanity checking on the extent path
-    let m = extent_dir
-        .symlink_metadata()
-        .map_err(|_| HttpError::for_bad_request(None, "ENOENT".to_string()))?;
-
+    let m = extent_dir.symlink_metadata().map_err(|e| {
+        HttpError::for_bad_request(
+            None,
+            format!("Failed to get {:?} metadata: {:#}", extent_dir, e),
+        )
+    })?;
     if m.file_type().is_symlink() {
-        Err(HttpError::for_bad_request(None, "EMLINK".to_string()))
+        Err(HttpError::for_bad_request(
+            None,
+            format!("File {:?} is a symlink", extent_dir),
+        ))
     } else if !extent_dir.is_dir() {
-        Err(HttpError::for_bad_request(None, "EBADF".to_string()))
+        Err(HttpError::for_bad_request(
+            None,
+            format!("Expected {:?} to be a directory", extent_dir),
+        ))
     } else {
         let files = extent_file_list(extent_dir, eid).await?;
         Ok(HttpResponseOk(files))

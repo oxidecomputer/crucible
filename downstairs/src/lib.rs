@@ -1466,6 +1466,7 @@ impl Work {
                     println!("returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !ds.is_active(job.upstairs_uuid) {
+                    println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     ds.region.region_read(requests)
@@ -1485,6 +1486,7 @@ impl Work {
                     println!("returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !ds.is_active(job.upstairs_uuid) {
+                    println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     ds.region.region_write(writes)
@@ -1506,6 +1508,7 @@ impl Work {
                     println!("returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !ds.is_active(job.upstairs_uuid) {
+                    println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     ds.region.region_flush(
