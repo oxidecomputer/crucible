@@ -1022,7 +1022,6 @@ mod test {
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch() {
         // Test that a hash mismatch will trigger a panic.
         let upstairs = Upstairs::default();
@@ -1056,7 +1055,7 @@ mod test {
         // We must move the completed job along the process, this enables
         // process_ds_completion to know to compare future jobs to this
         // one.
-        //work.ack(id);
+        work.ack(id);
 
         // Second read response, different hash
         let r2 = Ok(vec![ReadResponse::from_request_with_data(
@@ -1064,12 +1063,14 @@ mod test {
             &vec![1],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_ack() {
         // Test that a hash mismatch will trigger a panic.
         // We check here after a ACK, because that is a different location.
@@ -1112,19 +1113,20 @@ mod test {
             &vec![1],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
-        let upstairs = Upstairs::default();
-        upstairs.set_active().unwrap();
-        let mut work = upstairs.downstairs.lock().unwrap();
+        let target = vec![];
+        let mut ds = Downstairs::new(target);
 
-        let id = work.next_id();
+        let id = ds.next_id();
 
         let request = ReadRequest {
             eid: 0,
@@ -1133,11 +1135,11 @@ mod test {
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
-        work.enqueue(op);
+        ds.enqueue(op);
 
-        work.in_progress(id, 0);
-        work.in_progress(id, 1);
-        work.in_progress(id, 2);
+        ds.in_progress(id, 0);
+        ds.in_progress(id, 1);
+        ds.in_progress(id, 2);
 
         // Generate the first read response, this will be what we compare
         // future responses with.
@@ -1146,7 +1148,7 @@ mod test {
             &vec![1],
         )]);
 
-        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
+        ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
 
         // Second read response, it matches the first.
@@ -1155,7 +1157,7 @@ mod test {
             &vec![1],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+        ds.process_ds_completion(id, 1, r2, &None, UpState::Active)
             .unwrap();
 
         let r3 = Ok(vec![ReadResponse::from_request_with_data(
@@ -1163,12 +1165,14 @@ mod test {
             &vec![2],
         )]);
 
-        work.process_ds_completion(id, 2, r3, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(id, 2, r3, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_third_ack() {
         // Test that a hash mismatch on the third response will trigger a panic.
         // This one checks after an ACK.
@@ -1216,14 +1220,16 @@ mod test {
             &vec![2],
         )]);
 
-        work.process_ds_completion(id, 2, r3, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 2, r3, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_inside() {
-        // Test that a hash mismatch not at the first index will panic.
+        // Test that a hash length mismatch will panic
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -1258,14 +1264,17 @@ mod test {
             &vec![1, 2, 3, 9],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_len() {
-        // Test that a hash mismatch on the third response will trigger a panic.
+        // Test that a hash length mismatch on the second
+        // response will trigger a panic.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -1300,14 +1309,17 @@ mod test {
             &vec![1, 2],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_len2() {
-        // Test that a hash length mismatch will panic
+        // Test that a hash length mismatch will panic. This time
+        // the first read has two values and the 2nd has one.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -1342,12 +1354,14 @@ mod test {
             &vec![1],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_no_hash() {
         // Test that a missing hash first, then a hash later will panic.
         let upstairs = Upstairs::default();
@@ -1384,12 +1398,14 @@ mod test {
             &vec![1],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    // Issue #238 XXX #[should_panic]
     fn work_read_hash_mismatch_no_hash_next() {
         // Test that a missing hash on the 2nd read response will panic
         let upstairs = Upstairs::default();
@@ -1414,7 +1430,7 @@ mod test {
         // future responses with.
         let r1 = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![],
+            &vec![1],
         )]);
 
         work.process_ds_completion(id, 0, r1, &None, UpState::Active)
@@ -1423,11 +1439,14 @@ mod test {
         // Second read response, hash vec has different length/
         let r2 = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![1],
+            &vec![],
         )]);
 
-        work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            .unwrap();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3865,7 +3884,8 @@ mod test {
     }
 
     #[test]
-    fn bad_decryption_means_read_error() {
+    fn bad_decryption_means_panic() {
+        // Failure to decrypt means panic.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -3909,7 +3929,7 @@ mod test {
             tag[3] = 0xFF;
         }
 
-        // compute integrity hash after alteration above! it should still
+        // compute integrity hash after alteration above! It should still
         // validate
         let hash = crucible_common::integrity_hash(&[&nonce, &tag, &data]);
 
@@ -3926,37 +3946,22 @@ mod test {
             hashes: vec![hash],
         }]);
 
-        // should not notify Guest
-        assert_eq!(
-            work.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &Some(context),
-                UpState::Active,
-            )
-            .unwrap(),
-            false
-        );
-
-        // should not be completed ok
-        assert_eq!(work.state_count(next_id).unwrap().completed_ok(), 0);
-
-        // should still be NotAcked
-        let job = work.active.get_mut(&next_id).unwrap();
-        let state = job.ack_status;
-        assert_eq!(state, AckStatus::NotAcked);
-
-        // should be marked as error
-        let err = job.state.get(&0).unwrap();
-        assert!(matches!(
-            err,
-            IOState::Error(CrucibleError::DecryptionError)
-        ));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(
+                    next_id,
+                    0,
+                    response,
+                    &Some(context),
+                    UpState::Active,
+                )
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn bad_hash_means_read_error() {
+    fn bad_read_hash_means_panic() {
+        // Verify that a bad hash on a read will panic
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -3991,38 +3996,24 @@ mod test {
             ],
         }]);
 
-        // should not notify Guest
-        assert_eq!(
-            work.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-
-        // should not be completed ok
-        assert_eq!(work.state_count(next_id).unwrap().completed_ok(), 0);
-
-        // should still be NotAcked
-        let job = work.active.get_mut(&next_id).unwrap();
-        let state = job.ack_status;
-        assert_eq!(state, AckStatus::NotAcked);
-
-        // should be marked as error
-        let err = job.state.get(&0).unwrap();
-        assert!(matches!(err, IOState::Error(CrucibleError::HashMismatch)));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(
+                    next_id,
+                    0,
+                    response,
+                    &None,
+                    UpState::Active,
+                )
+            }));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn bad_hash_means_read_error_encrypted() {
-        let upstairs = Upstairs::default();
-        upstairs.set_active().unwrap();
-        let mut work = upstairs.downstairs.lock().unwrap();
-
+    fn bad_hash_on_encrypted_read_panic() {
+        // Verify that a decryption failure on a read will panic.
+        let target = vec![];
+        let mut work = Downstairs::new(target);
         let next_id = work.next_id();
 
         let request = ReadRequest {
@@ -4071,30 +4062,17 @@ mod test {
             ],
         }]);
 
-        // should not notify Guest
-        assert_eq!(
-            work.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &Some(context),
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-
-        // should not be completed ok
-        assert_eq!(work.state_count(next_id).unwrap().completed_ok(), 0);
-
-        // should still be NotAcked
-        let job = work.active.get_mut(&next_id).unwrap();
-        let state = job.ack_status;
-        assert_eq!(state, AckStatus::NotAcked);
-
-        // should be marked as error
-        let err = job.state.get(&0).unwrap();
-        assert!(matches!(err, IOState::Error(CrucibleError::HashMismatch)));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.process_ds_completion(
+                    next_id,
+                    0,
+                    response,
+                    &Some(context),
+                    UpState::Active,
+                )
+            }));
+        assert!(result.is_err());
     }
 
     #[test]

@@ -2358,11 +2358,12 @@ impl Downstairs {
             }
 
             if !successful_hash {
-                println!("No match encrypted computed hash");
+                println!("No match for encrypted computed hash");
                 // no hash was correct
                 return Err(CrucibleError::HashMismatch);
             } else if !successful_decryption {
                 // no hash + encryption context combination decrypted this block
+                println!("Decryption failed with correct hash");
                 return Err(CrucibleError::DecryptionError);
             } else {
                 // Ok!
@@ -2531,10 +2532,28 @@ impl Downstairs {
                             // It's possible we get a read error if the
                             // downstairs disconnects.  However XXX, someone
                             // should be told about this error.
-                            println!(
-                                "[{}] {} read error {:?} {:?}",
-                                client_id, ds_id, e, job
-                            );
+                            //
+                            // Some errors, we need to panic on.
+                            match e {
+                                CrucibleError::HashMismatch => {
+                                    panic!(
+                                        "[{}] {} read hash mismatch {:?} {:?}",
+                                        client_id, ds_id, e, job
+                                    );
+                                }
+                                CrucibleError::DecryptionError => {
+                                    panic!(
+                                        "[{}] {} read decryption error {:?} {:?}",
+                                        client_id, ds_id, e, job
+                                    );
+                                }
+                                _ => {
+                                    println!(
+                                        "[{}] {} read error {:?} {:?}",
+                                        client_id, ds_id, e, job
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -2567,7 +2586,9 @@ impl Downstairs {
                     assert!(!read_data.is_empty());
                     if job.read_response_hashes != read_response_hashes {
                         // XXX This error needs to go to Nexus
-                        println!(
+                        // XXX This will become the "force all downstairs
+                        // to stop and refuse to restart" mode.
+                        panic!(
                             "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
                             client_id,
                             ds_id,
@@ -2611,7 +2632,9 @@ impl Downstairs {
                          */
                         if job.read_response_hashes != read_response_hashes {
                             // XXX This error needs to go to Nexus
-                            println!(
+                            // XXX This will become the "force all downstairs
+                            // to stop and refuse to restart" mode.
+                            panic!(
                                 "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
                                 client_id,
                                 ds_id,

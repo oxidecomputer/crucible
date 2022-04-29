@@ -1021,4 +1021,579 @@ mod test {
 
         assert!(fix.mend.is_empty());
     }
+
+    #[test]
+    fn reconcile_gen_a() {
+        // Exhaustive test of all possible generation values (1-3) in
+        // first and second rows with a 1 in the third row.
+        // flush numbers and dirty bits are the same for all downstairs.
+
+        // Extent ------  0  1  2  3  4  5  6  7  8
+        let gen0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let gen1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
+        let gen2 = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        let flush = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        let dirty = vec![
+            false, false, false, false, false, false, false, false, false,
+        ];
+
+        let d0 = RegionMetadata {
+            generation: gen0,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let d1 = RegionMetadata {
+            generation: gen1,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let d2 = RegionMetadata {
+            generation: gen2,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+
+        // Extent 0 has no mismatch
+        // Extent 1 has a mismatch, so we should find it in the HM.
+        let mut ef = fix.mend.remove(&1).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 2
+        let mut ef = fix.mend.remove(&2).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+
+        // Extent 3
+        let mut ef = fix.mend.remove(&3).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+
+        // Extent 4
+        let mut ef = fix.mend.remove(&4).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 5
+        let mut ef = fix.mend.remove(&5).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 6
+        let mut ef = fix.mend.remove(&6).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 7
+        let mut ef = fix.mend.remove(&7).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 8
+        let mut ef = fix.mend.remove(&8).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        assert!(fix.mend.is_empty());
+    }
+
+    #[test]
+    fn reconcile_gen_b() {
+        // Exhaustive test of all possible generation values (1-3) in
+        // first and second rows with a 2 in the third row.
+        // flush numbers and dirty bits are the same for all downstairs.
+
+        // Extent ------  0  1  2  3  4  5  6  7  8
+        let gen0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let gen1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
+        let gen2 = vec![2, 2, 2, 2, 2, 2, 2, 2, 2];
+
+        let flush = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        let dirty = vec![
+            false, false, false, false, false, false, false, false, false,
+        ];
+
+        let d0 = RegionMetadata {
+            generation: gen0,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let d1 = RegionMetadata {
+            generation: gen1,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let d2 = RegionMetadata {
+            generation: gen2,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+
+        // Extent 0 has a mismatch
+        let mut ef = fix.mend.remove(&0).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 1 has a mismatch, so we should find it in the HM.
+        let mut ef = fix.mend.remove(&1).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 2
+        let mut ef = fix.mend.remove(&2).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+
+        // Extent 3
+        let mut ef = fix.mend.remove(&3).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+
+        // Extent 4 has no mismatch
+
+        // Extent 5
+        let mut ef = fix.mend.remove(&5).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 6
+        let mut ef = fix.mend.remove(&6).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 7
+        let mut ef = fix.mend.remove(&7).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 8
+        let mut ef = fix.mend.remove(&8).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        assert!(fix.mend.is_empty());
+    }
+
+    #[test]
+    fn reconcile_gen_c() {
+        // Exhaustive test of all possible generation values (1-3) in
+        // first and second rows with a 3 in the third row.
+        // flush numbers and dirty bits are the same for all downstairs.
+
+        // Extent ------  0  1  2  3  4  5  6  7  8
+        let gen0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let gen1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
+        let gen2 = vec![3, 3, 3, 3, 3, 3, 3, 3, 3];
+
+        let flush = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        let dirty = vec![
+            false, false, false, false, false, false, false, false, false,
+        ];
+
+        let d0 = RegionMetadata {
+            generation: gen0,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let d1 = RegionMetadata {
+            generation: gen1,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let d2 = RegionMetadata {
+            generation: gen2,
+            flush_numbers: flush.clone(),
+            dirty: dirty.clone(),
+        };
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+
+        // Extent 0 has a mismatch
+        let mut ef = fix.mend.remove(&0).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 1 has a mismatch
+        let mut ef = fix.mend.remove(&1).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 2
+        let mut ef = fix.mend.remove(&2).unwrap();
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 3
+        let mut ef = fix.mend.remove(&3).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 4
+        let mut ef = fix.mend.remove(&4).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 5
+        let mut ef = fix.mend.remove(&5).unwrap();
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 6
+        let mut ef = fix.mend.remove(&6).unwrap();
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert!(ef.dest.is_empty());
+
+        // Extent 7
+        let mut ef = fix.mend.remove(&7).unwrap();
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert!(ef.dest.is_empty());
+
+        // Extent 8  No mismatch
+
+        assert!(fix.mend.is_empty());
+    }
+
+    // Now, just do gen matching resolves?  Make sure higher
+    // numbered flush with lower gen does not pass also.
+
+    #[test]
+    fn reconcile_flush_a() {
+        // Exhaustive test of all possible flush values (1-3) in
+        // first and second rows with a 1 in the third row.
+        // Generation and dirty bits are the same for all downstairs.
+
+        let gen = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        // Extent --------  0  1  2  3  4  5  6  7  8
+        let flush0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let flush1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
+        let flush2 = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        let dirty = vec![
+            false, false, false, false, false, false, false, false, false,
+        ];
+
+        let d0 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush0,
+            dirty: dirty.clone(),
+        };
+        let d1 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush1,
+            dirty: dirty.clone(),
+        };
+        let d2 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush2,
+            dirty: dirty.clone(),
+        };
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+
+        // Extent 0 has no mismatch
+        // Extent 1 has a mismatch, so we should find it in the HM.
+        let mut ef = fix.mend.remove(&1).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 2
+        let mut ef = fix.mend.remove(&2).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+
+        // Extent 3
+        let mut ef = fix.mend.remove(&3).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+
+        // Extent 4
+        let mut ef = fix.mend.remove(&4).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 5
+        let mut ef = fix.mend.remove(&5).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 6
+        let mut ef = fix.mend.remove(&6).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 7
+        let mut ef = fix.mend.remove(&7).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 8
+        let mut ef = fix.mend.remove(&8).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        assert!(fix.mend.is_empty());
+    }
+
+    #[test]
+    fn reconcile_flush_b() {
+        // Exhaustive test of all possible flush values (1-3) in
+        // first and second rows with a 2 in the third row.
+        // Generation and dirty bits are the same for all downstairs.
+
+        let gen = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+        // Extent --------- 0  1  2  3  4  5  6  7  8
+        let flush0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let flush1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
+        let flush2 = vec![2, 2, 2, 2, 2, 2, 2, 2, 2];
+
+        let dirty = vec![
+            false, false, false, false, false, false, false, false, false,
+        ];
+
+        let d0 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush0,
+            dirty: dirty.clone(),
+        };
+        let d1 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush1,
+            dirty: dirty.clone(),
+        };
+        let d2 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush2,
+            dirty: dirty.clone(),
+        };
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+
+        // Extent 0 has a mismatch
+        let mut ef = fix.mend.remove(&0).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 1 has a mismatch, so we should find it in the HM.
+        let mut ef = fix.mend.remove(&1).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 2
+        let mut ef = fix.mend.remove(&2).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+
+        // Extent 3
+        let mut ef = fix.mend.remove(&3).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+
+        // Extent 4 has no mismatch
+
+        // Extent 5
+        let mut ef = fix.mend.remove(&5).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 6
+        let mut ef = fix.mend.remove(&6).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 7
+        let mut ef = fix.mend.remove(&7).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        // Extent 8
+        let mut ef = fix.mend.remove(&8).unwrap();
+        // Pick the higher gen for source.
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 2);
+        assert!(ef.dest.is_empty());
+
+        assert!(fix.mend.is_empty());
+    }
+
+    #[test]
+    fn reconcile_flush_c() {
+        // Exhaustive test of all possible flush values (1-3) in
+        // first and second rows with 3 in the third row.
+        // Generation and dirty bits are the same for all downstairs.
+
+        let gen = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        // Extent --------- 0  1  2  3  4  5  6  7  8
+        let flush0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let flush1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
+        let flush2 = vec![3, 3, 3, 3, 3, 3, 3, 3, 3];
+
+        let dirty = vec![
+            false, false, false, false, false, false, false, false, false,
+        ];
+
+        let d0 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush0,
+            dirty: dirty.clone(),
+        };
+        let d1 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush1,
+            dirty: dirty.clone(),
+        };
+        let d2 = RegionMetadata {
+            generation: gen.clone(),
+            flush_numbers: flush2,
+            dirty: dirty.clone(),
+        };
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+
+        // Extent 0 has a mismatch
+        let mut ef = fix.mend.remove(&0).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 1 has a mismatch
+        let mut ef = fix.mend.remove(&1).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 2
+        let mut ef = fix.mend.remove(&2).unwrap();
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 3
+        let mut ef = fix.mend.remove(&3).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 4
+        let mut ef = fix.mend.remove(&4).unwrap();
+        assert_eq!(ef.source, 2);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 5
+        let mut ef = fix.mend.remove(&5).unwrap();
+        assert_eq!(ef.source, 0);
+        assert_eq!(ef.dest.remove(0), 1);
+        assert!(ef.dest.is_empty());
+
+        // Extent 6
+        let mut ef = fix.mend.remove(&6).unwrap();
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert!(ef.dest.is_empty());
+
+        // Extent 7
+        let mut ef = fix.mend.remove(&7).unwrap();
+        assert_eq!(ef.source, 1);
+        assert_eq!(ef.dest.remove(0), 0);
+        assert!(ef.dest.is_empty());
+
+        // Extent 8  No mismatch
+        assert!(fix.mend.is_empty());
+    }
 }
