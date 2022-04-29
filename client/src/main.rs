@@ -103,6 +103,13 @@ pub struct Opt {
     #[structopt(short, global = true, long, default_value = "0")]
     gen: u64,
 
+    /**
+     * For the verify test, if this option is included we will allow
+     * the write log range of data to pass the verify_volume check.
+     */
+    #[structopt(long, global = true)]
+    range: bool,
+
     /*
      * Retry for activate, as long as it takes.  If we pass this arg, the
      * test will retry the initial activate command as long as it takes.
@@ -305,7 +312,7 @@ impl WriteLog {
     // and not part of a normal test.
     //
     // If update is set to true, then we also change the count_cur to match
-    // the given value (correct to be a u32 and not a u8).
+    // the given value (corrected to be a u32 and not a u8).
     pub fn validate_seed_range(
         &mut self,
         index: usize,
@@ -326,11 +333,9 @@ impl WriteLog {
             if value >= min && value < 250 {
                 res = true;
                 new_max = self.count_cur[index] + 250 - value as u32;
-                println!("new max {}", new_max);
             } else if value <= max {
                 res = true;
                 new_max = self.count_cur[index] + (max - value) as u32;
-                println!("2new max {}", new_max);
             } else {
                 res = false;
             }
@@ -341,7 +346,7 @@ impl WriteLog {
             res = false;
         }
         if update {
-            println!("actual new max {}", new_max);
+            println!("Update block {} to {}", index, new_max);
             self.count_cur[index] = new_max;
         }
         res
@@ -387,7 +392,7 @@ fn load_write_log(
      * Only verify the volume if requested.
      */
     if verify {
-        if let Err(e) = verify_volume(guest, ri) {
+        if let Err(e) = verify_volume(guest, ri, false) {
             bail!("Initial volume verify failed: {:?}", e)
         }
     }
@@ -506,7 +511,19 @@ fn main() -> Result<()> {
      * if we are expecting anything.
      */
     if let Some(verify_in) = opt.verify_in {
-        load_write_log(&guest, &mut region_info, verify_in, opt.verify)?;
+        /*
+         * If we are running the verify test, then don't verify while
+         * loading the file.  Otherwise, do whatever the opt.verify
+         * option has in it.
+         */
+        let verify = {
+            if opt.workload == Workload::Verify {
+                false
+            } else {
+                opt.verify
+            }
+        };
+        load_write_log(&guest, &mut region_info, verify_in, verify)?;
     }
 
     /*
@@ -704,10 +721,13 @@ fn main() -> Result<()> {
              * this turns into a read verify loop, sleep for some duration
              * and then re-check the volume.
              */
-            if !opt.verify {
-                if let Err(e) = verify_volume(&guest, &mut region_info) {
-                    bail!("Initial volume verify failed: {:?}", e)
-                }
+            if let Err(e) = verify_volume(&guest, &mut region_info, opt.range) {
+                bail!("Initial volume verify failed: {:?}", e)
+            }
+            if let Some(vo) = &opt.verify_out {
+                let cp = history_file(vo);
+                write_json(&cp, &region_info.write_log, true)?;
+                println!("Wrote out file {:?}", cp);
             }
             if opt.quit {
                 println!("Verify test completed");
@@ -715,7 +735,9 @@ fn main() -> Result<()> {
                 println!("Verify read loop begins");
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(10));
-                    if let Err(e) = verify_volume(&guest, &mut region_info) {
+                    if let Err(e) =
+                        verify_volume(&guest, &mut region_info, opt.range)
+                    {
                         bail!("Volume verify failed: {:?}", e)
                     }
                     let mut wc = guest.show_work()?;
@@ -751,9 +773,15 @@ fn main() -> Result<()> {
 }
 
 /*
- * Read/Verify every possible block, one block at a time.
+ * Read/Verify every possible block, up to 100 blocks at a time.
+ * If range is set to true, we allow the write log to consider any valid
+ * value for a block since the last commit was called.
  */
-fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+fn verify_volume(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    range: bool,
+) -> Result<()> {
     assert_eq!(ri.write_log.len(), ri.total_blocks);
 
     println!("Read and Verify all blocks (0..{})", ri.total_blocks);
@@ -784,9 +812,30 @@ fn verify_volume(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
-            pb.finish_with_message("Error");
-            bail!("Error at {}", block_index);
+        match validate_vec(
+            dl,
+            block_index,
+            &mut ri.write_log,
+            ri.block_size,
+            range,
+        ) {
+            ValidateStatus::Bad => {
+                pb.finish_with_message("Error");
+                bail!(
+                    "Error in range {} -> {}",
+                    block_index,
+                    block_index + io_sz
+                );
+            }
+            ValidateStatus::InRange => {
+                if range {
+                    {}
+                } else {
+                    pb.finish_with_message("Error");
+                    bail!("Error at {}", block_index);
+                }
+            }
+            ValidateStatus::Good => {}
         }
 
         block_index += next_io_blocks;
@@ -835,6 +884,25 @@ fn fill_vec(
 }
 
 /*
+ * Status for the validate vec function.
+ * If the buffer and write log data match, we return Good.
+ * If the buffer and the write log don't match on the highest
+ * write count, but is within range, we return InRange.
+ * If the buffer and the write log don't match within range, then
+ * we return Bad.
+ *
+ * If we return InRange, it means we have also updated the internal
+ * counters to match exactly, meaning the write log (--verify-out) now
+ * should be written back out, and future calls to verify_vec will
+ * expect the same value (i.e. we cut off any higher write count).
+ */
+#[derive(Debug, PartialEq)]
+enum ValidateStatus {
+    Good,
+    InRange,
+    Bad,
+}
+/*
  * Compare a vec buffer with what we expect to be written for that offset.
  * This assumes you used the fill_vec function (with get_seed) to write
  * the buffer originally.
@@ -843,20 +911,23 @@ fn fill_vec(
  * block_index: What block we started reading from.
  * wl:          The WriteLog struct where we store the write counter.
  * bs:          Crucible's block size.
+ * range:       If the validation should consider the write log range
+ *              for acceptable values in the data buffer.
  */
 fn validate_vec(
     data: Vec<u8>,
     block_index: usize,
-    wl: &WriteLog,
+    wl: &mut WriteLog,
     bs: u64,
-) -> bool {
+    range: bool,
+) -> ValidateStatus {
     let bs = bs as usize;
     assert_eq!(data.len() % bs, 0);
     assert_ne!(data.len(), 0);
 
     let blocks = data.len() / bs;
     let mut data_offset: usize = 0;
-    let mut res = true;
+    let mut res = ValidateStatus::Good;
     /*
      * The outer loop walks the buffer by blocks, as each block will have
      * its own unique write count.
@@ -876,13 +947,13 @@ fn validate_vec(
         if data[data_offset] != (block_offset % 255) as u8 {
             let byte_offset = bs as u64 * block_offset as u64;
             println!(
-                "BO:{} Offset:{}  Expected: {} != Got: {} Block Index",
+                "Mismatch Block Index Block:{} Offset:{} Expected:{} Got:{}",
                 block_offset,
                 byte_offset,
                 block_offset % 255,
                 data[data_offset],
             );
-            res = false;
+            res = ValidateStatus::Bad;
         }
 
         let seed = wl.get_seed(block_offset);
@@ -890,13 +961,33 @@ fn validate_vec(
             if data[data_offset + i] != seed {
                 let byte_offset = bs as u64 * block_offset as u64;
                 println!(
-                    "BO:{} Offset:{}  Expected: {} != Got: {} NEW",
+                    "Mismatch in Block:{} Volume offset:{}  Expected:{} Got:{}",
                     block_offset,
                     byte_offset + i as u64,
                     seed,
-                    data[i],
+                    data[data_offset + i],
                 );
-                res = false;
+                if range {
+                    if wl.validate_seed_range(
+                        block_offset,
+                        data[data_offset + i],
+                        true,
+                    ) {
+                        println!(
+                            "Block {} is in valid seed range",
+                            block_offset
+                        );
+                        res = ValidateStatus::InRange;
+                    } else {
+                        println!(
+                            "Block {} Also fails valid seed range",
+                            block_offset
+                        );
+                        res = ValidateStatus::Bad;
+                    }
+                } else {
+                    res = ValidateStatus::Bad;
+                }
             }
         }
         data_offset += bs as usize;
@@ -950,13 +1041,22 @@ async fn balloon_workload(
             waiter.block_wait()?;
 
             let dl = data.as_vec().to_vec();
-            if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
-                bail!("Error at {}", block_index);
+            match validate_vec(
+                dl,
+                block_index,
+                &mut ri.write_log,
+                ri.block_size,
+                false,
+            ) {
+                ValidateStatus::Bad | ValidateStatus::InRange => {
+                    bail!("Error at {}", block_index);
+                }
+                ValidateStatus::Good => {}
             }
         }
     }
 
-    verify_volume(guest, ri)?;
+    verify_volume(guest, ri, false)?;
     Ok(())
 }
 
@@ -1003,7 +1103,7 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
     pb.finish();
 
-    verify_volume(guest, ri)?;
+    verify_volume(guest, ri, false)?;
     Ok(())
 }
 
@@ -1080,9 +1180,17 @@ async fn generic_workload(
                 waiter.block_wait()?;
 
                 let dl = data.as_vec().to_vec();
-                if !validate_vec(dl, block_index, &ri.write_log, ri.block_size)
-                {
-                    bail!("Verify Error at {} len:{}", block_index, length);
+                match validate_vec(
+                    dl,
+                    block_index,
+                    &mut ri.write_log,
+                    ri.block_size,
+                    false,
+                ) {
+                    ValidateStatus::Bad | ValidateStatus::InRange => {
+                        bail!("Verify Error at {} len:{}", block_index, length);
+                    }
+                    ValidateStatus::Good => {}
                 }
             }
         }
@@ -1347,8 +1455,12 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     let dl = data.as_vec().to_vec();
-    if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
-        bail!("Error at {}", block_index);
+    match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
+    {
+        ValidateStatus::Bad | ValidateStatus::InRange => {
+            bail!("Error at {}", block_index);
+        }
+        ValidateStatus::Good => {}
     }
 
     println!("Flush");
@@ -1398,7 +1510,7 @@ async fn deactivate_workload(
     generic_workload(guest, 20, ri).await?;
 
     println!("final verify");
-    if let Err(e) = verify_volume(guest, ri) {
+    if let Err(e) = verify_volume(guest, ri, false) {
         bail!("Final volume verify failed: {:?}", e)
     }
     Ok(())
@@ -1469,12 +1581,21 @@ async fn rand_workload(
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
-            bail!("Error at {}", block_index);
+        match validate_vec(
+            dl,
+            block_index,
+            &mut ri.write_log,
+            ri.block_size,
+            false,
+        ) {
+            ValidateStatus::Bad | ValidateStatus::InRange => {
+                bail!("Error at {}", block_index);
+            }
+            ValidateStatus::Good => {}
         }
     }
 
-    if let Err(e) = verify_volume(guest, ri) {
+    if let Err(e) = verify_volume(guest, ri, false) {
         bail!("Final volume verify failed: {:?}", e)
     }
 
@@ -1534,6 +1655,9 @@ async fn repair_workload(
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
+    // Any state coming in should have been verified, so we can
+    // consider the current write log to be the minimum possible values.
+    ri.write_log.commit();
     let mut waiterlist = Vec::new();
     // TODO: Allow user to request r/w/f percentage (how???)
     for c in 1..=count {
@@ -1543,6 +1667,14 @@ async fn repair_workload(
             println!("{:4}/{:4} Flush", c, count);
             let waiter = guest.flush(None)?;
             waiterlist.push(waiter);
+            // Commit the current write log because we know this flush
+            // will make it out on at least two DS, so any writes before this
+            // point should also be persistent.
+            // Note that we don't want to commit on every write, because
+            // those writes might not make it if we have three dirty extents
+            // and the one we choose could be the one that does not have
+            // the write (no flush, no guarantee of persistence).
+            ri.write_log.commit();
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -1686,7 +1818,7 @@ async fn demo_workload(
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
     println!("All downstairs jobs completed.");
-    if let Err(e) = verify_volume(guest, ri) {
+    if let Err(e) = verify_volume(guest, ri, false) {
         bail!("Final volume verify failed: {:?}", e)
     }
 
@@ -1730,8 +1862,12 @@ fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     waiter.block_wait()?;
 
     let dl = data.as_vec().to_vec();
-    if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
-        bail!("Span read verify failed");
+    match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
+    {
+        ValidateStatus::Bad | ValidateStatus::InRange => {
+            bail!("Span read verify failed");
+        }
+        ValidateStatus::Good => {}
     }
     Ok(())
 }
@@ -1768,8 +1904,17 @@ fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         waiter.block_wait()?;
 
         let dl = data.as_vec().to_vec();
-        if !validate_vec(dl, block_index, &ri.write_log, ri.block_size) {
-            bail!("Verify error at block:{}", block_index);
+        match validate_vec(
+            dl,
+            block_index,
+            &mut ri.write_log,
+            ri.block_size,
+            false,
+        ) {
+            ValidateStatus::Bad | ValidateStatus::InRange => {
+                bail!("Verify error at block:{}", block_index);
+            }
+            ValidateStatus::Good => {}
         }
     }
 
@@ -2035,18 +2180,64 @@ mod test {
     fn test_wl_commit_range() {
         // Verify that validate seed range returns true for all possible
         // values between min and max
+        let bi = 1; // Block index
         let mut write_log = WriteLog::new(10);
-        write_log.update_wc(1);
-        write_log.update_wc(1);
+        write_log.update_wc(bi); // 1
+        write_log.update_wc(bi); // 2
         write_log.commit();
-        write_log.update_wc(1);
-        write_log.update_wc(1);
+        write_log.update_wc(bi); // 3
+        write_log.update_wc(bi); // 4
+
         // 2 is the minimum
-        assert_eq!(write_log.validate_seed_range(1, 1, false), false);
-        assert_eq!(write_log.validate_seed_range(1, 2, false), true);
-        assert_eq!(write_log.validate_seed_range(1, 3, false), true);
-        assert_eq!(write_log.validate_seed_range(1, 4, false), true);
-        assert_eq!(write_log.validate_seed_range(1, 5, false), false);
+        assert_eq!(write_log.validate_seed_range(bi, 1, false), false);
+        assert_eq!(write_log.validate_seed_range(bi, 2, false), true);
+        assert_eq!(write_log.validate_seed_range(bi, 3, false), true);
+        assert_eq!(write_log.validate_seed_range(bi, 4, false), true);
+        assert_eq!(write_log.validate_seed_range(bi, 5, false), false);
+    }
+
+    #[test]
+    fn test_wl_commit_range_vv() {
+        // Test expected return values from Validate_vec when we are
+        // working with ranges.  An InRange will change the expected value for
+        // future calls.
+        let bi = 1; // Block index
+        let bs: u64 = 512;
+        let mut write_log = WriteLog::new(10);
+        write_log.update_wc(bi); // 1
+        let vec_at_one = fill_vec(bi, 1, &write_log, bs);
+        write_log.update_wc(bi); // 2
+        write_log.commit();
+        let vec_at_two = fill_vec(bi, 1, &write_log, bs);
+        write_log.update_wc(bi); // 3
+        write_log.update_wc(bi); // 4
+        let vec_at_four = fill_vec(bi, 1, &write_log, bs);
+
+        // Too low
+        assert_eq!(
+            validate_vec(vec_at_one, bi, &mut write_log, bs, true),
+            ValidateStatus::Bad
+        );
+        // The current good. Ignore range
+        assert_eq!(
+            validate_vec(vec_at_four.clone(), bi, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
+        // In range, but will change the future
+        assert_eq!(
+            validate_vec(vec_at_two.clone(), bi, &mut write_log, bs, true),
+            ValidateStatus::InRange
+        );
+        // The new good. The previous InRange should now be Good.
+        assert_eq!(
+            validate_vec(vec_at_two, bi, &mut write_log, bs, true),
+            ValidateStatus::Good
+        );
+        // The original good is now bad.
+        assert_eq!(
+            validate_vec(vec_at_four.clone(), bi, &mut write_log, bs, true),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
@@ -2139,7 +2330,10 @@ mod test {
         write_log.update_wc(0);
 
         let vec = fill_vec(0, 1, &write_log, bs);
-        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 
     #[test]
@@ -2152,7 +2346,10 @@ mod test {
 
         let vec = fill_vec(0, 1, &write_log, bs);
         write_log.commit();
-        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 
     #[test]
@@ -2163,7 +2360,10 @@ mod test {
 
         let vec = fill_vec(0, 1, &write_log, bs);
         write_log.update_wc(0);
-        assert_eq!(validate_vec(vec, 0, &write_log, bs), false);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
@@ -2174,7 +2374,10 @@ mod test {
 
         let vec = fill_vec(0, 1, &write_log, bs);
         write_log.set_wc(0, 1);
-        assert_eq!(validate_vec(vec, 0, &write_log, bs), false);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
@@ -2186,7 +2389,10 @@ mod test {
         write_log.update_wc(block_index);
 
         let vec = fill_vec(block_index, 1, &write_log, bs);
-        assert_eq!(validate_vec(vec, block_index, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, block_index, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 
     #[test]
@@ -2203,7 +2409,10 @@ mod test {
         }
 
         let vec = fill_vec(block_index, total_blocks, &write_log, bs);
-        assert_eq!(validate_vec(vec, block_index, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, block_index, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 
     #[test]
@@ -2222,7 +2431,10 @@ mod test {
         let mut vec = fill_vec(block_index, total_blocks, &write_log, bs);
         let x = vec.len() - 1;
         vec[x] = 9;
-        assert_eq!(validate_vec(vec, block_index, &write_log, bs), false);
+        assert_eq!(
+            validate_vec(vec, block_index, &mut write_log, bs, false),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
@@ -2236,7 +2448,10 @@ mod test {
         write_log.set_wc(block_index + 2, 3);
 
         let vec = fill_vec(block_index, 3, &write_log, bs);
-        assert_eq!(validate_vec(vec, block_index, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, block_index, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 
     #[test]
@@ -2254,7 +2469,10 @@ mod test {
          * Replace the first value in the second block
          */
         vec[(bs + 1) as usize] = 9;
-        assert_eq!(validate_vec(vec, block_index, &write_log, bs), false);
+        assert_eq!(
+            validate_vec(vec, block_index, &mut write_log, bs, false),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
@@ -2273,17 +2491,23 @@ mod test {
          * Replace the second value in the second block
          */
         vec[(bs + 2) as usize] = 9;
-        assert_eq!(validate_vec(vec, block_index, &write_log, bs), false);
+        assert_eq!(
+            validate_vec(vec, block_index, &mut write_log, bs, false),
+            ValidateStatus::Bad
+        );
     }
 
     #[test]
     fn test_read_compare_empty() {
         // A new array has no expectations.
         let bs: u64 = 512;
-        let write_log = WriteLog::new(10);
+        let mut write_log = WriteLog::new(10);
 
         let vec = fill_vec(0, 1, &write_log, bs);
-        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 
     #[test]
@@ -2291,13 +2515,26 @@ mod test {
         // A new array has no expectations, even if the buffer has
         // data in it.
         let bs: u64 = 512;
-        let write_log = WriteLog::new(10);
+        let mut write_log = WriteLog::new(10);
         let mut fill_log = WriteLog::new(10);
         fill_log.set_wc(1, 1);
         fill_log.set_wc(2, 2);
         fill_log.set_wc(3, 3);
 
+        // This should seed our fill_vec with zeros, as we don't
+        // have any expectations for block 0.
         let vec = fill_vec(0, 1, &fill_log, bs);
-        assert_eq!(validate_vec(vec, 0, &write_log, bs), true);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
+
+        // Now fill the vec as if it read data from an already written block.
+        // We fake this by using block one's data (which should be 1).
+        let vec = fill_vec(1, 1, &fill_log, bs);
+        assert_eq!(
+            validate_vec(vec, 0, &mut write_log, bs, false),
+            ValidateStatus::Good
+        );
     }
 }

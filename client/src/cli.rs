@@ -117,12 +117,25 @@ fn cli_read(
     waiter.block_wait()?;
 
     let mut dl = data.as_vec().to_vec();
-    if !validate_vec(dl.clone(), block_index, &ri.write_log, ri.block_size) {
-        println!("Data mismatch error at {}", block_index);
-        Err(CrucibleError::GenericError("Data mismatch".to_string()))
-    } else {
-        dl.truncate(10);
-        Ok(dl)
+    match validate_vec(
+        dl.clone(),
+        block_index,
+        &mut ri.write_log,
+        ri.block_size,
+        false,
+    ) {
+        ValidateStatus::Bad => {
+            println!("Data mismatch error at {}", block_index);
+            Err(CrucibleError::GenericError("Data mismatch".to_string()))
+        }
+        ValidateStatus::InRange => {
+            println!("Data mismatch range error at {}", block_index);
+            Err(CrucibleError::GenericError("Data range error".to_string()))
+        }
+        ValidateStatus::Good => {
+            dl.truncate(10);
+            Ok(dl)
+        }
     }
 }
 
@@ -644,7 +657,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match verify_volume(guest, ri) {
+                match verify_volume(guest, ri, false) {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         println!("Verify failed with {:?}", e);

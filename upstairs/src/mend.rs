@@ -278,6 +278,10 @@ fn find_source(
      * the gen and flush are the same.  All that remains to break the tie is
      * an extent with the dirty bit set.
      */
+    println!(
+        "extent:{}  dirty: {} {} {}",
+        i, c0.dirty[i], c1.dirty[i], c2.dirty[i],
+    );
     for sc in max_flush.iter() {
         if rec[*sc as usize].dirty[i] {
             return *sc;

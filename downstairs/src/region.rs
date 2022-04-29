@@ -6,7 +6,6 @@ use std::fmt;
 use std::fs::{rename, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -127,7 +126,7 @@ impl Inner {
     }
 
     /*
-     * For a given block, return all encryption contexts since last fsync.
+     * For a given block, return all encryption contexts since last flush.
      * Order so latest is last.
      */
     fn get_encryption_contexts(
@@ -157,7 +156,7 @@ impl Inner {
     }
 
     /*
-     * For a given block, return all hashes since last fsync. Order so latest
+     * For a given block, return all hashes since last flush. Order so latest
      * is last.
      */
     pub fn get_hashes(&self, block: u64) -> Result<Vec<u64>> {
@@ -413,6 +412,7 @@ impl Default for ExtentMeta {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ExtentType {
     Data,
     Db,
@@ -610,7 +610,11 @@ impl Extent {
         let file =
             match OpenOptions::new().read(true).write(!read_only).open(&path) {
                 Err(e) => {
-                    bail!("Error: e {} No extent file found for {:?}", e, path);
+                    println!(
+                        "Error: {} No extent#{} file found for {:?}",
+                        e, number, path
+                    );
+                    bail!("Error: {} No extent file found for {:?}", e, path);
                 }
                 Ok(f) => {
                     let cur_size = f.metadata().unwrap().len();
@@ -629,7 +633,21 @@ impl Extent {
          * Open a connection to the metadata db
          */
         path.set_extension("db");
-        let metadb = Connection::open(&path)?;
+        let metadb = match Connection::open(&path) {
+            Err(e) => {
+                println!(
+                    "Error: {} No extent#{} db file found for {:?}",
+                    e, number, path
+                );
+                bail!(
+                    "Error: {} No extent#{} db file found for {:?}",
+                    e,
+                    number,
+                    path
+                );
+            }
+            Ok(m) => m,
+        };
         assert!(metadb.is_autocommit());
         metadb.pragma_update(None, "journal_mode", &"WAL")?;
         metadb.pragma_update(None, "synchronous", &"FULL")?;
@@ -767,14 +785,17 @@ impl Extent {
     /**
      * Create the copy directory for this extent.
      */
-    fn create_copy_dir<P: AsRef<Path>>(&self, dir: P) -> Result<PathBuf> {
+    fn create_copy_dir<P: AsRef<Path>>(
+        &self,
+        dir: P,
+    ) -> Result<PathBuf, CrucibleError> {
         let cp = copy_dir(dir, self.number);
 
         /*
          * Verify the copy directory does not exist
          */
         if Path::new(&cp).exists() {
-            panic!("Extent copy directory already exists {:?}", cp);
+            crucible_bail!(IoError, "Copy directory:{:?} already exists", cp);
         }
 
         println!("Create copy dir {:?}", cp);
@@ -801,7 +822,7 @@ impl Extent {
         let copy_path = copy_dir;
 
         if Path::new(&copy_path).exists() {
-            panic!("copy file already exists {:?}", copy_path);
+            bail!("Copy file:{:?} already exists", copy_path);
         }
 
         let file = OpenOptions::new()
@@ -980,8 +1001,7 @@ impl Extent {
          * We must first fsync to get any outstanding data written to disk.
          * This must be done before we update the flush number.
          */
-        if unsafe { fsync(inner.file.as_raw_fd()) } == -1 {
-            let e = std::io::Error::last_os_error();
+        if let Err(e) = inner.file.sync_all() {
             /*
              * XXX Retry?  Mark extent as broken?
              */
@@ -1005,10 +1025,6 @@ impl Extent {
 
         Ok(())
     }
-}
-
-extern "C" {
-    fn fsync(fildes: i32) -> i32;
 }
 
 /**
@@ -1266,11 +1282,17 @@ impl Region {
         let url = format!("http://{:?}", repair_addr);
         let repair_server = Client::new(&url);
 
-        let mut repair_files = repair_server
-            .get_files_for_extent(eid as u32)
-            .await
-            .unwrap()
-            .into_inner();
+        let mut repair_files =
+            match repair_server.get_files_for_extent(eid as u32).await {
+                Ok(f) => f.into_inner(),
+                Err(e) => {
+                    crucible_bail!(
+                        RepairRequestError,
+                        "Failed to get repair files: {:?}",
+                        e,
+                    );
+                }
+            };
 
         repair_files.sort();
         println!("Found repair files: {:?}", repair_files);
@@ -1280,39 +1302,74 @@ impl Region {
         // Missing these means the repair will not succeed.
         // Optionally, there could be both .db-shm and .db-wal.
         if !validate_repair_files(eid, &repair_files) {
-            panic!("Invalid repair file list: {:?}", repair_files);
+            crucible_bail!(
+                RepairFilesInvalid,
+                "Invalid repair file list: {:?}",
+                repair_files,
+            );
         }
 
         // First, copy the main extent data file.
-        let extent_copy =
-            extent.create_copy_file(copy_dir.clone(), None).unwrap();
-        let repair_stream = repair_server
+        let extent_copy = extent.create_copy_file(copy_dir.clone(), None)?;
+        let repair_stream = match repair_server
             .get_extent_file(eid as u32, FileType::Data)
             .await
-            .unwrap();
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                crucible_bail!(
+                    RepairRequestError,
+                    "Failed to get extent {} data file: {:?}",
+                    eid,
+                    e,
+                );
+            }
+        };
         save_stream_to_file(extent_copy, repair_stream.into_inner()).await?;
 
         // The .db file is also required to exist for any valid extent.
-        let extent_db = extent
-            .create_copy_file(copy_dir.clone(), Some(ExtentType::Db))
-            .unwrap();
-        let repair_stream = repair_server
+        let extent_db =
+            extent.create_copy_file(copy_dir.clone(), Some(ExtentType::Db))?;
+        let repair_stream = match repair_server
             .get_extent_file(eid as u32, FileType::Db)
             .await
-            .unwrap();
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                crucible_bail!(
+                    RepairRequestError,
+                    "Failed to get extent {} db file: {:?}",
+                    eid,
+                    e,
+                );
+            }
+        };
         save_stream_to_file(extent_db, repair_stream.into_inner()).await?;
 
         // These next two are optional.
         for opt_file in &[ExtentType::DbShm, ExtentType::DbWal] {
             let filename = extent_file_name(eid as u32, opt_file.clone());
+
             if repair_files.contains(&filename) {
-                let extent_shm = extent
-                    .create_copy_file(copy_dir.clone(), Some(opt_file.clone()))
-                    .unwrap();
-                let repair_stream = repair_server
+                let extent_shm = extent.create_copy_file(
+                    copy_dir.clone(),
+                    Some(opt_file.clone()),
+                )?;
+                let repair_stream = match repair_server
                     .get_extent_file(eid as u32, opt_file.to_file_type())
                     .await
-                    .unwrap();
+                {
+                    Ok(rs) => rs,
+                    Err(e) => {
+                        crucible_bail!(
+                            RepairRequestError,
+                            "Failed to get extent {} {} file: {:?}",
+                            eid,
+                            opt_file,
+                            e,
+                        );
+                    }
+                };
                 save_stream_to_file(extent_shm, repair_stream.into_inner())
                     .await?;
             }
@@ -1323,12 +1380,14 @@ impl Region {
             "Repair files downloaded, move directory {:?} to {:?}",
             copy_dir, rd
         );
-
-        // XXX fsync the parent directory (the extent dir)
         rename(copy_dir.clone(), rd.clone())?;
 
-        // XXX fsync the parent directory (the extent dir)
+        // Files are synced in save_stream_to_file(). Now make sure
+        // the parent directory containing the repair directory has
+        // been synced so that change is persistent.
+        let current_dir = extent_dir(&self.dir, eid as u32);
 
+        sync_path(&current_dir)?;
         Ok(())
     }
 
@@ -1418,6 +1477,7 @@ impl Region {
                 };
 
             if computed_hash != write.hash {
+                println!("Failed write hash validation");
                 crucible_bail!(HashMismatch);
             }
         }
@@ -1619,6 +1679,27 @@ impl Region {
 }
 
 /**
+ * Given a path to a directory or file, open it, then fsync it.
+ * If the file is already open, then just fsync it yourself.
+ */
+pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
+    path: P,
+) -> Result<(), CrucibleError> {
+    let file = match File::open(&path) {
+        Err(e) => {
+            crucible_bail!(IoError, "{:?} open fsync failure: {:?}", path, e);
+        }
+        Ok(f) => f,
+    };
+    if let Err(e) = file.sync_all() {
+        crucible_bail!(IoError, "{:?}: fsync failure: {:?}", path, e);
+    }
+    println!("fsync completed for: {:?}", path);
+
+    Ok(())
+}
+
+/**
  * Copy the contents of the replacement directory on to the extent
  * files in the extent directory.
  */
@@ -1631,7 +1712,6 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     let replace_dir = replace_dir(&region_dir, eid as u32);
     let completed_dir = completed_dir(&region_dir, eid as u32);
 
-    // XXX replace panic with CrucibleError
     assert!(Path::new(&replace_dir).exists());
     assert!(!Path::new(&completed_dir).exists());
 
@@ -1641,22 +1721,34 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     let mut new_file = replace_dir.clone();
     new_file.push(extent_file_name.clone());
 
-    let mut original_file = destination_dir;
+    let mut original_file = destination_dir.clone();
     original_file.push(extent_file_name);
 
     // Copy the new file (the one we copied from the source side) on top
     // of the original file.
     if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-        panic!("copy of {:?} to {:?} got: {:?}", new_file, original_file, e);
+        crucible_bail!(
+            IoError,
+            "copy of {:?} to {:?} got: {:?}",
+            new_file,
+            original_file,
+            e
+        );
     }
-    // XXX fsync original_file
+    sync_path(&original_file)?;
 
     new_file.set_extension("db");
     original_file.set_extension("db");
     if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-        panic!("copy {:?} to {:?} got: {:?}", new_file, original_file, e);
+        crucible_bail!(
+            IoError,
+            "copy {:?} to {:?} got: {:?}",
+            new_file,
+            original_file,
+            e
+        );
     }
-    // XXX fsync original_file
+    sync_path(&original_file)?;
 
     // The .db-shm and .db-wal files may or may not exist.  If they don't
     // exist on the source side, then be sure to remove them locally to
@@ -1665,47 +1757,54 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     original_file.set_extension("db-shm");
     if new_file.exists() {
         if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-            panic!("copy {:?} to {:?} got: {:?}", new_file, original_file, e);
+            crucible_bail!(
+                IoError,
+                "copy {:?} to {:?} got: {:?}",
+                new_file,
+                original_file,
+                e
+            );
         }
-        // XXX fsync original_file
-    } else {
+        sync_path(&original_file)?;
+    } else if original_file.exists() {
         println!(
             "Remove old file {:?} as there is no replacement",
             original_file.clone()
         );
-        if original_file.exists() {
-            std::fs::remove_file(&original_file).unwrap();
-        }
+        std::fs::remove_file(&original_file)?;
     }
 
     new_file.set_extension("db-wal");
     original_file.set_extension("db-wal");
     if new_file.exists() {
         if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-            panic!("copy {:?} to {:?} got: {:?}", new_file, original_file, e);
+            crucible_bail!(
+                IoError,
+                "copy {:?} to {:?} got: {:?}",
+                new_file,
+                original_file,
+                e
+            );
         }
-        // XXX fsync original_file
-    } else {
+        sync_path(&original_file)?;
+    } else if original_file.exists() {
         println!(
             "Remove old file {:?} as there is no replacement",
             original_file.clone()
         );
-        if original_file.exists() {
-            std::fs::remove_file(&original_file).unwrap();
-        }
+        std::fs::remove_file(&original_file)?;
     }
-
-    // XXX fsync destination_dir;
+    sync_path(&destination_dir)?;
 
     // After we have all files: move the copy dir.
     println!("Move directory  {:?} to {:?}", replace_dir, completed_dir);
     rename(replace_dir, &completed_dir)?;
 
-    // XXX fsync the parent directory (the extent dir)
+    sync_path(&destination_dir)?;
 
     std::fs::remove_dir_all(&completed_dir)?;
 
-    // XXX fsync parent dir one more time
+    sync_path(&destination_dir)?;
     Ok(())
 }
 
@@ -1729,14 +1828,21 @@ pub async fn save_stream_to_file(
     loop {
         match stream.try_next().await {
             Ok(Some(bytes)) => {
-                file.write_all(&bytes).unwrap();
+                file.write_all(&bytes)?;
             }
             Ok(None) => break,
-            Err(e) => panic!("extent stream {}", e),
+            Err(e) => {
+                crucible_bail!(
+                    RepairStreamError,
+                    "repair {:?}: stream error: {:?}",
+                    file,
+                    e
+                );
+            }
         }
     }
-    if unsafe { fsync(file.as_raw_fd()) } == -1 {
-        let e = std::io::Error::last_os_error();
+    if let Err(e) = file.sync_all() {
+        println!("Failed to fsync repair file: {:?}", e);
         crucible_bail!(IoError, "repair {:?}: fsync failure: {:?}", file, e);
     }
     Ok(())
@@ -1814,21 +1920,19 @@ mod test {
     }
 
     #[test]
-    fn copy_extent_dir_twice() -> () {
+    fn copy_extent_dir_twice() -> Result<()> {
         // Create the region, make three extents
         // Create the copy directory, make sure it exists.
         // Verify a second create will fail.
-        // Catch the panic just from the final step, all others should pass.
         let dir = tempdir().unwrap();
         let mut region = Region::create(&dir, new_region_options()).unwrap();
         region.extend(3).unwrap();
 
         let ext_one = &mut region.extents[1];
-        let _ = ext_one.create_copy_dir(&dir);
-        let result =
-            std::panic::catch_unwind(|| ext_one.create_copy_dir(&dir).unwrap());
-        assert!(result.is_err());
-        ()
+        ext_one.create_copy_dir(&dir).unwrap();
+        let res = ext_one.create_copy_dir(&dir);
+        assert!(res.is_err());
+        Ok(())
     }
 
     #[test]

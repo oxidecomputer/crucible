@@ -95,6 +95,15 @@ pub enum CrucibleError {
 
     #[error("Invalid extent")]
     InvalidExtent,
+
+    #[error("Repair request error {0}")]
+    RepairRequestError(String),
+
+    #[error("Invalid repair file list {0}")]
+    RepairFilesInvalid(String),
+
+    #[error("Repair stream error {0}")]
+    RepairStreamError(String),
 }
 
 impl From<std::io::Error> for CrucibleError {
