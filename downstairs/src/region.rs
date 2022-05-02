@@ -1,5 +1,4 @@
 // Copyright 2021 Oxide Computer Company
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
@@ -570,6 +569,18 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
     files == some || files == all
 }
 
+/// Always open sqlite with journaling, and synchronous.
+/// Note: these pragma_updates are not durable
+fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
+    let metadb = Connection::open(&path)?;
+
+    assert!(metadb.is_autocommit());
+    metadb.pragma_update(None, "journal_mode", &"WAL")?;
+    metadb.pragma_update(None, "synchronous", &"FULL")?;
+
+    Ok(metadb)
+}
+
 impl Extent {
     /**
      * Open an existing extent file at the location requested.
@@ -633,7 +644,7 @@ impl Extent {
          * Open a connection to the metadata db
          */
         path.set_extension("db");
-        let metadb = match Connection::open(&path) {
+        let metadb = match open_sqlite_connection(&path) {
             Err(e) => {
                 println!(
                     "Error: {} No extent#{} db file found for {:?}",
@@ -648,9 +659,6 @@ impl Extent {
             }
             Ok(m) => m,
         };
-        assert!(metadb.is_autocommit());
-        metadb.pragma_update(None, "journal_mode", &"WAL")?;
-        metadb.pragma_update(None, "synchronous", &"FULL")?;
 
         // XXX: schema updates?
 
@@ -709,67 +717,112 @@ impl Extent {
         file.set_len(size)?;
         file.seek(SeekFrom::Start(0))?;
 
-        /*
-         * Create the metadata db
-         */
-        path.set_extension("db");
-        let metadb = Connection::open(&path)?;
-        assert!(metadb.is_autocommit());
-        metadb.pragma_update(None, "journal_mode", &"WAL")?;
-        metadb.pragma_update(None, "synchronous", &"FULL")?;
+        let mut seed = dir.as_ref().to_path_buf();
+        seed.push("seed");
+        seed.set_extension("db");
 
-        /*
-         * Create tables and insert base data
-         */
-        metadb.execute(
-            "CREATE TABLE metadata (
-                name TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            )",
-            [],
-        )?;
+        let metadb = if Path::new(&seed).exists() {
+            path.set_extension("db");
+            std::fs::copy(&seed, &path)?;
 
-        let meta = ExtentMeta::default();
+            path.set_extension("db-shm");
+            seed.set_extension("db-shm");
+            if Path::new(&seed).exists() {
+                std::fs::copy(&seed, &path)?;
+            }
 
-        metadb.execute(
-            "INSERT INTO metadata
-            (name, value) VALUES (?1, ?2)",
-            params!["ext_version", meta.ext_version],
-        )?;
-        metadb.execute(
-            "INSERT INTO metadata
-            (name, value) VALUES (?1, ?2)",
-            params!["gen_number", meta.gen_number],
-        )?;
-        metadb.execute(
-            "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
-            params!["flush_number", meta.flush_number],
-        )?;
-        metadb.execute(
-            "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
-            params!["dirty", meta.dirty],
-        )?;
+            path.set_extension("db-wal");
+            seed.set_extension("db-wal");
+            if Path::new(&seed).exists() {
+                std::fs::copy(&seed, &path)?;
+            }
 
-        metadb.execute(
-            "CREATE TABLE encryption_context (
-                counter INTEGER,
-                block INTEGER,
-                nonce BLOB NOT NULL,
-                tag BLOB NOT NULL,
-                PRIMARY KEY (block, counter)
-            )",
-            [],
-        )?;
+            path.set_extension("db");
+            open_sqlite_connection(&path)?
+        } else {
+            /*
+             * Create the metadata db
+             */
+            path.set_extension("db");
+            let metadb = open_sqlite_connection(&path)?;
 
-        metadb.execute(
-            "CREATE TABLE integrity_hashes (
-                counter INTEGER,
-                block INTEGER,
-                hash BLOB NOT NULL,
-                PRIMARY KEY (block, counter)
-            )",
-            [],
-        )?;
+            /*
+             * Create tables and insert base data
+             */
+            metadb.execute(
+                "CREATE TABLE metadata (
+                    name TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                )",
+                [],
+            )?;
+
+            let meta = ExtentMeta::default();
+
+            metadb.execute(
+                "INSERT INTO metadata
+                (name, value) VALUES (?1, ?2)",
+                params!["ext_version", meta.ext_version],
+            )?;
+            metadb.execute(
+                "INSERT INTO metadata
+                (name, value) VALUES (?1, ?2)",
+                params!["gen_number", meta.gen_number],
+            )?;
+            metadb.execute(
+                "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+                params!["flush_number", meta.flush_number],
+            )?;
+            metadb.execute(
+                "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+                params!["dirty", meta.dirty],
+            )?;
+
+            metadb.execute(
+                "CREATE TABLE encryption_context (
+                    counter INTEGER,
+                    block INTEGER,
+                    nonce BLOB NOT NULL,
+                    tag BLOB NOT NULL,
+                    PRIMARY KEY (block, counter)
+                )",
+                [],
+            )?;
+
+            metadb.execute(
+                "CREATE TABLE integrity_hashes (
+                    counter INTEGER,
+                    block INTEGER,
+                    hash BLOB NOT NULL,
+                    PRIMARY KEY (block, counter)
+                )",
+                [],
+            )?;
+
+            // write out
+            metadb.close().map_err(|e| std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("metadb.close() failed! {}", e.1.to_string()),
+            ))?;
+
+            // Save it as DB seed
+            std::fs::copy(&path, &seed)?;
+
+            path.set_extension("db-shm");
+            seed.set_extension("db-shm");
+            if Path::new(&path).exists() {
+                std::fs::copy(&path, &seed)?;
+            }
+
+            path.set_extension("db-wal");
+            seed.set_extension("db-wal");
+            if Path::new(&path).exists() {
+                std::fs::copy(&path, &seed)?;
+            }
+
+            path.set_extension("db");
+            open_sqlite_connection(&path)?
+        };
 
         /*
          * Complete the construction of our new extent
@@ -1132,7 +1185,7 @@ impl Region {
         let next_eid = self.extents.len() as u32;
 
         let these_extents = (next_eid..self.def.extent_count())
-            .into_par_iter()
+            .into_iter()
             .map(|eid| {
                 if create {
                     Extent::create(&self.dir, &self.def, eid)
