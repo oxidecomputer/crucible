@@ -683,6 +683,7 @@ impl Extent {
     /**
      * Create an extent at the location requested.
      * Start off with the default meta data.
+     * Note that this function is not safe to run concurrently.
      */
     fn create<P: AsRef<Path>>(
         // Extent
@@ -721,6 +722,9 @@ impl Extent {
         seed.push("seed");
         seed.set_extension("db");
 
+        // Instead of creating the sqlite db for every extent, create it only
+        // once, and copy from a seed db when creating other extents. This
+        // minimizes Region create time.
         let metadb = if Path::new(&seed).exists() {
             path.set_extension("db");
             std::fs::copy(&seed, &path)?;
