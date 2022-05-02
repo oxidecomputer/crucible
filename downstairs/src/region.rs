@@ -800,10 +800,12 @@ impl Extent {
             )?;
 
             // write out
-            metadb.close().map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("metadb.close() failed! {}", e.1.to_string()),
-            ))?;
+            metadb.close().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("metadb.close() failed! {}", e.1),
+                )
+            })?;
 
             // Save it as DB seed
             std::fs::copy(&path, &seed)?;
