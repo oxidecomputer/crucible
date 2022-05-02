@@ -1272,98 +1272,9 @@ mod test {
     }
 
     #[test]
-    fn work_read_hash_mismatch_len() {
-        // Test that a hash length mismatch on the second
-        // response will trigger a panic.
-        let upstairs = Upstairs::default();
-        upstairs.set_active().unwrap();
-        let mut work = upstairs.downstairs.lock().unwrap();
-
-        let id = work.next_id();
-
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-            num_blocks: 2,
-        };
-        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
-
-        work.enqueue(op);
-
-        work.in_progress(id, 0);
-        work.in_progress(id, 1);
-
-        // Generate the first read response, this will be what we compare
-        // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
-
-        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
-            .unwrap();
-
-        // Second read response, hash vec has different length/
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1, 2],
-        )]);
-
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn work_read_hash_mismatch_len2() {
-        // Test that a hash length mismatch will panic. This time
-        // the first read has two values and the 2nd has one.
-        let upstairs = Upstairs::default();
-        upstairs.set_active().unwrap();
-        let mut work = upstairs.downstairs.lock().unwrap();
-
-        let id = work.next_id();
-
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-            num_blocks: 2,
-        };
-        let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
-
-        work.enqueue(op);
-
-        work.in_progress(id, 0);
-        work.in_progress(id, 1);
-
-        // Generate the first read response, this will be what we compare
-        // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1, 0],
-        )]);
-
-        work.process_ds_completion(id, 0, r1, &None, UpState::Active)
-            .unwrap();
-
-        // Second read response, hash vec has different length.
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
-
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                work.process_ds_completion(id, 1, r2, &None, UpState::Active)
-            }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn work_read_hash_mismatch_no_hash() {
-        // Test that a missing hash first, then a hash later will panic.
+    fn work_read_hash_mismatch_no_data() {
+        // Test that empty data first, then data later will trigger
+        // hash mismatch panic.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -1406,8 +1317,8 @@ mod test {
     }
 
     #[test]
-    fn work_read_hash_mismatch_no_hash_next() {
-        // Test that a missing hash on the 2nd read response will panic
+    fn work_read_hash_mismatch_no_data_next() {
+        // Test that missing data on the 2nd read response will panic
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -2451,6 +2362,7 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
 
         // Be sure the job is not yet in replay
+        assert_eq!(work.active.get_mut(&next_id).unwrap().replay, false);
         work.re_new(0);
         // Now the IO should be replay
         assert_eq!(work.active.get_mut(&next_id).unwrap().replay, true);
@@ -2487,7 +2399,7 @@ mod test {
         // Complete the read on one downstairs, verify it is ack ready.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![],
+            &vec![1, 2, 3, 4],
         )]);
         assert_eq!(
             work.process_ds_completion(
@@ -2507,7 +2419,7 @@ mod test {
         // Complete the read on a 2nd downstairs.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![],
+            &vec![1, 2, 3, 4],
         )]);
         assert_eq!(
             work.process_ds_completion(
@@ -4110,6 +4022,7 @@ mod test {
     #[test]
     fn bad_decryption_means_panic() {
         // Failure to decrypt means panic.
+        // This result has a valid hash, but won't decrypt.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut work = upstairs.downstairs.lock().unwrap();
@@ -4263,7 +4176,6 @@ mod test {
 
         // fake read response from downstairs that will fail integrity hash
         // check
-
         let mut data = Vec::from([1u8; 512]);
 
         let (nonce, tag, _) = context.encrypt_in_place(&mut data).unwrap();

@@ -2261,12 +2261,12 @@ impl Downstairs {
             }
 
             if !successful_hash {
-                // no integrity hash was correct for this
-                // response
-                println!("No match computed hash:{:?}", computed_hash,);
+                // No integrity hash was correct for this response
+                println!("No match computed hash:0x{:x}", computed_hash,);
                 for hash in response.hashes.iter().rev() {
-                    println!("No match          hash:{:?}", hash);
+                    println!("No match          hash:0x{:x}", hash);
                 }
+                println!("Data from hash: {:?}", response.data);
 
                 return Err(CrucibleError::HashMismatch);
             }
@@ -2360,6 +2360,21 @@ impl Downstairs {
 
             if !successful_hash {
                 println!("No match for encrypted computed hash");
+                for (i, ctx) in response
+                    .encryption_contexts
+                    .iter()
+                    .enumerate()
+                {
+                    let computed_hash = integrity_hash(&[
+                        &ctx.nonce[..],
+                        &ctx.tag[..],
+                        &response.data[..],
+                    ]);
+                    println!(
+                        "Expected: 0x{:x} != Computed: 0x{:x}",
+                        response.hashes[i], computed_hash
+                    );
+                }
                 // no hash was correct
                 return Err(CrucibleError::HashMismatch);
             } else if !successful_decryption {
@@ -2445,6 +2460,14 @@ impl Downstairs {
                         Ok(responses)
                     }
                 } else {
+                    // The downstairs sent us this error
+                    println!(
+                        "[{}] DS Reports error {:?} on job {}, {:?} EC",
+                        client_id,
+                        responses,
+                        ds_id,
+                        job,
+                    );
                     // bad responses
                     responses
                 }
@@ -2467,12 +2490,27 @@ impl Downstairs {
                         Ok(responses)
                     }
                 } else {
+                    // The downstairs sent us this error
+                    println!(
+                        "[{}] DS Reports error {:?} on job {}, {:?}",
+                        client_id,
+                        responses,
+                        ds_id,
+                        job,
+                    );
                     // bad responses
                     responses
                 }
             };
 
         let newstate = if let Err(ref e) = read_data {
+            println!(
+                "[{}] Reports error {:?} on job {}, {:?}",
+                client_id,
+                e,
+                ds_id,
+                job,
+            );
             IOState::Error(e.clone())
         } else {
             jobs_completed_ok += 1;
@@ -2591,8 +2629,10 @@ impl Downstairs {
                         // to stop and refuse to restart" mode.
                         let msg = format!(
                             "[{}] read hash mismatch on id {}\n\
-                            Expected {:?}\nReceived {:?}\n\
-                            guest_id:{:?} request:{:?}\njob state:{:?}",
+                            Expected {:x?}\n\
+                            Computed {:x?}\n\
+                            guest_id:{} request:{:?}\n\
+                            job state:{:?}",
                             client_id,
                             ds_id,
                             job.read_response_hashes,
@@ -2645,7 +2685,10 @@ impl Downstairs {
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
                             panic!(
-                                "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
+                                "[{}] read hash mismatch on {} \n\
+                                Expected {:x?}\n\
+                                Computed {:x?}\n\
+                                job: {:?}",
                                 client_id,
                                 ds_id,
                                 job.read_response_hashes,
