@@ -12,7 +12,8 @@ SECONDS=0
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
-    touch /tmp/ds_test/stop
+    rm -f /var/tmp/ds_test/up
+    touch /var/tmp/ds_test/stop
     if [[ -n "$dsd_pid" ]]; then
         kill "$dsd_pid"
     fi
@@ -24,11 +25,8 @@ echo "" > ${loop_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-./tools/downstairs_daemon.sh >> "$test_log" 2>&1 &
+./tools/downstairs_daemon.sh -u >> "$test_log" 2>&1 &
 dsd_pid=$!
-
-# Sleep 5 to give the downstairs time to get going.
-sleep 5
 
 if ! ps -p $dsd_pid > /dev/null; then
     echo "downstairs_daemon failed to start"
@@ -43,12 +41,16 @@ for (( i = 0; i < 30; i += 10 )); do
 done
 
 # Initial seed for verify file
-if ! cargo run -q -p crucible-client -- one "${args[@]}" -q \
+if ! cargo run -q -p crucible-client -- fill "${args[@]}" -q \
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     touch /var/tmp/ds_test/stop
     exit 1
 fi
+
+# Allow the downstairs to start restarting now.
+rm -f /var/tmp/ds_test/up
+sleep 5
 
 # Now run the quick client test in a loop
 for i in {1..100}
@@ -56,7 +58,7 @@ do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    cargo run -q -p crucible-client -- one "${args[@]}" \
+    cargo run -q -p crucible-client -- generic "${args[@]}" \
             -q --verify-out alan \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1
@@ -83,5 +85,6 @@ done
 touch /var/tmp/ds_test/stop
 echo "Final results:" | tee -a ${loop_log}
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
+echo "$(date) Test ends with $err" >> "$test_log" 2>&1
 exit "$err"
 

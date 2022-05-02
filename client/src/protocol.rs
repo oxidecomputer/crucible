@@ -41,6 +41,8 @@ pub enum CliMessage {
     RandRead,
     ReadResponse(usize, Result<Vec<u8>, CrucibleError>),
     RandWrite,
+    // Show the work queues
+    ShowWork,
     // Run the Verify test.
     Verify,
     Write(usize, usize),
@@ -253,6 +255,13 @@ mod tests {
     #[test]
     fn rt_read() -> Result<()> {
         let input = CliMessage::Read(32, 22);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_is_show() -> Result<()> {
+        let input = CliMessage::ShowWork;
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

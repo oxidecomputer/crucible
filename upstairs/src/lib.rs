@@ -2072,6 +2072,7 @@ impl Downstairs {
                 }
             }
             job.state.insert(client_id, IOState::New);
+            job.replay = true;
         }
     }
 
@@ -2543,7 +2544,7 @@ impl Downstairs {
                                 }
                                 CrucibleError::DecryptionError => {
                                     panic!(
-                                        "[{}] {} read decryption error {:?} {:?}",
+                                        "[{}] {} read decrypt error {:?} {:?}",
                                         client_id, ds_id, e, job
                                     );
                                 }
@@ -2576,7 +2577,7 @@ impl Downstairs {
                 }
                 IOop::Read {
                     dependencies: _dependencies,
-                    requests: _,
+                    requests,
                 } => {
                     /*
                      * For a read, make sure the data from a previous read
@@ -2588,14 +2589,23 @@ impl Downstairs {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
-                        panic!(
-                            "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
+                        let msg = format!(
+                            "[{}] read hash mismatch on id {}\n\
+                            Expected {:?}\nReceived {:?}\n\
+                            guest_id:{:?} request:{:?}\njob state:{:?}",
                             client_id,
                             ds_id,
                             job.read_response_hashes,
                             read_response_hashes,
-                            job
+                            job.guest_id,
+                            requests,
+                            job.state,
                         );
+                        if job.replay {
+                            println!("{} REPLAY", msg);
+                        } else {
+                            panic!("{}", msg);
+                        }
                     }
                 }
                 _ => { /* Write IOs have no action here */ }
@@ -4810,6 +4820,13 @@ struct DownstairsIO {
     ack_status: AckStatus,
 
     /*
+     * Is this a replay job, meaning we may have already sent it
+     * once.  At the present, this only matters for reads and for
+     * when we are comparing read hashes between the three downstairs.
+     */
+    replay: bool,
+
+    /*
      * If the operation is a Read, this holds the resulting buffer
      * The hashes vec holds the valid hash(es) for the read.
      */
@@ -6807,6 +6824,7 @@ fn create_write_eob(
         work: awrite,
         state,
         ack_status: AckStatus::NotAcked,
+        replay: false,
         data: None,
         read_response_hashes: Vec::new(),
     }
@@ -6839,6 +6857,7 @@ fn create_read_eob(
         work: aread,
         state,
         ack_status: AckStatus::NotAcked,
+        replay: false,
         data: None,
         read_response_hashes: Vec::new(),
     }
@@ -6872,6 +6891,7 @@ fn create_flush(
         work: flush,
         state,
         ack_status: AckStatus::NotAcked,
+        replay: false,
         data: None,
         read_response_hashes: Vec::new(),
     }
@@ -6905,8 +6925,16 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     } else {
         println!(
-            "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7} {5:>5} {6:>5} {7:>5}",
-            "GW_ID", "ACK", "DSID", "TYPE", "BLOCKS", "DS:0", "DS:1", "DS:2",
+            "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7} {5:>5} {6:>5} {7:>5} {8:>6}",
+            "GW_ID",
+            "ACK",
+            "DSID",
+            "TYPE",
+            "BLOCKS",
+            "DS:0",
+            "DS:1",
+            "DS:2",
+            "REPLAY",
         );
 
         kvec.sort_unstable();
@@ -6972,6 +7000,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     }
                 }
             }
+            print!(" {0:>5}", job.replay);
 
             println!();
         }

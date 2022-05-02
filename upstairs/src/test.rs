@@ -2450,8 +2450,10 @@ mod test {
         let state = work.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
-        // Now, take that downstairs offline
+        // Be sure the job is not yet in replay
         work.re_new(0);
+        // Now the IO should be replay
+        assert_eq!(work.active.get_mut(&next_id).unwrap().replay, true);
 
         // The act of taking a downstairs offline should move a read
         // back from AckReady if it was the only completed read.
@@ -2639,6 +2641,224 @@ mod test {
         assert_eq!(state, AckStatus::Acked);
     }
 
+    // ZZZ another test that does read replay for the first IO
+    // Also, the third IO?
+    #[test]
+    fn work_completed_ack_read_replay_hash_mismatch() {
+        // Verify that a read replay won't cause a panic on hash mismatch.
+        // During a replay, the same block may have been written after a read,
+        // so the actual contents of the block are now different.  We can't
+        // compare the read hash taken before a replay to one that happens
+        // after.  A sample sequence is:
+        //
+        // Flush (all previous IO cleared, all blocks the same)
+        // Read block 0
+        // Write block 0
+        // - Downstairs goes away here, causing a replay.
+        //
+        // In this case, the replay read will get the data again, but that
+        // data came from the write, which is different than the original,
+        // pre-replay read data (and hash).  In this case we can't compare
+        // with the original hash that we stored for this read.
+        //
+        // For the test below, we don't actually need to do a write, we
+        // can just change the "data" we fill the response with like we
+        // received different data than the original read.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut ds = upstairs.downstairs.lock().unwrap();
+
+        // Create the read and put it on the work queue.
+        let next_id = ds.next_id();
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+        ds.enqueue(op);
+
+        // Submit the read to each downstairs.
+        ds.in_progress(next_id, 0);
+        ds.in_progress(next_id, 1);
+        ds.in_progress(next_id, 2);
+
+        // Construct our fake response
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![122], // Original data.
+        )]);
+
+        // Complete the read on one downstairs.
+        assert_eq!(
+            ds.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            true
+        );
+
+        // Ack the read to the guest.
+        ds.ack(next_id);
+
+        // Before re re_new, the IO is not replay
+        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, false);
+        // Now, take that downstairs offline
+        ds.re_new(0);
+        // Now the IO should be replay
+        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, true);
+
+        // Move it to in-progress.
+        ds.in_progress(next_id, 0);
+
+        // Now, create a new response that has different data, and will
+        // produce a different hash.
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![123], // Different data than before
+        )]);
+
+        // Process the new read (with different data), make sure we don't
+        // trigger the hash mismatch check.
+        assert_eq!(
+            ds.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            false
+        );
+
+        // Some final checks.  The replay should behave in every other way
+        // like a regular read.
+        assert_eq!(ds.ackable_work().len(), 0);
+        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::Acked);
+    }
+
+    #[test]
+    fn work_completed_ack_read_replay_two_hash_mismatch() {
+        // Verify that a read replay won't cause a panic on hash mismatch.
+        // During a replay, the same block may have been written after a read,
+        // so the actual contents of the block are now different.  We can't
+        // compare the read hash taken before a replay to one that happens
+        // after.  A sample sequence is:
+        //
+        // Flush (all previous IO cleared, all blocks the same)
+        // Read block 0
+        // Write block 0
+        //
+        // In this case, the replay read will get the data again, but that
+        // data came from the write, which is different than the original,
+        // pre-replay read data (and hash).  In this case we can't compare
+        // with the original hash that we stored for this read.
+        //
+        // For the test below, we don't actually need to do a write, we
+        // can just change the "data" we fill the response with like we
+        // received different data than the original read.
+        let upstairs = Upstairs::default();
+        upstairs.set_active().unwrap();
+        let mut ds = upstairs.downstairs.lock().unwrap();
+
+        // Create the read and put it on the work queue.
+        let next_id = ds.next_id();
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+            num_blocks: 2,
+        };
+        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+        ds.enqueue(op);
+
+        // Submit the read to each downstairs.
+        ds.in_progress(next_id, 0);
+        ds.in_progress(next_id, 1);
+        ds.in_progress(next_id, 2);
+
+        // Construct our fake response
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![122], // Original data.
+        )]);
+
+        // Complete the read on one downstairs.
+        assert_eq!(
+            ds.process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            true
+        );
+
+        // Construct our fake response for another downstairs.
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![122], // Original data.
+        )]);
+
+        // Complete the read on the this downstairs as well
+        assert_eq!(
+            ds.process_ds_completion(
+                next_id,
+                1,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            false
+        );
+
+        // Ack the read to the guest.
+        ds.ack(next_id);
+
+        // Now, take the second downstairs offline
+        ds.re_new(1);
+        // Now the IO should be replay
+        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, true);
+
+        // Move it to in-progress.
+        ds.in_progress(next_id, 1);
+
+        // Now, create a new response that has different data, and will
+        // produce a different hash.
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &vec![123], // Different data than before
+        )]);
+
+        // Process the new read (with different data), make sure we don't
+        // trigger the hash mismatch check.
+        assert_eq!(
+            ds.process_ds_completion(
+                next_id,
+                1,
+                response,
+                &None,
+                UpState::Active
+            )
+            .unwrap(),
+            false
+        );
+
+        // Some final checks.  The replay should behave in every other way
+        // like a regular read.
+        assert_eq!(ds.ackable_work().len(), 0);
+        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::Acked);
+    }
+
     #[test]
     fn work_completed_write_ack_ready_replay() {
         // Verify that a replay when we have two completed writes will
@@ -2697,7 +2917,11 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
 
         /* Now, take that downstairs offline */
+        // Before re re_new, the IO is not replay
+        assert_eq!(work.active.get_mut(&id1).unwrap().replay, false);
         work.re_new(1);
+        // Now the IO should be replay
+        assert_eq!(work.active.get_mut(&id1).unwrap().replay, true);
 
         // State goes back to NotAcked
         let state = work.active.get_mut(&id1).unwrap().ack_status;
