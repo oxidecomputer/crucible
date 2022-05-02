@@ -721,33 +721,19 @@ impl Extent {
         let mut seed = dir.as_ref().to_path_buf();
         seed.push("seed");
         seed.set_extension("db");
+        path.set_extension("db");
 
         // Instead of creating the sqlite db for every extent, create it only
         // once, and copy from a seed db when creating other extents. This
         // minimizes Region create time.
         let metadb = if Path::new(&seed).exists() {
-            path.set_extension("db");
             std::fs::copy(&seed, &path)?;
 
-            path.set_extension("db-shm");
-            seed.set_extension("db-shm");
-            if Path::new(&seed).exists() {
-                std::fs::copy(&seed, &path)?;
-            }
-
-            path.set_extension("db-wal");
-            seed.set_extension("db-wal");
-            if Path::new(&seed).exists() {
-                std::fs::copy(&seed, &path)?;
-            }
-
-            path.set_extension("db");
             open_sqlite_connection(&path)?
         } else {
             /*
              * Create the metadata db
              */
-            path.set_extension("db");
             let metadb = open_sqlite_connection(&path)?;
 
             /*
@@ -814,19 +800,6 @@ impl Extent {
             // Save it as DB seed
             std::fs::copy(&path, &seed)?;
 
-            path.set_extension("db-shm");
-            seed.set_extension("db-shm");
-            if Path::new(&path).exists() {
-                std::fs::copy(&path, &seed)?;
-            }
-
-            path.set_extension("db-wal");
-            seed.set_extension("db-wal");
-            if Path::new(&path).exists() {
-                std::fs::copy(&path, &seed)?;
-            }
-
-            path.set_extension("db");
             open_sqlite_connection(&path)?
         };
 
