@@ -2360,10 +2360,7 @@ impl Downstairs {
 
             if !successful_hash {
                 println!("No match for encrypted computed hash");
-                for (i, ctx) in response
-                    .encryption_contexts
-                    .iter()
-                    .enumerate()
+                for (i, ctx) in response.encryption_contexts.iter().enumerate()
                 {
                     let computed_hash = integrity_hash(&[
                         &ctx.nonce[..],
@@ -2463,10 +2460,7 @@ impl Downstairs {
                     // The downstairs sent us this error
                     println!(
                         "[{}] DS Reports error {:?} on job {}, {:?} EC",
-                        client_id,
-                        responses,
-                        ds_id,
-                        job,
+                        client_id, responses, ds_id, job,
                     );
                     // bad responses
                     responses
@@ -2493,10 +2487,7 @@ impl Downstairs {
                     // The downstairs sent us this error
                     println!(
                         "[{}] DS Reports error {:?} on job {}, {:?}",
-                        client_id,
-                        responses,
-                        ds_id,
-                        job,
+                        client_id, responses, ds_id, job,
                     );
                     // bad responses
                     responses
@@ -2506,10 +2497,7 @@ impl Downstairs {
         let newstate = if let Err(ref e) = read_data {
             println!(
                 "[{}] Reports error {:?} on job {}, {:?}",
-                client_id,
-                e,
-                ds_id,
-                job,
+                client_id, e, ds_id, job,
             );
             IOState::Error(e.clone())
         } else {
