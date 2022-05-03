@@ -1,10 +1,12 @@
 // Copyright 2022 Oxide Computer Company
+use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
@@ -27,6 +29,7 @@ enum Workload {
     Big,
     Biggest,
     Burst,
+    /// Starts a CLI client
     Cli {
         /// Address to connect to
         #[structopt(long, short, default_value = "0.0.0.0:5050")]
@@ -49,6 +52,7 @@ enum Workload {
     Generic,
     Nothing,
     One,
+    /// Run the perf test, random writes, then random reads
     Perf {
         /// Size in blocks of each IO
         #[structopt(long, default_value = "1")]
@@ -56,6 +60,9 @@ enum Workload {
         /// Number of outstanding IOs at the same time.
         #[structopt(long, default_value = "1")]
         io_depth: usize,
+        /// Output file for IO times
+        #[structopt(long, global = true, parse(from_os_str), name = "PERF")]
+        perf_out: Option<PathBuf>,
     },
     Rand,
     Repair,
@@ -67,12 +74,10 @@ enum Workload {
 #[structopt(about = "crucible upstairs test client")]
 #[structopt(setting = structopt::clap::AppSettings::ColoredHelp)]
 pub struct Opt {
-    /*
-     * For tests that support it, pass this count value for the number
-     * of loops the test should do.
-     */
+    ///  For tests that support it, pass this count value for the number
+    ///  of loops the test should do.
     #[structopt(short, long, global = true, default_value = "0")]
-    count: u32,
+    count: usize,
 
     #[structopt(short, long, global = true, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
@@ -80,20 +85,16 @@ pub struct Opt {
     #[structopt(subcommand)]
     workload: Workload,
 
-    /*
-     * This allows the Upstairs to run in a mode where it will not
-     * always submit new work to downstairs when it first receives
-     * it.  This is for testing dependencies and should not be
-     * used in production.  Passing args like this to the upstairs
-     * may not be the best way to test, but until we have something
-     * better... XXX
-     */
+    ///  This allows the Upstairs to run in a mode where it will not
+    ///  always submit new work to downstairs when it first receives
+    ///  it.  This is for testing dependencies and should not be
+    ///  used in production.  Passing args like this to the upstairs
+    ///  may not be the best way to test, but until we have something
+    ///  better... XXX
     #[structopt(long, global = true)]
     lossy: bool,
 
-    /*
-     * quit after all crucible work queues are empty.
-     */
+    ///  quit after all crucible work queues are empty.
     #[structopt(short, global = true, long)]
     quit: bool,
 
@@ -103,39 +104,29 @@ pub struct Opt {
     #[structopt(short, global = true, long, default_value = "0")]
     gen: u64,
 
-    /**
-     * For the verify test, if this option is included we will allow
-     * the write log range of data to pass the verify_volume check.
-     */
+    /// For the verify test, if this option is included we will allow
+    /// the write log range of data to pass the verify_volume check.
     #[structopt(long, global = true)]
     range: bool,
 
-    /*
-     * Retry for activate, as long as it takes.  If we pass this arg, the
-     * test will retry the initial activate command as long as it takes.
-     */
+    /// Retry for activate, as long as it takes.  If we pass this arg, the
+    /// test will retry the initial activate command as long as it takes.
     #[structopt(long, global = true)]
     retry_activate: bool,
 
-    /**
-     * In addition to any tests, verify the volume on startup.
-     * This only has value if verify_in is also set.
-     */
+    /// In addition to any tests, verify the volume on startup.
+    /// This only has value if verify_in is also set.
     #[structopt(long, global = true)]
     verify: bool,
 
-    /**
-     * For tests that support it, load the expected write count from
-     * the provided file.  The addition of a --verify option will also
-     * have the test verify what it imports from the file is valid.
-     */
+    /// For tests that support it, load the expected write count from
+    /// the provided file.  The addition of a --verify option will also
+    /// have the test verify what it imports from the file is valid.
     #[structopt(long, global = true, parse(from_os_str), name = "INFILE")]
     verify_in: Option<PathBuf>,
 
-    /*
-     * For tests that support it, save the write count into the
-     * provided file.
-     */
+    ///  For tests that support it, save the write count into the
+    ///  provided file.
     #[structopt(long, global = true, parse(from_os_str), name = "FILE")]
     verify_out: Option<PathBuf>,
 
@@ -644,19 +635,35 @@ fn main() -> Result<()> {
             println!("One test");
             runtime.block_on(one_workload(&guest, &mut region_info))?;
         }
-        Workload::Perf { io_size, io_depth } => {
+        Workload::Perf {
+            io_size,
+            io_depth,
+            perf_out,
+        } => {
             println!("Perf test");
             let ops = {
                 if opt.count == 0 {
-                    1000_usize
+                    5000_usize
                 } else {
-                    opt.count as usize
+                    opt.count
                 }
             };
-            for _ in 0..2 {
+
+            let mut opt_wtr = None;
+            let mut wtr;
+            if let Some(perf_out) = perf_out {
+                wtr = WriterBuilder::new()
+                    .has_headers(false)
+                    .from_path(perf_out)
+                    .unwrap();
+                opt_wtr = Some(&mut wtr);
+            }
+
+            for _ in 0..5 {
                 runtime.block_on(perf_workload(
                     &guest,
                     &mut region_info,
+                    &mut opt_wtr,
                     ops,
                     io_depth,
                     io_size,
@@ -1114,7 +1121,7 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
  */
 async fn generic_workload(
     guest: &Arc<Guest>,
-    count: u32,
+    count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     /*
@@ -1207,7 +1214,7 @@ async fn generic_workload(
 async fn dirty_workload(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
-    count: u32,
+    count: usize,
 ) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
@@ -1262,6 +1269,35 @@ async fn dirty_workload(
 }
 
 /*
+ * Take the Vec of Durations for IOs and write it out in CSV format using
+ * the provided CSV Writer.
+ */
+pub fn perf_csv(
+    wtr: &mut csv::Writer<File>,
+    msg: &str,
+    count: usize,
+    io_depth: usize,
+    io_size: usize,
+    iotimes: Vec<Duration>,
+) {
+    // Convert all Durations to u64 nanoseconds.
+    let times = iotimes
+        .iter()
+        .map(|x| (x.as_secs() as u64 * 100000000) + x.subsec_nanos() as u64)
+        .collect::<Vec<u64>>();
+
+    wtr.serialize(Record {
+        label: msg.to_string(),
+        io_depth,
+        io_size,
+        count,
+        time: times,
+    })
+    .unwrap();
+    wtr.flush().unwrap();
+}
+
+/*
  * Display the summary results from a perf run.
  */
 fn perf_summary(
@@ -1285,7 +1321,7 @@ fn perf_summary(
         total_time.as_secs() as f32 + (total_time.subsec_nanos() as f32 / 1e9);
 
     println!(
-        "{}:{:.2}sec {} {} iops:{:.2} \
+        "{}:{:.2}sec {} {} IOPs:{:.2} \
         mean:{:.5} stdv:{:.5} \
         min:{:.5} max:{:.5}",
         msg,
@@ -1300,6 +1336,14 @@ fn perf_summary(
     );
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct Record {
+    label: String,
+    io_depth: usize,
+    io_size: usize,
+    count: usize,
+    time: Vec<u64>,
+}
 /**
  * A simple IO test in two stages: 100% random writes, then 100% random
  * reads. The caller can select:
@@ -1312,6 +1356,7 @@ fn perf_summary(
 async fn perf_workload(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
+    wtr: &mut Option<&mut csv::Writer<File>>,
     count: usize,
     io_depth: usize,
     blocks_per_io: usize,
@@ -1365,7 +1410,10 @@ async fn perf_workload(
     let big_end = big_start.elapsed();
 
     guest.flush(None)?;
-    perf_summary("rwrites", count, io_depth, wtime, big_end);
+    perf_summary("rwrites", count, io_depth, wtime.clone(), big_end);
+    if let Some(wtr) = wtr {
+        perf_csv(wtr, "rwrite", count, io_depth, blocks_per_io, wtime.clone());
+    }
 
     // Before we start reads, make sure the work queues are empty.
     loop {
@@ -1397,7 +1445,11 @@ async fn perf_workload(
     }
     let big_end = big_start.elapsed();
 
-    perf_summary(" rreads", count, io_depth, rtime, big_end);
+    perf_summary(" rreads", count, io_depth, rtime.clone(), big_end);
+
+    if let Some(wtr) = wtr {
+        perf_csv(wtr, "rread", count, io_depth, blocks_per_io, rtime.clone());
+    }
 
     guest.flush(None)?;
     // Before we return, make sure the work queues are empty.
@@ -1478,7 +1530,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
  */
 async fn deactivate_workload(
     guest: &Arc<Guest>,
-    count: u32,
+    count: usize,
     ri: &mut RegionInfo,
     mut gen: u64,
 ) -> Result<()> {
@@ -1522,7 +1574,7 @@ async fn deactivate_workload(
  */
 async fn rand_workload(
     guest: &Arc<Guest>,
-    count: u32,
+    count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     /*
@@ -1608,8 +1660,8 @@ async fn rand_workload(
  */
 async fn burst_workload(
     guest: &Arc<Guest>,
-    count: u32,
-    demo_count: u32,
+    count: usize,
+    demo_count: usize,
     ri: &mut RegionInfo,
     verify_out: &Option<PathBuf>,
 ) -> Result<()> {
@@ -1649,7 +1701,7 @@ async fn burst_workload(
  */
 async fn repair_workload(
     guest: &Arc<Guest>,
-    count: u32,
+    count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
@@ -1742,7 +1794,7 @@ async fn repair_workload(
  */
 async fn demo_workload(
     guest: &Arc<Guest>,
-    count: u32,
+    count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
