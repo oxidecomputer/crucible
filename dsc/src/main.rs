@@ -7,6 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+use byte_unit::Byte;
 use clap::{Parser, Subcommand};
 
 /// dsc  DownStairs Control
@@ -14,6 +15,10 @@ use clap::{Parser, Subcommand};
 #[clap(name = "dsc")]
 #[clap(about = "A downstairs controller", long_about = None)]
 struct Cli {
+    /// Delete any required directories before starting
+    #[clap(long, global=true)]
+    cleanup: bool,
+
     #[clap(subcommand)]
     command: Commands,
 }
@@ -22,11 +27,10 @@ struct Cli {
 enum Commands {
     /// Test creation of downstairs regions
     Create {
-        /// Delete any required directories before starting
         #[clap(long)]
-        cleanup: bool,
-    },
-    // Create and start downstairs regions
+        quick: bool,
+    }    ,
+    /// Create and start downstairs regions
     Start,
 }
 
@@ -118,9 +122,10 @@ impl TestInfo {
     fn create_ds_region(
         &mut self,
         port: u32,
-        extent_count: u32,
-        extent_size: u32,
+        extent_size: u64,
+        extent_count: u64,
         block_size: u32,
+        quiet: bool,
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
@@ -130,8 +135,8 @@ impl TestInfo {
 
         let new_region_dir =
             my_region.clone().into_os_string().into_string().unwrap();
-        let extent_count = format!("{}", extent_count);
         let extent_size = format!("{}", extent_size);
+        let extent_count = format!("{}", extent_count);
         let block_size = format!("{}", block_size);
         let uuid = format!("12345678-{0}-{0}-{0}-00000000{0}", port);
         let start = Instant::now();
@@ -167,7 +172,7 @@ impl TestInfo {
             println!("Output:\n{}", String::from_utf8(output.stdout).unwrap());
             println!("Error:\n{}", String::from_utf8(output.stderr).unwrap());
             bail!("Creating region failed");
-        } else {
+        } else if !quiet {
             println!(
                 "Downstairs region created at {} in {:04}",
                 new_region_dir,
@@ -193,6 +198,26 @@ impl TestInfo {
         Ok(time_f)
     }
 
+    /**
+     * Delete a region directory at the given port.
+     */
+    fn delete_ds_region(
+        &mut self,
+        port: u32,
+    ) -> Result<()> {
+        // Create the path for this region by combining the region
+        // directory and the port this downstairs will use.
+        let mut my_region = PathBuf::new();
+        my_region.push(self.rs.region_dir.clone());
+        my_region.push(format!("{}", port));
+
+        let new_region_dir =
+            my_region.clone().into_os_string().into_string().unwrap();
+
+        std::fs::remove_dir_all(&new_region_dir)?;
+        Ok(())
+    }
+
     // Start all downstairs.
     fn start_all_downstairs(&mut self) -> Result<()> {
         for ds in self.rs.ds.iter() {
@@ -204,16 +229,10 @@ impl TestInfo {
     }
 }
 
-fn startall() -> Result<()> {
-    let ds_bin: String = "../target/release/crucible-downstairs".into();
-
-    let output_dir: PathBuf = "/tmp/dsc".into();
-    let region_dir: PathBuf = "/var/tmp/dsc/region".into();
-// Put this in create function, return ti
-    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir).unwrap();
-    let _ = ti.create_ds_region(3810, 20, 10, 4096).unwrap();
-    let _ = ti.create_ds_region(3820, 20, 10, 4096).unwrap();
-    let _ = ti.create_ds_region(3830, 20, 10, 4096).unwrap();
+fn startall(ti: &mut TestInfo) -> Result<()> {
+    let _ = ti.create_ds_region(3810, 10, 20, 4096, false).unwrap();
+    let _ = ti.create_ds_region(3820, 10, 20, 4096, false).unwrap();
+    let _ = ti.create_ds_region(3830, 10, 20, 4096, false).unwrap();
 
     println!("All regions created, now start all downstairs");
     ti.start_all_downstairs().unwrap();
@@ -237,7 +256,7 @@ fn startall() -> Result<()> {
     Ok(())
 
 }
-fn _create(cleanup: bool, extent_count: u32, extent_size: u32) -> Result<()> {
+fn _create(cleanup: bool, extent_count: u64, extent_size: u64) -> Result<()> {
     let ds_bin: String = "../target/release/crucible-downstairs".into();
 
     let output_dir: PathBuf = "/tmp/dsc".into();
@@ -258,74 +277,158 @@ fn _create(cleanup: bool, extent_count: u32, extent_size: u32) -> Result<()> {
         }
     }
 
-    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir.clone()).unwrap();
-    let _ = ti.create_ds_region(3810, extent_count, extent_size, 4096).unwrap();
-    let _ = ti.create_ds_region(3820, extent_count, extent_size, 4096).unwrap();
-    let _ = ti.create_ds_region(3830, extent_count, extent_size, 4096).unwrap();
+    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir).unwrap();
+    let _ = ti.create_ds_region(3810, extent_size, extent_count, 4096, false).unwrap();
+    let _ = ti.create_ds_region(3820, extent_size, extent_count, 4096, false).unwrap();
+    let _ = ti.create_ds_region(3830, extent_size, extent_count, 4096, false).unwrap();
 
     println!("All regions created");
     Ok(())
 }
 
-fn create_test(cleanup: bool, extent_count: u32, extent_size: u32) -> Result<()> {
-    let ds_bin: String = "../target/release/crucible-downstairs".into();
-
-    let output_dir: PathBuf = "/tmp/dsc".into();
-    let region_dir: PathBuf = "/var/tmp/dsc/region".into();
-
-    if Path::new(&output_dir).exists() {
-        if cleanup {
-            std::fs::remove_dir_all(&output_dir)?;
-        } else {
-            bail!("Remove output {:?} before running", output_dir);
-        }
-    }
-    if Path::new(&region_dir).exists() {
-        if cleanup {
-            std::fs::remove_dir_all(&region_dir)?;
-        } else {
-            bail!("Remove region {:?} before running", region_dir);
-        }
-    }
+fn region_create_test(
+    ti: &mut TestInfo,
+    extent_size: u64,
+    extent_count: u64,
+    block_size: u64,
+) -> Result<()> {
 
     let mut times = Vec::new();
-    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir.clone())?;
-    let ct = ti.create_ds_region(3810, extent_count, extent_size, 4096)?;
-    times.push(ct);
-    let ct = ti.create_ds_region(3820, extent_count, extent_size, 4096)?;
-    times.push(ct);
-    let ct = ti.create_ds_region(3830, extent_count, extent_size, 4096)?;
-    times.push(ct);
+    for _ in 0..2 {
+        let ct = ti.create_ds_region(
+            3810,
+            extent_size,
+            extent_count,
+            block_size as u32,
+            true
+        )?;
+        times.push(ct);
+        ti.delete_ds_region(3810)?;
+    }
 
+    let size = region_si(extent_size, extent_count, block_size);
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    print!(
+        "{:>8.3} {}  {:3} {:>6} {:>4}",
+        statistical::mean(&times), size, extent_size, extent_count, block_size
+    );
     println!(
-        "ES:{} EC:{} mean:{:.5} stdv:{:.5} \
-        min:{:.5} max:{:.5}",
-        extent_size, extent_count,
-        statistical::mean(&times),
+        "  {:5.3} {:8.3} {:8.3}",
         statistical::standard_deviation(&times, None),
         times.first().unwrap(),
         times.last().unwrap(),
     );
 
-    println!("All regions created");
+    Ok(())
+}
+
+// Print out the region in SI units.
+fn region_si(es: u64, ec: u64, bs: u64) -> String {
+    let sz = Byte::from_bytes((bs * es * ec).into());
+    let bu = sz.get_appropriate_unit(true);
+    format!("{:>11}", bu.to_string())
+}
+
+fn single_create_test(
+    ti: &mut TestInfo,
+    extent_size: u64,
+    extent_count: u64,
+    block_size: u64,
+) -> Result<()> {
+
+    let ct = ti.create_ds_region(
+        3810,
+        extent_size,
+        extent_count,
+        block_size as u32,
+        true
+    )?;
+    let size = region_si(extent_size, extent_count, block_size);
+    println!(
+        "{:>8.3} {}  {:3} {:>6} {:>4}",
+        ct, size, extent_size, extent_count, block_size
+    );
+    ti.delete_ds_region(3810)?;
+
     Ok(())
 }
 
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    match args.command {
-        Commands::Create { cleanup } => {
-            println!("Test cleanup:{}", cleanup);
-            let extent_count = vec![10, 25, 50, 100, 150, 200, 256];
-            for ec in extent_count.iter() {
-                let es = (1024 * 200) / ec;
-                create_test(cleanup, es, *ec)?;
-            }
+    let ds_bin: String = "../target/release/crucible-downstairs".into();
+    let output_dir: PathBuf = "/tmp/dsc".into();
+    let region_dir: PathBuf = "/var/tmp/dsc/region".into();
+
+    if Path::new(&output_dir).exists() {
+        if args.cleanup {
+            std::fs::remove_dir_all(&output_dir)?;
+        } else {
+            bail!("Remove output {:?} before running", output_dir);
         }
-	Commands::Start => {
-            startall()?;
+    }
+    if Path::new(&region_dir).exists() {
+        if args.cleanup {
+            std::fs::remove_dir_all(&region_dir)?;
+        } else {
+            bail!("Remove region {:?} before running", region_dir);
+        }
+    }
+    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir).unwrap();
+
+    match args.command {
+        Commands::Create { quick } => {
+            let block_size = 4096;
+            let maxes = vec![
+               // 2u64.pow(15), // 128 MiB assuming 4k bs
+                2u64.pow(16), // 256 MiB
+                2u64.pow(17), // 512 MiB
+                2u64.pow(18), //   1 GiB
+               // 2u64.pow(19), //   2 GiB
+               // 2u64.pow(20), //   4 GiB
+               // 2u64.pow(21), //   8 GiB
+                2u64.pow(22), //  16 GiB
+                2u64.pow(23), //  32 GiB
+                2u64.pow(24), //  64 GiB
+                2u64.pow(25), // 128 GiB
+                2u64.pow(26), // 256 GiB
+                2u64.pow(27), // 256 GiB
+                2u64.pow(28), // 512 GiB
+                2u64.pow(29), //   1 TiB
+            ];
+            // let extent_count = vec![64, 128, 256, 512];
+            // let extent_count = vec![128, 256];
+            let extent_size = vec![256];
+
+            print!("{:>8} {:>11}  {:>3} {:>6} {:>4}",
+                "SECONDS",
+                "SIZE    ",
+                "ES",
+                "EC",
+                "BS"
+            );
+            if !quick {
+                print!("  {:>5} {:>8} {:>8}", "STDV", "MIN", "MAX");
+            }
+
+            println!();
+
+            for max in maxes.iter() {
+                // We have chosen sizes such that the / should always work
+                let es: u64 = extent_size[0];
+                let ec = max / es;
+                for es in extent_size.iter() {
+                    if quick {
+                        single_create_test(&mut ti, *es, ec, block_size)?;
+                    } else {
+                        region_create_test(&mut ti, *es, ec, block_size)?;
+                    }
+                }
+            }
+        },
+        Commands::Start => {
+            startall(&mut ti)?;
         }
     }
     Ok(())
