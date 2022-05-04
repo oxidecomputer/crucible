@@ -1,6 +1,6 @@
 #!/bin/bash
 #:
-#: name = "test-up-unencrypted"
+#: name = "test-up-encrypted"
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
@@ -40,7 +40,7 @@ done
 
 export BINDIR=/var/tmp/bins
 
-banner test_up
-ptime -m bash "$input/scripts/test_up.sh" unencrypted
+banner test_encr
+ptime -m bash "$input/scripts/test_up.sh" encrypted
 
 # Save the output files?
