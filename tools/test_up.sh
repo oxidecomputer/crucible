@@ -39,7 +39,12 @@ testdir="/var/tmp/test_up"
 if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
-rm -f /tmp/test_fail.txt
+
+# Store log files we want to keep in /tmp/*.txt as this is what
+# buildomat will look for and archive
+log_prefix="/tmp/test_up"
+fail_log="${log_prefix}_fail.txt"
+rm -f "$fail_log"
 
 args=()
 
@@ -67,21 +72,21 @@ for (( i = 0; i < 3; i++ )); do
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-    outdir="${testdir}/downstairs-${port}-out.txt"
+    outfile="${log_prefix}-downstairs-${port}-out.txt"
     set -o errexit
     case ${1} in
         "unencrypted")
-            echo ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
-            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+            echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 | tee "$outfile"
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10| tee -a "$outfile"
             ;;
         "encrypted")
-            echo ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true
-            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true
+            echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true | tee "$outfile"
+            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true | tee -a "$outfile"
             ;;
     esac
-    echo "Downstairs output log at $outdir"
-    echo ${cds} run -p "$port" -d "$dir"
-    ${cds} run -p "$port" -d "$dir" > "$outdir" 2>&1 &
+    echo "Downstairs output log at $outfile"
+    echo "$cds" run -p "$port" -d "$dir" | tee -a "$outfile"
+    ${cds} run -p "$port" -d "$dir" >> "$outfile" 2>&1 &
     downstairs[$i]=$!
     set +o errexit
 done
@@ -92,12 +97,12 @@ res=0
 test_list="span big dep deactivate balloon"
 for tt in ${test_list}; do
     echo "Running test: $tt"
-    echo "$cc" "$tt" -q "${args[@]}" >> "${testdir}"/test_out.txt
-    if ! "$cc" "$tt" -q "${args[@]}" >> "${testdir}"/test_out.txt 2>&1; then
+    echo "$cc" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt"
+    if ! "$cc" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
         (( res += 1 ))
         echo ""
         echo "Failed crucible-client $tt test"
-        echo "Failed crucible-client $tt test" >> /tmp/test_fail.txt
+        echo "Failed crucible-client $tt test" >> "$fail_log"
         echo ""
     else
         echo "Completed test: $tt"
@@ -105,22 +110,23 @@ for tt in ${test_list}; do
 done
 
 echo "Running hammer"
-if ! time "$ch" "${args[@]}" >> "${testdir}/test_out.txt" 2>&1; then
+if ! time "$ch" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     echo "Failed hammer test"
-    echo "Failed hammer test" >> /tmp/test_fail.txt
+    echo "Failed hammer test" >> "$fail_log"
     (( res += 1 ))
 fi
 
 # Repair test
 # This one goes last because it modified the args variable.
 # We also test the --verify-* args here as well.
+echo "Run repair tests"
 args+=( --verify-out "${testdir}/verify_file" )
 echo "$cc" fill -q "${args[@]}"
 if ! "$cc" fill -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed setup repair test"
-    echo "Failed setup repair test" >> /tmp/test_fail.txt
+    echo "Failed setup repair test" >> "$fail_log"
     echo
 else
     echo "Repair setup passed"
@@ -136,7 +142,7 @@ if ! "$cc" repair -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
-    echo "Failed repair test part 1" >> /tmp/test_fail.txt
+    echo "Failed repair test part 1" >> "$fail_log"
     echo
 else
     echo "Repair part 1 passed"
@@ -154,10 +160,32 @@ echo mv "${testdir}/previous" "${testdir}/${port}"
 rm -rf "${testdir:?}/${port:?}"
 mv "${testdir}/previous" "${testdir}/${port}"
 
+outfile="${log_prefix}-downstairs-${port}-out.txt"
 echo "Restart downstairs with old directory"
-echo ${cds} run -p "$port" -d "${testdir}/$port"
-${cds} run -p "$port" -d "${testdir}/$port" &
+echo "$cds" run -p "$port" -d "${testdir}/$port"
+${cds} run -p "$port" -d "${testdir}/$port" >> "$outfile" 2>&1 &
 downstairs[4]=$!
+
+# Put a dump test in the middle of the repair test, so we
+# can see both a mismatch and that dump works.
+# The dump args look different than other downstairs commands
+dump_args=()
+for (( i = 0; i < 30; i += 10 )); do
+    (( port = port_base + i ))
+    dir="${testdir}/$port"
+    dump_args+=( -d "$dir" )
+done
+echo "$cds" dump "${dump_args[@]}"
+# This should return error (a mismatch!)
+if "$cds" dump "${dump_args[@]}"; then
+    (( res += 1 ))
+    echo ""
+    echo "repair dump test did not find the expected error"
+    echo "repair dump test did not find the expected error" >> /tmp/test_fail.txt
+    echo ""
+else
+    echo "dump test found error as expected"
+fi
 
 echo ""
 echo ""
@@ -166,52 +194,53 @@ if ! "$cc" verify -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
-    echo "Failed repair test part 2" >> /tmp/test_fail.txt
+    echo "Failed repair test part 2" >> "$fail_log"
     echo
 else
     echo "Repair part 2 passed"
 fi
 
-# The dump args look different than other downstairs commands
-args=()
+# Now that repair has finished, make sure the dump command
+# does not detect any errors
+dump_args=()
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
-    args+=( -d "$dir" )
+    dump_args+=( -d "$dir" )
 done
-echo "$cds" dump "${args[@]}"
-if ! "$cds" dump "${args[@]}"; then
+echo "$cds" dump "${dump_args[@]}"
+if ! "$cds" dump "${dump_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed crucible-client dump test"
-    echo "Failed crucible-client dump test" >> /tmp/test_fail.txt
+    echo "Failed crucible-client dump test" >> "$fail_log"
     echo ""
 else
     echo "dump test passed"
 fi
 
-echo "$cds" dump "${args[@]}" -e 1
-if ! "$cds" dump "${args[@]}" -e 1; then
+echo "$cds" dump "${dump_args[@]}" -e 1
+if ! "$cds" dump "${dump_args[@]}" -e 1; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump test 2"
-    echo "Failed crucible-client dump test 2" >> /tmp/test_fail.txt
+    echo "Failed crucible-client dump extent"
+    echo "Failed crucible-client dump extent" >> "$fail_log"
+
     echo ""
 else
-    echo "dump test 2 passed"
+    echo "dump extent test passed"
 fi
 
-echo "$cds" dump "${args[@]}" -b 20
-if ! "$cds" dump "${args[@]}" -b 20 ; then
+echo "$cds" dump "${dump_args[@]}" -b 20
+if ! "$cds" dump "${dump_args[@]}" -b 20 ; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump test 2"
-    echo "Failed crucible-client dump test 2" >> /tmp/test_fail.txt
+    echo "Failed crucible-client dump block 20"
+    echo "Failed crucible-client dump block 20" >> "$fail_log"
     echo ""
 else
-    echo "dump test 2 passed"
+    echo "dump block test passed"
 fi
-
 echo "Upstairs tests have completed, stopping all downstairs"
 for pid in ${downstairs[*]}; do
     kill $pid >/dev/null 2>&1
@@ -221,7 +250,7 @@ done
 echo ""
 if [[ $res != 0 ]]; then
     echo "$res Tests have failed"
-    cat /tmp/test_fail.txt
+    cat "$fail_log"
 else
     echo "All Tests have passed"
 fi
