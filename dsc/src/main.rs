@@ -16,11 +16,27 @@ use clap::{Parser, Subcommand};
 #[clap(about = "A downstairs controller", long_about = None)]
 struct Cli {
     /// Delete any required directories before starting
-    #[clap(long, global=true)]
+    #[clap(long, global = true)]
     cleanup: bool,
 
     #[clap(subcommand)]
     command: Commands,
+
+    /// Downstairs binary location
+    #[clap(
+        long,
+        global = true,
+        default_value = "target/release/crucible-downstairs"
+    )]
+    ds_bin: String,
+
+    /// default output directory
+    #[clap(long, global = true, default_value = "/tmp/dsc")]
+    output_dir: PathBuf,
+
+    /// default region directory
+    #[clap(long, global = true, default_value = "/var/tmp/dsc/region")]
+    region_dir: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -29,11 +45,12 @@ enum Commands {
     Create {
         #[clap(long)]
         quick: bool,
-    }    ,
+    },
     /// Create and start downstairs regions
     Start,
 }
 
+/// Information about a single downstairs.
 #[derive(Debug, Clone)]
 struct DownstairsInfo {
     ds_bin: String,
@@ -70,12 +87,16 @@ impl DownstairsInfo {
         Ok(cmd)
     }
 }
+
+// Describing the downstairs that together make a region.
 #[derive(Debug)]
 struct RegionSet {
     ds: Vec<DownstairsInfo>,
     ds_bin: String,
     region_dir: String,
 }
+
+// This holds the overall info for the regions we have created.
 #[derive(Debug)]
 struct TestInfo {
     output_dir: PathBuf,
@@ -118,6 +139,9 @@ impl TestInfo {
     /**
      * Create a region as part of the region set at the given port with
      * the provided extent size and count.
+     *
+     * TODO: Add encryption option
+     * TODO: Take command line args for region info.
      */
     fn create_ds_region(
         &mut self,
@@ -175,8 +199,7 @@ impl TestInfo {
         } else if !quiet {
             println!(
                 "Downstairs region created at {} in {:04}",
-                new_region_dir,
-                time_f,
+                new_region_dir, time_f,
             );
         }
 
@@ -201,10 +224,7 @@ impl TestInfo {
     /**
      * Delete a region directory at the given port.
      */
-    fn delete_ds_region(
-        &mut self,
-        port: u32,
-    ) -> Result<()> {
+    fn delete_ds_region(&mut self, port: u32) -> Result<()> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
         let mut my_region = PathBuf::new();
@@ -215,6 +235,9 @@ impl TestInfo {
             my_region.clone().into_os_string().into_string().unwrap();
 
         std::fs::remove_dir_all(&new_region_dir)?;
+
+        // If this region was part of the ds vec, remove it.
+        self.rs.ds.retain(|ds| ds.port != port);
         Ok(())
     }
 
@@ -229,6 +252,7 @@ impl TestInfo {
     }
 }
 
+// WIP.. begin ignore
 fn startall(ti: &mut TestInfo) -> Result<()> {
     let _ = ti.create_ds_region(3810, 10, 20, 4096, false).unwrap();
     let _ = ti.create_ds_region(3820, 10, 20, 4096, false).unwrap();
@@ -240,6 +264,11 @@ fn startall(ti: &mut TestInfo) -> Result<()> {
     println!("ti: {:?}", ti);
 
     // Spawn a thread to watch each downstairs??
+    // No, ZZZ spawn a thread to first create, then wait on a downstairs.
+    // The PID should be updated somewhere another task can find it.
+    // Setup a mpsc channel and a head controller thread that knows if a
+    // thread dies unexpected, and can also restart threads (downstairs)
+    // if so desired.
     //
     // Messages to tell each monitor thread what to do?
     for ads in ti.cmd.iter_mut() {
@@ -254,8 +283,8 @@ fn startall(ti: &mut TestInfo) -> Result<()> {
         }
     }
     Ok(())
-
 }
+
 fn _create(cleanup: bool, extent_count: u64, extent_size: u64) -> Result<()> {
     let ds_bin: String = "../target/release/crucible-downstairs".into();
 
@@ -278,43 +307,57 @@ fn _create(cleanup: bool, extent_count: u64, extent_size: u64) -> Result<()> {
     }
 
     let mut ti = TestInfo::new(ds_bin, output_dir, region_dir).unwrap();
-    let _ = ti.create_ds_region(3810, extent_size, extent_count, 4096, false).unwrap();
-    let _ = ti.create_ds_region(3820, extent_size, extent_count, 4096, false).unwrap();
-    let _ = ti.create_ds_region(3830, extent_size, extent_count, 4096, false).unwrap();
+    let _ = ti
+        .create_ds_region(3810, extent_size, extent_count, 4096, false)
+        .unwrap();
+    let _ = ti
+        .create_ds_region(3820, extent_size, extent_count, 4096, false)
+        .unwrap();
+    let _ = ti
+        .create_ds_region(3830, extent_size, extent_count, 4096, false)
+        .unwrap();
 
     println!("All regions created");
     Ok(())
 }
+// WIP, end ignore
 
-fn region_create_test(
+/*
+ * Create a region with the given values in a loop.  Report the mean,
+ * standard deviation, min, and max for the creation.
+ * The region is created and deleted each time.
+ */
+fn loop_create_test(
     ti: &mut TestInfo,
     extent_size: u64,
     extent_count: u64,
     block_size: u64,
 ) -> Result<()> {
-
     let mut times = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..5 {
         let ct = ti.create_ds_region(
             3810,
             extent_size,
             extent_count,
             block_size as u32,
-            true
+            true,
         )?;
         times.push(ct);
         ti.delete_ds_region(3810)?;
     }
 
     let size = region_si(extent_size, extent_count, block_size);
+    let efile_size = efile_si(extent_count, block_size);
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    print!(
-        "{:>8.3} {}  {:3} {:>6} {:>4}",
-        statistical::mean(&times), size, extent_size, extent_count, block_size
-    );
     println!(
-        "  {:5.3} {:8.3} {:8.3}",
+        "{:>9.3} {}  {:>4} {:>6} {:>4} {} {:5.3} {:8.3} {:8.3}",
+        statistical::mean(&times),
+        size,
+        extent_size,
+        extent_count,
+        block_size,
+        efile_size,
         statistical::standard_deviation(&times, None),
         times.first().unwrap(),
         times.last().unwrap(),
@@ -323,111 +366,151 @@ fn region_create_test(
     Ok(())
 }
 
-// Print out the region in SI units.
+/*
+ * Return a formatted string of the region size in SI units.
+ */
 fn region_si(es: u64, ec: u64, bs: u64) -> String {
     let sz = Byte::from_bytes((bs * es * ec).into());
     let bu = sz.get_appropriate_unit(true);
     format!("{:>11}", bu.to_string())
 }
 
+/*
+ * Return a formatted string of the extent file size in SI units
+ */
+fn efile_si(es: u64, bs: u64) -> String {
+    let sz = Byte::from_bytes((bs * es).into());
+    let bu = sz.get_appropriate_unit(true);
+    format!("{:>11}", bu.to_string())
+}
+
+/*
+ * Create a single downstairs region with the passed in values.
+ * Report the time and stats in the standard format, then delete the region.
+ */
 fn single_create_test(
     ti: &mut TestInfo,
     extent_size: u64,
     extent_count: u64,
     block_size: u64,
 ) -> Result<()> {
-
     let ct = ti.create_ds_region(
         3810,
         extent_size,
         extent_count,
         block_size as u32,
-        true
+        true,
     )?;
+
     let size = region_si(extent_size, extent_count, block_size);
+    let efile_size = efile_si(extent_size, block_size);
     println!(
-        "{:>8.3} {}  {:3} {:>6} {:>4}",
-        ct, size, extent_size, extent_count, block_size
+        "{:>9.3} {}  {:>4} {:>6} {:>4} {}",
+        ct, size, extent_size, extent_count, block_size, efile_size,
     );
     ti.delete_ds_region(3810)?;
 
     Ok(())
 }
 
+/*
+ * Run the region create test.
+ * This will run a bunch of region creation commands in a loop, changing
+ * the overall region size as well as blocks per extent (extent_size) and
+ * total number of extent files (extent_count).
+ */
+fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
+    let block_size = 4096;
+
+    // The total region size we want for the test.  The total region
+    // divided by the extent_size will give us the number of extents
+    // the creation will require.
+    //  XXX I've hard coded some "interesting" values here.  We may
+    //  decide to either keep these, or set some different ones, or make
+    //  an option to the test to allow it from the command line.
+    //  Since the larger sizes can currently take minutes/hours, those
+    //  are commented out as well.
+    let region_size = vec![
+        // REGION SIZE   4k BLOCKS  512 BLOCKS
+        2u64.pow(22), //  16 GiB      2 GiB
+        2u64.pow(23), //  32 GiB      4 GiB
+        2u64.pow(24), //  64 GiB      8 GiB
+        2u64.pow(25), // 128 GiB     16 GiB
+        2u64.pow(26),
+        /*
+         * cargo fmt keeps trying to merge these with the ones
+         * above, so I added this comment to keep it away.
+         * 2u64.pow(27), // 512 GiB     64 GiB
+         * 2u64.pow(28), //   1 TiB    128 GiB
+         */
+    ];
+
+    // The list of blocks per extent file, in crucible, extent_size
+    // XXX This is again some self selected interesting values.  Expect
+    // these to change as we learn more.
+    let extent_size = vec![1024, 2048, 4096];
+
+    // This header is the same for both the regular and the quick test.
+    print!(
+        "{:>9} {:>11}  {:>4} {:>6} {:>4} {:>11}",
+        "SECONDS", "REGION_SIZE", "ES", "EC", "BS", "EFILE_SIZE"
+    );
+
+    if !quick {
+        // The longer test will print more info than the quick
+        print!("  {:>5} {:>8} {:>8}", "STDV", "MIN", "MAX");
+    }
+    println!();
+
+    for rs in region_size.iter() {
+        for es in extent_size.iter() {
+            // With power of 2 region sizes, the rs/es should always yield
+            // a correct ec.
+            let ec = rs / es;
+            if quick {
+                single_create_test(ti, *es, ec, block_size)?;
+            } else {
+                loop_create_test(ti, *es, ec, block_size)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    let ds_bin: String = "../target/release/crucible-downstairs".into();
-    let output_dir: PathBuf = "/tmp/dsc".into();
-    let region_dir: PathBuf = "/var/tmp/dsc/region".into();
+    // XXX Some WIP here too.  The eventual idea is to allow this tool to
+    // use an existing region instead of creating one each time.
+    // To avoid destroying the region by accident, we have a flag that
+    // specifies it is okay to delete it.
+    if Path::new(&args.output_dir).exists() {
+        if args.cleanup {
+            std::fs::remove_dir_all(&args.output_dir)?;
+        } else {
+            bail!("Remove output {:?} before running", args.output_dir);
+        }
+    }
+    if Path::new(&args.region_dir).exists() {
+        if args.cleanup {
+            std::fs::remove_dir_all(&args.region_dir)?;
+        } else {
+            bail!("Remove region {:?} before running", args.region_dir);
+        }
+    }
+    if !Path::new(&args.ds_bin).exists() {
+        bail!("Can't find downstairs binary at {:?}", args.ds_bin);
+    }
 
-    if Path::new(&output_dir).exists() {
-        if args.cleanup {
-            std::fs::remove_dir_all(&output_dir)?;
-        } else {
-            bail!("Remove output {:?} before running", output_dir);
-        }
-    }
-    if Path::new(&region_dir).exists() {
-        if args.cleanup {
-            std::fs::remove_dir_all(&region_dir)?;
-        } else {
-            bail!("Remove region {:?} before running", region_dir);
-        }
-    }
-    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir).unwrap();
+    let mut ti =
+        TestInfo::new(args.ds_bin, args.output_dir, args.region_dir).unwrap();
 
     match args.command {
         Commands::Create { quick } => {
-            let block_size = 4096;
-            let maxes = vec![
-               // 2u64.pow(15), // 128 MiB assuming 4k bs
-                2u64.pow(16), // 256 MiB
-                2u64.pow(17), // 512 MiB
-                2u64.pow(18), //   1 GiB
-               // 2u64.pow(19), //   2 GiB
-               // 2u64.pow(20), //   4 GiB
-               // 2u64.pow(21), //   8 GiB
-                2u64.pow(22), //  16 GiB
-                2u64.pow(23), //  32 GiB
-                2u64.pow(24), //  64 GiB
-                2u64.pow(25), // 128 GiB
-                2u64.pow(26), // 256 GiB
-                2u64.pow(27), // 256 GiB
-                2u64.pow(28), // 512 GiB
-                2u64.pow(29), //   1 TiB
-            ];
-            // let extent_count = vec![64, 128, 256, 512];
-            // let extent_count = vec![128, 256];
-            let extent_size = vec![256];
-
-            print!("{:>8} {:>11}  {:>3} {:>6} {:>4}",
-                "SECONDS",
-                "SIZE    ",
-                "ES",
-                "EC",
-                "BS"
-            );
-            if !quick {
-                print!("  {:>5} {:>8} {:>8}", "STDV", "MIN", "MAX");
-            }
-
-            println!();
-
-            for max in maxes.iter() {
-                // We have chosen sizes such that the / should always work
-                let es: u64 = extent_size[0];
-                let ec = max / es;
-                for es in extent_size.iter() {
-                    if quick {
-                        single_create_test(&mut ti, *es, ec, block_size)?;
-                    } else {
-                        region_create_test(&mut ti, *es, ec, block_size)?;
-                    }
-                }
-            }
-        },
+            region_create_test(&mut ti, quick)?;
+        }
         Commands::Start => {
+            // XXX This is all WIP stuff
             startall(&mut ti)?;
         }
     }
