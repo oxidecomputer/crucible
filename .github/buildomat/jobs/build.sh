@@ -37,7 +37,5 @@ ls -l /work/scripts
 echo in_work_bins
 ls -l /work/bins
 
-exit 0
-
 banner test
 ptime -m cargo test --lib --verbose
