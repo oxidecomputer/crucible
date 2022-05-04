@@ -28,7 +28,7 @@ for t in downstairs client hammer; do
 done
 
 mkdir -p /work/scripts
-for s in tools/test_up.sh; do
+for s in tools/test_up.sh tools/test_ds.sh; do
 	cp "$s" /work/scripts/
 done
 
@@ -39,12 +39,5 @@ ls -l /work/bins
 
 exit 0
 
-#banner test
-#ptime -m cargo test --lib --verbose
-
-#banner test_up.sh
-#ptime -m ./tools/test_up.sh unencrypted
-#ptime -m ./tools/test_up.sh encrypted
-#
-#banner test_ds.sh
-#ptime -m ./tools/test_ds.sh
+banner test
+ptime -m cargo test --lib --verbose
