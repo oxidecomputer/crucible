@@ -13,21 +13,12 @@
 
 input="/input/build/work"
 
-date
-echo first
-ls -ltr /
-echo input
-ls -ltr /input/
-echo build
-ls -ltr /input/build/
-echo work
-ls -ltr /input/build/work
 set -o errexit
 set -o pipefail
 set -o xtrace
 
-echo first bins
-ls -ltr /input/build/work/bins || true
+echo "input bins dir contains:"
+ls -ltr "$input"/bins || true
 
 banner unpack
 mkdir -p /var/tmp/bins
@@ -40,7 +31,7 @@ done
 
 export BINDIR=/var/tmp/bins
 
-banner test_encr
+banner test_up_encrypted
 ptime -m bash "$input/scripts/test_up.sh" encrypted
 
 # Save the output files?
