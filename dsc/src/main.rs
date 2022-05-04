@@ -10,9 +10,9 @@ use anyhow::{bail, Context, Result};
 use byte_unit::Byte;
 use clap::{Parser, Subcommand};
 
-/// dsc  DownStairs Control
+/// dsc  DownStairs Controller
 #[derive(Debug, Parser)]
-#[clap(name = "dsc")]
+#[clap(name = "dsc", term_width = 80)]
 #[clap(about = "A downstairs controller", long_about = None)]
 struct Cli {
     /// Delete any required directories before starting
