@@ -1225,14 +1225,14 @@ where
      * reconciliation work notification to arrive from the upstairs task
      * responsible for making all downstairs the same.
      */
-    let mut ping_interval = deadline_secs(10);
-    let mut timeout_deadline = deadline_secs(50);
+    let mut ping_interval = deadline_secs(5);
+    let mut timeout_deadline = deadline_secs(40);
     loop {
         tokio::select! {
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
-                timeout_deadline = deadline_secs(50);
-                ping_interval = deadline_secs(10);
+                timeout_deadline = deadline_secs(40);
+                ping_interval = deadline_secs(5);
 
                 match f.transpose()? {
                     None => {
@@ -1269,9 +1269,28 @@ where
                             ).await?;
                         }
                     }
-                    Some(m) => {
+                    Some(Message::Imok) => {
+                        println!("[{}] Received Imok", up_coms.client_id);
+                    }
+                    Some(Message::ExtentError(rep_id, eid, error)) => {
                         println!(
-                            "[{}] In repair, No action taken for message {:?}",
+                            "[{}] Extent {} error on job {}: {}",
+                            up_coms.client_id,
+                            eid,
+                            rep_id,
+                            error,
+                        );
+                        bail!(
+                            "[{}] Extent {} error on job {}: {}",
+                            up_coms.client_id,
+                            eid,
+                            rep_id,
+                            error,
+                        );
+                    }
+                    Some(m) => {
+                        panic!(
+                            "[{}] In repair, No action for message {:?}",
                             up_coms.client_id, m);
                     }
                 }
@@ -1309,7 +1328,7 @@ where
                          *
                          * If the work is an extent flush, then only send the
                          * message to the source extent, the other downstairs
-                         * do not get a message.
+                         * must not get a message.
                          */
                         match op {
                             Message::ExtentRepair(rep_id, _, src, _, _) => {
@@ -2243,6 +2262,11 @@ impl Downstairs {
             if !successful_hash {
                 // no integrity hash was correct for this
                 // response
+                println!("No match computed hash:{:?}", computed_hash,);
+                for hash in response.hashes.iter().rev() {
+                    println!("No match          hash:{:?}", hash);
+                }
+
                 return Err(CrucibleError::HashMismatch);
             }
         } else {
@@ -2334,6 +2358,7 @@ impl Downstairs {
             }
 
             if !successful_hash {
+                println!("No match encrypted computed hash");
                 // no hash was correct
                 return Err(CrucibleError::HashMismatch);
             } else if !successful_decryption {
@@ -2479,28 +2504,38 @@ impl Downstairs {
                     // Mark this downstairs as bad if this was a write or flush
                     // XXX: reconcilation, retries?
                     // XXX: Errors should be reported to nexus
-                    if matches!(
-                        job.work,
+                    match job.work {
                         IOop::Write {
                             dependencies: _,
                             writes: _,
-                        } | IOop::Flush {
+                        }
+                        | IOop::Flush {
                             dependencies: _,
                             flush_number: _,
                             gen_number: _,
                             snapshot_details: _,
-                        }
-                    ) {
-                        let errors: u64 =
-                            match self.downstairs_errors.get(&client_id) {
-                                Some(v) => *v,
-                                None => 0,
-                            };
+                        } => {
+                            let errors: u64 =
+                                match self.downstairs_errors.get(&client_id) {
+                                    Some(v) => *v,
+                                    None => 0,
+                                };
 
-                        self.downstairs_errors.insert(client_id, errors + 1);
-                    } else {
-                        // XXX We don't count read errors here.
-                        println!("[{}] {} read error", client_id, ds_id);
+                            self.downstairs_errors
+                                .insert(client_id, errors + 1);
+                        }
+                        IOop::Read {
+                            dependencies: _,
+                            requests: _,
+                        } => {
+                            // It's possible we get a read error if the
+                            // downstairs disconnects.  However XXX, someone
+                            // should be told about this error.
+                            println!(
+                                "[{}] {} read error {:?} {:?}",
+                                client_id, ds_id, e, job
+                            );
+                        }
                     }
                 }
             }
@@ -2531,13 +2566,14 @@ impl Downstairs {
                     let read_data: Vec<ReadResponse> = read_data.unwrap();
                     assert!(!read_data.is_empty());
                     if job.read_response_hashes != read_response_hashes {
-                        // XXX Change to panic when reconciliation works
+                        // XXX This error needs to go to Nexus
                         println!(
-                            "[{}] read hash mismatch on {} {:?} {:?}",
+                            "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
                             client_id,
                             ds_id,
                             job.read_response_hashes,
-                            read_response_hashes
+                            read_response_hashes,
+                            job
                         );
                     }
                 }
@@ -2574,13 +2610,14 @@ impl Downstairs {
                          * that and verify they are the same.
                          */
                         if job.read_response_hashes != read_response_hashes {
-                            // XXX Change to panic when reconciliation works
+                            // XXX This error needs to go to Nexus
                             println!(
-                                "[{}] read hash mismatch on {} {:?} {:?}",
+                                "[{}] read hash mismatch on {} {:?} {:?} j:{:?}",
                                 client_id,
                                 ds_id,
                                 job.read_response_hashes,
-                                read_response_hashes
+                                read_response_hashes,
+                                job,
                             );
                         }
                     }
@@ -4096,7 +4133,7 @@ impl Upstairs {
                     send_reconcile_work(dst, *lastcast);
                     *lastcast += 1;
                     println!("Sent repair work, now wait for resp");
-                    let mut progress_check = deadline_secs(20);
+                    let mut progress_check = deadline_secs(5);
 
                     /*
                      * What to do if a downstairs goes away and never
@@ -4133,7 +4170,7 @@ impl Upstairs {
                                  * an ACK from that downstairs.
                                  */
                                 println!("progress_check");
-                                progress_check = deadline_secs(20);
+                                progress_check = deadline_secs(5);
                                 self.ds_state_show();
                                 let mut ds = self.downstairs.lock().unwrap();
                                 if let Err(e) = ds.repair_or_abort() {
@@ -4484,7 +4521,10 @@ impl Upstairs {
             || ddef.extent_count() != client_ddef.extent_count()
         {
             // XXX Figure out if we can handle this error. Possibly not.
-            panic!("New downstairs region info mismatch");
+            panic!(
+                "New downstairs region info mismatch {:?} vs. {:?}",
+                ddef, client_ddef
+            );
         }
 
         Ok(())
@@ -4542,13 +4582,23 @@ impl Upstairs {
         }
 
         // Mark this ds_id for the client_id as completed.
-        let notify_guest = ds.process_ds_completion(
+        let notify_guest = match ds.process_ds_completion(
             ds_id,
             client_id,
             read_data,
             &self.encryption_context,
             up_state,
-        )?;
+        ) {
+            Err(e) => {
+                let job = ds.active.get_mut(&ds_id).unwrap();
+                println!(
+                    "[{}] ds_completion error: {:?} j:{} {:?} {:?} ",
+                    client_id, e, ds_id, &self.encryption_context, job,
+                );
+                return Err(e);
+            }
+            Ok(ng) => ng,
+        };
 
         // Mark this downstairs as bad if this was a write or flush
         if let Err(err) = ds.client_error(ds_id, client_id) {
@@ -6007,7 +6057,7 @@ impl BlockIO for Guest {
          * XXX Figure out how long to wait for this.  The time to go active
          * will include the time to reconcile all three downstairs.
          */
-        for _ in 0..10 {
+        loop {
             if self.query_is_active()? {
                 println!("This guest Upstairs is now active");
                 self.set_active();
@@ -6016,11 +6066,9 @@ impl BlockIO for Guest {
                 println!(
                     "Upstairs is not yet active, waiting in activate function"
                 );
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                std::thread::sleep(std::time::Duration::from_secs(3));
             }
         }
-
-        Err(CrucibleError::UpstairsInactive)
     }
 
     fn query_is_active(&self) -> Result<bool, CrucibleError> {
