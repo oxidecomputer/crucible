@@ -255,8 +255,7 @@ async fn cmd_to_msg(
             fw.send(CliMessage::IsActive).await?;
         }
         CliCommand::Show => {
-            println!("No support for {:?}", cmd);
-            return Ok(());
+            fw.send(CliMessage::ShowWork).await?;
         }
         CliCommand::Wait => {
             println!("No support for {:?}", cmd);
@@ -557,10 +556,13 @@ async fn process_cli_command(
                 }
             }
         }
-        CliMessage::Flush => match guest.flush(None) {
-            Ok(_) => fw.send(CliMessage::DoneOk).await,
-            Err(e) => fw.send(CliMessage::Error(e)).await,
-        },
+        CliMessage::Flush => {
+            println!("Flush");
+            match guest.flush(None) {
+                Ok(_) => fw.send(CliMessage::DoneOk).await,
+                Err(e) => fw.send(CliMessage::Error(e)).await,
+            }
+        }
         CliMessage::IsActive => match guest.query_is_active() {
             Ok(a) => fw.send(CliMessage::ActiveIs(a)).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
@@ -630,6 +632,10 @@ async fn process_cli_command(
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
+        CliMessage::ShowWork => match guest.show_work() {
+            Ok(_) => fw.send(CliMessage::DoneOk).await,
+            Err(e) => fw.send(CliMessage::Error(e)).await,
+        },
         CliMessage::Write(offset, len) => {
             if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
