@@ -29,7 +29,7 @@ reqwest = { version = "0.11", features = ["json"] }
 ringbuffer = "0.8"
 schemars = { version = "0.8.8", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1.0.79"
+serde_json = "1.0.81"
 slog = { version = "2.7" }
 slog-term = { version = "2.9" }
 slog-async = { version = "2.7" }
