@@ -364,7 +364,6 @@ fn single_create_test(
     block_size: u64,
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
-
     let ct = ti.create_ds_region(
         3810,
         extent_size,
@@ -446,11 +445,14 @@ fn region_create_test(
     let mut csv_file = None;
     let mut csv;
     if let Some(csv_out) = csv_out {
-        csv = WriterBuilder::new()
-            .from_path(csv_out)
-            .unwrap();
+        csv = WriterBuilder::new().from_path(csv_out).unwrap();
         csv.serialize((
-            "SECONDS", "REGION_SIZE", "EXTENT_SIZE", "ES", "EC", "BS",
+            "SECONDS",
+            "REGION_SIZE",
+            "EXTENT_SIZE",
+            "ES",
+            "EC",
+            "BS",
         ))?;
         csv.flush().unwrap();
         csv_file = Some(&mut csv);
