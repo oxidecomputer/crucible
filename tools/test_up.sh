@@ -86,7 +86,7 @@ for (( i = 0; i < 3; i++ )); do
     esac
     echo "Downstairs output log at $outfile"
     echo "$cds" run -p "$port" -d "$dir" | tee -a "$outfile"
-    ${cds} run -p "$port" -d "$dir" > "$outfile" 2>&1 &
+    ${cds} run -p "$port" -d "$dir" >> "$outfile" 2>&1 &
     downstairs[$i]=$!
     set +o errexit
 done

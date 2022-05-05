@@ -9,21 +9,17 @@ set -o pipefail
 ulimit -n 16384
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BINDIR=${BINDIR:-$ROOT/target/debug}
 
 echo "$ROOT"
 cd "$ROOT"
 
-if pgrep -fl target/debug/crucible-downstairs; then
+if pgrep -fl crucible-downstairs; then
     echo 'Downstairs already running?' >&2
     exit 1
 fi
 
-if ! cargo build; then
-    echo "Initial Build failed, no tests ran"
-    exit 1
-fi
-
-cds="./target/debug/crucible-downstairs"
+cds="$BINDIR/crucible-downstairs"
 if [[ ! -f ${cds} ]]; then
     echo "Can't find crucible binary at $cds"
     exit 1
