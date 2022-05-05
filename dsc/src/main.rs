@@ -252,8 +252,7 @@ impl TestInfo {
     }
 }
 
-// WIP.. begin ignore
-fn startall(ti: &mut TestInfo) -> Result<()> {
+fn create_and_run(ti: &mut TestInfo) -> Result<()> {
     let _ = ti.create_ds_region(3810, 10, 20, 4096, false).unwrap();
     let _ = ti.create_ds_region(3820, 10, 20, 4096, false).unwrap();
     let _ = ti.create_ds_region(3830, 10, 20, 4096, false).unwrap();
@@ -284,43 +283,6 @@ fn startall(ti: &mut TestInfo) -> Result<()> {
     }
     Ok(())
 }
-
-fn _create(cleanup: bool, extent_count: u64, extent_size: u64) -> Result<()> {
-    let ds_bin: String = "../target/release/crucible-downstairs".into();
-
-    let output_dir: PathBuf = "/tmp/dsc".into();
-    let region_dir: PathBuf = "/var/tmp/dsc/region".into();
-
-    if Path::new(&output_dir).exists() {
-        if cleanup {
-            std::fs::remove_dir_all(&output_dir)?;
-        } else {
-            bail!("Remove output {:?} before running", output_dir);
-        }
-    }
-    if Path::new(&region_dir).exists() {
-        if cleanup {
-            std::fs::remove_dir_all(&region_dir)?;
-        } else {
-            bail!("Remove region {:?} before running", region_dir);
-        }
-    }
-
-    let mut ti = TestInfo::new(ds_bin, output_dir, region_dir).unwrap();
-    let _ = ti
-        .create_ds_region(3810, extent_size, extent_count, 4096, false)
-        .unwrap();
-    let _ = ti
-        .create_ds_region(3820, extent_size, extent_count, 4096, false)
-        .unwrap();
-    let _ = ti
-        .create_ds_region(3830, extent_size, extent_count, 4096, false)
-        .unwrap();
-
-    println!("All regions created");
-    Ok(())
-}
-// WIP, end ignore
 
 /*
  * Create a region with the given values in a loop.  Report the mean,
@@ -506,8 +468,7 @@ fn main() -> Result<()> {
             region_create_test(&mut ti, quick)?;
         }
         Commands::Start => {
-            // XXX This is all WIP stuff
-            startall(&mut ti)?;
+            create_and_run(&mut ti)?;
         }
     }
     Ok(())
