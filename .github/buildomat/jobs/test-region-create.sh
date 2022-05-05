@@ -4,7 +4,7 @@
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
-#:	"/tmp/*.txt",
+#:	"region.csv",
 #: ]
 #: skip_clone = true
 #:
@@ -31,7 +31,10 @@ done
 
 export BINDIR=/var/tmp/bins
 
-banner region_create
-ptime -m "$BINDIR/dsc" create --ds-bin "${BINDIR}/crucible-downstairs"
+banner region
+pfexec plimit -n 9123456 $$
+
+ptime -m "$BINDIR/dsc" create --ds-bin "${BINDIR}/crucible-downstairs" \
+        --csv-out ./region.csv
 
 # Save the output files?
