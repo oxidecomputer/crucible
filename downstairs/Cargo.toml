@@ -16,7 +16,7 @@ crucible-protocol = { path = "../protocol" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 futures = "0.3"
 futures-core = "0.3"
-http = "0.2.6"
+http = "0.2.7"
 hyper = { version = "0.14", features = [ "full" ] }
 hyper-staticfile = "0.8"
 mime_guess = "2.0.4"
@@ -29,14 +29,14 @@ reqwest = { version = "0.11", features = ["json"] }
 ringbuffer = "0.8"
 schemars = { version = "0.8.8", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1.0.79"
+serde_json = "1.0.81"
 slog = { version = "2.7" }
 slog-term = { version = "2.9" }
 slog-async = { version = "2.7" }
 structopt = "0.3"
-tokio = { version = "1.17.0", features = ["full"] }
+tokio = { version = "1.18.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
-tokio-rustls = { version = "0.23.3" }
+tokio-rustls = { version = "0.23.4" }
 tracing = "0.1"
 toml = "0.5"
 opentelemetry = "0.17.0"
