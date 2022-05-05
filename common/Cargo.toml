@@ -13,7 +13,7 @@ toml = "0.5"
 tempfile = "3"
 thiserror = "1.0"
 uuid = { version = "0.8", features = [ "serde", "v4" ] }
-twox-hash = "1.6.2"
+twox-hash = "1.6.3"
 rusqlite = { version = "0.27" }
 tokio-rustls = { version = "0.23.3" }
 rustls-pemfile = { version = "1.0.0" }
