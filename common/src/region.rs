@@ -30,6 +30,7 @@ pub const MAX_SHIFT: u32 = 15;
 
 pub const MIN_BLOCK_SIZE: usize = (1 << MIN_SHIFT) as usize;
 pub const MAX_BLOCK_SIZE: usize = (1 << MAX_SHIFT) as usize;
+pub const MAX_EXTENT_FILE_SIZE: u64 = (1 << 29) as u64; // 512 MiB
 
 impl Block {
     pub fn new(value: u64, shift: u32) -> Block {
@@ -237,17 +238,17 @@ impl RegionOptions {
             bail!("extent size must be at least 1 block");
         }
 
-        let bs = self.extent_size.value.saturating_mul(self.block_size);
-        if bs > 20 * 1024 * 1024 {
+        let es = self.extent_size.value.saturating_mul(self.block_size);
+        if es > MAX_EXTENT_FILE_SIZE {
             /*
-             * For now, make sure we don't accidentally try to use a gigantic
-             * extent.
+             * Limit the maximum size of an extent file.
              */
             bail!(
-                "extent size {:?} x {} bytes = {}MB, bigger than 20MB",
-                self.extent_size,
+                "extent size {} x {} bytes = {}, bigger than {}",
+                self.extent_size.value,
                 self.block_size,
-                bs / 1024 / 1024
+                es,
+                MAX_EXTENT_FILE_SIZE,
             );
         }
 

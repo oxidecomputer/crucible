@@ -54,11 +54,6 @@ if pgrep -fl crucible-downstairs; then
     exit 1
 fi
 
-if ! cargo build; then
-    echo "Initial Build failed, no tests ran"
-    exit 1
-fi
-
 if [[ $delete -eq 1 ]]; then
     rm -rf var/8810 var/8820 var/8830
 else
@@ -80,13 +75,13 @@ fi
 res=0
 for port in 8810 8820 8830; do
     if [[ $encryption -eq 0 ]]; then
-        echo cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size" --block-size "$block_size"
+        echo "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size" --block-size "$block_size"
         if ! time "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size" --block-size "$block_size"; then
             echo "Failed to create downstairs $port"
             res=1
         fi
     else
-        echo cargo run -q -p crucible-downstairs -- create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted=true
+        echo "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted=true
         if ! time "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted=true; then
             echo "Failed to create downstairs $port"
             res=1
