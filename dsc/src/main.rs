@@ -347,11 +347,11 @@ fn loop_create_test(
     }
 
     let size = region_si(extent_size, extent_count, block_size);
-    let efile_size = efile_si(extent_count, block_size);
+    let efile_size = efile_si(extent_size, block_size);
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     println!(
-        "{:>9.3} {}  {:>4} {:>6} {:>4} {} {:5.3} {:8.3} {:8.3}",
+        "{:>9.3} {}  {:>6} {:>6} {:>4} {}  {:5.3} {:8.3} {:8.3}",
         statistical::mean(&times),
         size,
         extent_size,
@@ -405,7 +405,7 @@ fn single_create_test(
     let size = region_si(extent_size, extent_count, block_size);
     let efile_size = efile_si(extent_size, block_size);
     println!(
-        "{:>9.3} {}  {:>4} {:>6} {:>4} {}",
+        "{:>9.3} {}  {:>6} {:>6} {:>4} {}",
         ct, size, extent_size, extent_count, block_size, efile_size,
     );
     ti.delete_ds_region(3810)?;
@@ -432,27 +432,23 @@ fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
     //  are commented out as well.
     let region_size = vec![
         // REGION SIZE   4k BLOCKS  512 BLOCKS
-        2u64.pow(22), //  16 GiB      2 GiB
-        2u64.pow(23), //  32 GiB      4 GiB
+        // 2u64.pow(22), //  16 GiB      2 GiB
+        // 2u64.pow(23), //  32 GiB      4 GiB
         2u64.pow(24), //  64 GiB      8 GiB
         2u64.pow(25), // 128 GiB     16 GiB
         2u64.pow(26),
-        /*
-         * cargo fmt keeps trying to merge these with the ones
-         * above, so I added this comment to keep it away.
-         * 2u64.pow(27), // 512 GiB     64 GiB
-         * 2u64.pow(28), //   1 TiB    128 GiB
-         */
+        2u64.pow(27), // 512 GiB     64 GiB
+        2u64.pow(28), //   1 TiB    128 GiB
     ];
 
     // The list of blocks per extent file, in crucible, extent_size
     // XXX This is again some self selected interesting values.  Expect
     // these to change as we learn more.
-    let extent_size = vec![1024, 2048, 4096];
+    let extent_size = vec![4096, 8192, 16384, 32768];
 
     // This header is the same for both the regular and the quick test.
     print!(
-        "{:>9} {:>11}  {:>4} {:>6} {:>4} {:>11}",
+        "{:>9} {:>11}  {:>6} {:>6} {:>4} {:>11}",
         "SECONDS", "REGION_SIZE", "ES", "EC", "BS", "EFILE_SIZE"
     );
 
