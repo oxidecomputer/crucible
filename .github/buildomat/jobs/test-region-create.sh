@@ -32,6 +32,6 @@ done
 export BINDIR=/var/tmp/bins
 
 banner region_create
-ptime -m "$BINDIR/dsc" --ds-bin "${BINDIR}/crucible-downstairs"
+ptime -m "$BINDIR/dsc" create --ds-bin "${BINDIR}/crucible-downstairs"
 
 # Save the output files?
