@@ -44,7 +44,7 @@ enum Commands {
     /// Test creation of downstairs regions
     Create {
         #[clap(long)]
-        quick: bool,
+        long: bool,
     },
     /// Create and start downstairs regions
     Start,
@@ -381,7 +381,7 @@ fn single_create_test(
  * the overall region size as well as blocks per extent (extent_size) and
  * total number of extent files (extent_count).
  */
-fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
+fn region_create_test(ti: &mut TestInfo, long: bool) -> Result<()> {
     let block_size = 4096;
 
     // The total region size we want for the test.  The total region
@@ -393,29 +393,27 @@ fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
     //  Since the larger sizes can currently take minutes/hours, those
     //  are commented out as well.
     let region_size = vec![
-        // REGION SIZE   4k BLOCKS  512 BLOCKS
-        // 2u64.pow(22), //  16 GiB      2 GiB
-        // 2u64.pow(23), //  32 GiB      4 GiB
-        2u64.pow(24), //  64 GiB      8 GiB
-        2u64.pow(25), // 128 GiB     16 GiB
-        2u64.pow(26),
-        2u64.pow(27), // 512 GiB     64 GiB
-        2u64.pow(28), //   1 TiB    128 GiB
+        1024 * 1024 * 1024 * 10,   //  10 Mib
+        1024 * 1024 * 1024 * 100,  // 100 Mib
+        1024 * 1024 * 1024 * 250,  // 250 Mib
+        1024 * 1024 * 1024 * 500,  // 500 Mib
+        1024 * 1024 * 1024 * 750,  // 750 Mib
+        1024 * 1024 * 1024 * 1024, //   1 Tib
     ];
 
-    // The list of blocks per extent file, in crucible, extent_size
+    // The list of blocks per extent file, in crucible: extent_size
     // XXX This is again some self selected interesting values.  Expect
     // these to change as we learn more.
     let extent_size = vec![4096, 8192, 16384, 32768];
 
-    // This header is the same for both the regular and the quick test.
+    // This header is the same for both the regular and the long test.
     print!(
         "{:>9} {:>11}  {:>11} {:>6} {:>6} {:>4}",
         "SECONDS", "REGION_SIZE", "EXTENT_SIZE", "ES", "EC", "BS",
     );
 
-    if !quick {
-        // The longer test will print more info than the quick
+    if long {
+        // The longer test will print more info than the default
         print!("  {:>5} {:>8} {:>8}", "STDV", "MIN", "MAX");
     }
     println!();
@@ -424,11 +422,11 @@ fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
         for es in extent_size.iter() {
             // With power of 2 region sizes, the rs/es should always yield
             // a correct ec.
-            let ec = rs / es;
-            if quick {
-                single_create_test(ti, *es, ec, block_size)?;
-            } else {
+            let ec = (rs / block_size) / es;
+            if long {
                 loop_create_test(ti, *es, ec, block_size)?;
+            } else {
+                single_create_test(ti, *es, ec, block_size)?;
             }
         }
     }
@@ -464,8 +462,8 @@ fn main() -> Result<()> {
         TestInfo::new(args.ds_bin, args.output_dir, args.region_dir).unwrap();
 
     match args.command {
-        Commands::Create { quick } => {
-            region_create_test(&mut ti, quick)?;
+        Commands::Create { long } => {
+            region_create_test(&mut ti, long)?;
         }
         Commands::Start => {
             create_and_run(&mut ti)?;

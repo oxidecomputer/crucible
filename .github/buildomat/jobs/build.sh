@@ -22,9 +22,8 @@ ptime -m cargo build --verbose
 
 banner output
 mkdir -p /work/bins
-for t in downstairs client hammer; do
-	f="crucible-$t"
-	gzip < "target/debug/$f" > "/work/bins/$f.gz"
+for t in crucible-downstairs crucible-client crucible-hammer dsc; do
+	gzip < "target/debug/$t" > "/work/bins/$t.gz"
 done
 
 mkdir -p /work/scripts
