@@ -405,7 +405,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
             FileBackedHistory::with_file(50, "history.txt".into())
                 .expect("Error configuring history with file"),
         );
-        let mut line_editor = Reedline::create()?.with_history(history)?;
+        let mut line_editor = Reedline::create().with_history(history);
         let prompt = CliPrompt::new();
 
         loop {
@@ -434,9 +434,6 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                 Signal::CtrlD | Signal::CtrlC => {
                     println!("CTRL-C");
                     break;
-                }
-                Signal::CtrlL => {
-                    line_editor.clear_screen().unwrap();
                 }
             }
         }
