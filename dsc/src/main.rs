@@ -309,17 +309,17 @@ fn loop_create_test(
     }
 
     let size = region_si(extent_size, extent_count, block_size);
-    let efile_size = efile_si(extent_size, block_size);
+    let extent_file_size = efile_si(extent_size, block_size);
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     println!(
-        "{:>9.3} {}  {:>6} {:>6} {:>4} {}  {:5.3} {:8.3} {:8.3}",
+        "{:>9.3} {}  {} {:>6} {:>6} {:>4}  {:5.3} {:8.3} {:8.3}",
         statistical::mean(&times),
         size,
+        extent_file_size,
         extent_size,
         extent_count,
         block_size,
-        efile_size,
         statistical::standard_deviation(&times, None),
         times.first().unwrap(),
         times.last().unwrap(),
@@ -365,10 +365,10 @@ fn single_create_test(
     )?;
 
     let size = region_si(extent_size, extent_count, block_size);
-    let efile_size = efile_si(extent_size, block_size);
+    let extent_file_size = efile_si(extent_size, block_size);
     println!(
-        "{:>9.3} {}  {:>6} {:>6} {:>4} {}",
-        ct, size, extent_size, extent_count, block_size, efile_size,
+        "{:>9.3} {}  {} {:>6} {:>6} {:>4}",
+        ct, size, extent_file_size, extent_size, extent_count, block_size,
     );
     ti.delete_ds_region(3810)?;
 
@@ -410,8 +410,8 @@ fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
 
     // This header is the same for both the regular and the quick test.
     print!(
-        "{:>9} {:>11}  {:>6} {:>6} {:>4} {:>11}",
-        "SECONDS", "REGION_SIZE", "ES", "EC", "BS", "EFILE_SIZE"
+        "{:>9} {:>11}  {:>11} {:>6} {:>6} {:>4}",
+        "SECONDS", "REGION_SIZE", "EXTENT_SIZE", "ES", "EC", "BS",
     );
 
     if !quick {
