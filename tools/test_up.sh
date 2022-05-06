@@ -181,7 +181,7 @@ if "$cds" dump "${dump_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "repair dump test did not find the expected error"
-    echo "repair dump test did not find the expected error" >> /tmp/test_fail.txt
+    echo "repair dump test did not find the expected error" >> "$fail_log"
     echo ""
 else
     echo "dump test found error as expected"

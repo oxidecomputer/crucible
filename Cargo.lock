@@ -974,7 +974,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byte-unit",
- "clap 3.1.12",
+ "clap 3.1.15",
  "statistical",
 ]
 
