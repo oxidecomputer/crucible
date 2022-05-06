@@ -19,11 +19,19 @@ rustc --version
 
 banner build
 ptime -m cargo build --verbose
+ptime -m cargo build -p crucible-downstairs --verbose --release
+
+banner test
+ptime -m cargo test --lib --verbose
 
 banner output
 mkdir -p /work/bins
 for t in crucible-downstairs crucible-client crucible-hammer dsc; do
 	gzip < "target/debug/$t" > "/work/bins/$t.gz"
+done
+
+for t in crucible-downstairs; do
+	gzip < "target/release/$t" > "/work/bins/${t}-release.gz"
 done
 
 mkdir -p /work/scripts
@@ -36,5 +44,3 @@ ls -l /work/scripts
 echo in_work_bins
 ls -l /work/bins
 
-banner test
-ptime -m cargo test --lib --verbose

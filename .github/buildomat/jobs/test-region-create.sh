@@ -34,7 +34,6 @@ export BINDIR=/var/tmp/bins
 banner region
 pfexec plimit -n 9123456 $$
 
-ptime -m "$BINDIR/dsc" create --ds-bin "${BINDIR}/crucible-downstairs" \
+ptime -m "$BINDIR/dsc" create \
+        --ds-bin "${BINDIR}/crucible-downstairs-release" \
         --csv-out ./region.csv
-
-# Save the output files?
