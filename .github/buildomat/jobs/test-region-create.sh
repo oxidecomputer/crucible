@@ -8,8 +8,8 @@
 #: ]
 #: skip_clone = true
 #:
-#: [dependencies.build]
-#: job = "build"
+#: [dependencies.rbuild]
+#: job = "rbuild"
 
 input="/input/build/work"
 
@@ -17,12 +17,12 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
-echo "input bins dir contains:"
-ls -ltr "$input"/bins || true
+echo "input rbins dir contains:"
+ls -ltr "$input"/rbins || true
 
 banner unpack
 mkdir -p /var/tmp/bins
-for t in "$input/bins/"*.gz; do
+for t in "$input/rbins/"*.gz; do
 	b=$(basename "$t")
 	b=${b%.gz}
 	gunzip < "$t" > "/var/tmp/bins/$b"
