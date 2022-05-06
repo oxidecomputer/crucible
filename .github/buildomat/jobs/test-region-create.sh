@@ -11,7 +11,7 @@
 #: [dependencies.rbuild]
 #: job = "rbuild"
 
-input="/input/build/work"
+input="/input/rbuild/work"
 
 set -o errexit
 set -o pipefail
