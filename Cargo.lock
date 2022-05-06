@@ -324,9 +324,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "3.1.15"
+version = "3.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85a35a599b11c089a7f49105658d089b8f2cf0882993c17daf6de15285c2c35d"
+checksum = "f52d4f8e4a1419219935762e32913b4430f37cb0c0200ad17a89ee18c0188a9f"
 dependencies = [
  "atty",
  "bitflags",
@@ -500,7 +500,7 @@ dependencies = [
 name = "crucadm"
 version = "0.1.0"
 dependencies = [
- "clap 3.1.15",
+ "clap 3.1.16",
  "crucible",
  "crucible-control-client",
  "tokio",
@@ -974,7 +974,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byte-unit",
- "clap 3.1.12",
+ "clap 3.1.16",
  "statistical",
 ]
 
