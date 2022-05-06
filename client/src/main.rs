@@ -1136,7 +1136,9 @@ async fn generic_workload(
             // flush
             println!(
                 "{:>0width$}/{:>0width$} FLUSH",
-                c, count, width = count_width,
+                c,
+                count,
+                width = count_width,
             );
             let mut waiter = guest.flush(None)?;
             waiter.block_wait()?;
@@ -1546,33 +1548,49 @@ async fn deactivate_workload(
     for c in 1..=count {
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: run rand test",
-            c, count, width = count_width
+            c,
+            count,
+            width = count_width
         );
         generic_workload(guest, 20, ri).await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
-            c, count, width = count_width
+            c,
+            count,
+            width = count_width
         );
         let mut waiter = guest.deactivate()?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect wait",
-            c, count, width = count_width
+            c,
+            count,
+            width = count_width
         );
         waiter.block_wait()?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect done.",
-            c, count, width = count_width
+            c,
+            count,
+            width = count_width
         );
         let wc = guest.show_work()?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Up:{} ds:{}",
-            c, count, wc.up_count, wc.ds_count, width = count_width
+            c,
+            count,
+            wc.up_count,
+            wc.ds_count,
+            width = count_width
         );
         let mut retry = 1;
         while let Err(e) = guest.activate(gen) {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
-                c, count, retry, e, width = count_width
+                c,
+                count,
+                retry,
+                e,
+                width = count_width
             );
             std::thread::sleep(std::time::Duration::from_secs(5));
             if retry > 100 {
@@ -1640,7 +1658,11 @@ async fn rand_workload(
 
         println!(
             "{:>0width$}/{:>0width$} IO at block {:5}, len:{:7}",
-            c, count, offset.value, data.len(), width = count_width,
+            c,
+            count,
+            offset.value,
+            data.len(),
+            width = count_width,
         );
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
@@ -1695,7 +1717,11 @@ async fn burst_workload(
             std::thread::sleep(std::time::Duration::from_secs(1));
             println!(
                 "{:>0width$}/{:>0width$} Up:{} ds:{}",
-                c, count, wc.up_count, wc.ds_count, width = count_width
+                c,
+                count,
+                wc.up_count,
+                wc.ds_count,
+                width = count_width
             );
             std::thread::sleep(std::time::Duration::from_secs(4));
             wc = guest.show_work()?;
@@ -1713,7 +1739,9 @@ async fn burst_workload(
         }
         println!(
             "{:>0width$}/{:>0width$}: 5 second pause, then another test loop",
-            c, count, width = count_width
+            c,
+            count,
+            width = count_width
         );
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
@@ -1748,7 +1776,9 @@ async fn repair_workload(
             // flush
             println!(
                 "{:>0width$}/{:>0width$} Flush",
-                c, count, width = count_width,
+                c,
+                count,
+                width = count_width,
             );
             let waiter = guest.flush(None)?;
             waiterlist.push(waiter);
