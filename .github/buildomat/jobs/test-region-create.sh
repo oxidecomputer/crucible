@@ -4,7 +4,7 @@
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
-#:	"region.csv",
+#:	"/tmp/region.csv",
 #: ]
 #: skip_clone = true
 #:
@@ -36,4 +36,4 @@ pfexec plimit -n 9123456 $$
 
 ptime -m "$BINDIR/dsc" create \
         --ds-bin "${BINDIR}/crucible-downstairs-release" \
-        --csv-out ./region.csv
+        --csv-out /tmp/region.csv
