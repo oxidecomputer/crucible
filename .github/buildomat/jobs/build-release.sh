@@ -26,7 +26,7 @@ ptime -m cargo test --verbose
 banner output
 mkdir -p /work/rbins
 for t in crucible-downstairs crucible-client crucible-hammer dsc; do
-	gzip < "target/release/$t" > "/work/bins/$t.gz"
+	gzip < "target/release/$t" > "/work/rbins/$t.gz"
 done
 
 mkdir -p /work/scripts

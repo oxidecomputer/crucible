@@ -418,12 +418,13 @@ fn region_create_test(
     //  Since the larger sizes can currently take minutes/hours, those
     //  are commented out as well.
     let region_size = vec![
-        1024 * 1024 * 1024 * 10,   //  10 Mib
-        1024 * 1024 * 1024 * 100,  // 100 Mib
-        1024 * 1024 * 1024 * 250,  // 250 Mib
-        1024 * 1024 * 1024 * 500,  // 500 Mib
-        1024 * 1024 * 1024 * 750,  // 750 Mib
-        1024 * 1024 * 1024 * 1024, //   1 Tib
+        1024 * 1024 * 1024,        //   1 GiB
+        1024 * 1024 * 1024 * 10,   //  10 GiB
+        1024 * 1024 * 1024 * 100,  // 100 GiB
+        1024 * 1024 * 1024 * 250,  // 250 GiB
+        1024 * 1024 * 1024 * 500,  // 500 GiB
+        1024 * 1024 * 1024 * 750,  // 750 GiB
+        1024 * 1024 * 1024 * 1024, //   1 TiB
     ];
 
     // The list of blocks per extent file, in crucible: extent_size
