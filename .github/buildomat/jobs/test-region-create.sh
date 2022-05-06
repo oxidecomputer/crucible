@@ -35,5 +35,5 @@ banner region
 pfexec plimit -n 9123456 $$
 
 ptime -m "$BINDIR/dsc" create \
-        --ds-bin "${BINDIR}/crucible-downstairs-release" \
+        --ds-bin "${BINDIR}/crucible-downstairs" \
         --csv-out /tmp/region.csv
