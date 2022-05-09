@@ -25,4 +25,5 @@ uuid = { version = "0.8", features = [ "serde", "v4" ] }
 [dev-dependencies]
 expectorate = "1.0.5"
 openapiv3 = "1.0"
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
 subprocess = "0.2.8"
