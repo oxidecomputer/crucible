@@ -641,7 +641,7 @@ impl BlockIO for SubVolume {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
     Volume {
         block_size: u64,
