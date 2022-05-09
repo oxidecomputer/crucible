@@ -43,7 +43,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Test creation of downstairs regions
-    Create {
+    RegionPerf {
         /// Run a longer test, do 10 loops for each region size combo
         /// and report mean min max and stddev.
         #[clap(long)]
@@ -477,7 +477,7 @@ fn region_create_test(
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    // XXX Some WIP here too.  The eventual idea is to allow this tool to
+    // XXX Some WIP here.  The eventual idea is to allow this tool to
     // use an existing region instead of creating one each time.
     // To avoid destroying the region by accident, we have a flag that
     // specifies it is okay to delete it.
@@ -503,7 +503,7 @@ fn main() -> Result<()> {
         TestInfo::new(args.ds_bin, args.output_dir, args.region_dir).unwrap();
 
     match args.command {
-        Commands::Create { long, csv_out } => {
+        Commands::RegionPerf { long, csv_out } => {
             region_create_test(&mut ti, long, csv_out)?;
         }
         Commands::Start => {
