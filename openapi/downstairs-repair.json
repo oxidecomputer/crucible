@@ -1,8 +1,8 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "downstairs-repair",
-    "version": "1"
+    "title": "Downstairs Repair",
+    "version": "0.0.0"
   },
   "paths": {
     "/extent/{eid}/files": {
@@ -47,7 +47,7 @@
         }
       }
     },
-    "/newextent/{eid}/{fileType}": {
+    "/newextent/{eid}/{file_type}": {
       "get": {
         "operationId": "get_extent_file",
         "parameters": [
@@ -64,7 +64,7 @@
           },
           {
             "in": "path",
-            "name": "fileType",
+            "name": "file_type",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/FileType"
@@ -123,8 +123,8 @@
         "enum": [
           "data",
           "db",
-          "db-shm",
-          "db-wal"
+          "db_shm",
+          "db_wal"
         ]
       }
     }

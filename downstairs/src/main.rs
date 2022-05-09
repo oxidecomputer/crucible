@@ -293,10 +293,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Args::RepairAPI => {
-            let _ = repair::build_api(true);
-            Ok(())
-        }
+        Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {
             trace_endpoint,
             bind_addr,

@@ -958,13 +958,24 @@ fn worker_region_destroy(
 
 #[cfg(test)]
 mod tests {
+    use openapiv3::OpenAPI;
+
     use crate::write_openapi;
 
     #[test]
-    fn test_openapi() {
+    fn test_crucible_agent_openapi() {
         let mut raw = Vec::new();
         write_openapi(&mut raw).unwrap();
         let actual = String::from_utf8(raw).unwrap();
+
+        // Make sure the result parses as a valid OpenAPI spec.
+        let spec = serde_json::from_str::<OpenAPI>(&actual)
+            .expect("output was not valid OpenAPI");
+
+        // Check for lint errors.
+        let errors = openapi_lint::validate(&spec);
+        assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+
         expectorate::assert_contents("../openapi/crucible-agent.json", &actual);
     }
 }
