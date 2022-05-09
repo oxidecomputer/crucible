@@ -2931,6 +2931,7 @@ impl EncryptionContext {
 }
 
 #[derive(Debug, Copy, Clone, JsonSchema, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum UpState {
     /*
      * The upstairs is just coming online.  We can send IO on behalf of
@@ -3792,7 +3793,7 @@ impl Upstairs {
             DsState::Active => DsState::Offline,
             DsState::Replay => DsState::Offline,
             DsState::Offline => DsState::Offline,
-            DsState::_Migrating => DsState::Failed,
+            DsState::Migrating => DsState::Failed,
             DsState::Deactivated => DsState::New,
             DsState::Repair => DsState::New,
             DsState::FailedRepair => DsState::New,
@@ -4749,6 +4750,7 @@ impl FlushInfo {
  * holders and the final set of states will change.
  */
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 enum DsState {
     /*
      * New connection
@@ -4779,7 +4781,7 @@ enum DsState {
     /*
      * Comparing downstairs for consistency.
      */
-    _Verifying,
+    Verifying,
     /*
      * Downstairs are repairing from each other.
      */
@@ -4801,7 +4803,7 @@ enum DsState {
     /*
      * This downstairs is being migrated to a new location
      */
-    _Migrating,
+    Migrating,
     /*
      * This downstairs was active, but is now no longer connected.
      * We may have work for it in memory, so a replay is possible

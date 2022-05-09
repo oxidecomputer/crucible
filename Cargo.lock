@@ -392,6 +392,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
+name = "convert_case"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb4a24b1aaf0fd0ce8b45161144d6f42cd91677fd5940fd431183eb023b3a2b8"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -518,8 +524,11 @@ dependencies = [
  "crucible-protocol",
  "crucible-scope",
  "dropshot",
+ "expectorate",
  "futures",
  "futures-core",
+ "openapi-lint",
+ "openapiv3",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "reqwest",
@@ -554,6 +563,7 @@ dependencies = [
  "http",
  "hyper",
  "omicron-common",
+ "openapi-lint",
  "openapiv3",
  "schemars",
  "serde",
@@ -651,6 +661,7 @@ dependencies = [
  "crucible-common",
  "crucible-protocol",
  "dropshot",
+ "expectorate",
  "futures",
  "futures-core",
  "hex",
@@ -659,6 +670,8 @@ dependencies = [
  "hyper-staticfile",
  "mime_guess",
  "omicron-common",
+ "openapi-lint",
+ "openapiv3",
  "opentelemetry",
  "opentelemetry-jaeger",
  "oximeter",
@@ -2028,6 +2041,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "624a8340c38c1b80fd549087862da4ba43e08858af025b236e509b6649fc13d5"
 
 [[package]]
+name = "openapi-lint"
+version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/openapi-lint#9e3ada82808ef882fdefe2d01a39eeeb219c8778"
+dependencies = [
+ "convert_case 0.5.0",
+ "indexmap",
+ "openapiv3",
+]
+
+[[package]]
 name = "openapiv3"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2518,7 +2541,7 @@ name = "progenitor-impl"
 version = "0.0.0"
 source = "git+https://github.com/oxidecomputer/progenitor?branch=main#75348207d7405db3371a98b5348bef3fbd0ef79e"
 dependencies = [
- "convert_case",
+ "convert_case 0.4.0",
  "getopts",
  "indexmap",
  "openapiv3",
@@ -2540,7 +2563,7 @@ name = "progenitor-impl"
 version = "0.0.0"
 source = "git+https://github.com/oxidecomputer/progenitor#b7bbb5cdffdfc4ddf5bc7c1a45d34760130e48a0"
 dependencies = [
- "convert_case",
+ "convert_case 0.4.0",
  "getopts",
  "indexmap",
  "openapiv3",
@@ -3999,7 +4022,7 @@ name = "typify-impl"
 version = "0.0.6-dev"
 source = "git+https://github.com/oxidecomputer/typify#6617df9800c81954ef2aa630f117f66e824f104d"
 dependencies = [
- "convert_case",
+ "convert_case 0.4.0",
  "log",
  "proc-macro2",
  "quote",

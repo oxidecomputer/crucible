@@ -26,23 +26,18 @@ pub struct FileServerContext {
     region_dir: PathBuf,
 }
 
-/**
- * Build the API.  If requested, dump it to stdout.
- * This allows us to use the resulting output to build the client side.
- */
-pub fn build_api(
-    show: bool,
-) -> Result<ApiDescription<FileServerContext>, String> {
+pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
+    let api = build_api();
+    api.openapi("Downstairs Repair", "0.0.0").write(f)?;
+    Ok(())
+}
+
+fn build_api() -> ApiDescription<FileServerContext> {
     let mut api = ApiDescription::new();
     api.register(get_extent_file).unwrap();
     api.register(get_files_for_extent).unwrap();
 
-    if show {
-        api.openapi("downstairs-repair", "1")
-            .write(&mut std::io::stdout())
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(api)
+    api
 }
 
 pub async fn repair_main(
@@ -72,7 +67,7 @@ pub async fn repair_main(
     /*
      * Build a description of the API
      */
-    let api = build_api(false)?;
+    let api = build_api();
 
     /*
      * Record the region directory where all the extents and metadata
@@ -112,14 +107,13 @@ pub enum FileType {
     Data,
     #[serde(rename = "db")]
     Database,
-    #[serde(rename = "db-shm")]
+    #[serde(rename = "db_shm")]
     DatabaseSharedMemory,
-    #[serde(rename = "db-wal")]
+    #[serde(rename = "db_wal")]
     DatabaseLog,
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct FileSpec {
     eid: u32,
     file_type: FileType,
@@ -127,7 +121,7 @@ pub struct FileSpec {
 
 #[endpoint {
     method = GET,
-    path = "/newextent/{eid}/{fileType}",
+    path = "/newextent/{eid}/{file_type}",
 }]
 async fn get_extent_file(
     rqctx: Arc<RequestContext<FileServerContext>>,
@@ -268,6 +262,7 @@ async fn extent_file_list(
 mod test {
     use super::*;
     use crate::region::{extent_dir, extent_file_name};
+    use openapiv3::OpenAPI;
     use tempfile::tempdir;
 
     fn new_region_options() -> crucible_common::RegionOptions {
@@ -406,5 +401,25 @@ mod test {
         assert!(extent_file_list(extent_dir, 1).await.is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_crucible_repair_openapi() {
+        let mut raw = Vec::new();
+        write_openapi(&mut raw).unwrap();
+        let actual = String::from_utf8(raw).unwrap();
+
+        // Make sure the result parses as a valid OpenAPI spec.
+        let spec = serde_json::from_str::<OpenAPI>(&actual)
+            .expect("output was not valid OpenAPI");
+
+        // Check for lint errors.
+        let errors = openapi_lint::validate(&spec);
+        assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+
+        expectorate::assert_contents(
+            "../openapi/downstairs-repair.json",
+            &actual,
+        );
     }
 }

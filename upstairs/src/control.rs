@@ -17,21 +17,12 @@ use std::sync::Arc;
 
 use super::*;
 
-/*
- * Build the API.  If requested, dump it to stdout.
- * This allows us to use the resulting output to build the client side.
- */
-pub fn build_api(show: bool) -> Result<ApiDescription<UpstairsInfo>, String> {
+pub(crate) fn build_api() -> ApiDescription<UpstairsInfo> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
     api.register(take_snapshot).unwrap();
 
-    if show {
-        api.openapi("Crucible-control", "1")
-            .write(&mut std::io::stdout())
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(api)
+    api
 }
 
 /**
@@ -63,7 +54,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     /*
      * Build a description of the API.
      */
-    let api = build_api(false)?;
+    let api = build_api();
 
     /*
      * The functions that implement our API endpoints will share this
@@ -190,4 +181,34 @@ async fn take_snapshot(
     Ok(HttpResponseCreated(TakeSnapshotResponse {
         snapshot_name: take_snapshot_params.snapshot_name,
     }))
+}
+
+#[cfg(test)]
+mod test {
+    use openapiv3::OpenAPI;
+
+    use super::build_api;
+
+    #[test]
+    fn test_crucible_control_openapi() {
+        let api = build_api();
+        let mut raw = Vec::new();
+        api.openapi("Crucible Control", "0.0.0")
+            .write(&mut raw)
+            .unwrap();
+        let actual = String::from_utf8(raw).unwrap();
+
+        // Make sure the result parses as a valid OpenAPI spec.
+        let spec = serde_json::from_str::<OpenAPI>(&actual)
+            .expect("output was not valid OpenAPI");
+
+        // Check for lint errors.
+        let errors = openapi_lint::validate(&spec);
+        assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+
+        expectorate::assert_contents(
+            "../openapi/crucible-control.json",
+            &actual,
+        );
+    }
 }
