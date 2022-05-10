@@ -8,7 +8,6 @@ use reedline::{
     FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
     Signal,
 };
-use structopt::clap::AppSettings;
 use tokio::net::tcp::WriteHalf;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -16,22 +15,25 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use super::*;
 use protocol::*;
 
+#[derive(Debug, Parser)]
+#[clap(name = "Cli", term_width = 80, no_binary_name = true)]
+pub struct CliAction {
+    #[clap(subcommand)]
+    cmd: CliCommand,
+}
 /*
  * Commands supported by the crucible CLI.  Most of these translate into
  * an actual BlockOpt, but some are processed locally, and some happen
  * on the cli_server side.
- *
- * I'm not totally happy with how structopt is working here, as it
- * thinks of everything as a subcommand.  Perhaps there is a better
- * library for this. XXX
  */
-#[derive(Debug, StructOpt)]
-#[structopt(name = "", setting(AppSettings::NoBinaryName))]
-/// Commands supported by the Crucible CLI
+#[derive(Debug, Parser, PartialEq)]
+#[clap(name = "", term_width = 80, no_binary_name = true)]
 enum CliCommand {
-    /// Activate the upstairs
+    /// Send an activation message to all the downstairs and block
+    /// until all the downstairs answer
     Activate {
-        #[structopt(long, short, default_value = "1")]
+        /// Specify this generation number to use when requesting activation.
+        #[clap(long, short, default_value = "1")]
         gen: u64,
     },
     /// Commit the current write_log data to the minimum expected counts.
@@ -40,7 +42,8 @@ enum CliCommand {
     Deactivate,
     /// Report the expected read count for an offset.
     Expected {
-        #[structopt(long, short)]
+        /// The desired offset to see the expected value for.
+        #[clap(long, short)]
         offset: usize,
     },
     /// Export the current write count to the verify out file
@@ -59,9 +62,11 @@ enum CliCommand {
     Quit,
     /// Read from a given block offset
     Read {
-        #[structopt(long, short)]
+        /// The desired offset in blocks to read from.
+        #[clap(long, short)]
         offset: usize,
-        #[structopt(long, short, default_value = "1")]
+        /// The number of blocks to read.
+        #[clap(long, short, default_value = "1")]
         len: usize,
     },
     /// Issue a random read
@@ -76,9 +81,11 @@ enum CliCommand {
     Verify,
     /// Write to a given block offset
     Write {
-        #[structopt(short)]
+        /// The desired offset in blocks to write to.
+        #[clap(short)]
         offset: usize,
-        #[structopt(long, short, default_value = "1")]
+        /// The number of blocks to write.
+        #[clap(long, short, default_value = "1")]
         len: usize,
     },
     /// Get the upstairs UUID
@@ -417,7 +424,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                     if cmds[0].is_empty() {
                         continue;
                     }
-                    match CliCommand::from_iter_safe(cmds) {
+                    match CliCommand::try_parse_from(cmds) {
                         Ok(CliCommand::Quit) => {
                             break;
                         }
