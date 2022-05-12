@@ -686,7 +686,7 @@ fn main() -> Result<()> {
                 "ES",
                 "EC",
             );
-            for _ in 0..8 {
+            for _ in 0..5 {
                 runtime.block_on(perf_workload(
                     &guest,
                     &mut region_info,

@@ -21,8 +21,8 @@ function ctrl_c() {
 # output to a csv file.
 function perf_round() {
     if [[ $# -ne 2 ]]; then
-        echo "Missing EC and ES for perf_round()"
-        exit -1
+        echo "Missing EC and ES for perf_round()" >&2
+        exit 1
     fi
     es=$1
     ec=$2
@@ -40,7 +40,7 @@ function perf_round() {
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
     pkill -f -U "$(id -u)" downstairs
-    kill $dsc_pid
+    kill $dsc_pid || true
     wait $dsc_pid || true
 }
 
@@ -51,8 +51,8 @@ echo "$ROOT"
 cd "$ROOT"
 
 if pgrep -fl -U "$(id -u)" downstairs; then
-    echo "Downstairs already running"
-    echo Run: pkill -f -U "$(id -u)" downstairs
+    echo "Downstairs already running" >&2
+    echo Run: pkill -f -U "$(id -u)" downstairs >&2
     exit 1
 fi
 
