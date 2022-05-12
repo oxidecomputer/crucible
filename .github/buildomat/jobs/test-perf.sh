@@ -4,8 +4,8 @@
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
-#:	"/tmp/perfout.csv",
-#:  "./*.csv",
+#:  "/tmp/perf*.csv",
+#:  "/tmp/perfout.txt",
 #: ]
 #: skip_clone = true
 #:

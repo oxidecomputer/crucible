@@ -35,8 +35,8 @@ function perf_round() {
     sleep 5
     pfiles $dsc_pid > /dev/null
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
-    echo "$cc" perf $args --perf-out perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    "$cc" perf $args --perf-out perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
+    echo "$cc" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
+    "$cc" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
     pkill -f -U "$(id -u)" downstairs
