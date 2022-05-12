@@ -30,7 +30,7 @@ function perf_round() {
     args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 4000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
-    "$dsc" start --cleanup --extent-size  "$es" --extent-count "$ec" &
+    "$dsc" start --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec" &
     dsc_pid=$!
     sleep 5
     pfiles $dsc_pid > /dev/null
@@ -58,9 +58,10 @@ fi
 
 cc="$BINDIR/crucible-client"
 dsc="$BINDIR/dsc"
+downstairs="$BINDIR/crucible-downstairs"
 outfile="/tmp/perfout.txt"
 
-for bin in $dsc $cc; do
+for bin in $dsc $cc $downstairs; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
