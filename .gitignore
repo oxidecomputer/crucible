@@ -4,7 +4,6 @@ core
 *.swp
 /.*.sock
 .cli_history.txt
-/dsc/target
 /fio/*.png
 /fio/*.log
 /fio/*.log.hist

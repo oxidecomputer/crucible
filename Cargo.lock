@@ -988,6 +988,7 @@ dependencies = [
  "anyhow",
  "byte-unit",
  "clap 3.1.16",
+ "csv",
  "statistical",
 ]
 

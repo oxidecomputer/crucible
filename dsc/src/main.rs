@@ -9,6 +9,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use byte_unit::Byte;
 use clap::{Parser, Subcommand};
+use csv::WriterBuilder;
 
 /// dsc  DownStairs Controller
 #[derive(Debug, Parser)]
@@ -42,9 +43,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Test creation of downstairs regions
-    Create {
+    RegionPerf {
+        /// Run a longer test, do 10 loops for each region size combo
+        /// and report mean min max and stddev.
         #[clap(long)]
-        quick: bool,
+        long: bool,
+        /// If supplied, also write create performance numbers in .csv
+        /// format to the provided file name.
+        #[clap(long, parse(from_os_str), name = "CSV")]
+        csv_out: Option<PathBuf>,
     },
     /// Create and start downstairs regions
     Start,
@@ -355,6 +362,7 @@ fn single_create_test(
     extent_size: u64,
     extent_count: u64,
     block_size: u64,
+    csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
     let ct = ti.create_ds_region(
         3810,
@@ -372,6 +380,19 @@ fn single_create_test(
     );
     ti.delete_ds_region(3810)?;
 
+    // If requested, also write out the results to the csv file
+    if let Some(csv) = csv {
+        csv.serialize((
+            ct,
+            block_size * extent_size * extent_count,
+            block_size * extent_size,
+            extent_size,
+            extent_count,
+            block_size,
+        ))?;
+        csv.flush().unwrap();
+    }
+
     Ok(())
 }
 
@@ -381,7 +402,11 @@ fn single_create_test(
  * the overall region size as well as blocks per extent (extent_size) and
  * total number of extent files (extent_count).
  */
-fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
+fn region_create_test(
+    ti: &mut TestInfo,
+    long: bool,
+    csv_out: Option<PathBuf>,
+) -> Result<()> {
     let block_size = 4096;
 
     // The total region size we want for the test.  The total region
@@ -393,42 +418,56 @@ fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
     //  Since the larger sizes can currently take minutes/hours, those
     //  are commented out as well.
     let region_size = vec![
-        // REGION SIZE   4k BLOCKS  512 BLOCKS
-        // 2u64.pow(22), //  16 GiB      2 GiB
-        // 2u64.pow(23), //  32 GiB      4 GiB
-        2u64.pow(24), //  64 GiB      8 GiB
-        2u64.pow(25), // 128 GiB     16 GiB
-        2u64.pow(26),
-        2u64.pow(27), // 512 GiB     64 GiB
-        2u64.pow(28), //   1 TiB    128 GiB
+        1024 * 1024 * 1024,        //   1 GiB
+        1024 * 1024 * 1024 * 10,   //  10 GiB
+        1024 * 1024 * 1024 * 100,  // 100 GiB
+        1024 * 1024 * 1024 * 250,  // 250 GiB
+        1024 * 1024 * 1024 * 500,  // 500 GiB
+        1024 * 1024 * 1024 * 750,  // 750 GiB
+        1024 * 1024 * 1024 * 1024, //   1 TiB
     ];
 
-    // The list of blocks per extent file, in crucible, extent_size
+    // The list of blocks per extent file, in crucible: extent_size
     // XXX This is again some self selected interesting values.  Expect
     // these to change as we learn more.
     let extent_size = vec![4096, 8192, 16384, 32768];
 
-    // This header is the same for both the regular and the quick test.
+    // This header is the same for both the regular and the long test.
     print!(
         "{:>9} {:>11}  {:>11} {:>6} {:>6} {:>4}",
         "SECONDS", "REGION_SIZE", "EXTENT_SIZE", "ES", "EC", "BS",
     );
 
-    if !quick {
-        // The longer test will print more info than the quick
+    if long {
+        // The longer test will print more info than the default
         print!("  {:>5} {:>8} {:>8}", "STDV", "MIN", "MAX");
     }
     println!();
+    let mut csv_file = None;
+    let mut csv;
+    if let Some(csv_out) = csv_out {
+        csv = WriterBuilder::new().from_path(csv_out).unwrap();
+        csv.serialize((
+            "SECONDS",
+            "REGION_SIZE",
+            "EXTENT_SIZE",
+            "ES",
+            "EC",
+            "BS",
+        ))?;
+        csv.flush().unwrap();
+        csv_file = Some(&mut csv);
+    }
 
     for rs in region_size.iter() {
         for es in extent_size.iter() {
             // With power of 2 region sizes, the rs/es should always yield
             // a correct ec.
-            let ec = rs / es;
-            if quick {
-                single_create_test(ti, *es, ec, block_size)?;
-            } else {
+            let ec = (rs / block_size) / es;
+            if long {
                 loop_create_test(ti, *es, ec, block_size)?;
+            } else {
+                single_create_test(ti, *es, ec, block_size, &mut csv_file)?;
             }
         }
     }
@@ -438,7 +477,7 @@ fn region_create_test(ti: &mut TestInfo, quick: bool) -> Result<()> {
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    // XXX Some WIP here too.  The eventual idea is to allow this tool to
+    // XXX Some WIP here.  The eventual idea is to allow this tool to
     // use an existing region instead of creating one each time.
     // To avoid destroying the region by accident, we have a flag that
     // specifies it is okay to delete it.
@@ -464,8 +503,8 @@ fn main() -> Result<()> {
         TestInfo::new(args.ds_bin, args.output_dir, args.region_dir).unwrap();
 
     match args.command {
-        Commands::Create { quick } => {
-            region_create_test(&mut ti, quick)?;
+        Commands::RegionPerf { long, csv_out } => {
+            region_create_test(&mut ti, long, csv_out)?;
         }
         Commands::Start => {
             create_and_run(&mut ti)?;
