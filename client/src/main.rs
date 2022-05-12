@@ -686,14 +686,16 @@ fn main() -> Result<()> {
                 "ES",
                 "EC",
             );
-            runtime.block_on(perf_workload(
-                &guest,
-                &mut region_info,
-                &mut opt_wtr,
-                ops,
-                io_depth,
-                io_size,
-            ))?;
+            for _ in 0..2 {
+                runtime.block_on(perf_workload(
+                    &guest,
+                    &mut region_info,
+                    &mut opt_wtr,
+                    ops,
+                    io_depth,
+                    io_size,
+                ))?;
+            }
             if opt.quit {
                 return Ok(());
             }
