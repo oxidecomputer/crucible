@@ -27,7 +27,7 @@ function perf_round() {
     es=$1
     ec=$2
     # Args for crucible-client.  Using the default IP:port for dsc
-    args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 4000 -q"
+    args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 16000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
     "$dsc" start --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec" &
@@ -82,6 +82,8 @@ perf_round 32768  800
 echo ""
 grep TEST $outfile | head -1
 grep rwrites $outfile
+echo ""
+grep TEST $outfile | head -1
 grep rreads $outfile
 
 echo "Perf test finished on $(date)" | tee -a "$outfile"
