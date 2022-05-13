@@ -1,8 +1,8 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "Crucible-control",
-    "version": "1"
+    "title": "Crucible Control",
+    "version": "0.0.0"
   },
   "paths": {
     "/info": {
@@ -19,6 +19,12 @@
                 }
               }
             }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
           }
         }
       }
@@ -46,32 +52,69 @@
                 }
               }
             }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
           }
         }
       }
     }
   },
   "components": {
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
     "schemas": {
       "DsState": {
         "type": "string",
         "enum": [
-          "New",
-          "BadVersion",
-          "WaitActive",
-          "WaitQuorum",
-          "BadRegion",
-          "Disconnected",
-          "_Verifying",
-          "Repair",
-          "FailedRepair",
-          "Active",
-          "Failed",
-          "_Migrating",
-          "Offline",
-          "Replay",
-          "Deactivated",
-          "Disabled"
+          "new",
+          "bad_version",
+          "wait_active",
+          "wait_quorum",
+          "bad_region",
+          "disconnected",
+          "verifying",
+          "repair",
+          "failed_repair",
+          "active",
+          "failed",
+          "migrating",
+          "offline",
+          "replay",
+          "deactivated",
+          "disabled"
+        ]
+      },
+      "Error": {
+        "description": "Error information from a response.",
+        "type": "object",
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "request_id"
         ]
       },
       "TakeSnapshotParams": {
@@ -100,9 +143,9 @@
       "UpState": {
         "type": "string",
         "enum": [
-          "Initializing",
-          "Active",
-          "Deactivating"
+          "initializing",
+          "active",
+          "deactivating"
         ]
       },
       "UpstairsStats": {
