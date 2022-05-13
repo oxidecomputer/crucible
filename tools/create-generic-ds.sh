@@ -49,7 +49,7 @@ while getopts 'b:c:dehs:' opt; do
     esac
 done
 
-if pgrep -fl crucible-downstairs; then
+if pgrep -fl -U $(id -u) crucible-downstairs; then
     echo 'Some downstairs already running?' >&2
     exit 1
 fi

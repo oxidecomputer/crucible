@@ -32,7 +32,7 @@ downstairs_restart() {
             continue
         fi
         if [[ -f ${testdir}/pause ]]; then
-            ds_pids=$(pgrep -fl ${cds} | awk '{print $1}')
+            ds_pids=$(pgrep -fl -U $(id -u) ${cds} | awk '{print $1}')
             for pid in ${ds_pids}; do
                 echo "pause downstairs, stop PID $pid"
                 kill "$pid"
@@ -49,7 +49,7 @@ downstairs_restart() {
         fi
 
         # Pick a PID and kill it
-        ds_pids=( $(pgrep -fl ${cds} | awk '{print $1}') )
+        ds_pids=( $(pgrep -fl -U $(id -u) ${cds} | awk '{print $1}') )
 
         # Sometimes there are no downstairs running.
         if [[ ${#ds_pids[@]} -gt 0 ]]; then
@@ -61,7 +61,7 @@ downstairs_restart() {
         fi
     done
     # Run a final cleanup
-    ds=$(pgrep -fl ${cds} | awk '{print $1}')
+    ds=$(pgrep -fl -U $(id -u) ${cds} | awk '{print $1}')
     for pid in ${ds}; do
         kill "$pid"
     done
@@ -127,11 +127,11 @@ done
 # Remove all options passed by getopts options
 shift $((OPTIND-1))
 
-if pgrep -fl target/debug/crucible-downstairs; then
+if pgrep -fl -U $(id -u) target/debug/crucible-downstairs; then
     echo 'Some downstairs already running?' >&2
     exit 1
 fi
-if pgrep -fl target/release/crucible-downstairs; then
+if pgrep -fl -U $(id -u) target/release/crucible-downstairs; then
     echo 'Some downstairs already running?' >&2
     exit 1
 fi
@@ -232,7 +232,7 @@ while :; do
 done
 
 # Cleanup leftovers
-ds=$(pgrep -fl ${cds} | awk '{print $1}')
+ds=$(pgrep -fl -U $(id -u) ${cds} | awk '{print $1}')
 for pid in ${ds}; do
     kill "$pid"
 done

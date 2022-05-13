@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use clap::Parser;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
-use structopt::StructOpt;
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
 
@@ -23,7 +23,10 @@ use crucible::*;
 /*
  * The various tests this program supports.
  */
-#[derive(Debug, PartialEq, StructOpt)]
+/// Client: A Crucible Upstairs test program
+#[derive(Debug, Parser, PartialEq)]
+#[clap(name = "workload", term_width = 80)]
+#[clap(about = "Workload the program will execute.", long_about = None)]
 enum Workload {
     Balloon,
     Big,
@@ -32,16 +35,16 @@ enum Workload {
     /// Starts a CLI client
     Cli {
         /// Address to connect to
-        #[structopt(long, short, default_value = "0.0.0.0:5050")]
+        #[clap(long, short, default_value = "0.0.0.0:5050")]
         attach: SocketAddr,
     },
     /// Start a server and listen on the given address and port
     CliServer {
         /// Address to listen on
-        #[structopt(long, short, default_value = "0.0.0.0")]
+        #[clap(long, short, default_value = "0.0.0.0")]
         listen: IpAddr,
         /// Port to listen on
-        #[structopt(long, short, default_value = "5050")]
+        #[clap(long, short, default_value = "5050")]
         port: u16,
     },
     Deactivate,
@@ -55,13 +58,13 @@ enum Workload {
     /// Run the perf test, random writes, then random reads
     Perf {
         /// Size in blocks of each IO
-        #[structopt(long, default_value = "1")]
+        #[clap(long, default_value = "1")]
         io_size: usize,
         /// Number of outstanding IOs at the same time.
-        #[structopt(long, default_value = "1")]
+        #[clap(long, default_value = "1")]
         io_depth: usize,
         /// Output file for IO times
-        #[structopt(long, global = true, parse(from_os_str), name = "PERF")]
+        #[clap(long, global = true, parse(from_os_str), name = "PERF")]
         perf_out: Option<PathBuf>,
     },
     Rand,
@@ -70,19 +73,19 @@ enum Workload {
     Verify,
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "crucible upstairs test client")]
-#[structopt(setting = structopt::clap::AppSettings::ColoredHelp)]
+#[derive(Debug, Parser)]
+#[clap(name = "client", term_width = 80)]
+#[clap(about = "A Crucible upstairs test client", long_about = None)]
 pub struct Opt {
     ///  For tests that support it, pass this count value for the number
     ///  of loops the test should do.
-    #[structopt(short, long, global = true, default_value = "0")]
+    #[clap(short, long, global = true, default_value = "0")]
     count: usize,
 
-    #[structopt(short, long, global = true, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, global = true, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
 
-    #[structopt(subcommand)]
+    #[clap(subcommand)]
     workload: Workload,
 
     ///  This allows the Upstairs to run in a mode where it will not
@@ -91,60 +94,60 @@ pub struct Opt {
     ///  used in production.  Passing args like this to the upstairs
     ///  may not be the best way to test, but until we have something
     ///  better... XXX
-    #[structopt(long, global = true)]
+    #[clap(long, global = true)]
     lossy: bool,
 
     ///  quit after all crucible work queues are empty.
-    #[structopt(short, global = true, long)]
+    #[clap(short, global = true, long)]
     quit: bool,
 
-    #[structopt(short, global = true, long)]
+    #[clap(short, global = true, long)]
     key: Option<String>,
 
-    #[structopt(short, global = true, long, default_value = "0")]
+    #[clap(short, global = true, long, default_value = "0")]
     gen: u64,
 
     /// For the verify test, if this option is included we will allow
     /// the write log range of data to pass the verify_volume check.
-    #[structopt(long, global = true)]
+    #[clap(long, global = true)]
     range: bool,
 
     /// Retry for activate, as long as it takes.  If we pass this arg, the
     /// test will retry the initial activate command as long as it takes.
-    #[structopt(long, global = true)]
+    #[clap(long, global = true)]
     retry_activate: bool,
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
-    #[structopt(long, global = true)]
+    #[clap(long, global = true)]
     verify: bool,
 
     /// For tests that support it, load the expected write count from
     /// the provided file.  The addition of a --verify option will also
     /// have the test verify what it imports from the file is valid.
-    #[structopt(long, global = true, parse(from_os_str), name = "INFILE")]
+    #[clap(long, global = true, parse(from_os_str), name = "INFILE")]
     verify_in: Option<PathBuf>,
 
     ///  For tests that support it, save the write count into the
     ///  provided file.
-    #[structopt(long, global = true, parse(from_os_str), name = "FILE")]
+    #[clap(long, global = true, parse(from_os_str), name = "FILE")]
     verify_out: Option<PathBuf>,
 
     // TLS options
-    #[structopt(long)]
+    #[clap(long)]
     cert_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long)]
     key_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long)]
     root_cert_pem: Option<String>,
 
     /// IP:Port for the upstairs control http server
-    #[structopt(long, global = true)]
+    #[clap(long, global = true)]
     control: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
 
     Ok(opt)
 }
