@@ -142,6 +142,24 @@ impl TestInfo {
         output_dir: PathBuf,
         region_dir: PathBuf,
     ) -> Result<Self> {
+        /*
+         * Verify binary exists, and paths do not
+         */
+        if !Path::new(&downstairs_bin).exists() {
+            bail!("Can't find downstairs binary at {:?}", downstairs_bin);
+        }
+        let md = std::fs::metadata(&downstairs_bin).unwrap();
+        if !md.is_file() {
+            bail!("{} is not a file", downstairs_bin);
+        }
+
+        if Path::new(&output_dir).exists() {
+            bail!("Remove output {:?} before running", output_dir);
+        }
+        if Path::new(&region_dir).exists() {
+            bail!("Remove region {:?} before running", region_dir);
+        }
+
         println!(
             "Creating test directory at: {}",
             output_dir.clone().into_os_string().into_string().unwrap()
@@ -180,12 +198,7 @@ impl TestInfo {
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
-        let mut my_region = PathBuf::new();
-        my_region.push(self.rs.region_dir.clone());
-        my_region.push(format!("{}", port));
-
-        let new_region_dir =
-            my_region.clone().into_os_string().into_string().unwrap();
+        let new_region_dir = port_to_region(self.rs.region_dir.clone(), port)?;
         let extent_size = format!("{}", extent_size);
         let extent_count = format!("{}", extent_count);
         let block_size = format!("{}", block_size);
@@ -254,14 +267,8 @@ impl TestInfo {
     fn delete_ds_region(&mut self, port: u32) -> Result<()> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
-        let mut my_region = PathBuf::new();
-        my_region.push(self.rs.region_dir.clone());
-        my_region.push(format!("{}", port));
-
-        let new_region_dir =
-            my_region.clone().into_os_string().into_string().unwrap();
-
-        std::fs::remove_dir_all(&new_region_dir)?;
+        let region_dir = port_to_region(self.rs.region_dir.clone(), port)?;
+        std::fs::remove_dir_all(&region_dir)?;
 
         // If this region was part of the ds vec, remove it.
         self.rs.ds.retain(|ds| ds.port != port);
@@ -307,6 +314,17 @@ impl TestInfo {
 
         println!("recv channel is done");
     }
+}
+
+fn port_to_region(region_dir: String, port: u32) -> Result<String> {
+    // Create the path for this region by combining the region
+    // directory and the port this downstairs will use.
+    let mut my_region = PathBuf::new();
+    my_region.push(region_dir);
+    my_region.push(format!("{}", port));
+
+    let mr = my_region.into_os_string().into_string().unwrap();
+    Ok(mr)
 }
 
 /*
@@ -602,10 +620,6 @@ fn main() -> Result<()> {
         }
     }
 
-    if !Path::new(&args.ds_bin).exists() {
-        bail!("Can't find downstairs binary at {:?}", args.ds_bin);
-    }
-
     let mut ti =
         TestInfo::new(args.ds_bin, args.output_dir, args.region_dir).unwrap();
 
@@ -629,4 +643,86 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn new_ti() {
+        // Test a typical creation
+        // The empty file fake_bin is good enough for our test here.
+        let fake_bin = "./dsbin".to_string();
+        File::create(fake_bin.clone()).unwrap();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let res = TestInfo::new(fake_bin, dir.clone(), dir.clone());
+        assert!(res.is_ok());
+        assert!(Path::new(&dir).exists());
+    }
+
+    #[test]
+    fn bad_bin() {
+        // Send a directory instead of a file for downstairs_bin, should
+        // return error.
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let res = TestInfo::new("/dev/null".to_string(), dir.clone(), dir);
+
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn existing_ti() {
+        // Try to create the same directories twice, which should
+        // return error on the second try.
+        let fake_bin = "./dsbin".to_string();
+        File::create(fake_bin.clone()).unwrap();
+
+        let output_dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_dir = tempdir().unwrap().as_ref().to_path_buf();
+        // First create the new directories.
+        TestInfo::new(fake_bin.clone(), output_dir.clone(), region_dir.clone())
+            .unwrap();
+        // Now, create them again and expect an error.
+        let res = TestInfo::new(fake_bin, output_dir, region_dir);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn delete_bad_region() {
+        // Test deletion of a region that does not exist, should report error.
+        let fake_bin = "./dsbin".to_string();
+        File::create(fake_bin.clone()).unwrap();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let mut ti = TestInfo::new(fake_bin, dir.clone(), dir).unwrap();
+
+        let res = ti.delete_ds_region(8810);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn delete_region() {
+        // Test creation then deletion of a region
+        let fake_bin = "./dsbin".to_string();
+        File::create(fake_bin.clone()).unwrap();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let mut ti = TestInfo::new(fake_bin, dir.clone(), dir.clone()).unwrap();
+
+        // Manually create the region directory.  We have to convert the
+        // PathBuf back into a string.
+        let ds_region_dir = port_to_region(
+            dir.clone().into_os_string().into_string().unwrap(),
+            8810,
+        )
+        .unwrap();
+        fs::create_dir_all(&ds_region_dir).unwrap();
+
+        let res = ti.delete_ds_region(8810);
+        assert!(res.is_ok());
+        assert!(!Path::new(&ds_region_dir).exists());
+    }
 }

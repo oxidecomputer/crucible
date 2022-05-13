@@ -990,6 +990,7 @@ dependencies = [
  "clap 3.1.16",
  "csv",
  "statistical",
+ "tempfile",
 ]
 
 [[package]]

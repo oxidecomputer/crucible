@@ -10,3 +10,6 @@ byte-unit = "4.0.14"
 clap = { version = "3.1.16", features = ["derive", "env"] }
 csv = "1.1.6"
 statistical = "1.0.0"
+
+[dev-dependencies]
+tempfile = "3"
