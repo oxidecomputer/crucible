@@ -1132,11 +1132,17 @@ async fn generic_workload(
      */
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    for i in 0..count {
+    let count_width = count.to_string().len();
+    for c in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            println!("{:4}/{:4} FLUSH", i, count);
+            println!(
+                "{:>0width$}/{:>0width$} FLUSH",
+                c,
+                count,
+                width = count_width,
+            );
             let mut waiter = guest.flush(None)?;
             waiter.block_wait()?;
         } else {
@@ -1166,11 +1172,12 @@ async fn generic_workload(
                 let data = Bytes::from(vec);
 
                 println!(
-                    "{:4}/{:4} WRITE {}:{}",
-                    i,
+                    "{:>0width$}/{:>0width$} WRITE {}:{}",
+                    c,
                     count,
                     offset.value,
-                    data.len()
+                    data.len(),
+                    width = count_width,
                 );
                 let mut waiter = guest.write(offset, data)?;
                 waiter.block_wait()?;
@@ -1180,11 +1187,12 @@ async fn generic_workload(
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{:4}/{:4} READ  {}:{}",
-                    i,
+                    "{:>0width$}/{:>0width$} READ  {}:{}",
+                    c,
                     count,
                     offset.value,
-                    data.len()
+                    data.len(),
+                    width = count_width,
                 );
                 let mut waiter = guest.read(offset, data.clone())?;
                 waiter.block_wait()?;
@@ -1236,6 +1244,7 @@ async fn dirty_workload(
      * IO size.
      */
     let block_max = ri.total_blocks - size + 1;
+    let count_width = count.to_string().len();
     for c in 1..=count {
         let block_index = rng.gen_range(0..block_max) as usize;
         /*
@@ -1253,11 +1262,12 @@ async fn dirty_workload(
         let data = Bytes::from(vec);
 
         println!(
-            "[{}/{}] Write at block {}, len:{}",
+            "[{:>0width$}/{:>0width$}] Write at block {}, len:{}",
             c,
             count,
             offset.value,
-            data.len()
+            data.len(),
+            width = count_width,
         );
 
         let waiter = guest.write(offset, data)?;
@@ -1537,22 +1547,54 @@ async fn deactivate_workload(
     ri: &mut RegionInfo,
     mut gen: u64,
 ) -> Result<()> {
+    let count_width = count.to_string().len();
     for c in 1..=count {
-        println!("{}/{} CLIENT: run rand test", c, count);
+        println!(
+            "{:>0width$}/{:>0width$}, CLIENT: run rand test",
+            c,
+            count,
+            width = count_width
+        );
         generic_workload(guest, 20, ri).await?;
-        println!("{}/{} CLIENT: Now disconnect", c, count);
+        println!(
+            "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
+            c,
+            count,
+            width = count_width
+        );
         let mut waiter = guest.deactivate()?;
-        println!("{}/{} CLIENT: Now disconnect wait", c, count);
+        println!(
+            "{:>0width$}/{:>0width$}, CLIENT: Now disconnect wait",
+            c,
+            count,
+            width = count_width
+        );
         waiter.block_wait()?;
-        println!("{}/{} CLIENT: Now disconnect done.", c, count);
+        println!(
+            "{:>0width$}/{:>0width$}, CLIENT: Now disconnect done.",
+            c,
+            count,
+            width = count_width
+        );
         let wc = guest.show_work()?;
         println!(
-            "{}/{} CLIENT: Up:{} ds:{}",
-            c, count, wc.up_count, wc.ds_count
+            "{:>0width$}/{:>0width$}, CLIENT: Up:{} ds:{}",
+            c,
+            count,
+            wc.up_count,
+            wc.ds_count,
+            width = count_width
         );
         let mut retry = 1;
         while let Err(e) = guest.activate(gen) {
-            println!("{}/{} Retry:{} activate {:?}", c, count, retry, e);
+            println!(
+                "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
+                c,
+                count,
+                retry,
+                e,
+                width = count_width
+            );
             std::thread::sleep(std::time::Duration::from_secs(5));
             if retry > 100 {
                 bail!("Too many retries {} for activate", retry);
@@ -1585,6 +1627,7 @@ async fn rand_workload(
      */
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
+    let count_width = count.to_string().len();
     for c in 1..=count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
@@ -1617,11 +1660,12 @@ async fn rand_workload(
         let data = Bytes::from(vec);
 
         println!(
-            "{:4}/{:4} IO at block {:5}, len:{:7}",
+            "{:>0width$}/{:>0width$} IO at block {:5}, len:{:7}",
             c,
             count,
             offset.value,
-            data.len()
+            data.len(),
+            width = count_width,
         );
         let mut waiter = guest.write(offset, data)?;
         waiter.block_wait()?;
@@ -1668,13 +1712,20 @@ async fn burst_workload(
     ri: &mut RegionInfo,
     verify_out: &Option<PathBuf>,
 ) -> Result<()> {
-    // TODO: let user pick loop count
+    let count_width = count.to_string().len();
     for c in 1..=count {
         demo_workload(guest, demo_count, ri).await?;
         let mut wc = guest.show_work()?;
         while wc.up_count + wc.ds_count != 0 {
             std::thread::sleep(std::time::Duration::from_secs(1));
-            println!("{}/{} Up:{} ds:{}", c, count, wc.up_count, wc.ds_count);
+            println!(
+                "{:>0width$}/{:>0width$} Up:{} ds:{}",
+                c,
+                count,
+                wc.up_count,
+                wc.ds_count,
+                width = count_width
+            );
             std::thread::sleep(std::time::Duration::from_secs(4));
             wc = guest.show_work()?;
         }
@@ -1690,8 +1741,10 @@ async fn burst_workload(
             println!("Wrote out file {:?} at this time", cp);
         }
         println!(
-            "{}/{}: 5 second pause, then run another test loop",
-            c, count
+            "{:>0width$}/{:>0width$}: 5 second pause, then another test loop",
+            c,
+            count,
+            width = count_width
         );
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
@@ -1715,11 +1768,21 @@ async fn repair_workload(
     ri.write_log.commit();
     let mut waiterlist = Vec::new();
     // TODO: Allow user to request r/w/f percentage (how???)
+    // We want at least one write, otherwise there will be nothing to
+    // repair.
+    let mut one_write = false;
+    let count_width = count.to_string().len();
     for c in 1..=count {
         let op = rng.gen_range(0..10);
-        if op == 0 {
+        // Make sure the last few commands are not a flush
+        if c + 3 < count && op == 0 {
             // flush
-            println!("{:4}/{:4} Flush", c, count);
+            println!(
+                "{:>0width$}/{:>0width$} Flush",
+                c,
+                count,
+                width = count_width,
+            );
             let waiter = guest.flush(None)?;
             waiterlist.push(waiter);
             // Commit the current write log because we know this flush
@@ -1730,6 +1793,8 @@ async fn repair_workload(
             // and the one we choose could be the one that does not have
             // the write (no flush, no guarantee of persistence).
             ri.write_log.commit();
+            // Make sure a write comes next.
+            one_write = false;
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -1745,8 +1810,9 @@ async fn repair_workload(
             let offset =
                 Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-            if op <= 4 {
+            if one_write == false || op <= 4 {
                 // Write
+                one_write = true;
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
                     ri.write_log.update_wc(block_index + i);
@@ -1757,11 +1823,12 @@ async fn repair_workload(
                 let data = Bytes::from(vec);
 
                 println!(
-                    "{:4}/{:4} Write at block {:5}, len:{:7}",
+                    "{:>0width$}/{:>0width$} Write at block {:5}, len:{:7}",
                     c,
                     count,
                     offset.value,
-                    data.len()
+                    data.len(),
+                    width = count_width,
                 );
                 let waiter = guest.write(offset, data)?;
                 waiterlist.push(waiter);
@@ -1771,11 +1838,12 @@ async fn repair_workload(
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{:4}/{:4} Read  at block {:5}, len:{:7}",
+                    "{:>0width$}/{:>0width$} Read  at block {:5}, len:{:7}",
                     c,
                     count,
                     offset.value,
-                    data.len()
+                    data.len(),
+                    width = count_width,
                 );
                 let waiter = guest.read(offset, data.clone())?;
                 waiterlist.push(waiter);
