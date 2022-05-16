@@ -159,25 +159,19 @@ pub fn dump_region(
     let mut ext_num = all_extents.keys().collect::<Vec<&u32>>();
     ext_num.sort_unstable();
 
-    print!("EXT ");
-
-    // How much space we need to print the blocks
+    // Width for EXT column.
+    let ext_width = std::cmp::max(3, total_extents.to_string().len());
+    // Width for BLOCKS column
     let max_block = total_extents as u64 * blocks_per_extent;
+    // Get the max possible width for a single block
     let block_width = std::cmp::max(3, max_block.to_string().len());
+    // Now compute width for BLOCK-BLOCK
     let block_header = std::cmp::max(7, block_width * 2 + 1);
-    print!("{:>0width$}", "BLOCKS", width = block_header);
-    for i in 0..dir_count {
-        print!(" GEN{}", i);
-    }
-    print!(" ");
-    for i in 0..dir_count {
-        print!("  FL{}", i);
-    }
-    print!(" ");
-    for i in 0..dir_count {
-        print!(" D{}", i);
-    }
-    println!();
+
+    // We don't know these yet, but we will have a good guess
+    // once we start the loop.
+    let mut gen_width = 4;
+    let mut fl_width = 3;
 
     // If our extent is invalid, then there is some other problem,
     // but, whomever is using this tool is probably trying to figure
@@ -186,6 +180,7 @@ pub fn dump_region(
     let mut difference_found = false;
     let mut max_gen = 0;
     let mut max_flush = 0;
+    let mut print_header = true;
     for en in ext_num.iter() {
         if let Some(ei) = all_extents.get(en) {
             let mut bad_extent = false;
@@ -215,7 +210,12 @@ pub fn dump_region(
                         different = true;
                     }
                 } else {
-                    println!("{:3}  column {} bad", en, dir_index);
+                    println!(
+                        "{:>width$} column {} bad ",
+                        en,
+                        dir_index,
+                        width = ext_width
+                    );
                     bad_extent = true;
                 }
             }
@@ -223,7 +223,45 @@ pub fn dump_region(
                 continue;
             }
 
-            print!("{:3} ", en);
+            if print_header {
+                // Because we don't know how large gen or flush is yet, we
+                // wait to print the header until we have at least one
+                // value to base our guess on.  We add one column to
+                // whatever max we have found so far with the hope that this
+                // will cover most cases.
+                print!("{:>0width$}", "EXT", width = ext_width);
+
+                print!(" {:>0width$}", "BLOCKS", width = block_header);
+
+                // Width for GEN columns
+                gen_width =
+                    std::cmp::max(gen_width, max_gen.to_string().len() + 1);
+                for i in 0..dir_count {
+                    print!(" {:>0width$}{}", "GEN", i, width = (gen_width - 1));
+                }
+
+                // Width for Flush columns
+                fl_width =
+                    std::cmp::max(fl_width, max_flush.to_string().len() + 1);
+                print!(" ");
+                for i in 0..dir_count {
+                    print!(" {:>0width$}{}", "FL", i, width = (fl_width - 1));
+                }
+
+                // Dirty bit is always the same width
+                print!(" ");
+                for i in 0..dir_count {
+                    print!(" D{}", i);
+                }
+                println!();
+
+                print_header = false;
+            }
+
+            // Ext #
+            print!("{:>width$} ", en, width = ext_width);
+
+            // Blocks
             print!(
                 "{:0width$}-{:0width$}",
                 blocks_per_extent * (**en as u64),
@@ -231,16 +269,33 @@ pub fn dump_region(
                 width = block_width,
             );
 
+            // Gen
             let color = color_vec(&gen_vec);
             for i in 0..dir_count {
-                print!(" {}{:4}", sgr(color[i]), gen_vec[i]);
+                print!(
+                    " {}{:>width$}",
+                    sgr(color[i]),
+                    gen_vec[i],
+                    width = gen_width
+                );
             }
+            // Clear color
             print!("{} ", sgr(0));
+
+            // Flush
             let color = color_vec(&flush_vec);
             for i in 0..dir_count {
-                print!(" {}{:4}", sgr(color[i]), flush_vec[i]);
+                print!(
+                    " {}{:>width$}",
+                    sgr(color[i]),
+                    flush_vec[i],
+                    width = fl_width
+                );
             }
+            // Clear color
             print!("{} ", sgr(0));
+
+            // Dirty bit T or F
             for dv in dirty_vec.iter().take(dir_count) {
                 if *dv {
                     print!("  {}T", sgr(31));
@@ -248,11 +303,12 @@ pub fn dump_region(
                     print!("  {}F", sgr(32));
                 }
             }
+            // Clear color
             println!("{}", sgr(0));
 
             difference_found |= different;
         } else {
-            print!("{:3} ", en);
+            print!("{:>width$} ", en, width = ext_width);
             println!("No data for {}", en);
         }
     }

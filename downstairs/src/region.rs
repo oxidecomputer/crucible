@@ -622,10 +622,15 @@ impl Extent {
             match OpenOptions::new().read(true).write(!read_only).open(&path) {
                 Err(e) => {
                     println!(
-                        "Error: {} No extent#{} file found for {:?}",
-                        e, number, path
+                        "Error: Open of {:?} for extent#{} returned: {}",
+                        path, number, e,
                     );
-                    bail!("Error: {} No extent file found for {:?}", e, path);
+                    bail!(
+                        "Open of {:?} for extent#{} returned: {}",
+                        path,
+                        number,
+                        e,
+                    );
                 }
                 Ok(f) => {
                     let cur_size = f.metadata().unwrap().len();
@@ -647,14 +652,14 @@ impl Extent {
         let metadb = match open_sqlite_connection(&path) {
             Err(e) => {
                 println!(
-                    "Error: {} No extent#{} db file found for {:?}",
-                    e, number, path
+                    "Error: Open of db file {:?} for extent#{} returned: {}",
+                    path, number, e
                 );
                 bail!(
-                    "Error: {} No extent#{} db file found for {:?}",
-                    e,
+                    "Open of db file {:?} for extent#{} returned: {}",
+                    path,
                     number,
-                    path
+                    e,
                 );
             }
             Ok(m) => m,
