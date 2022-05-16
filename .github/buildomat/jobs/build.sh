@@ -27,7 +27,7 @@ for t in crucible-downstairs crucible-client crucible-hammer dsc; do
 done
 
 mkdir -p /work/scripts
-for s in tools/create-generic-ds.sh tools/test_repair.sh tools/test_up.sh tools/test_ds.sh; do
+for s in tools/test_repair.sh tools/test_up.sh tools/test_ds.sh; do
 	cp "$s" /work/scripts/
 done
 

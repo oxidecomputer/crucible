@@ -1,6 +1,6 @@
 #!/bin/bash
 #:
-#: name = "test-up-repair"
+#: name = "test-repair"
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
@@ -35,7 +35,6 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
-export SCRIPTDIR="$input"/scripts
 
 banner repair
 ptime -m bash "$input/scripts/test_repair.sh"
