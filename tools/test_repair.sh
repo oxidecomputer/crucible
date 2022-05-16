@@ -36,7 +36,9 @@ for bin in $cds $cc; do
     fi
 done
 
-if ! ./tools/create-generic-ds.sh -d -c 30 -s 20; then
+SCRIPTDIR=${SCRIPTDIR:-$ROOT/tools}
+create_ds="$SCRIPTDIR/create-generic-ds.sh"
+if ! $create_ds -d -c 30 -s 20; then
     echo "Failed to create new region"
     exit 1
 fi
@@ -70,7 +72,7 @@ then
 fi
 
 # Start loop
-for (( i = 0; i < 10; i += 1 )); do
+for (( i = 0; i < 2; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""

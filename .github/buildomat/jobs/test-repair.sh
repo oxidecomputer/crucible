@@ -19,6 +19,8 @@ set -o xtrace
 
 echo "input bins dir contains:"
 ls -ltr "$input"/bins || true
+echo "input script dir contains:"
+ls -ltr "$input"/scripts || true
 
 banner unpack
 mkdir -p /var/tmp/bins
@@ -30,6 +32,7 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+export SCRIPTDIR="$input"/scripts
 
 banner repair
 ptime -m bash "$input/scripts/test_repair.sh"
