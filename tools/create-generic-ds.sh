@@ -3,8 +3,14 @@
 # A hack of downstairs create tool
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
+export BINDIR=${BINDIR:-$ROOT/target/debug}
+
+cds="$BINDIR/crucible-downstairs"
+if [[ ! -f "$cds" ]]; then
+    echo "Can't find crucible binary at $cds" >&2
+    exit 1
+fi
 
 usage () {
     echo "Usage: $0 [de] [-b #] [-c #] [-s #]" >&2
@@ -59,15 +65,6 @@ if [[ $delete -eq 1 ]]; then
 else
     if [[ -d var/8810 ]] || [[ -d var/8820 ]] || [[ -d var/8830 ]]; then
         echo " var/88.. directories are already present"
-        exit 1
-    fi
-fi
-
-cds="./target/release/crucible-downstairs"
-if [[ ! -f ${cds} ]]; then
-    cds="./target/debug/crucible-downstairs"
-    if [[ ! -f ${cds} ]]; then
-        echo "Can't find crucible binary at $cds"
         exit 1
     fi
 fi

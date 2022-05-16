@@ -25,7 +25,7 @@ set -o pipefail
 
 SECONDS=0
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BINDIR=${BINDIR:-$ROOT/target/debug}
+export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
 cc="$BINDIR/crucible-client"
@@ -72,7 +72,7 @@ then
 fi
 
 # Start loop
-for (( i = 0; i < 2; i += 1 )); do
+for (( i = 0; i < 10; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""
