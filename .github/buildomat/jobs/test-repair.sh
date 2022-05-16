@@ -21,6 +21,9 @@ echo "input bins dir contains:"
 ls -ltr "$input"/bins || true
 echo "input script dir contains:"
 ls -ltr "$input"/scripts || true
+pfexec chmod +x "$input"/scripts/* || true
+echo " chmod input script dir contains:"
+ls -ltr "$input"/scripts || true
 
 banner unpack
 mkdir -p /var/tmp/bins
