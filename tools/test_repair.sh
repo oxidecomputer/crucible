@@ -36,19 +36,33 @@ for bin in $cds $cc; do
     fi
 done
 
-SCRIPTDIR=${SCRIPTDIR:-$ROOT/tools}
-create_ds="$SCRIPTDIR/create-generic-ds.sh"
-if ! $create_ds -d -c 30 -s 20; then
-    echo "Failed to create new region"
-    exit 1
+# For buildomat, the regions should be in /var/tmp
+testdir="/var/tmp/test_repair"
+if [[ -d ${testdir} ]]; then
+    rm -rf ${testdir}
 fi
 
+# This is temporary hack until dsc is able to do this
+uuidprefix="12345678-1234-1234-1234-00000000"
+port_base=8810
+args=()
+for (( i = 0; i < 3; i++ )); do
+    (( port_step = i * 10 )) || true
+    (( port = port_base + port_step )) || true
+	echo $port
+    dir="${testdir}/$port"
+    uuid="${uuidprefix}${port}"
+    args+=( -t "127.0.0.1:$port" )
+	echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+	${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+done
+
 # Start all three downstairs
-${cds} run -d var/8810 -p 8810 &> "$ds_log_prefix"8810.txt &
+${cds} run -d "${testdir}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
 ds0_pid=$!
-${cds} run -d var/8820 -p 8820 &> "$ds_log_prefix"8820.txt &
+${cds} run -d "${testdir}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
 ds1_pid=$!
-${cds} run -d var/8830 -p 8830 &> "$ds_log_prefix"8830.txt &
+${cds} run -d "${testdir}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
 ds2_pid=$!
 
 os_name=$(uname)
@@ -83,17 +97,17 @@ for (( i = 0; i < 10; i += 1 )); do
     if [[ $choice -eq 0 ]]; then
         kill "$ds0_pid"
         wait "$ds0_pid" || true
-        ${cds} run -d var/8810 -p 8810 --lossy &> "$ds_log_prefix"8810.txt &
+        ${cds} run -d "${testdir}/8810" -p 8810 --lossy &> "$ds_log_prefix"8810.txt &
         ds0_pid=$!
     elif [[ $choice -eq 1 ]]; then
         kill "$ds1_pid"
         wait "$ds1_pid" || true
-        ${cds} run -d var/8820 -p 8820 --lossy &> "$ds_log_prefix"8820.txt &
+        ${cds} run -d "${testdir}/8820" -p 8820 --lossy &> "$ds_log_prefix"8820.txt &
         ds1_pid=$!
     else
         kill "$ds2_pid"
         wait "$ds2_pid" || true
-        ${cds} run -d var/8830 -p 8830 --lossy &> "$ds_log_prefix"8830.txt &
+        ${cds} run -d "${testdir}/8830" -p 8830 --lossy &> "$ds_log_prefix"8830.txt &
         ds2_pid=$!
     fi
 
@@ -121,19 +135,19 @@ for (( i = 0; i < 10; i += 1 )); do
     # We || true because dump will return non-zero when it finds
     # a mismatch
     echo "Current downstairs dump:"
-    ${cds} dump -d var/8810 -d var/8820 -d var/8830 || true
+    ${cds} dump -d "${testdir}/8810" -d "${testdir}/8820" -d "${testdir}/8830" || true
     echo "On loop $i"
 
     echo ""
     # Start downstairs without lossy
     if [[ $choice -eq 0 ]]; then
-        ${cds} run -d var/8810 -p 8810 &> "$ds_log_prefix"8810.txt &
+        ${cds} run -d "${testdir}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
         ds0_pid=$!
     elif [[ $choice -eq 1 ]]; then
-        ${cds} run -d var/8820 -p 8820 &> "$ds_log_prefix"8820.txt &
+        ${cds} run -d "${testdir}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
         ds1_pid=$!
     else
-        ${cds} run -d var/8830 -p 8830 &> "$ds_log_prefix"8830.txt &
+        ${cds} run -d "${testdir}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
         ds2_pid=$!
     fi
 
@@ -148,7 +162,7 @@ for (( i = 0; i < 10; i += 1 )); do
     fi
 
     echo "Loop: $i  Downstairs dump after verify (and repair):"
-    ${cds} dump -d var/8810 -d var/8820 -d var/8830
+    ${cds} dump -d "${testdir}/8810" -d "${testdir}/8820" -d "${testdir}/8830"
 
 done
 
