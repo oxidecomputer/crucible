@@ -1324,18 +1324,34 @@ where
                          * If there is work to do, check to see if it is
                          * a repair job.  If so, only send that to the actual
                          * clients that need to get it.  The source downstairs
-                         * does not get a message for this operation.
+                         * does not get a message for this operation, nor
+                         * will a downstairs that matches the source.
                          *
                          * If the work is an extent flush, then only send the
                          * message to the source extent, the other downstairs
                          * must not get a message.
                          */
                         match op {
-                            Message::ExtentRepair(rep_id, _, src, _, _) => {
-                                if up_coms.client_id == src {
-                                    rep_done = Some(rep_id);
+                            Message::ExtentRepair(rep_id, _, _, _, ref dest) => {
+                                let mut send_repair = false;
+                                for d in dest {
+                                    if *d == up_coms.client_id {
+                                        send_repair = true;
+                                        break;
+                                    }
+                                }
+                                if send_repair {
+                                    println!(
+                                        "[{}] Sending repair request {:?}",
+                                        up_coms.client_id, rep_id,
+                                    );
+                                    fw.send(op.clone()).await?;
                                 } else {
-                                    fw.send(op).await?;
+                                    println!(
+                                        "[{}] No action required {:?}",
+                                        up_coms.client_id, rep_id,
+                                    );
+                                    rep_done = Some(rep_id);
                                 }
                             },
                             Message::ExtentFlush(rep_id, _, src, _, _) => {

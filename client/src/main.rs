@@ -1810,7 +1810,7 @@ async fn repair_workload(
             let offset =
                 Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-            if one_write == false || op <= 4 {
+            if !one_write || op <= 4 {
                 // Write
                 one_write = true;
                 // Update the write count for all blocks we plan to write to.
