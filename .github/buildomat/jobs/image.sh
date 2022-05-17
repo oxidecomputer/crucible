@@ -27,7 +27,7 @@ cargo --version
 rustc --version
 
 banner build
-ptime -m cargo build --release --verbose
+ptime -m cargo build --release --verbose --all-features
 
 banner image
 ptime -m cargo run --bin crucible-package
