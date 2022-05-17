@@ -37,6 +37,6 @@ done
 export BINDIR=/var/tmp/bins
 
 banner repair
-ptime -m bash "$input/scripts/test_repair.sh"
+ptime -m bash "$input/scripts/test_repair.sh" "-N"
 
 # Save the output files?

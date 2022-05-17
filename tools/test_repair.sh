@@ -46,6 +46,20 @@ verify_file=/tmp/repair_test_verify.data
 test_log=/tmp/verify_out.txt
 ds_log_prefix=/tmp/test_repair_ds
 
+dump_args=()
+while getopts 'N' opt; do
+	case "$opt" in
+		N)  echo "more dump args"
+            dump_args+=(" --no-color")
+            ;;
+        *)
+			echo "Usage: $0 [N]"
+			echo "N:  Don't dump color output"
+			exit 1
+			;;
+	esac
+done
+
 # This is temporary hack until dsc is able to do this
 uuidprefix="12345678-1234-1234-1234-00000000"
 port_base=8810
@@ -53,12 +67,12 @@ args=()
 for (( i = 0; i < 3; i++ )); do
     (( port_step = i * 10 )) || true
     (( port = port_base + port_step )) || true
-    echo $port
     dir="${testdir}/$port"
+    dump_args+=( -d "$dir" )
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-    echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
-    ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+    echo "$cds" create -u "$uuid" -d "$dir" --extent-count 30 --extent-size 20
+    ${cds} create -u "$uuid" -d "$dir" --extent-count 30 --extent-size 20
 done
 
 # Start all three downstairs
@@ -77,6 +91,7 @@ if [[ "$os_name" == 'Darwin' ]]; then
 fi
 
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
+
 # Do initial volume population.
 if ! ${cc} fill ${target_args} --verify-out "$verify_file" -q
 then
@@ -86,7 +101,7 @@ then
 fi
 
 # Start loop
-for (( i = 0; i < 10; i += 1 )); do
+for (( i = 0; i < 20; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""
@@ -135,7 +150,7 @@ for (( i = 0; i < 10; i += 1 )); do
     # We || true because dump will return non-zero when it finds
     # a mismatch
     echo "Current downstairs dump:"
-    ${cds} dump -d "${testdir}/8810" -d "${testdir}/8820" -d "${testdir}/8830" || true
+    ${cds} dump ${dump_args[@]} || true
     echo "On loop $i"
 
     echo ""
@@ -162,7 +177,7 @@ for (( i = 0; i < 10; i += 1 )); do
     fi
 
     echo "Loop: $i  Downstairs dump after verify (and repair):"
-    ${cds} dump -d "${testdir}/8810" -d "${testdir}/8820" -d "${testdir}/8830"
+    ${cds} dump ${dump_args[@]}
 
 done
 
