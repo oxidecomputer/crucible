@@ -42,6 +42,10 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
+verify_file=/tmp/repair_test_verify.data
+test_log=/tmp/verify_out.txt
+ds_log_prefix=/tmp/test_repair_ds
+
 # This is temporary hack until dsc is able to do this
 uuidprefix="12345678-1234-1234-1234-00000000"
 port_base=8810
@@ -49,12 +53,12 @@ args=()
 for (( i = 0; i < 3; i++ )); do
     (( port_step = i * 10 )) || true
     (( port = port_base + port_step )) || true
-	echo $port
+    echo $port
     dir="${testdir}/$port"
     uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-	echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
-	${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+    echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
+    ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10
 done
 
 # Start all three downstairs
@@ -71,10 +75,6 @@ if [[ "$os_name" == 'Darwin' ]]; then
     codesign -s - -f "$cds"
     codesign -s - -f "$cc"
 fi
-
-verify_file=/tmp/repair_test_verify.data
-test_log=/tmp/verify_out.txt
-ds_log_prefix=/tmp/test_repair_ds
 
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
 # Do initial volume population.
