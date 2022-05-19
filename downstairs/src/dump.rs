@@ -15,12 +15,15 @@ struct ExtInfo {
  *
  * If a specific extent is requested, only dump info on that extent. If a
  * specific block offset is supplied, show details for only that block.
+ *
+ * If you don't want color, then set nc to true.
  */
 pub fn dump_region(
     region_dir: Vec<PathBuf>,
     mut cmp_extent: Option<u32>,
     block: Option<u64>,
     only_show_differences: bool,
+    nc: bool,
 ) -> Result<()> {
     if cmp_extent.is_some() && block.is_some() {
         bail!("Either a specific block, or a specific extent, not both");
@@ -139,6 +142,7 @@ pub fn dump_region(
                 block,
                 blocks_per_extent,
                 only_show_differences,
+                nc,
             );
         }
 
@@ -148,6 +152,7 @@ pub fn dump_region(
             ce,
             blocks_per_extent,
             only_show_differences,
+            nc,
         )?;
 
         return Ok(());
@@ -253,6 +258,10 @@ pub fn dump_region(
                 for i in 0..dir_count {
                     print!(" D{}", i);
                 }
+
+                if nc {
+                    print!(" DIFF");
+                }
                 println!();
 
                 print_header = false;
@@ -274,37 +283,41 @@ pub fn dump_region(
             for i in 0..dir_count {
                 print!(
                     " {}{:>width$}",
-                    sgr(color[i]),
+                    sgr(color[i], nc),
                     gen_vec[i],
                     width = gen_width
                 );
             }
             // Clear color
-            print!("{} ", sgr(0));
+            print!("{} ", sgr(0, nc));
 
             // Flush
             let color = color_vec(&flush_vec);
             for i in 0..dir_count {
                 print!(
                     " {}{:>width$}",
-                    sgr(color[i]),
+                    sgr(color[i], nc),
                     flush_vec[i],
                     width = fl_width
                 );
             }
             // Clear color
-            print!("{} ", sgr(0));
+            print!("{} ", sgr(0, nc));
 
             // Dirty bit T or F
             for dv in dirty_vec.iter().take(dir_count) {
                 if *dv {
-                    print!("  {}T", sgr(31));
+                    print!("  {}T", sgr(31, nc));
                 } else {
-                    print!("  {}F", sgr(32));
+                    print!("  {}F", sgr(32, nc));
                 }
             }
-            // Clear color
-            println!("{}", sgr(0));
+            if nc && different {
+                println!(" <---");
+            } else {
+                // Clear color
+                println!("{}", sgr(0, nc));
+            }
 
             difference_found |= different;
         } else {
@@ -323,8 +336,14 @@ pub fn dump_region(
 
 // Print the ASCII color code of the given value
 // Clear: 0, Green: 32, Red: 31, Blue: 34
-fn sgr(n: u8) -> String {
-    format!("\x1b[{}m", n)
+// If we don't want to print any color, then set no_color to true when
+// calling and we just return an empty string.
+fn sgr(n: u8, no_color: bool) -> String {
+    if no_color {
+        String::new()
+    } else {
+        format!("\x1b[{}m", n)
+    }
 }
 
 // Return a Vec of the display color selections for an input vec.
@@ -376,6 +395,7 @@ fn color_vec(compare: &[u64]) -> Vec<u8> {
 fn return_status_letters<T, U: std::cmp::PartialEq>(
     items: &[T],
     accessor: fn(&T) -> &U,
+    nc: bool,
 ) -> ([String; 3], bool) {
     let mut status_letters = vec![String::new(); 3];
     let mut different = false;
@@ -383,29 +403,29 @@ fn return_status_letters<T, U: std::cmp::PartialEq>(
     let count = items.len();
 
     if accessor(&items[0]) == accessor(&items[1]) {
-        status_letters[0] = format!("{}A{}", sgr(32), sgr(0));
-        status_letters[1] = format!("{}A{}", sgr(32), sgr(0));
+        status_letters[0] = format!("{}A{}", sgr(32, nc), sgr(0, nc));
+        status_letters[1] = format!("{}A{}", sgr(32, nc), sgr(0, nc));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] = format!("{}A{}", sgr(32), sgr(0));
+                status_letters[2] = format!("{}A{}", sgr(32, nc), sgr(0, nc));
             } else {
-                status_letters[2] = format!("{}C{}", sgr(31), sgr(0));
+                status_letters[2] = format!("{}C{}", sgr(31, nc), sgr(0, nc));
                 different = true;
             }
         }
     } else {
         different = true;
-        status_letters[0] = format!("{}A{}", sgr(32), sgr(0));
-        status_letters[1] = format!("{}B{}", sgr(34), sgr(0));
+        status_letters[0] = format!("{}A{}", sgr(32, nc), sgr(0, nc));
+        status_letters[1] = format!("{}B{}", sgr(34, nc), sgr(0, nc));
 
         if count > 2 {
             if accessor(&items[0]) == accessor(&items[2]) {
-                status_letters[2] = format!("{}A{}", sgr(32), sgr(0));
+                status_letters[2] = format!("{}A{}", sgr(32, nc), sgr(0, nc));
             } else if accessor(&items[1]) == accessor(&items[2]) {
-                status_letters[2] = format!("{}B{}", sgr(34), sgr(0));
+                status_letters[2] = format!("{}B{}", sgr(34, nc), sgr(0, nc));
             } else {
-                status_letters[2] = format!("{}C{}", sgr(31), sgr(0));
+                status_letters[2] = format!("{}C{}", sgr(31, nc), sgr(0, nc));
             }
         }
     }
@@ -423,6 +443,7 @@ fn show_extent(
     cmp_extent: u32,
     blocks_per_extent: u64,
     only_show_differences: bool,
+    nc: bool,
 ) -> Result<()> {
     /*
      * First, print out the Generation number, the flush ID,
@@ -537,7 +558,7 @@ fn show_extent(
 
         // first compare data
         let (status_letters, data_different) =
-            return_status_letters(&dvec, |x| &x.data);
+            return_status_letters(&dvec, |x| &x.data, nc);
 
         // Print the data status letters
         for dir_index in 0..dir_count {
@@ -546,7 +567,7 @@ fn show_extent(
 
         // then, compare encryption_context_columns
         let (status_letters, ec_different) =
-            return_status_letters(&dvec, |x| &x.encryption_contexts);
+            return_status_letters(&dvec, |x| &x.encryption_contexts, nc);
 
         // Print nonce status letters
         for dir_index in 0..dir_count {
@@ -556,7 +577,7 @@ fn show_extent(
 
         // then, compare hashes
         let (status_letters, hashes_different) =
-            return_status_letters(&dvec, |x| &x.hashes);
+            return_status_letters(&dvec, |x| &x.hashes, nc);
 
         // Print hash status letters
         for dir_index in 0..dir_count {
@@ -612,6 +633,7 @@ fn show_extent_block(
     block: u64,
     blocks_per_extent: u64,
     only_show_differences: bool,
+    nc: bool,
 ) -> Result<()> {
     let block_in_extent = block % blocks_per_extent;
     println!(
@@ -649,7 +671,8 @@ fn show_extent_block(
     /*
      * Compare data
      */
-    let (status_letters, different) = return_status_letters(&dvec, |x| &x.data);
+    let (status_letters, different) =
+        return_status_letters(&dvec, |x| &x.data, nc);
 
     if !only_show_differences || different {
         println!("{:>6}  {:<64}  {:3}", "DATA", "SHA256", "VER");
@@ -676,7 +699,7 @@ fn show_extent_block(
      * Compare encryption contexts
      */
     let (_, different) =
-        return_status_letters(&dvec, |x| &x.encryption_contexts);
+        return_status_letters(&dvec, |x| &x.encryption_contexts, nc);
 
     if !only_show_differences || different {
         /*
@@ -791,7 +814,7 @@ fn show_extent_block(
     /*
      * Compare integrity hashes
      */
-    let (_, different) = return_status_letters(&dvec, |x| &x.hashes);
+    let (_, different) = return_status_letters(&dvec, |x| &x.hashes, nc);
 
     if !only_show_differences || different {
         /*

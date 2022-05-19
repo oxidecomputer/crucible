@@ -93,6 +93,10 @@ enum Args {
          */
         #[structopt(short, long)]
         only_show_differences: bool,
+
+        /// No color output
+        #[structopt(long)]
+        no_color: bool,
     },
     Export {
         /*
@@ -214,11 +218,12 @@ async fn main() -> Result<()> {
             extent,
             block,
             only_show_differences,
+            no_color,
         } => {
             if data.is_empty() {
                 bail!("Need at least one data directory to dump");
             }
-            dump_region(data, extent, block, only_show_differences)?;
+            dump_region(data, extent, block, only_show_differences, no_color)?;
             Ok(())
         }
         Args::Export {
