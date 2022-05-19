@@ -15,4 +15,4 @@ futures-core = "0.3"
 httptest = "0.15.4"
 tempfile = "3.3.0"
 tokio = { version = "1.18.1", features = ["full"] }
-uuid = { version = "1.0.0", features = [ "serde", "v4" ] }
+uuid = { version = "0.8", features = [ "serde", "v4" ] }
