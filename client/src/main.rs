@@ -659,7 +659,7 @@ fn main() -> Result<()> {
                     .unwrap();
                 wtr.serialize((
                     "type",
-                    "total_time",
+                    "total_time_ns",
                     "io_depth",
                     "io_size",
                     "count",
@@ -1317,12 +1317,12 @@ pub fn perf_csv(
         .map(|x| (x.as_secs() as u64 * 100000000) + x.subsec_nanos() as u64)
         .collect::<Vec<u64>>();
 
-    let time_in_sec =
+    let time_in_nsec =
         duration.as_secs() as u64 * 100000000 + duration.subsec_nanos() as u64;
 
     wtr.serialize(Record {
         label: msg.to_string(),
-        total_time: time_in_sec,
+        total_time: time_in_nsec,
         io_depth,
         io_size,
         count,
