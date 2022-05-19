@@ -185,7 +185,7 @@ fn get_region_info(guest: &Arc<Guest>) -> Result<RegionInfo, CrucibleError> {
     let total_blocks = (total_size / block_size) as usize;
 
     /*
-     * Limit the max IO size (in blocks) to be 1M or the size
+     * Limit the max IO size (in blocks) to be 1MiB or the size
      * of the volume, whichever is smaller
      */
     const MAX_IO_BYTES: usize = 1024 * 1024;
@@ -195,8 +195,9 @@ fn get_region_info(guest: &Arc<Guest>) -> Result<RegionInfo, CrucibleError> {
     }
 
     println!(
-        "Region: es:{:?}  bs:{}  ts:{}  tb:{}  max_io:{} or {}",
+        "Region: es:{} ec:{} bs:{}  ts:{}  tb:{}  max_io:{} or {}",
         extent_size.value,
+        total_blocks as u64 / extent_size.value,
         block_size,
         total_size,
         total_blocks,
@@ -656,13 +657,39 @@ fn main() -> Result<()> {
             let mut wtr;
             if let Some(perf_out) = perf_out {
                 wtr = WriterBuilder::new()
-                    .has_headers(false)
+                    .flexible(true)
                     .from_path(perf_out)
                     .unwrap();
+                wtr.serialize((
+                    "type",
+                    "total_time_ns",
+                    "io_depth",
+                    "io_size",
+                    "count",
+                    "es",
+                    "ec",
+                    "times",
+                ))?;
                 opt_wtr = Some(&mut wtr);
             }
 
-            for _ in 0..5 {
+            // The header for all perf tests
+            println!(
+                "{:>8} {:7} {:5} {:4} {:>7} {:>7} {:>7} \
+                {:>7} {:>8} {:>5} {:>5}",
+                "TEST",
+                "SECONDS",
+                "COUNT",
+                "DPTH",
+                "IOPS",
+                "MEAN",
+                "STDV",
+                "MIN",
+                "MAX",
+                "ES",
+                "EC",
+            );
+            for _ in 0..2 {
                 runtime.block_on(perf_workload(
                     &guest,
                     &mut region_info,
@@ -1285,13 +1312,17 @@ async fn dirty_workload(
  * Take the Vec of Durations for IOs and write it out in CSV format using
  * the provided CSV Writer.
  */
+#[allow(clippy::too_many_arguments)]
 pub fn perf_csv(
     wtr: &mut csv::Writer<File>,
     msg: &str,
     count: usize,
     io_depth: usize,
     io_size: usize,
+    duration: Duration,
     iotimes: Vec<Duration>,
+    es: u64,
+    ec: u64,
 ) {
     // Convert all Durations to u64 nanoseconds.
     let times = iotimes
@@ -1299,11 +1330,17 @@ pub fn perf_csv(
         .map(|x| (x.as_secs() as u64 * 100000000) + x.subsec_nanos() as u64)
         .collect::<Vec<u64>>();
 
+    let time_in_nsec =
+        duration.as_secs() as u64 * 100000000 + duration.subsec_nanos() as u64;
+
     wtr.serialize(Record {
         label: msg.to_string(),
+        total_time: time_in_nsec,
         io_depth,
         io_size,
         count,
+        es,
+        ec,
         time: times,
     })
     .unwrap();
@@ -1319,6 +1356,8 @@ fn perf_summary(
     io_depth: usize,
     times: Vec<Duration>,
     total_time: Duration,
+    es: u64,
+    ec: u64,
 ) {
     // Convert all the Durations into floats.
     let mut times = times
@@ -1332,11 +1371,8 @@ fn perf_summary(
     // the average IOPs
     let time_f =
         total_time.as_secs() as f32 + (total_time.subsec_nanos() as f32 / 1e9);
-
     println!(
-        "{}:{:.2}sec {} {} IOPs:{:.2} \
-        mean:{:.5} stdv:{:.5} \
-        min:{:.5} max:{:.5}",
+        "{:>8} {:>7.2} {:5} {:4} {:>7.2} {:.5} {:.5} {:.5} {:8.5} {:>5} {:>5}",
         msg,
         time_f,
         count,
@@ -1346,15 +1382,20 @@ fn perf_summary(
         statistical::standard_deviation(&times, None),
         times.first().unwrap(),
         times.last().unwrap(),
+        es,
+        ec,
     );
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Record {
     label: String,
+    total_time: u64,
     io_depth: usize,
     io_size: usize,
     count: usize,
+    es: u64,
+    ec: u64,
     time: Vec<u64>,
 }
 /**
@@ -1390,10 +1431,9 @@ async fn perf_workload(
         .map(|_| Buffer::new(io_size as usize))
         .collect();
 
-    println!(
-        "Performance test io_size:({}){} io_depth:{} total ops:{}",
-        blocks_per_io, io_size, io_depth, count,
-    );
+    let es = ri.extent_size.value;
+    let ec = ri.total_blocks as u64 / es;
+
     // To make a random block offset modulus, we take the total
     // block number and subtract the IO size in blocks.
     let offset_mod =
@@ -1406,7 +1446,6 @@ async fn perf_workload(
         let mut write_waiters = Vec::with_capacity(io_depth);
         for write_buffer in write_buffers.iter().take(io_depth) {
             let offset: u64 = rng.gen::<u64>() % offset_mod;
-            // println!("Write at: {}", offset);
 
             let waiter = guest.write_to_byte_offset(
                 offset * ri.block_size,
@@ -1423,9 +1462,19 @@ async fn perf_workload(
     let big_end = big_start.elapsed();
 
     guest.flush(None)?;
-    perf_summary("rwrites", count, io_depth, wtime.clone(), big_end);
+    perf_summary("rwrites", count, io_depth, wtime.clone(), big_end, es, ec);
     if let Some(wtr) = wtr {
-        perf_csv(wtr, "rwrite", count, io_depth, blocks_per_io, wtime.clone());
+        perf_csv(
+            wtr,
+            "rwrite",
+            count,
+            io_depth,
+            blocks_per_io,
+            big_end,
+            wtime.clone(),
+            es,
+            ec,
+        );
     }
 
     // Before we start reads, make sure the work queues are empty.
@@ -1458,10 +1507,20 @@ async fn perf_workload(
     }
     let big_end = big_start.elapsed();
 
-    perf_summary(" rreads", count, io_depth, rtime.clone(), big_end);
+    perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
 
     if let Some(wtr) = wtr {
-        perf_csv(wtr, "rread", count, io_depth, blocks_per_io, rtime.clone());
+        perf_csv(
+            wtr,
+            "rread",
+            count,
+            io_depth,
+            blocks_per_io,
+            big_end,
+            rtime.clone(),
+            es,
+            ec,
+        );
     }
 
     guest.flush(None)?;
