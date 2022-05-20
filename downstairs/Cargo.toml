@@ -20,9 +20,9 @@ http = "0.2.7"
 hyper = { version = "0.14", features = [ "full" ] }
 hyper-staticfile = "0.8"
 mime_guess = "2.0.4"
-omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "uuid1" }
-oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "uuid1" }
-oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "uuid1" }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 rand = "0.8.5"
 repair-client = { path = "../repair-client" }
 reqwest = { version = "0.11", features = ["json"] }

@@ -17,7 +17,7 @@ serde_json = "1.0"
 slog = { version = "2.7", features = [ "max_level_trace", "release_max_level_debug" ] }
 crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
-omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "uuid1" }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 structopt = "0.3"
 tokio = { version = "1.18", features = [ "full" ] }
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }

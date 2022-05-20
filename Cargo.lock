@@ -82,7 +82,7 @@ checksum = "4361135be9122e0870de935d7c439aef945b9f9ddd4199a553b5270b49c82a27"
 [[package]]
 name = "api_identity"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=uuid1#500c8d905c66ce1a36f13a42643aa57d2efc3839"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed230957904a176f36eb85089944a266e7d50"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -927,7 +927,7 @@ dependencies = [
 [[package]]
 name = "dropshot"
 version = "0.7.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#53106a852b4936e3a4b5d54e9801f3dc58ba9238"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#99261d7fc2df9f01dee8a63be511c40289384af7"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -966,7 +966,7 @@ dependencies = [
 [[package]]
 name = "dropshot_endpoint"
 version = "0.7.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#53106a852b4936e3a4b5d54e9801f3dc58ba9238"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#99261d7fc2df9f01dee8a63be511c40289384af7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1820,7 +1820,7 @@ dependencies = [
 [[package]]
 name = "nexus-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=uuid1#500c8d905c66ce1a36f13a42643aa57d2efc3839"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed230957904a176f36eb85089944a266e7d50"
 dependencies = [
  "chrono",
  "omicron-common",
@@ -1967,7 +1967,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "omicron-common"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=uuid1#500c8d905c66ce1a36f13a42643aa57d2efc3839"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed230957904a176f36eb85089944a266e7d50"
 dependencies = [
  "anyhow",
  "api_identity",
@@ -2156,7 +2156,7 @@ checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 [[package]]
 name = "oximeter"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=uuid1#500c8d905c66ce1a36f13a42643aa57d2efc3839"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed230957904a176f36eb85089944a266e7d50"
 dependencies = [
  "bytes",
  "chrono",
@@ -2171,7 +2171,7 @@ dependencies = [
 [[package]]
 name = "oximeter-macro-impl"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=uuid1#500c8d905c66ce1a36f13a42643aa57d2efc3839"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed230957904a176f36eb85089944a266e7d50"
 dependencies = [
  "bytes",
  "proc-macro2",
@@ -2182,7 +2182,7 @@ dependencies = [
 [[package]]
 name = "oximeter-producer"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=uuid1#500c8d905c66ce1a36f13a42643aa57d2efc3839"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed230957904a176f36eb85089944a266e7d50"
 dependencies = [
  "chrono",
  "dropshot",
@@ -2454,7 +2454,7 @@ dependencies = [
 [[package]]
 name = "progenitor"
 version = "0.1.2-dev"
-source = "git+https://github.com/oxidecomputer/progenitor#0f48c29935eec11aefbc74ae2d9c99fda5e99b72"
+source = "git+https://github.com/oxidecomputer/progenitor#d3441861bc36247af11c774c8e1de43e0c37bf4b"
 dependencies = [
  "anyhow",
  "getopts",
@@ -2469,7 +2469,7 @@ dependencies = [
 [[package]]
 name = "progenitor-client"
 version = "0.1.2-dev"
-source = "git+https://github.com/oxidecomputer/progenitor#0f48c29935eec11aefbc74ae2d9c99fda5e99b72"
+source = "git+https://github.com/oxidecomputer/progenitor#d3441861bc36247af11c774c8e1de43e0c37bf4b"
 dependencies = [
  "bytes",
  "futures-core",
@@ -2482,7 +2482,7 @@ dependencies = [
 [[package]]
 name = "progenitor-impl"
 version = "0.1.2-dev"
-source = "git+https://github.com/oxidecomputer/progenitor#0f48c29935eec11aefbc74ae2d9c99fda5e99b72"
+source = "git+https://github.com/oxidecomputer/progenitor#d3441861bc36247af11c774c8e1de43e0c37bf4b"
 dependencies = [
  "getopts",
  "heck 0.4.0",
@@ -2504,7 +2504,7 @@ dependencies = [
 [[package]]
 name = "progenitor-macro"
 version = "0.1.2-dev"
-source = "git+https://github.com/oxidecomputer/progenitor#0f48c29935eec11aefbc74ae2d9c99fda5e99b72"
+source = "git+https://github.com/oxidecomputer/progenitor#d3441861bc36247af11c774c8e1de43e0c37bf4b"
 dependencies = [
  "openapiv3",
  "proc-macro2",
