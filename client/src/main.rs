@@ -653,6 +653,10 @@ fn main() -> Result<()> {
                 }
             };
 
+            // NOTICE: The graphing code REQUIRES the data to be in a
+            // specific format, where the first 7 columns are as described
+            // below, and the 8 through whatever are the data samples from
+            // the performance test.
             let mut opt_wtr = None;
             let mut wtr;
             if let Some(perf_out) = perf_out {
