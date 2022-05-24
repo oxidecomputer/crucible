@@ -53,11 +53,27 @@ enum CliCommand {
     /// Flush
     Flush,
     /// Run Generic workload
-    Generic,
+    Generic {
+        /// Number of IOs to execute
+        #[clap(long, short, default_value = "5000")]
+        count: usize,
+    },
     /// Request region information
     Info,
     /// Report if the Upstairs is ready for guest IO
     IsActive,
+    /// Run the client perf test
+    Perf {
+        /// Number of IOs to execute for each test phase
+        #[clap(long, short, default_value = "5000")]
+        count: usize,
+        /// Size in blocks of each IO
+        #[clap(long, default_value = "1")]
+        io_size: usize,
+        /// Number of outstanding IOs at the same time
+        #[clap(long, default_value = "1")]
+        io_depth: usize,
+    },
     /// Quit the CLI
     Quit,
     /// Read from a given block offset
@@ -216,12 +232,6 @@ async fn cmd_to_msg(
     fw: &mut FramedWrite<WriteHalf<'_>, CliEncoder>,
 ) -> Result<()> {
     match cmd {
-        CliCommand::Uuid => {
-            fw.send(CliMessage::Uuid).await?;
-        }
-        CliCommand::Info => {
-            fw.send(CliMessage::InfoPlease).await?;
-        }
         CliCommand::Activate { gen } => {
             fw.send(CliMessage::Activate(gen)).await?;
         }
@@ -240,40 +250,53 @@ async fn cmd_to_msg(
         CliCommand::Fill => {
             fw.send(CliMessage::Fill).await?;
         }
+        CliCommand::Flush => {
+            fw.send(CliMessage::Flush).await?;
+        }
+        CliCommand::Generic { count } => {
+            fw.send(CliMessage::Generic(count)).await?;
+        }
+        CliCommand::IsActive => {
+            fw.send(CliMessage::IsActive).await?;
+        }
+        CliCommand::Info => {
+            fw.send(CliMessage::InfoPlease).await?;
+        }
+        CliCommand::Perf {
+            count,
+            io_size,
+            io_depth,
+        } => {
+            fw.send(CliMessage::Perf(count, io_size, io_depth)).await?;
+        }
+        CliCommand::Quit => {
+            println!("The quit command has nothing to send");
+            return Ok(());
+        }
         CliCommand::Read { offset, len } => {
             fw.send(CliMessage::Read(offset, len)).await?;
         }
         CliCommand::Rr => {
             fw.send(CliMessage::RandRead).await?;
         }
-        CliCommand::Write { offset, len } => {
-            fw.send(CliMessage::Write(offset, len)).await?;
-        }
         CliCommand::Rw => {
             fw.send(CliMessage::RandWrite).await?;
-        }
-        CliCommand::Flush => {
-            fw.send(CliMessage::Flush).await?;
-        }
-        CliCommand::Generic => {
-            fw.send(CliMessage::Generic).await?;
-        }
-        CliCommand::IsActive => {
-            fw.send(CliMessage::IsActive).await?;
         }
         CliCommand::Show => {
             fw.send(CliMessage::ShowWork).await?;
         }
-        CliCommand::Wait => {
-            println!("No support for {:?}", cmd);
-            return Ok(());
+        CliCommand::Uuid => {
+            fw.send(CliMessage::Uuid).await?;
         }
         CliCommand::Verify => {
             fw.send(CliMessage::Verify).await?;
         }
-        _ => {
-            println!("No support for {:?}", cmd);
+        CliCommand::Wait => {
+            println!("No support for Wait");
             return Ok(());
+        }
+        CliCommand::Write { offset, len } => {
+            fw.send(CliMessage::Write(offset, len)).await?;
         }
     }
     /*
@@ -529,14 +552,14 @@ async fn process_cli_command(
                 .await
             }
         }
-        CliMessage::Generic => {
+        CliMessage::Generic(count) => {
             if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
                 .await
             } else {
-                match generic_workload(guest, 20, ri).await {
+                match generic_workload(guest, count, ri).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("{}", e);
@@ -597,6 +620,27 @@ async fn process_cli_command(
                     fw.send(CliMessage::Info(bs, es, ts)).await
                 }
                 Err(e) => fw.send(CliMessage::Error(e)).await,
+            }
+        }
+        CliMessage::Perf(count, io_size, io_depth) => {
+            if ri.write_log.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match perf_workload(
+                    guest, ri, &mut None, count, io_size, io_depth,
+                )
+                .await
+                {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
+                    }
+                }
             }
         }
         CliMessage::RandRead => {

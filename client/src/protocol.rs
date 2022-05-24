@@ -32,11 +32,12 @@ pub enum CliMessage {
     // Run the fill test.
     Fill,
     Flush,
-    Generic,
+    Generic(usize),
     Info(u64, u64, u64),
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
+    Perf(usize, usize, usize),
     Read(usize, usize),
     RandRead,
     ReadResponse(usize, Result<Vec<u8>, CrucibleError>),
@@ -275,7 +276,14 @@ mod tests {
 
     #[test]
     fn rt_generic() -> Result<()> {
-        let input = CliMessage::Generic;
+        let input = CliMessage::Generic(2);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_perf() -> Result<()> {
+        let input = CliMessage::Perf(2, 3, 4);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
