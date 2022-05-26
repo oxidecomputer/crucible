@@ -1,0 +1,339 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DownStairs Control",
+    "version": "0.0.0"
+  },
+  "paths": {
+    "/disablerestart/all": {
+      "get": {
+        "summary": "Disable automatic restart on all downstairs",
+        "operationId": "dsc_disable_restart_all",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/disablerestart/cid/{cid}": {
+      "get": {
+        "summary": "Disable automatic restart on the given client_id",
+        "operationId": "dsc_disable_restart",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/enablerestart/all": {
+      "get": {
+        "summary": "Enable automatic restart on all downstairs",
+        "operationId": "dsc_enable_restart_all",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/enablerestart/cid/{cid}": {
+      "get": {
+        "summary": "Enable automatic restart on the given client_id",
+        "operationId": "dsc_enable_restart",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/pid/cid/{cid}": {
+      "get": {
+        "summary": "Fetch the reported pid for the requested client_id",
+        "operationId": "dsc_get_pid",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "nullable": true,
+                  "title": "Nullable_uint32",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/start/all": {
+      "get": {
+        "summary": "Start all the downstairs",
+        "operationId": "dsc_start_all",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/start/cid/{cid}": {
+      "get": {
+        "summary": "Start the downstairs at the given client_id",
+        "operationId": "dsc_start",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/state/cid/{cid}": {
+      "get": {
+        "summary": "Fetch the current state for the requested client_id",
+        "operationId": "dsc_get_state",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DownstairsState"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/stop/all": {
+      "get": {
+        "summary": "Stop all downstairs",
+        "operationId": "dsc_stop_all",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/stop/cid/{cid}": {
+      "get": {
+        "summary": "Stop the downstairs at the given client_id",
+        "operationId": "dsc_stop",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/stop/rand": {
+      "get": {
+        "summary": "Stop a random downstairs",
+        "operationId": "dsc_stop_rand",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "DownstairsState": {
+        "description": "State of a downstairs.",
+        "type": "string",
+        "enum": [
+          "Stopped",
+          "Stopping",
+          "Starting",
+          "Running",
+          "Exit",
+          "Error"
+        ]
+      },
+      "Error": {
+        "description": "Error information from a response.",
+        "type": "object",
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "request_id"
+        ]
+      }
+    }
+  }
+}
