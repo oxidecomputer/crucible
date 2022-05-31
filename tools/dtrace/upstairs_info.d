@@ -2,7 +2,7 @@
  * Display internal Upstairs status.
  */
 #pragma D option quiet
-cdt*:::up-status
+crucible_upstairs*:::up-status
 {
     printf("%s ", json(copyinstr(arg1), "ok.ds_state"));
     printf("Upstairs:%4s ", json(copyinstr(arg1), "ok.up_count"));

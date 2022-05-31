@@ -1,12 +1,12 @@
 /*
  * Trace all the guest submitted and completed IOs.
  */
-cdt*:::gw-*-start
+crucible_upstairs*:::gw-*-start
 {
     start[arg0] = timestamp;
 }
 
-cdt*:::gw-*-done
+crucible_upstairs*:::gw-*-done
 /start[arg0]/
 {
     strtok(probename, "-");

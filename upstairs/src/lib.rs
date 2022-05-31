@@ -111,7 +111,7 @@ pub trait BlockIO {
     }
 }
 
-#[usdt::provider]
+#[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}

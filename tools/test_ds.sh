@@ -1,8 +1,6 @@
 #!/bin/bash
 #
-# Simple script to start three downstairs, then run through all the tests
-# that exist on the crucible client program.  This should eventually either
-# move to some common test framework, or be thrown away.
+# Test import and export functions of crucible-downstairs
 
 set -o pipefail
 
