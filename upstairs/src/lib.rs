@@ -6326,9 +6326,9 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
         let mut gw = up.guest.guest_work.lock().unwrap();
         for ds_id_done in ack_list.iter() {
-            let mut work = up.downstairs.lock().unwrap();
+            let mut ds = up.downstairs.lock().unwrap();
 
-            let done = work.active.get_mut(ds_id_done).unwrap();
+            let done = ds.active.get_mut(ds_id_done).unwrap();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -6344,13 +6344,13 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let data = done.data.take();
 
-            work.ack(ds_id);
+            ds.ack(ds_id);
 
-            gw.gw_ds_complete(gw_id, ds_id, data, work.result(ds_id));
+            gw.gw_ds_complete(gw_id, ds_id, data, ds.result(ds_id));
 
-            work.cdt_gw_work_done(ds_id, gw_id);
+            ds.cdt_gw_work_done(ds_id, gw_id);
 
-            work.retire_check(ds_id);
+            ds.retire_check(ds_id);
         }
     }
     println!("up_ds_listen loop done");
@@ -6955,8 +6955,8 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let gior = up.guest_io_ready();
     let up_count = up.guest.guest_work.lock().unwrap().active.len();
 
-    let work = up.downstairs.lock().unwrap();
-    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    let ds = up.downstairs.lock().unwrap();
+    let mut kvec: Vec<u64> = ds.active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
     );
@@ -6988,7 +6988,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
         kvec.sort_unstable();
         for id in kvec.iter() {
-            let job = work.active.get(id).unwrap();
+            let job = ds.active.get(id).unwrap();
             let ack = job.ack_status;
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
@@ -7055,13 +7055,13 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
         iosc.show_all();
         print!("Last Flush: ");
-        for lf in work.ds_last_flush.iter() {
+        for lf in ds.ds_last_flush.iter() {
             print!("{} ", lf);
         }
         println!();
     }
 
-    let done = work.completed.to_vec();
+    let done = ds.completed.to_vec();
     let mut count = 0;
     print!("Downstairs last five completed:");
     for j in done.iter().rev() {
@@ -7072,7 +7072,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     }
     println!();
-    drop(work);
+    drop(ds);
 
     let up_done = up.guest.guest_work.lock().unwrap().completed.to_vec();
     print!("Upstairs last five completed:  ");
