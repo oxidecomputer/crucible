@@ -11,3 +11,6 @@ Described in this file is the control API for Crucible Upstairs.
 
 ## downstairs-repair.json
 This file describes the API for repairing between Crucible Downstairs.
+
+### dsc-control.json
+The API for controlling the dsc (DownStairs Control) test program.

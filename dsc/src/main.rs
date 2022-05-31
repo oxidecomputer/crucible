@@ -1,24 +1,43 @@
 // Copyright 2022 Oxide Computer Company
 #![feature(exit_status_error)]
+use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc};
-use std::thread;
-use std::time::Instant;
+//use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+//use std::thread;
+// use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use byte_unit::Byte;
 use clap::{Parser, Subcommand};
 use csv::WriterBuilder;
+use rand::prelude::*;
+use rand_chacha::rand_core::SeedableRng;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::process::{Child, Command};
+use tokio::runtime::Builder;
+use tokio::sync::{mpsc, watch};
+use tokio::time::sleep_until;
+
+pub mod control;
+
+// How far apart the ports are for a default region set.
+// Note that this value is sprinkled all over the tests scripts,
+// so when you change it here, go forth and search.
+const DEFAULT_PORT_STEP: u32 = 10;
 
 /// dsc  DownStairs Controller
 #[derive(Debug, Parser)]
 #[clap(name = "dsc", term_width = 80)]
 #[clap(about = "A downstairs controller", long_about = None)]
 struct Cli {
-    /// Delete any required directories before starting
+    /// Delete all existing test and region directories
     #[clap(long, global = true)]
     cleanup: bool,
 
@@ -44,6 +63,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Create a downstairs region then exit.
+    Create {
+        /// The block size for the region
+        #[clap(long, default_value = "4096")]
+        block_size: u32,
+
+        /// The extent size for the region
+        #[clap(long, default_value = "100")]
+        extent_size: u64,
+
+        /// The extent count for the region
+        #[clap(long, default_value = "15")]
+        extent_count: u64,
+    },
     /// Test creation of downstairs regions
     RegionPerf {
         /// Run a longer test, do 10 loops for each region size combo
@@ -55,16 +88,30 @@ enum Commands {
         #[clap(long, parse(from_os_str), name = "CSV")]
         csv_out: Option<PathBuf>,
     },
-    /// Create and start downstairs regions
+    /// Start a downstairs region set
+    /// This requires the region is already created, unless you include
+    /// the --create option.
     Start {
+        /// Delete any existing region and create a new one using the
+        /// default or provided block-size, extent-size, and extent-count.
+        #[clap(long)]
+        create: bool,
+
+        /// If creating, the block size for the region
         #[clap(long, default_value = "4096")]
         block_size: u32,
 
+        /// If creating, the extent size for the region
         #[clap(long, default_value = "100")]
         extent_size: u64,
 
+        /// If creating, the extent count for the region
         #[clap(long, default_value = "15")]
         extent_count: u64,
+
+        /// The IP/Port where the control server will listen
+        #[clap(long, default_value = "127.0.0.1:9998")]
+        control: SocketAddr,
     },
 }
 
@@ -76,6 +123,7 @@ struct DownstairsInfo {
     port: u32,
     _create_output: String,
     output_file: PathBuf,
+    client_id: usize,
 }
 
 impl DownstairsInfo {
@@ -85,6 +133,7 @@ impl DownstairsInfo {
         port: u32,
         _create_output: String,
         output_file: PathBuf,
+        client_id: usize,
     ) -> DownstairsInfo {
         DownstairsInfo {
             ds_bin,
@@ -92,13 +141,14 @@ impl DownstairsInfo {
             port,
             _create_output,
             output_file,
+            client_id,
         }
     }
 
     fn start(&self) -> Result<Child> {
         println!("Make output file at {:?}", self.output_file);
         let outputs = File::create(&self.output_file)
-            .context("Failed to create test file")?;
+            .context("Failed to create output file")?;
         let errors = outputs.try_clone()?;
 
         let port_value = format!("{}", self.port);
@@ -127,24 +177,40 @@ struct RegionSet {
     ds: Vec<Arc<DownstairsInfo>>,
     ds_bin: String,
     region_dir: String,
+    next_id: usize,
+    ds_state: Vec<DownstairsState>,
+    ds_pid: Vec<Option<u32>>,
+}
+
+impl RegionSet {
+    // The next unused client ID.
+    fn next_client_id(&mut self) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
 }
 
 // This holds the overall info for the regions we have created.
 #[derive(Debug)]
-struct TestInfo {
+pub struct DscInfo {
+    /// The directory location where output files are
     output_dir: PathBuf,
-    rs: RegionSet,
+    /// The region set that make our downstairs
+    rs: Mutex<RegionSet>,
+    /// Work for the dsc to do, what downstairs to start/stop/etc
+    work: Mutex<DscWork>,
 }
 
-impl TestInfo {
+impl DscInfo {
     fn new(
         downstairs_bin: String,
         output_dir: PathBuf,
         region_dir: PathBuf,
-    ) -> Result<Self> {
-        /*
-         * Verify binary exists, and paths do not
-         */
+        notify_tx: watch::Sender<u64>,
+        create: bool,
+    ) -> Result<Arc<Self>> {
+        // Verify the downstairs binary exists as is a file
         if !Path::new(&downstairs_bin).exists() {
             bail!("Can't find downstairs binary at {:?}", downstairs_bin);
         }
@@ -153,33 +219,72 @@ impl TestInfo {
             bail!("{} is not a file", downstairs_bin);
         }
 
-        if Path::new(&output_dir).exists() {
-            bail!("Remove output {:?} before running", output_dir);
-        }
-        if Path::new(&region_dir).exists() {
-            bail!("Remove region {:?} before running", region_dir);
+        if create {
+            // If the caller has requested to create a region, then
+            // we expect it not to be present.
+            if Path::new(&region_dir).exists() {
+                bail!("Remove region {:?} before running", region_dir);
+            }
+            println!(
+                "Creating region directory at: {}",
+                region_dir.clone().into_os_string().into_string().unwrap()
+            );
+            fs::create_dir_all(&region_dir)
+                .context("Failed to create region directory")?;
+
+            // We only create the output directory if we need it.
+            if !Path::new(&output_dir).exists() {
+                println!(
+                    "Creating dsc directory at: {}",
+                    output_dir.clone().into_os_string().into_string().unwrap()
+                );
+                fs::create_dir_all(&output_dir)
+                    .context("Failed to create dsc directory")?;
+            }
+        } else {
+            // Everything should already exist
+            if !Path::new(&region_dir).exists() {
+                bail!("Failed to find region {:?}", region_dir);
+            }
+
+            if Path::new(&output_dir).exists() {
+                println!("Using existing output directory {:?}", output_dir);
+            } else {
+                println!(
+                    "Creating dsc directory at: {}",
+                    output_dir.clone().into_os_string().into_string().unwrap()
+                );
+                fs::create_dir_all(&output_dir)
+                    .context("Failed to create dsc directory")?;
+            }
         }
 
-        println!(
-            "Creating test directory at: {}",
-            output_dir.clone().into_os_string().into_string().unwrap()
-        );
-        fs::create_dir_all(&output_dir)
-            .context("Failed to create test directory")?;
-
-        println!(
-            "Creating region directory at: {}",
-            region_dir.clone().into_os_string().into_string().unwrap()
-        );
-        fs::create_dir_all(&region_dir)
-            .context("Failed to create region directory")?;
+        let ds_state = vec![
+            DownstairsState::Stopped,
+            DownstairsState::Stopped,
+            DownstairsState::Stopped,
+        ];
+        let ds_pid = vec![None, None, None];
 
         let rs = RegionSet {
             ds: Vec::new(),
             ds_bin: downstairs_bin,
             region_dir: region_dir.into_os_string().into_string().unwrap(),
+            next_id: 0,
+            ds_state,
+            ds_pid,
         };
-        Ok(TestInfo { output_dir, rs })
+
+        let mrs = Mutex::new(rs);
+
+        let dsc_work = DscWork::new(notify_tx);
+        let work = Mutex::new(dsc_work);
+        // Received actions from the dropshot server.
+        Ok(Arc::new(DscInfo {
+            output_dir,
+            rs: mrs,
+            work,
+        }))
     }
 
     /**
@@ -188,8 +293,8 @@ impl TestInfo {
      *
      * TODO: Add encryption option
      */
-    fn create_ds_region(
-        &mut self,
+    async fn create_ds_region(
+        &self,
         port: u32,
         extent_size: u64,
         extent_count: u64,
@@ -198,13 +303,14 @@ impl TestInfo {
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
-        let new_region_dir = port_to_region(self.rs.region_dir.clone(), port)?;
+        let mut rs = self.rs.lock().unwrap();
+        let new_region_dir = port_to_region(rs.region_dir.clone(), port)?;
         let extent_size = format!("{}", extent_size);
         let extent_count = format!("{}", extent_count);
         let block_size = format!("{}", block_size);
         let uuid = format!("12345678-0000-0000-0000-{:012}", port);
-        let start = Instant::now();
-        let output = Command::new(self.rs.ds_bin.clone())
+        let start = std::time::Instant::now();
+        let output = Command::new(rs.ds_bin.clone())
             .args(&[
                 "create",
                 "-d",
@@ -219,6 +325,7 @@ impl TestInfo {
                 &block_size,
             ])
             .output()
+            .await
             .unwrap();
 
         let end = start.elapsed();
@@ -227,7 +334,7 @@ impl TestInfo {
         if !output.status.success() {
             println!(
                 "Create failed for {:?} {:?}",
-                self.rs.region_dir, output.status
+                rs.region_dir, output.status
             );
             println!(
                 "dir:{} uuid: {} es:{} ec:{}",
@@ -236,10 +343,13 @@ impl TestInfo {
             println!("Output:\n{}", String::from_utf8(output.stdout).unwrap());
             println!("Error:\n{}", String::from_utf8(output.stderr).unwrap());
             bail!("Creating region failed");
-        } else if !quiet {
+        }
+
+        let client_id = rs.next_client_id();
+        if !quiet {
             println!(
-                "Downstairs region created at {} in {:04}",
-                new_region_dir, time_f,
+                "Downstairs region {} created at {} in {:04}",
+                client_id, new_region_dir, time_f,
             );
         }
 
@@ -251,74 +361,280 @@ impl TestInfo {
         };
 
         let dsi = DownstairsInfo::new(
-            self.rs.ds_bin.clone(),
+            rs.ds_bin.clone(),
             new_region_dir,
             port,
             String::from_utf8(output.stdout).unwrap(),
             output_path,
+            client_id,
         );
-        self.rs.ds.push(Arc::new(dsi));
+        rs.ds.push(Arc::new(dsi));
         Ok(time_f)
     }
 
     /**
      * Delete a region directory at the given port.
      */
-    fn delete_ds_region(&mut self, port: u32) -> Result<()> {
+    fn delete_ds_region(&self, port: u32) -> Result<()> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
-        let region_dir = port_to_region(self.rs.region_dir.clone(), port)?;
+        let mut rs = self.rs.lock().unwrap();
+        let region_dir = port_to_region(rs.region_dir.clone(), port)?;
         std::fs::remove_dir_all(&region_dir)?;
 
         // If this region was part of the ds vec, remove it.
-        self.rs.ds.retain(|ds| ds.port != port);
+        rs.ds.retain(|ds| ds.port != port);
         Ok(())
     }
 
-    /**
-     * Start all downstairs.
-     * Walk the list of downstairs in our region set and spawn
-     * a thread that will then start a downstairs and watch it.
-     *
-     * TODO: There is more coming here, this currently never returns
-     * unless there is an error.  Eventually this will become the
-     * controller of the three downstairs and will be able to stop/start
-     * them as so desired.
+    /*
+     * Generate a region set given the starting port and expected region
+     * directories.  Return error if any of them don't already exist.
+     * TODO: This is assuming a fair amount of stuff.
+     * Make fewer assumptions...
      */
-    fn start_all_downstairs(&mut self) {
-        let (tx, rx) = mpsc::channel::<MonitorInfo>();
-        let mut handles = vec![];
+    fn generate_region_set(&self, port_base: u32) -> Result<()> {
+        let mut port = port_base;
+        let mut rs = self.rs.lock().unwrap();
 
-        for ds in self.rs.ds.iter() {
-            println!("start ds: {:?}", ds.port);
-            let txc = tx.clone();
-            let dsc = ds.clone();
-            let handle = thread::spawn(move || {
-                ds_start_monitor(txc, dsc);
-            });
-            handles.push(handle);
-        }
-        drop(tx);
-        loop {
-            let res = rx.recv();
-            match res {
-                Ok(mi) => {
-                    println!("[{}] reports {:?}", mi.port, mi.status);
-                }
-                Err(e) => {
-                    println!("Receive thread stops with error {:?}", e);
-                    break;
-                }
+        for _ in 0..3 {
+            let new_region_dir = port_to_region(rs.region_dir.clone(), port)?;
+            let output_file = format!("downstairs-{}.txt", port);
+            let output_path = {
+                let mut t = self.output_dir.clone();
+                t.push(output_file);
+                t
+            };
+            if !Path::new(&new_region_dir).exists() {
+                bail!("Can't find region dir {:?}", new_region_dir);
             }
+
+            let dsi = DownstairsInfo::new(
+                rs.ds_bin.clone(),
+                new_region_dir,
+                port,
+                "/dev/null".to_string(),
+                output_path,
+                rs.next_client_id(),
+            );
+            rs.ds.push(Arc::new(dsi));
+            port += DEFAULT_PORT_STEP;
         }
 
-        println!("recv channel is done");
+        Ok(())
+    }
+
+    fn get_ds_state(&self, client_id: usize) -> Result<DownstairsState> {
+        let rs = self.rs.lock().unwrap();
+        if rs.ds_state.len() <= client_id {
+            bail!("Invalid client ID: {}", client_id);
+        }
+        Ok(rs.ds_state[client_id])
+    }
+
+    fn get_ds_pid(&self, client_id: usize) -> Result<Option<u32>> {
+        let rs = self.rs.lock().unwrap();
+        if rs.ds_state.len() <= client_id {
+            bail!("Invalid client ID: {}", client_id);
+        }
+        Ok(rs.ds_pid[client_id])
     }
 }
 
+// This holds the work queue for the main task.  Work is added
+// by the dropshot server, and the main task takes work off that
+// queue and performs it on the required downstairs.  The notify
+// channel is how the main task is told there is new work to do.
+#[derive(Debug)]
+pub struct DscWork {
+    cmd: VecDeque<DscCmd>,
+    notify_tx: watch::Sender<u64>,
+}
+
+impl DscWork {
+    fn new(notify_tx: watch::Sender<u64>) -> Self {
+        let cmd: VecDeque<DscCmd> = VecDeque::new();
+        DscWork { cmd, notify_tx }
+    }
+
+    // Add a new command to the work list, and notify the main task.
+    fn add_cmd(&mut self, cmd: DscCmd) {
+        self.cmd.push_back(cmd);
+        self.notify_tx.send(1).unwrap();
+    }
+
+    // Take the oldest command off the work queue.
+    fn get_cmd(&mut self) -> Option<DscCmd> {
+        self.cmd.pop_front()
+    }
+}
+
+pub fn deadline_secs(secs: u64) -> tokio::time::Instant {
+    tokio::time::Instant::now()
+        .checked_add(tokio::time::Duration::from_secs(secs))
+        .unwrap()
+}
+
+// This is where the main task has received notification that there is new
+// work on the work queue.  Take the oldest item on the list and then
+// send a message to one (or possibly all) downstairs tasks with the
+// piece of work they next need to do.
+// TODO: "start random restart with interval", we have to return
+// something from this?  Or send it to each DS?
+fn do_dsc_work(dsci: &DscInfo, action_tx_list: &[watch::Sender<Action>]) {
+    let mut dsc_work = dsci.work.lock().unwrap();
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    while let Some(work) = dsc_work.get_cmd() {
+        println!("got dsc {:?}", work);
+        match work {
+            DscCmd::Start(cid) => {
+                println!("start {}", cid);
+                action_tx_list[cid].send(Action::Start).unwrap();
+            }
+            DscCmd::StartAll => {
+                println!("start all downstairs: {}", action_tx_list.len());
+                for action_tx in action_tx_list {
+                    action_tx.send(Action::Start).unwrap();
+                }
+            }
+            DscCmd::Stop(cid) => {
+                println!("stop {}", cid);
+                action_tx_list[cid].send(Action::Stop).unwrap();
+            }
+            DscCmd::StopRand => {
+                let cid = rng.gen_range(0..3) as usize;
+                println!("stop rand {}", cid);
+                action_tx_list[cid].send(Action::Stop).unwrap();
+            }
+            DscCmd::StopAll => {
+                println!("Stop all downstairs: {}", action_tx_list.len());
+                for action_tx in action_tx_list {
+                    action_tx.send(Action::Stop).unwrap();
+                }
+            }
+            DscCmd::DisableRestart(cid) => {
+                println!("disable restart {}", cid);
+                action_tx_list[cid].send(Action::DisableRestart).unwrap();
+            }
+            DscCmd::DisableRestartAll => {
+                println!("disable restart on all: {}", action_tx_list.len());
+                for action_tx in action_tx_list {
+                    action_tx.send(Action::DisableRestart).unwrap();
+                }
+            }
+            DscCmd::EnableRestart(cid) => {
+                println!("enable restart {}", cid);
+                action_tx_list[cid].send(Action::EnableRestart).unwrap();
+            }
+            DscCmd::EnableRestartAll => {
+                println!("enable restart on all: {}", action_tx_list.len());
+                for action_tx in action_tx_list {
+                    action_tx.send(Action::EnableRestart).unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// Start the DownStairs Controller (dsc).
+///
+/// This task is the "main task" for the dsc server.  It is responsible for
+/// the initial startup of all the downstairs, then to respond to commands
+/// from the dropshot server (via a channel and work queue) and submit
+/// those commands to the downstairs.
+///
+/// The dropshot server should already be running when this function
+/// is called.
+///
+///                                       +-------------+
+///  Http or API requests from outside -> |  Dropshot   |   Async
+///                                       |   server    |   task
+///                                       +-------------+
+///                                              |
+///                                           notify_*
+///                                           channel
+///                  +-------------+             |
+///                  |  DSC main   | <-----------+          Async
+///                  |    task     |                        task
+///                  +---+--+--+---+
+///                      |  |  |
+///                     action_*x
+///                      channels
+///                      |  |  |
+///        +-------------+  |  +-------------+
+///        |                |                |
+/// +------+------+  +------+------+  +------+------+
+/// |  Client 0   |  |  Client 1   |  |  Client 2   |       Async
+/// |             |  |             |  |             |       task
+/// |------|------|  |------|------|  |------|------|
+/// | Downstairs  |  | Downstairs  |  | Downstairs  |       Spawned
+/// |             |  |             |  |             |       process
+/// +-------------+  +-------------+  +-------------+
+///
+/// Each client task spawns a process for their downstairs
+/// and watches that process as well as the action channel
+/// for changes requested by the main task.
+///
+/// When a command is received from the dropshot server, it puts that
+/// command on a queue, then notifies the main task that new work has
+/// arrived.  When the main task receives a notification, it walks
+/// the queue and performs all jobs it finds.
+async fn start_dsc(
+    dsci: &DscInfo,
+    mut notify_rx: watch::Receiver<u64>,
+) -> Result<()> {
+    let (tx, mut rx) = mpsc::channel::<MonitorInfo>(10);
+    let mut action_tx_list = Vec::new();
+    let mut handles = vec![];
+
+    // Spawn a task to start and monitor each of our downstairs.
+    let rs = dsci.rs.lock().unwrap();
+    for ds in rs.ds.iter() {
+        println!("start ds: {:?}", ds.port);
+        let txc = tx.clone();
+        let dsc = ds.clone();
+        let (action_tx, action_rx) = watch::channel(Action::Start);
+        let handle = tokio::spawn(async move {
+            ds_start_monitor(dsc, txc, action_rx).await;
+        });
+        action_tx_list.push(action_tx);
+        handles.push(handle);
+    }
+    drop(tx);
+    drop(rs);
+
+    let mut timeout_deadline = deadline_secs(5);
+    loop {
+        tokio::select! {
+            _ = sleep_until(timeout_deadline) => {
+                // println!("Timeout");
+                timeout_deadline = deadline_secs(15);
+            },
+            _ = notify_rx.changed() => {
+                println!("Main task has work to do, go find it");
+                do_dsc_work(dsci, &action_tx_list);
+            },
+            res = rx.recv() => {
+                if let Some(mi) = res {
+                    println!("[{}][{}] reports {:?}",
+                        mi.port, mi.client_id,
+                        mi.state);
+                    let mut rs = dsci.rs.lock().unwrap();
+                    rs.ds_state[mi.client_id] = mi.state;
+                    rs.ds_pid[mi.client_id] = mi.pid;
+                } else {
+                    println!("rx.recv got None");
+                }
+            }
+        }
+    }
+}
+
+/// Create a path for a region
+///
+/// By combining the region directory and the port this downstairs
+/// will use, we construct the path for the region directory.
 fn port_to_region(region_dir: String, port: u32) -> Result<String> {
-    // Create the path for this region by combining the region
-    // directory and the port this downstairs will use.
     let mut my_region = PathBuf::new();
     my_region.push(region_dir);
     my_region.push(format!("{}", port));
@@ -327,85 +643,222 @@ fn port_to_region(region_dir: String, port: u32) -> Result<String> {
     Ok(mr)
 }
 
-/*
- * This is used to communicate between the main thread and a thread that
- * is responsible for starting and monitoring a downstairs process.
- */
+/// Downstairs process information.
+///
+/// This structure is used to send status from a task responsible for
+/// stop/start/status of a downstairs process and the main dsc task.
 #[derive(Debug)]
 struct MonitorInfo {
     port: u32,
-    status: DownstairsStatus,
+    client_id: usize,
+    state: DownstairsState,
+    pid: Option<u32>,
 }
 
-// Status of a downstairs.
-#[derive(Debug)]
-enum DownstairsStatus {
+/// State of a downstairs.
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema)]
+enum DownstairsState {
+    Stopped,
+    Stopping,
     Starting,
     Running,
     Exit,
     Error,
 }
 
-/*
- * Start up a downstairs. Monitor that downstairs and send a message to the
- * channel if the downstairs exits.
- *
- * TODO: This is really just the first stage of much more work here.
- * Right now all this does is start a downstairs then watch for what
- * happens, sending a message to another thread when things change. This
- * will become smarter in the future and will restart on failure and or
- * possibly also listen for commands from another thread.
- */
-fn ds_start_monitor(tx: mpsc::Sender<MonitorInfo>, ds: Arc<DownstairsInfo>) {
-    println!("starting downstairs at port {}", ds.port);
-    let _ = tx.send(MonitorInfo {
-        port: ds.port,
-        status: DownstairsStatus::Starting,
-    });
+/// Downstairs action commands.
+///
+/// This is used to send commands between the main task and a task that
+/// is responsible stopping/starting/restarting a downstairs process.
+#[derive(Debug, PartialEq)]
+enum Action {
+    // Stop the downstairs
+    Stop,
+    // Start the downstairs
+    // TODO, add lossy flag
+    Start,
+    // Disable auto restart
+    DisableRestart,
+    // Enable auto restart
+    EnableRestart,
+}
 
-    let mut cmd = ds.start().unwrap();
-    let _ = tx.send(MonitorInfo {
-        port: ds.port,
-        status: DownstairsStatus::Running,
-    });
+/// Commands supported by DSC.
+///
+/// These are the commands the main dsc task can accept from the dropshot
+/// control server.
+#[derive(Debug, PartialEq)]
+enum DscCmd {
+    /// Start the downstairs at the given client index.
+    Start(usize),
+    /// Start all downstairs.
+    StartAll,
+    /// Stop the downstairs at the given client index.
+    Stop(usize),
+    /// Stop a random downstairs.
+    StopRand,
+    /// Stop all downstairs.
+    StopAll,
+    /// Disable auto restart of the downstairs at the given client index.
+    DisableRestart(usize),
+    /// Disable auto restart of all downstairs.
+    DisableRestartAll,
+    /// Enable auto restart of downstairs at the given client index.
+    EnableRestart(usize),
+    /// Enable auto restart of all downstairs
+    EnableRestartAll,
+}
 
-    match cmd.wait() {
-        Ok(status) => {
-            println!("[{}] exited with: {}", ds.port, status);
-            let _ = tx.send(MonitorInfo {
-                port: ds.port,
-                status: DownstairsStatus::Exit,
-            });
-        }
-        Err(e) => {
-            println!("[{}] wait error {} from downstairs", ds.port, e);
-            let _ = tx.send(MonitorInfo {
-                port: ds.port,
-                status: DownstairsStatus::Error,
-            });
+/// Start a process for a downstairs.
+///
+/// Returns the <Child> of the spawned process.
+async fn start_ds(
+    ds: &Arc<DownstairsInfo>,
+    tx: &mpsc::Sender<MonitorInfo>,
+) -> Child {
+    println!("Starting downstairs at port {}", ds.port);
+    tx.send(MonitorInfo {
+        port: ds.port,
+        client_id: ds.client_id,
+        state: DownstairsState::Starting,
+        pid: None,
+    })
+    .await
+    .unwrap();
+
+    // Create a new process that will run the downstairs
+    let cmd = ds.start().unwrap();
+    tx.send(MonitorInfo {
+        port: ds.port,
+        client_id: ds.client_id,
+        state: DownstairsState::Running,
+        pid: cmd.id(),
+    })
+    .await
+    .unwrap();
+    cmd
+}
+
+/// Start and monitor a specific downstairs.
+///
+/// Start up a downstairs. Monitor that downstairs and send a message to
+/// the main task if the downstairs exits.
+/// Listen for commands from the main task and take action.
+async fn ds_start_monitor(
+    ds: Arc<DownstairsInfo>,
+    tx: mpsc::Sender<MonitorInfo>,
+    mut action_rx: watch::Receiver<Action>,
+) {
+    // Start by starting.
+    let mut cmd = start_ds(&ds, &tx).await;
+
+    let mut keep_running = true;
+    let mut start_once = false;
+    let mut stop_notify = true;
+    loop {
+        tokio::select! {
+            a = action_rx.changed() => {
+                match a {
+                    Ok(_) => {
+                        let act = action_rx.borrow();
+                        match *act {
+                            Action::Start => {
+                                println!("[{}] got start action", ds.port);
+                                // This does nothing if we are already
+                                // running. If we are not running, then this
+                                // will start the downstairs.
+                                start_once = true;
+                            },
+                            Action::Stop => {
+                                println!(
+                                    "[{}] got stop action so:{} kr:{}",
+                                    ds.port,
+                                    start_once,
+                                    keep_running);
+                                start_once = false;
+                                if let Err(e) = cmd.start_kill() {
+                                    println!(
+                                        "[{}] kill attempt returned {:?}",
+                                        ds.port, e,
+                                    );
+                                }
+                            },
+                            Action::DisableRestart => {
+                                keep_running = false;
+                                start_once = false;
+                                println!("[{}] Disable keep_running", ds.port);
+                            },
+                            Action::EnableRestart => {
+                                keep_running = true;
+                                println!("[{}] Enable  keep_running", ds.port);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("recv got error {:?}", e);
+                    }
+                }
+            }
+            c = cmd.wait() => {
+                // If the downstairs is not running, this will match
+                // every loop.
+                match c {
+                    Ok(status) => {
+                        // Only notify we are down once,
+                        if stop_notify {
+                            println!("[{}] exited with: {}", ds.port, status);
+                            let _ = tx.send(MonitorInfo {
+                                port: ds.port,
+                                client_id: ds.client_id,
+                                state: DownstairsState::Exit,
+                                pid: cmd.id(),
+                            }).await;
+                            stop_notify = false;
+                        }
+                    }
+                    Err(e) => {
+                        // Just exit here?
+                        let _ = tx.send(MonitorInfo {
+                            port: ds.port,
+                            client_id: ds.client_id,
+                            state: DownstairsState::Error,
+                            pid: cmd.id(),
+                        }).await;
+                        panic!(
+                            "[{}] wait error {} from downstairs",
+                            ds.port, e
+                        );
+                    }
+                }
+                // restart if desired, otherwise stay down.
+                if keep_running || start_once {
+                    println!("[{}]I am going to restart", ds.port);
+                    cmd = start_ds(&ds, &tx).await;
+                    start_once = false;
+                    stop_notify = true;
+                } else {
+                    // Don't loop too fast if we are not required to restart
+                    tokio::time::sleep_until(deadline_secs(2)).await;
+                }
+            }
         }
     }
-    println!("[{}] thread all done", ds.port);
 }
 
 /*
- * Create a default region set.  Attach it to our test info struct
+ * Create a default region set.  Attach it to our dsc info struct
  */
-fn create_region_set(
-    ti: &mut TestInfo,
+async fn create_region_set(
+    dsci: &DscInfo,
     extent_size: u64,
     extent_count: u64,
     block_size: u32,
     port_base: u32,
 ) -> Result<()> {
-    // How far apart the ports are for a default region set.
-    // Note that this value is sprinkled all over the tests scripts,
-    // so when you change it here, go forth and search.
-    const DEFAULT_PORT_STEP: u32 = 10;
     let mut port = port_base;
 
     for _ in 0..3 {
-        let _ = ti
+        let _ = dsci
             .create_ds_region(
                 port,
                 extent_size,
@@ -413,6 +866,7 @@ fn create_region_set(
                 block_size,
                 false,
             )
+            .await
             .unwrap();
         port += DEFAULT_PORT_STEP;
     }
@@ -425,23 +879,19 @@ fn create_region_set(
  * standard deviation, min, and max for the creation.
  * The region is created and deleted each time.
  */
-fn loop_create_test(
-    ti: &mut TestInfo,
+async fn loop_create_test(
+    dsci: &DscInfo,
     extent_size: u64,
     extent_count: u64,
     block_size: u32,
 ) -> Result<()> {
     let mut times = Vec::new();
     for _ in 0..5 {
-        let ct = ti.create_ds_region(
-            3810,
-            extent_size,
-            extent_count,
-            block_size,
-            true,
-        )?;
+        let ct = dsci
+            .create_ds_region(3810, extent_size, extent_count, block_size, true)
+            .await?;
         times.push(ct);
-        ti.delete_ds_region(3810)?;
+        dsci.delete_ds_region(3810)?;
     }
 
     let size = region_si(extent_size, extent_count, block_size);
@@ -486,15 +936,16 @@ fn efile_si(es: u64, bs: u32) -> String {
  * Create a single downstairs region with the passed in values.
  * Report the time and stats in the standard format, then delete the region.
  */
-fn single_create_test(
-    ti: &mut TestInfo,
+async fn single_create_test(
+    dsci: &DscInfo,
     extent_size: u64,
     extent_count: u64,
     block_size: u32,
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
-    let ct =
-        ti.create_ds_region(3810, extent_size, extent_count, block_size, true)?;
+    let ct = dsci
+        .create_ds_region(3810, extent_size, extent_count, block_size, true)
+        .await?;
 
     let size = region_si(extent_size, extent_count, block_size);
     let extent_file_size = efile_si(extent_size, block_size);
@@ -502,7 +953,7 @@ fn single_create_test(
         "{:>9.3} {}  {} {:>6} {:>6} {:>4}",
         ct, size, extent_file_size, extent_size, extent_count, block_size,
     );
-    ti.delete_ds_region(3810)?;
+    dsci.delete_ds_region(3810)?;
 
     // If requested, also write out the results to the csv file
     if let Some(csv) = csv {
@@ -526,8 +977,8 @@ fn single_create_test(
  * the overall region size as well as blocks per extent (extent_size) and
  * total number of extent files (extent_count).
  */
-fn region_create_test(
-    ti: &mut TestInfo,
+async fn region_create_test(
+    dsci: &DscInfo,
     long: bool,
     csv_out: Option<PathBuf>,
 ) -> Result<()> {
@@ -589,9 +1040,10 @@ fn region_create_test(
             // a correct ec.
             let ec = (rs / (block_size as u64)) / es;
             if long {
-                loop_create_test(ti, *es, ec, block_size)?;
+                loop_create_test(dsci, *es, ec, block_size).await?;
             } else {
-                single_create_test(ti, *es, ec, block_size, &mut csv_file)?;
+                single_create_test(dsci, *es, ec, block_size, &mut csv_file)
+                    .await?;
             }
         }
     }
@@ -600,49 +1052,109 @@ fn region_create_test(
 
 fn main() -> Result<()> {
     let args = Cli::parse();
+    // If any of our async tasks in our runtime panic, then we should
+    // exit the program right away.
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
 
-    // XXX Some WIP here.  The eventual idea is to allow this tool to
-    // use an existing region instead of creating one each time.
-    // To avoid destroying the region by accident, we have a flag that
-    // specifies it is okay to delete it.
-    if Path::new(&args.output_dir).exists() {
-        if args.cleanup {
+    // If requested, remove any existing dsc files/regions
+    if args.cleanup {
+        if Path::new(&args.output_dir).exists() {
+            println!("Removing existing dsc directory {:?}", args.output_dir);
             std::fs::remove_dir_all(&args.output_dir)?;
-        } else {
-            bail!("Remove output {:?} before running", args.output_dir);
         }
-    }
-    if Path::new(&args.region_dir).exists() {
-        if args.cleanup {
+        if Path::new(&args.region_dir).exists() {
+            println!("Removing existing region {:?}", args.region_dir);
             std::fs::remove_dir_all(&args.region_dir)?;
-        } else {
-            bail!("Remove region {:?} before running", args.region_dir);
         }
     }
 
-    let mut ti =
-        TestInfo::new(args.ds_bin, args.output_dir, args.region_dir).unwrap();
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(10)
+        .thread_name("dsc")
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // This channel is used to communicate between the dropshot server
+    // and the dsc main thread.
+    let (notify_tx, notify_rx) = watch::channel(0);
 
     match args.command {
-        Commands::RegionPerf { long, csv_out } => {
-            region_create_test(&mut ti, long, csv_out)?;
-        }
-        Commands::Start {
+        Commands::Create {
             block_size,
             extent_size,
             extent_count,
         } => {
-            create_region_set(
-                &mut ti,
+            let dsci = DscInfo::new(
+                args.ds_bin,
+                args.output_dir,
+                args.region_dir.clone(),
+                notify_tx,
+                true,
+            )?;
+
+            runtime.block_on(create_region_set(
+                &dsci,
                 extent_size,
                 extent_count,
                 block_size,
                 8810,
+            ))
+        }
+        Commands::RegionPerf { long, csv_out } => {
+            let dsci = DscInfo::new(
+                args.ds_bin,
+                args.output_dir,
+                args.region_dir.clone(),
+                notify_tx,
+                true,
             )?;
-            ti.start_all_downstairs();
+            runtime.block_on(region_create_test(&dsci, long, csv_out))
+        }
+        Commands::Start {
+            create,
+            block_size,
+            extent_size,
+            extent_count,
+            control,
+        } => {
+            // Delete any existing region if requested
+            if create && Path::new(&args.region_dir).exists() {
+                println!("Removing existing region {:?}", args.region_dir);
+                std::fs::remove_dir_all(&args.region_dir)?;
+            }
+
+            let dsci = DscInfo::new(
+                args.ds_bin,
+                args.output_dir,
+                args.region_dir.clone(),
+                notify_tx,
+                create,
+            )?;
+
+            if create {
+                runtime.block_on(create_region_set(
+                    &dsci,
+                    extent_size,
+                    extent_count,
+                    block_size,
+                    8810,
+                ))?;
+            } else {
+                dsci.generate_region_set(8810)?;
+            }
+
+            let dsci_c = Arc::clone(&dsci);
+            // Start the dropshot control endpoint
+            runtime.spawn(control::begin(dsci_c, control));
+
+            runtime.block_on(start_dsc(&dsci, notify_rx))
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -653,12 +1165,13 @@ mod test {
     #[test]
     fn new_ti() {
         // Test a typical creation
-        // The empty file fake_bin is good enough for our test here.
-        let fake_bin = "./dsbin".to_string();
-        File::create(fake_bin.clone()).unwrap();
+        // The empty file ds_bin is good enough for our test here.
+        let ds_bin = "./dsbin".to_string();
+        File::create(ds_bin.clone()).unwrap();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
-        let res = TestInfo::new(fake_bin, dir.clone(), dir.clone());
+        let (tx, _) = watch::channel(0);
+        let res = DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true);
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
     }
@@ -668,7 +1181,9 @@ mod test {
         // Send a directory instead of a file for downstairs_bin, should
         // return error.
         let dir = tempdir().unwrap().as_ref().to_path_buf();
-        let res = TestInfo::new("/dev/null".to_string(), dir.clone(), dir);
+        let (tx, _) = watch::channel(0);
+        let res =
+            DscInfo::new("/dev/null".to_string(), dir.clone(), dir, tx, true);
 
         assert!(res.is_err());
     }
@@ -677,40 +1192,57 @@ mod test {
     fn existing_ti() {
         // Try to create the same directories twice, which should
         // return error on the second try.
-        let fake_bin = "./dsbin".to_string();
-        File::create(fake_bin.clone()).unwrap();
+        let ds_bin = "./dsbin".to_string();
+        File::create(ds_bin.clone()).unwrap();
 
         let output_dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_dir = tempdir().unwrap().as_ref().to_path_buf();
         // First create the new directories.
-        TestInfo::new(fake_bin.clone(), output_dir.clone(), region_dir.clone())
-            .unwrap();
+        let (tx, _) = watch::channel(0);
+        DscInfo::new(
+            ds_bin.clone(),
+            output_dir.clone(),
+            region_dir.clone(),
+            tx,
+            true,
+        )
+        .unwrap();
         // Now, create them again and expect an error.
-        let res = TestInfo::new(fake_bin, output_dir, region_dir);
+        let (tx, _) = watch::channel(0);
+        let res = DscInfo::new(ds_bin, output_dir, region_dir, tx, true);
         assert!(res.is_err());
     }
 
     #[test]
     fn delete_bad_region() {
         // Test deletion of a region that does not exist, should report error.
-        let fake_bin = "./dsbin".to_string();
-        File::create(fake_bin.clone()).unwrap();
+        let ds_bin = "./dsbin".to_string();
+        File::create(ds_bin.clone()).unwrap();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
-        let mut ti = TestInfo::new(fake_bin, dir.clone(), dir).unwrap();
+        let (tx, _) = watch::channel(0);
+        let dsci = DscInfo::new(ds_bin, dir.clone(), dir, tx, true).unwrap();
 
-        let res = ti.delete_ds_region(8810);
+        let res = dsci.delete_ds_region(8810);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn port_to_region_generation() {
+        let nr = port_to_region("/var/tmp/rr".to_string(), 1234).unwrap();
+        assert_eq!(nr, "/var/tmp/rr/1234".to_string());
     }
 
     #[test]
     fn delete_region() {
         // Test creation then deletion of a region
-        let fake_bin = "./dsbin".to_string();
-        File::create(fake_bin.clone()).unwrap();
+        let ds_bin = "./dsbin".to_string();
+        File::create(ds_bin.clone()).unwrap();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
-        let mut ti = TestInfo::new(fake_bin, dir.clone(), dir.clone()).unwrap();
+        let (tx, _) = watch::channel(0);
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true).unwrap();
 
         // Manually create the region directory.  We have to convert the
         // PathBuf back into a string.
@@ -721,8 +1253,67 @@ mod test {
         .unwrap();
         fs::create_dir_all(&ds_region_dir).unwrap();
 
-        let res = ti.delete_ds_region(8810);
+        let res = dsci.delete_ds_region(8810);
         assert!(res.is_ok());
         assert!(!Path::new(&ds_region_dir).exists());
+    }
+
+    #[test]
+    fn restart_region() {
+        // Test a typical creation
+        // The empty file ds_bin is good enough for our test here.
+        let ds_bin = "./dsbin".to_string();
+        File::create(ds_bin.clone()).unwrap();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let (tx, _) = watch::channel(0);
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true).unwrap();
+        assert!(Path::new(&dir).exists());
+
+        // Manually create the region set.  We have to convert the
+        // PathBuf back into a string.
+        for port in &[8810, 8820, 8830] {
+            let ds_region_dir = port_to_region(
+                dir.clone().into_os_string().into_string().unwrap(),
+                *port,
+            )
+            .unwrap();
+            fs::create_dir_all(&ds_region_dir).unwrap();
+        }
+
+        // Verify that we can find the existing region directories.
+        dsci.generate_region_set(8810).unwrap();
+        let mut rs = dsci.rs.lock().unwrap();
+        assert_eq!(rs.next_client_id(), 3);
+    }
+
+    #[test]
+    fn restart_region_bad() {
+        // Test region restart when a region directory is not present.
+        // This should return error.
+        let ds_bin = "./dsbin".to_string();
+        File::create(ds_bin.clone()).unwrap();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let (tx, _) = watch::channel(0);
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true).unwrap();
+        assert!(Path::new(&dir).exists());
+
+        // Manually create the 2/3 of the region set.
+        // We have to convert the PathBuf back into a string.
+        for port in &[8810, 8830] {
+            let ds_region_dir = port_to_region(
+                dir.clone().into_os_string().into_string().unwrap(),
+                *port,
+            )
+            .unwrap();
+            fs::create_dir_all(&ds_region_dir).unwrap();
+        }
+
+        // Verify that the missing region will return error.
+        let res = dsci.generate_region_set(8810);
+        assert!(res.is_err());
     }
 }
