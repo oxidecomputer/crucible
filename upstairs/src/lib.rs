@@ -133,6 +133,7 @@ mod cdt {
 pub struct CrucibleOpts {
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
+    pub flush_timeout: Option<u32>,
     pub key: Option<String>,
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
@@ -3097,6 +3098,7 @@ impl Upstairs {
         let opts = CrucibleOpts {
             target: vec![],
             lossy: false,
+            flush_timeout: None,
             key: None,
             cert_pem: None,
             key_pem: None,
@@ -6595,8 +6597,17 @@ async fn up_listen(
     dst: Vec<Target>,
     mut ds_status_rx: mpsc::Receiver<Condition>,
     mut ds_reconcile_done_rx: mpsc::Receiver<Repair>,
+    timeout: Option<u32>,
 ) {
     println!("Wait for all three downstairs to come online");
+    let flush_timeout = {
+        if timeout.is_some() {
+            timeout.unwrap()
+        } else {
+            5
+        }
+    };
+    println!("Flush timeout: {}", flush_timeout);
     let mut lastcast = 1;
 
     /*
@@ -6610,7 +6621,7 @@ async fn up_listen(
     let mut leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
 
     up.stat_update("start");
-    let mut flush_check = deadline_secs(5);
+    let mut flush_check = deadline_secs(flush_timeout.into());
     let mut show_work_interval = deadline_secs(5);
     loop {
         /*
@@ -6691,7 +6702,7 @@ async fn up_listen(
                  */
                 up.stat_update("loop");
 
-                flush_check = deadline_secs(5);
+                flush_check = deadline_secs(flush_timeout.into());
             }
             _ = sleep_until(show_work_interval) => {
                 //show_all_work(up);
@@ -6838,7 +6849,14 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Once connected, we then take work requests from the guest and
      * submit them into the upstairs
      */
-    up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx).await;
+    up_listen(
+        &up,
+        dst,
+        ds_status_rx,
+        ds_reconcile_done_rx,
+        opt.flush_timeout,
+    )
+    .await;
 
     Ok(())
 }

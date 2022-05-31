@@ -73,6 +73,12 @@ enum CliCommand {
         /// Number of outstanding IOs at the same time
         #[clap(long, default_value = "1")]
         io_depth: usize,
+        /// Number of read test loops to do.
+        #[clap(long, default_value = "2")]
+        read_loops: usize,
+        /// Number of write test loops to do.
+        #[clap(long, default_value = "2")]
+        write_loops: usize,
     },
     /// Quit the CLI
     Quit,
@@ -266,8 +272,17 @@ async fn cmd_to_msg(
             count,
             io_size,
             io_depth,
+            read_loops,
+            write_loops,
         } => {
-            fw.send(CliMessage::Perf(count, io_size, io_depth)).await?;
+            fw.send(CliMessage::Perf(
+                count,
+                io_size,
+                io_depth,
+                read_loops,
+                write_loops,
+            ))
+            .await?;
         }
         CliCommand::Quit => {
             println!("The quit command has nothing to send");
@@ -622,7 +637,7 @@ async fn process_cli_command(
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
         }
-        CliMessage::Perf(count, io_size, io_depth) => {
+        CliMessage::Perf(count, io_size, io_depth, read_loops, write_loops) => {
             if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -630,7 +645,14 @@ async fn process_cli_command(
                 .await
             } else {
                 match perf_workload(
-                    guest, ri, &mut None, count, io_size, io_depth,
+                    guest,
+                    ri,
+                    &mut None,
+                    count,
+                    io_size,
+                    io_depth,
+                    read_loops,
+                    write_loops,
                 )
                 .await
                 {

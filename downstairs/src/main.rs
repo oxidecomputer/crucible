@@ -13,6 +13,7 @@ use slog::Drain;
 use structopt::StructOpt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use usdt::register_probes;
 use uuid::Uuid;
 
 use crucible_downstairs::admin::*;
@@ -202,7 +203,7 @@ async fn main() -> Result<()> {
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None)?;
+                region.region_flush(1, 0, &None, 0)?;
             }
 
             println!("UUID: {:?}", region.def().uuid());
@@ -277,6 +278,15 @@ async fn main() -> Result<()> {
                     .with(telemetry)
                     .try_init()
                     .expect("Error init tracing subscriber");
+            }
+
+            match register_probes() {
+                Ok(()) => {
+                    println!("DTrace probes registered okay");
+                }
+                Err(e) => {
+                    println!("Error registering DTrace probes: {:?}", e);
+                }
             }
 
             let read_only = mode == Mode::Ro;
