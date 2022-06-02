@@ -35,6 +35,11 @@ produced from running downstairs with the `--oximeter` option.  This script
 is hard coded with a downstairs UUID and is intended to provide a sample to
 build off of.
 
+## show_ox_upstairs.sh
+A sample script that uses `oxdb` and `jq` to dump some oximeter stats
+produced from running the upstairs.  This script is hard coded with a
+downstairs UUID and is intended to provide a sample to build off of.
+
 ## test_ds.sh
 Test import then export for crucible downstairs.
 

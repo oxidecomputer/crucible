@@ -56,6 +56,9 @@ mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
+mod stats;
+pub use stats::*;
+
 pub trait BlockIO {
     fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
 
@@ -121,6 +124,12 @@ mod cdt {
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn up__to__ds__read__start(_: u64) {}
+    fn up__to__ds__read__done(_: u64) {}
+    fn up__to__ds__write__start(_: u64) {}
+    fn up__to__ds__write__done(_: u64) {}
+    fn up__to__ds__flush__start(_: u64) {}
+    fn up__to__ds__flush__done(_: u64) {}
     fn ds__read__io__start(_: u64, _: u64) {}
     fn ds__write__io__start(_: u64, _: u64) {}
     fn ds__flush__io__start(_: u64, _: u64) {}
@@ -2223,10 +2232,16 @@ impl Downstairs {
     }
 
     /*
-     * This function just does the match on IOop type and updates the dtrace
-     * probe for that operation finishing.
+     * This function does a match on IOop type and updates the oximeter
+     * stat and dtrace probe for that operation.
      */
-    fn cdt_gw_work_done(&self, ds_id: u64, gw_id: u64) {
+    fn cdt_gw_work_done(
+        &self,
+        ds_id: u64,
+        gw_id: u64,
+        io_size: usize,
+        stats: &UpStatOuter,
+    ) {
         let job = self
             .active
             .get(&ds_id)
@@ -2239,12 +2254,14 @@ impl Downstairs {
                 requests: _,
             } => {
                 cdt::gw__read__done!(|| (gw_id));
+                stats.add_read(io_size as i64);
             }
             IOop::Write {
                 dependencies: _,
                 writes: _,
             } => {
                 cdt::gw__write__done!(|| (gw_id));
+                stats.add_write(io_size as i64);
             }
             IOop::Flush {
                 dependencies: _,
@@ -2253,6 +2270,7 @@ impl Downstairs {
                 snapshot_details: _,
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
+                stats.add_flush();
             }
         }
     }
@@ -2678,6 +2696,7 @@ impl Downstairs {
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__read__done!(|| job.guest_id);
                     } else {
                         /*
                          * If another job has finished already, we can
@@ -2710,6 +2729,7 @@ impl Downstairs {
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__write__done!(|| job.guest_id);
                     }
                 }
                 IOop::Flush {
@@ -2730,6 +2750,7 @@ impl Downstairs {
                     {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__flush__done!(|| job.guest_id);
                         if deactivate {
                             println!(
                                 "[{}] deactivate flush {} done",
@@ -3004,6 +3025,7 @@ impl UpstairsState {
         }
         self.active_request = false;
         self.up_state = UpState::Active;
+
         println!("{} is now active", uuid);
         Ok(())
     }
@@ -3090,6 +3112,11 @@ pub struct Upstairs {
      * queue was not a flush.
      */
     need_flush: Mutex<bool>,
+
+    /*
+     * Upstairs stats.
+     */
+    stats: UpStatOuter,
 }
 
 impl Upstairs {
@@ -3146,9 +3173,14 @@ impl Upstairs {
             ))
         });
 
+        let uuid = Uuid::new_v4(); // XXX get from Nexus?
+        let stats = UpStatOuter {
+            up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
+        };
+
         Arc::new(Upstairs {
             active: Mutex::new(UpstairsState::default()),
-            uuid: Uuid::new_v4(),      // XXX get from Nexus?
+            uuid,
             generation: Mutex::new(0), // XXX Also get from Nexus?
             guest,
             downstairs: Mutex::new(Downstairs::new(opt.target.clone())),
@@ -3156,6 +3188,7 @@ impl Upstairs {
             ddef: Mutex::new(def),
             encryption_context,
             need_flush: Mutex::new(false),
+            stats,
         })
     }
 
@@ -3193,10 +3226,13 @@ impl Upstairs {
      * re-join than the original compare all downstairs to each other
      * that happens on initial startup. This is because the running
      * upstairs has some state it can use to re-verify a downstairs.
+     *
+     * Note this method is only called during tests.
      */
     #[cfg(test)]
     fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().unwrap();
+        self.stats.add_activation();
         active.set_active(self.uuid)
     }
 
@@ -3545,6 +3581,7 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
         let next_id = downstairs.next_id();
         let next_flush = self.next_flush_id();
+        cdt::gw__flush__start!(|| (gw_id));
 
         /*
          * Walk the downstairs work active list, and pull out all the active
@@ -3579,9 +3616,9 @@ impl Upstairs {
 
         let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         gw.active.insert(gw_id, new_gtos);
-        cdt::gw__flush__start!(|| (gw_id));
 
         downstairs.enqueue(fl);
+        cdt::up__to__ds__flush__start!(|| (gw_id));
 
         Ok(())
     }
@@ -3629,6 +3666,7 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
+        cdt::gw__write__start!(|| (gw_id));
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -3697,9 +3735,9 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt::gw__write__start!(|| (gw_id));
 
         downstairs.enqueue(wr);
+        cdt::up__to__ds__write__start!(|| (gw_id));
 
         Ok(())
     }
@@ -3746,6 +3784,7 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
+        cdt::gw__read__start!(|| (gw_id));
 
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
@@ -3787,9 +3826,9 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt::gw__read__start!(|| (gw_id));
 
         downstairs.enqueue(wr);
+        cdt::up__to__ds__read__start!(|| (gw_id));
 
         Ok(())
     }
@@ -4420,6 +4459,7 @@ impl Upstairs {
                     *s = DsState::Active;
                 }
                 active.set_active(self.uuid)?;
+                self.stats.add_activation();
             }
         } else {
             /*
@@ -4447,6 +4487,7 @@ impl Upstairs {
                     *s = DsState::Active;
                 }
                 active.set_active(self.uuid)?;
+                self.stats.add_activation();
                 println!("{} Set Active after no repair", self.uuid);
             }
         }
@@ -4897,6 +4938,37 @@ impl DownstairsIO {
         }
 
         wc
+    }
+
+    /*
+     * Return the size of the IO in bytes
+     * Depending on the IO (write or read) we have to look in a different
+     * location to get the size.
+     */
+    pub fn io_size(&self) -> usize {
+        match &self.work {
+            IOop::Write {
+                dependencies: _,
+                writes,
+            } => writes.iter().map(|w| w.data.len()).sum(),
+            IOop::Flush {
+                dependencies: _,
+                flush_number: _flush_number,
+                gen_number: _,
+                snapshot_details: _,
+            } => 0,
+            IOop::Read {
+                dependencies: _,
+                requests: _,
+            } => {
+                if self.data.is_some() {
+                    let rrs = self.data.as_ref().unwrap();
+                    rrs.iter().map(|r| r.data.len()).sum()
+                } else {
+                    0
+                }
+            }
+        }
     }
 }
 
@@ -6342,13 +6414,14 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let ds_id = done.ds_id;
             assert_eq!(*ds_id_done, ds_id);
 
+            let io_size = done.io_size();
             let data = done.data.take();
 
             work.ack(ds_id);
 
             gw.gw_ds_complete(gw_id, ds_id, data, work.result(ds_id));
 
-            work.cdt_gw_work_done(ds_id, gw_id);
+            work.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats);
 
             work.retire_check(ds_id);
         }
@@ -6751,6 +6824,24 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     let upc = Arc::clone(&up);
     tokio::spawn(async move {
         up_ds_listen(&upc, ds_done_rx).await;
+    });
+
+    /*
+     * spawn a task to register with Oximeter and handle it.
+     */
+    let up_oxc = Arc::clone(&up);
+    let ups = up_oxc.stats.clone();
+    tokio::spawn(async move {
+        // XXX How do I find the IP of propolis or whomever I'm
+        // running on?
+        let my_addr: SocketAddr = "127.0.0.1:55443".parse().unwrap();
+        // XXX How do we get the correct address for registering with nexus?
+        let reg_addr: SocketAddr = "127.0.0.1:12221".parse().unwrap();
+        if let Err(e) = up_oximeter(ups, reg_addr, my_addr).await {
+            println!("ERROR: Oximeter failed: {:?}", e);
+        } else {
+            println!("OK: Oximeter stats exits.");
+        }
     });
 
     let tls_context = if let Some(cert_pem_path) = opt.cert_pem {

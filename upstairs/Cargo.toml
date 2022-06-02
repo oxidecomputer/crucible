@@ -16,12 +16,16 @@ asm = ["usdt/asm"]
 anyhow = "1"
 base64 = "0.13.0"
 bytes = "1"
+chrono = { version = "0.4.19", features = [ "serde" ] }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 crucible-scope = { path = "../scope" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 futures = "0.3"
 futures-core = "0.3"
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 rand = "0.8.5"
 ringbuffer = "0.8"
 schemars = { version = "0.8.10", features = [ "uuid1" ] }
