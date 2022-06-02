@@ -1,8 +1,11 @@
 /*
  * Watch a upstairs flush and write IOs.
- * 1st report is gw to ds sending it to the OS.
- * 2nd report is OS time (for flush, to flush all extents)
- * 3rd report is OS done to sending ACK back to upstairs/
+ * Report on:
+ * 1: From IO received in the upstairs to IO being submitted to the
+ * queue of work for the three downstairs.
+ * 2: From IO on downstairs queue, to enough downstairs completing the
+ * IO that it is ready to ack.
+ * 3: From the IO being ready to ack, to that ack being sent.
  *
  * arg0 is the job ID number.
  */
