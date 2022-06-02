@@ -1,6 +1,6 @@
 #!/bin/bash
 
-UUID=1ade0b6e-9330-472b-a0c9-c60f1b9ab815
+UUID=e2d8e8ad-17bf-4d03-b364-02fe8f41d064
 # Show me the stats for a hard coded upstairs UUID
 # All sorts of assumptions here.  Make it better if you so desire.
 if [[ -f ../omicron/target/debug/oxdb ]]; then
@@ -12,6 +12,7 @@ else
     exit 1
 fi
 
+echo "Showing upstairs stats for UUID: $UUID"
 for stat in flush read write activated write_bytes read_bytes; do
     last_time=$($OXDB query crucible_upstairs:$stat upstairs_uuid=="$UUID" | jq '.[].measurements[].timestamp '| sort -n | tail -1)
 
