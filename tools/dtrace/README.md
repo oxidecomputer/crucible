@@ -182,6 +182,22 @@ dtrace: script 'perfgw.d' matched 6 probes
        134217728 |
 ```
 
+## perf-downstairs-d
+Trace all IOs from when the downstairs received them to when the downstairs
+has completed them and is about to ack to the upstairs.  Grouped by IO
+type (R/W/F).
+
+## perf-downstairs-os.d
+Trace all IOs on a downstairs from when the downstairs sent them to the OS for
+servicing (almost, sort of, see the code) to when the downstairs receives
+an answer back from the OS. Grouped by PID and IO type (R/W/F).
+
+## perf-downstairs-three.d
+Trace a downstairs IO and measure time for in in the following three parts:
+* 1st report is time for IO received (from upstairs) to sending it to the OS.
+* 2nd report is OS time (for flush, to flush all extents)
+* 3rd report is OS done to downstairs sending the ACK back to upstairs
+
 ## upstairs_info.d
 This is a dtrace script for printing some simple upstairs state info.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will
