@@ -1444,7 +1444,7 @@ async fn perf_workload(
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     let mut rng = rand::thread_rng();
@@ -1524,7 +1524,7 @@ async fn perf_workload(
             if wc.up_count + wc.ds_count == 0 {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 

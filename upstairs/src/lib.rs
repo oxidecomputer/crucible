@@ -6600,13 +6600,7 @@ async fn up_listen(
     timeout: Option<u32>,
 ) {
     println!("Wait for all three downstairs to come online");
-    let flush_timeout = {
-        if timeout.is_some() {
-            timeout.unwrap()
-        } else {
-            5
-        }
-    };
+    let flush_timeout = timeout.unwrap_or(5);
     println!("Flush timeout: {}", flush_timeout);
     let mut lastcast = 1;
 
