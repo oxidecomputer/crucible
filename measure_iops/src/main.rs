@@ -77,6 +77,8 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: None,
+        oximeter_listen: None,
+        oximeter_register: None,
     };
 
     /*

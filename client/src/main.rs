@@ -144,6 +144,14 @@ pub struct Opt {
     /// IP:Port for the upstairs control http server
     #[clap(long, global = true)]
     control: Option<SocketAddr>,
+
+    /// IP:Port for the oximeter register address
+    #[clap(long, global = true, default_value = "127.0.0.1:12221")]
+    oximeter_register: SocketAddr,
+
+    /// IP:Port for the oximeter listen address
+    #[clap(long, global = true, default_value = "127.0.0.1:55443")]
+    oximeter_listen: SocketAddr,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -426,6 +434,8 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
+        oximeter_listen: Some(opt.oximeter_listen),
+        oximeter_register: Some(opt.oximeter_register),
     };
 
     /*

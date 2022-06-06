@@ -1,6 +1,6 @@
 #!/bin/bash
 
-UUID=e2d8e8ad-17bf-4d03-b364-02fe8f41d064
+UUID=4f0d2ac9-dde5-44cf-9011-12add9cd975a
 # Show me the stats for a hard coded upstairs UUID
 # All sorts of assumptions here.  Make it better if you so desire.
 if [[ -f ../omicron/target/debug/oxdb ]]; then

@@ -185,6 +185,8 @@ pub struct CrucibleOpts {
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
+    pub oximeter_listen: Option<SocketAddr>,
+    pub oximeter_register: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -3167,6 +3169,8 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
+            oximeter_listen: None,
+            oximeter_register: None,
         };
         Self::new(
             &opts,
@@ -6864,23 +6868,22 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
         up_ds_listen(&upc, ds_done_rx).await;
     });
 
-    /*
-     * spawn a task to register with Oximeter and handle it.
-     */
-    let up_oxc = Arc::clone(&up);
-    let ups = up_oxc.stats.clone();
-    tokio::spawn(async move {
-        // XXX How do I find the IP of propolis or whomever I'm
-        // running on?
-        let my_addr: SocketAddr = "127.0.0.1:55443".parse().unwrap();
-        // XXX How do we get the correct address for registering with nexus?
-        let reg_addr: SocketAddr = "127.0.0.1:12221".parse().unwrap();
-        if let Err(e) = up_oximeter(ups, reg_addr, my_addr).await {
-            println!("ERROR: Oximeter failed: {:?}", e);
-        } else {
-            println!("OK: Oximeter stats exits.");
-        }
-    });
+    if opt.oximeter_register.is_some() && opt.oximeter_listen.is_some() {
+        /*
+         * spawn a task to register with Oximeter and handle it.
+         */
+        let up_oxc = Arc::clone(&up);
+        let ups = up_oxc.stats.clone();
+        let my_addr = opt.oximeter_listen.unwrap();
+        let my_reg = opt.oximeter_register.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = up_oximeter(ups, my_reg, my_addr).await {
+                println!("ERROR: Oximeter failed: {:?}", e);
+            } else {
+                println!("OK: Oximeter stats exits.");
+            }
+        });
+    }
 
     let tls_context = if let Some(cert_pem_path) = opt.cert_pem {
         let key_pem_path = opt.key_pem.unwrap();
