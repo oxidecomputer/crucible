@@ -114,6 +114,44 @@ pub trait BlockIO {
     }
 }
 
+/// Stats tracking the path of an IO through the Upstairs.
+///
+/// For each read/write/flush, we have a DTrace probe at specific
+/// points throughout its path through the upstairs.  Below is the basic
+/// order of probes an IO will hit as it works its way through the
+/// system.
+///
+/// gw__*__start: This is when the upstairs has taken work from the
+/// `guest` structure and created a new `gw_id` used to track this IO
+/// through the system.  At the point of this probe, we have already
+/// taken two locks, so it's not the very beginning of an IO, but it is
+/// as close as we get after the `gw_id` is created.
+///
+/// up__to__ds_*_start: (Upstairs__to__Downstairs) At this point we have
+/// created the structures to track this IO through the Upstairs and added
+/// it to internal work queues, including the work queue for the three
+/// downstairs tasks that are responsible for sending IO to each
+/// downstairs.  This probe firing does not mean that a downstairs task
+/// has received or is acting on the IO yet, it just means the notification
+/// has been sent.
+///
+/// ds__*__io__start: This is when a downstairs task puts an IO on the
+/// wire to the actual downstairs that will do the work. This probe has
+/// both the job ID and the client ID so we can tell the individual
+/// downstairs apart.
+///
+/// ds__*__io_done: An ACK has been received from a downstairs for an IO
+/// sent to it. At the point of this probe the IO has just come off the
+/// wire and we have not processed it yet.
+///
+/// up__to__ds__*__done: (Upstairs__to__Downstairs) This is the point where
+/// the upstairs has decided that it has enough data to complete an IO
+/// and send an ACK back to the guest.  For a read, this could be the the
+/// first IO to respond from the downstairs.  For a write/flush, we have
+/// two downstairs that have ACK'd the IO.
+///
+/// gw__*__done: An IO is completed and the Upstairs has sent the
+/// completion notice to the guest.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
     use crate::Arg;
@@ -121,21 +159,21 @@ mod cdt {
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__read__done(_: u64) {}
-    fn gw__write__done(_: u64) {}
-    fn gw__flush__done(_: u64) {}
     fn up__to__ds__read__start(_: u64) {}
-    fn up__to__ds__read__done(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
-    fn up__to__ds__write__done(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
-    fn up__to__ds__flush__done(_: u64) {}
     fn ds__read__io__start(_: u64, _: u64) {}
     fn ds__write__io__start(_: u64, _: u64) {}
     fn ds__flush__io__start(_: u64, _: u64) {}
     fn ds__read__io__done(_: u64, _: u64) {}
     fn ds__write__io__done(_: u64, _: u64) {}
     fn ds__flush__io__done(_: u64, _: u64) {}
+    fn up__to__ds__read__done(_: u64) {}
+    fn up__to__ds__write__done(_: u64) {}
+    fn up__to__ds__flush__done(_: u64) {}
+    fn gw__read__done(_: u64) {}
+    fn gw__write__done(_: u64) {}
+    fn gw__flush__done(_: u64) {}
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
