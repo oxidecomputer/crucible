@@ -66,6 +66,12 @@ enum Workload {
         /// Output file for IO times
         #[clap(long, global = true, parse(from_os_str), name = "PERF")]
         perf_out: Option<PathBuf>,
+        /// Number of read test loops to do.
+        #[clap(long, default_value = "2")]
+        read_loops: usize,
+        /// Number of write test loops to do.
+        #[clap(long, default_value = "2")]
+        write_loops: usize,
     },
     Rand,
     Repair,
@@ -144,6 +150,10 @@ pub struct Opt {
     /// IP:Port for the upstairs control http server
     #[clap(long, global = true)]
     control: Option<SocketAddr>,
+
+    /// How long to wait before the auto flush check fires
+    #[clap(long, global = true)]
+    flush_timeout: Option<u32>,
 
     /// IP:Port for the oximeter register address
     #[clap(long, global = true, default_value = "127.0.0.1:12221")]
@@ -429,6 +439,7 @@ fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: opt.lossy,
+        flush_timeout: opt.flush_timeout,
         key: opt.key,
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
@@ -653,6 +664,8 @@ fn main() -> Result<()> {
             io_size,
             io_depth,
             perf_out,
+            read_loops,
+            write_loops,
         } => {
             println!("Perf test");
             let ops = {
@@ -703,16 +716,16 @@ fn main() -> Result<()> {
                 "ES",
                 "EC",
             );
-            for _ in 0..2 {
-                runtime.block_on(perf_workload(
-                    &guest,
-                    &mut region_info,
-                    &mut opt_wtr,
-                    ops,
-                    io_depth,
-                    io_size,
-                ))?;
-            }
+            runtime.block_on(perf_workload(
+                &guest,
+                &mut region_info,
+                &mut opt_wtr,
+                ops,
+                io_depth,
+                io_size,
+                write_loops,
+                read_loops,
+            ))?;
             if opt.quit {
                 return Ok(());
             }
@@ -1415,12 +1428,16 @@ struct Record {
 /**
  * A simple IO test in two stages: 100% random writes, then 100% random
  * reads. The caller can select:
- * io_depth: The number of outstanding IOs issued at a time
+ * io_depth:      The number of outstanding IOs issued at a time
  * blocks_per_io: The size of each io (in multiple of block size).
- * count: The number of loops to perform for each test (all IOs in io_depth
- *        are considered as a single loop).
+ * count:         The number of loops to perform for each test (all IOs
+ *                in io_depth are considered as a single loop).
+ * write_loop:    The number of times to do the 100% write loop.
+ * read_loop:     The number of times to do the 100% read loop.
+ *
  * A summary is printed at the end of each stage.
  */
+#[allow(clippy::too_many_arguments)]
 async fn perf_workload(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
@@ -1428,7 +1445,18 @@ async fn perf_workload(
     count: usize,
     io_depth: usize,
     blocks_per_io: usize,
+    write_loop: usize,
+    read_loop: usize,
 ) -> Result<()> {
+    // Before we start, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue()?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
     let mut rng = rand::thread_rng();
     let io_size = blocks_per_io * ri.block_size as usize;
 
@@ -1453,99 +1481,112 @@ async fn perf_workload(
     let offset_mod =
         rng.gen::<u64>() % (ri.total_blocks - blocks_per_io) as u64;
 
-    let mut wtime = Vec::with_capacity(count);
-    let big_start = Instant::now();
-    for _ in 0..count {
-        let burst_start = Instant::now();
-        let mut write_waiters = Vec::with_capacity(io_depth);
-        for write_buffer in write_buffers.iter().take(io_depth) {
-            let offset: u64 = rng.gen::<u64>() % offset_mod;
+    for _ in 0..write_loop {
+        let mut wtime = Vec::with_capacity(count);
+        let big_start = Instant::now();
+        for _ in 0..count {
+            let burst_start = Instant::now();
+            let mut write_waiters = Vec::with_capacity(io_depth);
+            for write_buffer in write_buffers.iter().take(io_depth) {
+                let offset: u64 = rng.gen::<u64>() % offset_mod;
 
-            let waiter = guest.write_to_byte_offset(
-                offset * ri.block_size,
-                write_buffer.clone(),
-            )?;
-            write_waiters.push(waiter);
+                let waiter = guest.write_to_byte_offset(
+                    offset * ri.block_size,
+                    write_buffer.clone(),
+                )?;
+                write_waiters.push(waiter);
+            }
+
+            for mut waiter in write_waiters {
+                waiter.block_wait()?;
+            }
+            wtime.push(burst_start.elapsed());
         }
+        let big_end = big_start.elapsed();
 
-        for mut waiter in write_waiters {
-            waiter.block_wait()?;
-        }
-        wtime.push(burst_start.elapsed());
-    }
-    let big_end = big_start.elapsed();
-
-    guest.flush(None)?;
-    perf_summary("rwrites", count, io_depth, wtime.clone(), big_end, es, ec);
-    if let Some(wtr) = wtr {
-        perf_csv(
-            wtr,
-            "rwrite",
+        guest.flush(None)?;
+        perf_summary(
+            "rwrites",
             count,
             io_depth,
-            blocks_per_io,
-            big_end,
             wtime.clone(),
+            big_end,
             es,
             ec,
         );
-    }
-
-    // Before we start reads, make sure the work queues are empty.
-    loop {
-        let wc = guest.query_work_queue()?;
-        if wc.up_count + wc.ds_count == 0 {
-            break;
+        if let Some(wtr) = wtr {
+            perf_csv(
+                wtr,
+                "rwrite",
+                count,
+                io_depth,
+                blocks_per_io,
+                big_end,
+                wtime.clone(),
+                es,
+                ec,
+            );
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Before we loop or end, make sure the work queues are empty.
+        loop {
+            let wc = guest.query_work_queue()?;
+            if wc.up_count + wc.ds_count == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     let mut rtime = Vec::with_capacity(count);
-    let big_start = Instant::now();
-    for _ in 0..count {
-        let burst_start = Instant::now();
-        let mut read_waiters = Vec::with_capacity(io_depth);
-        for read_buffer in read_buffers.iter().take(io_depth) {
-            let offset: u64 = rng.gen::<u64>() % offset_mod;
+    for _ in 0..read_loop {
+        let big_start = Instant::now();
+        for _ in 0..count {
+            let burst_start = Instant::now();
+            let mut read_waiters = Vec::with_capacity(io_depth);
+            for read_buffer in read_buffers.iter().take(io_depth) {
+                let offset: u64 = rng.gen::<u64>() % offset_mod;
 
-            let waiter = guest.read_from_byte_offset(
-                offset * ri.block_size,
-                read_buffer.clone(),
-            )?;
-            read_waiters.push(waiter);
+                let waiter = guest.read_from_byte_offset(
+                    offset * ri.block_size,
+                    read_buffer.clone(),
+                )?;
+                read_waiters.push(waiter);
+            }
+            for mut waiter in read_waiters {
+                waiter.block_wait()?;
+            }
+            rtime.push(burst_start.elapsed());
         }
-        for mut waiter in read_waiters {
-            waiter.block_wait()?;
+        let big_end = big_start.elapsed();
+
+        perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
+
+        if let Some(wtr) = wtr {
+            perf_csv(
+                wtr,
+                "rread",
+                count,
+                io_depth,
+                blocks_per_io,
+                big_end,
+                rtime.clone(),
+                es,
+                ec,
+            );
         }
-        rtime.push(burst_start.elapsed());
-    }
-    let big_end = big_start.elapsed();
 
-    perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
-
-    if let Some(wtr) = wtr {
-        perf_csv(
-            wtr,
-            "rread",
-            count,
-            io_depth,
-            blocks_per_io,
-            big_end,
-            rtime.clone(),
-            es,
-            ec,
-        );
-    }
-
-    guest.flush(None)?;
-    // Before we return, make sure the work queues are empty.
-    loop {
-        let wc = guest.query_work_queue()?;
-        if wc.up_count + wc.ds_count == 0 {
-            return Ok(());
+        guest.flush(None)?;
+        // Before we finish, make sure the work queues are empty.
+        loop {
+            let wc = guest.query_work_queue()?;
+            if wc.up_count + wc.ds_count == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(4));
         }
-        std::thread::sleep(std::time::Duration::from_secs(4));
     }
+    Ok(())
 }
 /*
  * Generate a random offset and length, and write to then read from

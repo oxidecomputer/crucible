@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         target: opt.target,
         lossy: false,
+        flush_timeout: None,
         key: opt.key,
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,

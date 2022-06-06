@@ -536,11 +536,14 @@ fn show_extent(
             // Open Region read only
             let region = Region::open(&dir, Default::default(), false, true)?;
 
-            let mut responses = region.region_read(&[ReadRequest {
-                eid: cmp_extent as u64,
-                offset: Block::new_with_ddef(block, &region.def()),
-                num_blocks: 1,
-            }])?;
+            let mut responses = region.region_read(
+                &[ReadRequest {
+                    eid: cmp_extent as u64,
+                    offset: Block::new_with_ddef(block, &region.def()),
+                    num_blocks: 1,
+                }],
+                0,
+            )?;
             let response = responses.pop().unwrap();
 
             dvec.insert(index, response);
@@ -658,11 +661,14 @@ fn show_extent_block(
         // Open Region read only
         let region = Region::open(&dir, Default::default(), false, true)?;
 
-        let mut responses = region.region_read(&[ReadRequest {
-            eid: cmp_extent as u64,
-            offset: Block::new_with_ddef(block_in_extent, &region.def()),
-            num_blocks: 1,
-        }])?;
+        let mut responses = region.region_read(
+            &[ReadRequest {
+                eid: cmp_extent as u64,
+                offset: Block::new_with_ddef(block_in_extent, &region.def()),
+                num_blocks: 1,
+            }],
+            0,
+        )?;
         let response = responses.pop().unwrap();
 
         dvec.insert(index, response);

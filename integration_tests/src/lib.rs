@@ -89,6 +89,7 @@ mod test {
                             "127.0.0.1:54003".parse()?,
                         ],
                         lossy: false,
+                        flush_timeout: None,
                         key: Some(
                             "YVubErJfMsHeaM+v3UY+11IutzbiArT1woP91BWj/Zc="
                                 .to_string(),
@@ -178,6 +179,7 @@ mod test {
                     "127.0.0.1:54006".parse()?,
                 ],
                 lossy: false,
+                flush_timeout: None,
                 key: Some(
                     "6Yiim0tnK91G7O0KTRLumpuhkr9T0X1AVSVYJUhRcxs=".to_string(),
                 ),
@@ -271,6 +273,7 @@ mod test {
                             "127.0.0.1:54009".parse()?,
                         ],
                         lossy: false,
+                        flush_timeout: None,
                         key: Some(
                             "/Gud6zA+MoI/lvt+0dqf3wIMyTfNqp1Bw6FKuM+zFWM="
                                 .to_string(),
@@ -374,6 +377,7 @@ mod test {
                             "127.0.0.1:54012".parse()?,
                         ],
                         lossy: false,
+                        flush_timeout: None,
                         key: Some(
                             "+3AhoL47nkZPwj9XRmoCnOKa66Cfb8Q2gmQ84pVlsbw="
                                 .to_string(),
