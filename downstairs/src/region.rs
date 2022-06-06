@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use tokio::macros::support::Pin;
 use tracing::instrument;
 
+use super::*;
+
 #[derive(Debug)]
 pub struct Extent {
     number: u32,
@@ -1023,6 +1025,7 @@ impl Extent {
         &self,
         new_flush: u64,
         new_gen: u64,
+        job_id: u64,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
 
@@ -1526,6 +1529,7 @@ impl Region {
     pub fn region_write(
         &self,
         writes: &[crucible_protocol::Write],
+        job_id: u64,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
@@ -1550,11 +1554,13 @@ impl Region {
             extent_vec.push(write);
         }
 
+        cdt::os__write__start!(|| job_id);
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
             extent.write(&writes[..])?;
         }
+        cdt::os__write__done!(|| job_id);
 
         Ok(())
     }
@@ -1563,6 +1569,7 @@ impl Region {
     pub fn region_read(
         &self,
         requests: &[crucible_protocol::ReadRequest],
+        job_id: u64,
     ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
         let mut responses = Vec::with_capacity(requests.len());
 
@@ -1578,6 +1585,7 @@ impl Region {
         let mut batched_reads: Vec<&crucible_protocol::ReadRequest> =
             Vec::with_capacity(requests.len());
 
+        cdt::os__read__start!(|| job_id);
         for request in requests {
             if let Some(_eid) = eid {
                 if request.eid == _eid {
@@ -1601,6 +1609,7 @@ impl Region {
             let extent = &self.extents[_eid as usize];
             extent.read(&batched_reads[..], &mut responses)?;
         }
+        cdt::os__read__done!(|| job_id);
 
         Ok(responses)
     }
@@ -1615,6 +1624,7 @@ impl Region {
         eid: usize,
         flush_number: u64,
         gen_number: u64,
+        job_id: u64,
     ) -> Result<(), CrucibleError> {
         println!(
             "Flush just extent {} with f:{} and g:{}",
@@ -1622,7 +1632,7 @@ impl Region {
         );
 
         let extent = &self.extents[eid];
-        extent.flush_block(flush_number, gen_number)?;
+        extent.flush_block(flush_number, gen_number, 0)?;
 
         Ok(())
     }
@@ -1637,6 +1647,7 @@ impl Region {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: &Option<SnapshotDetails>,
+        job_id: u64,
     ) -> Result<(), CrucibleError> {
         // It should be ok to Flush a read-only region, but not take a snapshot.
         // Most likely this read-only region *is* a snapshot, so that's
@@ -1646,10 +1657,12 @@ impl Region {
         }
 
         // XXX How to we convert between usize and u32 correctly?
+        cdt::os__flush__start!(|| job_id);
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number, gen_number)?;
+            extent.flush_block(flush_number, gen_number, job_id)?;
         }
+        cdt::os__flush__done!(|| job_id);
 
         // snapshots currently only work with ZFS
         if cfg!(feature = "zfs_snapshot") {
@@ -2925,7 +2938,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes)?;
+        region.region_write(&writes, 0)?;
 
         // read data into File, compare what was written to buffer
 
@@ -2957,7 +2970,7 @@ mod test {
             });
         }
 
-        let responses = region.region_read(&requests)?;
+        let responses = region.region_read(&requests, 0)?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -2992,7 +3005,7 @@ mod test {
                 hash: 5061083712412462836,
             }];
 
-        region.region_write(&writes)?;
+        region.region_write(&writes, 0)?;
 
         Ok(())
     }
@@ -3019,7 +3032,7 @@ mod test {
                 hash: 2398419238764,
             }];
 
-        let result = region.region_write(&writes);
+        let result = region.region_write(&writes, 0);
 
         assert!(result.is_err());
 
@@ -3041,12 +3054,14 @@ mod test {
         let mut region = Region::create(&dir, new_region_options())?;
         region.extend(1)?;
 
-        let responses =
-            region.region_read(&[crucible_protocol::ReadRequest {
+        let responses = region.region_read(
+            &[crucible_protocol::ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
                 num_blocks: 1,
-            }])?;
+            }],
+            0,
+        )?;
 
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].hashes.len(), 0);

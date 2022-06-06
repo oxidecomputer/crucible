@@ -180,6 +180,7 @@ mod cdt {
 pub struct CrucibleOpts {
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
+    pub flush_timeout: Option<u32>,
     pub key: Option<String>,
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
@@ -3162,6 +3163,7 @@ impl Upstairs {
         let opts = CrucibleOpts {
             target: vec![],
             lossy: false,
+            flush_timeout: None,
             key: None,
             cert_pem: None,
             key_pem: None,
@@ -6436,9 +6438,9 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
         let mut gw = up.guest.guest_work.lock().unwrap();
         for ds_id_done in ack_list.iter() {
-            let mut work = up.downstairs.lock().unwrap();
+            let mut ds = up.downstairs.lock().unwrap();
 
-            let done = work.active.get_mut(ds_id_done).unwrap();
+            let done = ds.active.get_mut(ds_id_done).unwrap();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -6455,13 +6457,13 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let io_size = done.io_size();
             let data = done.data.take();
 
-            work.ack(ds_id);
+            ds.ack(ds_id);
 
-            gw.gw_ds_complete(gw_id, ds_id, data, work.result(ds_id));
+            gw.gw_ds_complete(gw_id, ds_id, data, ds.result(ds_id));
 
-            work.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats);
+            ds.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats);
 
-            work.retire_check(ds_id);
+            ds.retire_check(ds_id);
         }
     }
     println!("up_ds_listen loop done");
@@ -6706,8 +6708,11 @@ async fn up_listen(
     dst: Vec<Target>,
     mut ds_status_rx: mpsc::Receiver<Condition>,
     mut ds_reconcile_done_rx: mpsc::Receiver<Repair>,
+    timeout: Option<u32>,
 ) {
     println!("Wait for all three downstairs to come online");
+    let flush_timeout = timeout.unwrap_or(5);
+    println!("Flush timeout: {}", flush_timeout);
     let mut lastcast = 1;
 
     /*
@@ -6721,7 +6726,7 @@ async fn up_listen(
     let mut leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
 
     up.stat_update("start");
-    let mut flush_check = deadline_secs(5);
+    let mut flush_check = deadline_secs(flush_timeout.into());
     let mut show_work_interval = deadline_secs(5);
     loop {
         /*
@@ -6802,7 +6807,7 @@ async fn up_listen(
                  */
                 up.stat_update("loop");
 
-                flush_check = deadline_secs(5);
+                flush_check = deadline_secs(flush_timeout.into());
             }
             _ = sleep_until(show_work_interval) => {
                 //show_all_work(up);
@@ -6967,7 +6972,14 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Once connected, we then take work requests from the guest and
      * submit them into the upstairs
      */
-    up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx).await;
+    up_listen(
+        &up,
+        dst,
+        ds_status_rx,
+        ds_reconcile_done_rx,
+        opt.flush_timeout,
+    )
+    .await;
 
     Ok(())
 }
@@ -7084,8 +7096,8 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let gior = up.guest_io_ready();
     let up_count = up.guest.guest_work.lock().unwrap().active.len();
 
-    let work = up.downstairs.lock().unwrap();
-    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    let ds = up.downstairs.lock().unwrap();
+    let mut kvec: Vec<u64> = ds.active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
     );
@@ -7117,7 +7129,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
         kvec.sort_unstable();
         for id in kvec.iter() {
-            let job = work.active.get(id).unwrap();
+            let job = ds.active.get(id).unwrap();
             let ack = job.ack_status;
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
@@ -7184,13 +7196,13 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
         iosc.show_all();
         print!("Last Flush: ");
-        for lf in work.ds_last_flush.iter() {
+        for lf in ds.ds_last_flush.iter() {
             print!("{} ", lf);
         }
         println!();
     }
 
-    let done = work.completed.to_vec();
+    let done = ds.completed.to_vec();
     let mut count = 0;
     print!("Downstairs last five completed:");
     for j in done.iter().rev() {
@@ -7201,7 +7213,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     }
     println!();
-    drop(work);
+    drop(ds);
 
     let up_done = up.guest.guest_work.lock().unwrap().completed.to_vec();
     print!("Upstairs last five completed:  ");
