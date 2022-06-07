@@ -186,8 +186,8 @@ pub struct CrucibleOpts {
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
-    pub oximeter_listen: Option<SocketAddr>,
-    pub oximeter_register: Option<SocketAddr>,
+    pub metric_collect: Option<SocketAddr>,
+    pub metric_register: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -3171,8 +3171,8 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
-            oximeter_listen: None,
-            oximeter_register: None,
+            metric_collect: None,
+            metric_register: None,
         };
         Self::new(
             &opts,
@@ -6873,16 +6873,16 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
         up_ds_listen(&upc, ds_done_rx).await;
     });
 
-    if opt.oximeter_register.is_some() && opt.oximeter_listen.is_some() {
+    if opt.metric_register.is_some() && opt.metric_collect.is_some() {
         /*
          * spawn a task to register with Oximeter and handle it.
          */
         let up_oxc = Arc::clone(&up);
         let ups = up_oxc.stats.clone();
-        let my_addr = opt.oximeter_listen.unwrap();
-        let my_reg = opt.oximeter_register.unwrap();
+        let listen = opt.metric_collect.unwrap();
+        let register = opt.metric_register.unwrap();
         tokio::spawn(async move {
-            if let Err(e) = up_oximeter(ups, my_reg, my_addr).await {
+            if let Err(e) = up_oximeter(ups, register, listen).await {
                 println!("ERROR: Oximeter failed: {:?}", e);
             } else {
                 println!("OK: Oximeter stats exits.");

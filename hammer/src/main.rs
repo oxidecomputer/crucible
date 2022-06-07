@@ -87,8 +87,8 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
-        oximeter_listen: None,
-        oximeter_register: None,
+        metric_collect: None,
+        metric_register: None,
     };
     let mut generation_number = opt.gen;
 

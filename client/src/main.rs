@@ -155,13 +155,13 @@ pub struct Opt {
     #[clap(long, global = true)]
     flush_timeout: Option<u32>,
 
-    /// IP:Port for the oximeter register address
+    /// IP:Port for the Oximeter register address, which is Nexus.
     #[clap(long, global = true, default_value = "127.0.0.1:12221")]
-    oximeter_register: SocketAddr,
+    metric_register: SocketAddr,
 
-    /// IP:Port for the oximeter listen address
+    /// IP:Port for the Oximeter listen address
     #[clap(long, global = true, default_value = "127.0.0.1:55443")]
-    oximeter_listen: SocketAddr,
+    metric_collect: SocketAddr,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -445,8 +445,8 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
-        oximeter_listen: Some(opt.oximeter_listen),
-        oximeter_register: Some(opt.oximeter_register),
+        metric_collect: Some(opt.metric_collect),
+        metric_register: Some(opt.metric_register),
     };
 
     /*
