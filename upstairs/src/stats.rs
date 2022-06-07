@@ -126,7 +126,7 @@ impl Producer for UpStatOuter {
     ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, MetricsError> {
         let ups = self.up_stat_wrap.lock().unwrap();
 
-        let mut data = Vec::with_capacity(4);
+        let mut data = Vec::with_capacity(6);
         let name = ups.stat_name;
 
         data.push(Sample::new(&name, &ups.activated_count));
@@ -149,7 +149,7 @@ pub async fn up_oximeter(
     registration_address: SocketAddr,
     my_address: SocketAddr,
 ) -> Result<()> {
-    println!("Connecting to Oximeter at {:?}", registration_address);
+    println!("Register with Nexus at {:?}", registration_address);
 
     let dropshot_config = ConfigDropshot {
         bind_address: my_address,
