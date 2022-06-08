@@ -1,5 +1,14 @@
 # Oxide DTrace Crucible scripts
 
+## perf-upstairs-rw.d
+A DTrace script to track writes and flushes through the upstairs.
+The shows the time in three parts:
+1: From IO received in the upstairs to IO being submitted to the
+queue of work for the three downstairs.
+2: From IO on downstairs queue, to enough downstairs completing the
+IO that it is ready to ack.
+3: From the IO being ready to ack, to that ack being sent.
+
 ## perfdw.d
 This is a simple dtrace script that measures latency times for when a r/w/f
 job is sent over the network to each downstairs to when the ACK for that job

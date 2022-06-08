@@ -78,6 +78,8 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: None,
+        metric_collect: None,
+        metric_register: None,
     };
 
     /*

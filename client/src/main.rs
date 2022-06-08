@@ -154,6 +154,14 @@ pub struct Opt {
     /// How long to wait before the auto flush check fires
     #[clap(long, global = true)]
     flush_timeout: Option<u32>,
+
+    /// IP:Port for the Oximeter register address, which is Nexus.
+    #[clap(long, global = true, default_value = "127.0.0.1:12221")]
+    metric_register: SocketAddr,
+
+    /// IP:Port for the Oximeter listen address
+    #[clap(long, global = true, default_value = "127.0.0.1:55443")]
+    metric_collect: SocketAddr,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -437,6 +445,8 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
+        metric_collect: Some(opt.metric_collect),
+        metric_register: Some(opt.metric_register),
     };
 
     /*
