@@ -114,7 +114,11 @@ pub trait BlockIO {
     }
 }
 
-/// Stats tracking the path of an IO through the Upstairs.
+/// DTrace probes in the upstairs
+///
+/// up__status: This tracks the state of each of the three downstairs
+/// as well as the work queue counts for the upstairs work queue and the
+/// downstairs work queue.
 ///
 /// For each read/write/flush, we have a DTrace probe at specific
 /// points throughout its path through the upstairs.  Below is the basic
