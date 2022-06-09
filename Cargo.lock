@@ -517,7 +517,6 @@ dependencies = [
  "chrono",
  "crucible-common",
  "crucible-protocol",
- "crucible-scope",
  "dropshot",
  "expectorate",
  "futures",
@@ -599,7 +598,6 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-protocol",
- "crucible-scope",
  "csv",
  "futures",
  "futures-core",
@@ -743,7 +741,6 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-protocol",
- "crucible-scope",
  "futures",
  "futures-core",
  "nbd",
@@ -776,20 +773,6 @@ dependencies = [
  "serde",
  "tokio-util 0.7.0",
  "uuid 1.0.0",
-]
-
-[[package]]
-name = "crucible-scope"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "futures",
- "futures-core",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util 0.7.0",
- "toml",
 ]
 
 [[package]]

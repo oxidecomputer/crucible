@@ -14,7 +14,6 @@ crossterm = { version = "0.23.2" }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
-crucible-scope = { path = "../scope" }
 csv = "1.1.6"
 futures = "0.3"
 futures-core = "0.3"
