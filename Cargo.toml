@@ -15,7 +15,6 @@ members = [
     "package",
     "protocol",
     "repair-client",
-    "scope",
     "smf",
     "upstairs",
 ]

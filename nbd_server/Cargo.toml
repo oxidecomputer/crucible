@@ -11,7 +11,6 @@ bytes = "1"
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
-crucible-scope = { path = "../scope" }
 futures = "0.3"
 futures-core = "0.3"
 ringbuffer = "0.8"

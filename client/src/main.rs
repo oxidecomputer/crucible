@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -505,12 +505,6 @@ fn main() -> Result<()> {
 
     println!("Wait for a query_work_queue command to finish before sending IO");
     guest.query_work_queue()?;
-    /*
-     * Create the interactive input scope that will generate and send
-     * work to the Crucible thread that listens to work from outside
-     * (Propolis).  XXX Test code here..
-     * runtime.spawn(run_scope(prop_work));
-     */
 
     /*
      * Build the region info struct that all the tests will use.
@@ -2298,55 +2292,6 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     println!("dep test done");
     Ok(())
-}
-
-async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
-    let scope =
-        crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
-    let mut my_offset = 512 * 99;
-    scope.wait_for("Send all the IOs").await;
-    loop {
-        let mut data = BytesMut::with_capacity(512 * 2);
-        for seed in 44..46 {
-            data.put(&[seed; 512][..]);
-        }
-        my_offset += 512 * 2;
-        scope.wait_for("write 1").await;
-
-        println!("send write 1");
-        guest.write_to_byte_offset(my_offset, data.freeze())?;
-
-        scope.wait_for("show work").await;
-        guest.show_work()?;
-
-        let mut read_offset = 512 * 99;
-        const READ_SIZE: usize = 4096;
-        for _ in 0..4 {
-            let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
-
-            println!("send a read");
-            // scope.wait_for("send Read").await;
-            guest.read_from_byte_offset(read_offset, data)?;
-            read_offset += READ_SIZE as u64;
-            // scope.wait_for("show work").await;
-            guest.show_work()?;
-        }
-
-        // scope.wait_for("Flush step").await;
-        println!("send flush");
-        guest.flush(None)?;
-
-        let mut data = BytesMut::with_capacity(512);
-        data.put(&[0xbb; 512][..]);
-
-        // scope.wait_for("write 2").await;
-        println!("send write 2");
-        guest.write_to_byte_offset(my_offset, data.freeze())?;
-        my_offset += 512;
-        // scope.wait_for("show work").await;
-        guest.show_work()?;
-        //scope.wait_for("at the bottom").await;
-    }
 }
 
 #[cfg(test)]

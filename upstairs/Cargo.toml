@@ -19,7 +19,6 @@ bytes = "1"
 chrono = { version = "0.4.19", features = [ "serde" ] }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
-crucible-scope = { path = "../scope" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 futures = "0.3"
 futures-core = "0.3"
