@@ -533,7 +533,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "structopt",
  "tempfile",
  "tokio",
  "tokio-rustls",
