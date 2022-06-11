@@ -4,54 +4,54 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use clap::Parser;
 use rand::Rng;
-use structopt::StructOpt;
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
 
 use crucible::*;
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "measure iops!")]
+#[derive(Debug, Parser)]
+#[clap(about = "measure iops!")]
 pub struct Opt {
     // Upstairs options
-    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
 
-    #[structopt(short, long)]
+    #[clap(short, long)]
     key: Option<String>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0")]
     gen: u64,
 
-    #[structopt(long)]
+    #[clap(long)]
     cert_pem: Option<String>,
 
-    #[structopt(long)]
+    #[clap(long)]
     key_pem: Option<String>,
 
-    #[structopt(long)]
+    #[clap(long)]
     root_cert_pem: Option<String>,
 
     // Tool options
-    #[structopt(long, default_value = "100")]
+    #[clap(long, default_value = "100")]
     samples: usize,
 
-    #[structopt(long)]
+    #[clap(long)]
     iop_limit: Option<usize>,
 
-    #[structopt(long)]
+    #[clap(long)]
     io_size_in_bytes: Option<usize>,
 
-    #[structopt(long)]
+    #[clap(long)]
     io_depth: Option<usize>,
 
-    #[structopt(long)]
+    #[clap(long)]
     bw_limit_in_bytes: Option<usize>,
 }
 
 pub fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
 
     if opt.target.is_empty() {
         bail!("must specify at least one --target");
