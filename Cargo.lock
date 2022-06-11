@@ -551,6 +551,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "clap 3.1.16",
  "crucible-common",
  "crucible-smf",
  "dropshot",
@@ -565,7 +566,6 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "structopt",
  "subprocess",
  "tokio",
  "uuid 1.0.0",
