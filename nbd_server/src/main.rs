@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use structopt::StructOpt;
+use clap::Parser;
 use tokio::runtime::Builder;
 
 use crucible::*;
@@ -30,33 +30,33 @@ fn handle_nbd_client<T: crucible::BlockIO>(
     Ok(())
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "volume-side storage component")]
+#[derive(Debug, Parser)]
+#[clap(about = "volume-side storage component")]
 pub struct Opt {
-    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
 
-    #[structopt(short, long)]
+    #[clap(short, long)]
     key: Option<String>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0")]
     gen: u64,
 
     // TLS options
-    #[structopt(long)]
+    #[clap(long)]
     cert_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long)]
     key_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long)]
     root_cert_pem: Option<String>,
 
     // Start upstairs control http server
-    #[structopt(long)]
+    #[clap(long)]
     control: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
     println!("raw options: {:?}", opt);
 
     if opt.target.is_empty() {

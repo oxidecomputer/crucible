@@ -737,6 +737,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "clap 3.1.16",
  "crucible",
  "crucible-common",
  "crucible-protocol",
@@ -746,7 +747,6 @@ dependencies = [
  "ringbuffer",
  "serde",
  "serde_json",
- "structopt",
  "tokio",
  "tokio-util 0.7.0",
  "toml",
