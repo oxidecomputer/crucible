@@ -9,8 +9,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
+use clap::Parser;
 use slog::Drain;
-use structopt::StructOpt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use usdt::register_probes;
@@ -38,29 +38,29 @@ impl std::str::FromStr for Mode {
     }
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "disk-side storage component")]
+#[derive(Debug, Parser)]
+#[clap(about = "disk-side storage component")]
 enum Args {
     Create {
-        #[structopt(long, default_value = "512")]
+        #[clap(long, default_value = "512")]
         block_size: u64,
 
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
         data: PathBuf,
 
-        #[structopt(long, default_value = "100")]
+        #[clap(long, default_value = "100")]
         extent_size: u64,
 
-        #[structopt(long, default_value = "15")]
+        #[clap(long, default_value = "15")]
         extent_count: u64,
 
-        #[structopt(short, long, parse(from_os_str), name = "FILE")]
+        #[clap(short, long, parse(from_os_str), name = "FILE")]
         import_path: Option<PathBuf>,
 
-        #[structopt(short, long, name = "UUID", parse(try_from_str))]
+        #[clap(short, long, name = "UUID", parse(try_from_str))]
         uuid: Uuid,
 
-        #[structopt(long, parse(try_from_str), default_value = "false")]
+        #[clap(long, parse(try_from_str), default_value = "false")]
         encrypted: bool,
     },
     /*
@@ -74,59 +74,59 @@ enum Args {
         /*
          * Directories containing a region.
          */
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
         data: Vec<PathBuf>,
 
         /*
          * Just dump this extent number
          */
-        #[structopt(short, long)]
+        #[clap(short, long)]
         extent: Option<u32>,
 
         /*
          * Detailed view for a block
          */
-        #[structopt(short, long)]
+        #[clap(short, long)]
         block: Option<u64>,
 
         /*
          * Only show differences
          */
-        #[structopt(short, long)]
+        #[clap(short, long)]
         only_show_differences: bool,
 
         /// No color output
-        #[structopt(long)]
+        #[clap(long)]
         no_color: bool,
     },
     Export {
         /*
          * Number of blocks to export.
          */
-        #[structopt(long, default_value = "0", name = "COUNT")]
+        #[clap(long, default_value = "0", name = "COUNT")]
         count: u64,
 
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
         data: PathBuf,
 
-        #[structopt(short, long, parse(from_os_str), name = "OUT_FILE")]
+        #[clap(short, long, parse(from_os_str), name = "OUT_FILE")]
         export_path: PathBuf,
 
-        #[structopt(short, long, default_value = "0", name = "SKIP")]
+        #[clap(short, long, default_value = "0", name = "SKIP")]
         skip: u64,
     },
     Run {
         /// Address the downstairs will listen for the upstairs on.
-        #[structopt(short, long, default_value = "0.0.0.0", name = "ADDRESS")]
+        #[clap(short, long, default_value = "0.0.0.0", name = "ADDRESS")]
         address: IpAddr,
 
         /// Directory where the region is located.
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
         data: PathBuf,
 
         /// Test option, makes the search for new work sleep and sometimes
         /// skip doing work.
-        #[structopt(long)]
+        #[clap(long)]
         lossy: bool,
 
         /*
@@ -134,44 +134,44 @@ enum Args {
          * oximeter server, the downstairs will publish stats.
          */
         /// Use this address:port to send stats to an Oximeter server.
-        #[structopt(long, name = "OXIMETER_ADDRESS:PORT")]
+        #[clap(long, name = "OXIMETER_ADDRESS:PORT")]
         oximeter: Option<SocketAddr>,
 
         /// Listen on this port for the upstairs to connect to us.
-        #[structopt(short, long, default_value = "9000")]
+        #[clap(short, long, default_value = "9000")]
         port: u16,
 
-        #[structopt(long)]
+        #[clap(long)]
         return_errors: bool,
 
-        #[structopt(short, long)]
+        #[clap(short, long)]
         trace_endpoint: Option<String>,
 
         // TLS options
-        #[structopt(long)]
+        #[clap(long)]
         cert_pem: Option<String>,
-        #[structopt(long)]
+        #[clap(long)]
         key_pem: Option<String>,
-        #[structopt(long)]
+        #[clap(long)]
         root_cert_pem: Option<String>,
 
-        #[structopt(long, default_value = "rw")]
+        #[clap(long, default_value = "rw")]
         mode: Mode,
     },
     RepairAPI,
     Serve {
-        #[structopt(short, long)]
+        #[clap(short, long)]
         trace_endpoint: Option<String>,
 
         // Dropshot server details
-        #[structopt(long, default_value = "127.0.0.1:4567")]
+        #[clap(long, default_value = "127.0.0.1:4567")]
         bind_addr: SocketAddr,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::from_args_safe()?;
+    let args = Args::try_parse()?;
 
     /*
      * Everyone needs a region
