@@ -704,12 +704,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "clap 3.1.16",
  "crucible",
  "crucible-common",
  "opentelemetry",
  "opentelemetry-jaeger",
  "rand 0.8.5",
- "structopt",
  "tokio",
  "tracing-opentelemetry",
  "tracing-subscriber",
