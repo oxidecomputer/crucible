@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use structopt::StructOpt;
+use clap::Parser;
 use tokio::runtime::Builder;
 
 use crucible::*;
@@ -20,48 +20,48 @@ fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     matching == a.len() && matching == b.len()
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "volume-side storage component")]
+#[derive(Debug, Parser)]
+#[clap(about = "volume-side storage component")]
 pub struct Opt {
-    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000")]
     target: Vec<SocketAddr>,
 
     /*
      * Verify that writes don't extend before or after the actual location.
      */
-    #[structopt(short, long)]
+    #[clap(short, long)]
     verify_isolation: bool,
 
-    #[structopt(long)]
+    #[clap(long)]
     tracing_endpoint: Option<String>,
 
-    #[structopt(short, long)]
+    #[clap(short, long)]
     key: Option<String>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0")]
     gen: u64,
 
     /*
      * Number of upstairs to sequentially activate and handoff to
      */
-    #[structopt(short, long, default_value = "5")]
+    #[clap(short, long, default_value = "5")]
     num_upstairs: usize,
 
     // TLS options
-    #[structopt(long)]
+    #[clap(long)]
     cert_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long)]
     key_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long)]
     root_cert_pem: Option<String>,
 
     // Start upstairs control http server
-    #[structopt(long)]
+    #[clap(long)]
     control: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
     println!("raw options: {:?}", opt);
 
     if opt.target.is_empty() {

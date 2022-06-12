@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 #![allow(clippy::needless_collect)]
 use anyhow::{anyhow, bail, Result};
+use clap::Parser;
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
 use slog::{error, info, o, warn, Logger};
 use std::collections::HashSet;
@@ -9,7 +10,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use structopt::StructOpt;
 
 const PROG: &str = "crucible-agent";
 const SERVICE: &str = "oxide/crucible/downstairs";
@@ -20,31 +20,31 @@ mod server;
 
 use model::State;
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = PROG, about = "Crucible zone management agent")]
+#[derive(Debug, Parser)]
+#[clap(name = PROG, about = "Crucible zone management agent")]
 enum Args {
     OpenApi {
-        #[structopt(short = "o", parse(try_from_str))]
+        #[clap(short = 'o', parse(try_from_str))]
         output: PathBuf,
     },
     Run {
         // zfs dataset to be used by the crucible agent
-        #[structopt(long, parse(try_from_str))]
+        #[clap(long, parse(try_from_str))]
         dataset: PathBuf,
 
-        #[structopt(short = "l", parse(try_from_str))]
+        #[clap(short = 'l', parse(try_from_str))]
         listen: SocketAddr,
 
-        #[structopt(short = "D", parse(try_from_str))]
+        #[clap(short = 'D', parse(try_from_str))]
         downstairs_program: PathBuf,
 
-        #[structopt(short = "P", parse(try_from_str))]
+        #[clap(short = 'P', parse(try_from_str))]
         lowport: u16,
 
-        #[structopt(short = "p", parse(try_from_str))]
+        #[clap(short = 'p', parse(try_from_str))]
         downstairs_prefix: String,
 
-        #[structopt(short = "s", parse(try_from_str))]
+        #[clap(short = 's', parse(try_from_str))]
         snapshot_prefix: String,
     },
 }
@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }));
 
-    let args = Args::from_args_safe()?;
+    let args = Args::try_parse()?;
 
     match args {
         Args::OpenApi { output } => {
