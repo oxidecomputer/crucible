@@ -324,9 +324,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "3.1.16"
+version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52d4f8e4a1419219935762e32913b4430f37cb0c0200ad17a89ee18c0188a9f"
+checksum = "a836566fa5f52f7ddf909a8a2f9029b9f78ca584cd95cf7e87f8073110f4c5c9"
 dependencies = [
  "atty",
  "bitflags",
@@ -341,9 +341,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "3.1.7"
+version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3aab4734e083b809aaf5794e14e756d1c798d2c69c7f7de7a09a2f5214993c1"
+checksum = "986fd75d1dfd2c34eb8c9275ae38ad87ea9478c9b79e87f1801f7d866dfb1e37"
 dependencies = [
  "heck 0.4.0",
  "proc-macro-error",
@@ -354,9 +354,9 @@ dependencies = [
 
 [[package]]
 name = "clap_lex"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a37c35f1112dad5e6e0b1adaff798507497a18fceeb30cceb3bae7d1427b9213"
+checksum = "5538cd660450ebeb4234cfecf8f2284b844ffc4c50531e66d584ad5b91293613"
 dependencies = [
  "os_str_bytes",
 ]
@@ -500,7 +500,7 @@ dependencies = [
 name = "crucadm"
 version = "0.1.0"
 dependencies = [
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible",
  "crucible-control-client",
  "tokio",
@@ -551,7 +551,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible-common",
  "crucible-smf",
  "dropshot",
@@ -592,7 +592,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytes",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crossterm",
  "crucible",
  "crucible-common",
@@ -652,7 +652,7 @@ dependencies = [
  "bincode",
  "bytes",
  "chrono",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "crucible-protocol",
@@ -704,7 +704,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "opentelemetry",
@@ -737,7 +737,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "crucible-protocol",
@@ -968,7 +968,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byte-unit",
- "clap 3.1.16",
+ "clap 3.2.1",
  "csv",
  "dropshot",
  "expectorate",
@@ -1700,7 +1700,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "rand 0.8.5",

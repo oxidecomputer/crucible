@@ -24,27 +24,27 @@ use model::State;
 #[clap(name = PROG, about = "Crucible zone management agent")]
 enum Args {
     OpenApi {
-        #[clap(short = 'o', parse(try_from_str))]
+        #[clap(short = 'o', action)]
         output: PathBuf,
     },
     Run {
         // zfs dataset to be used by the crucible agent
-        #[clap(long, parse(try_from_str))]
+        #[clap(long, action)]
         dataset: PathBuf,
 
-        #[clap(short = 'l', parse(try_from_str))]
+        #[clap(short = 'l', action)]
         listen: SocketAddr,
 
-        #[clap(short = 'D', parse(try_from_str))]
+        #[clap(short = 'D', action)]
         downstairs_program: PathBuf,
 
-        #[clap(short = 'P', parse(try_from_str))]
+        #[clap(short = 'P', action)]
         lowport: u16,
 
-        #[clap(short = 'p', parse(try_from_str))]
+        #[clap(short = 'p', action)]
         downstairs_prefix: String,
 
-        #[clap(short = 's', parse(try_from_str))]
+        #[clap(short = 's', action)]
         snapshot_prefix: String,
     },
 }

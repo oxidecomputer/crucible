@@ -15,38 +15,38 @@ use crucible::*;
 #[clap(about = "measure iops!")]
 pub struct Opt {
     // Upstairs options
-    #[clap(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000", action)]
     target: Vec<SocketAddr>,
 
-    #[clap(short, long)]
+    #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0", action)]
     gen: u64,
 
-    #[clap(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
 
-    #[clap(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
 
-    #[clap(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     // Tool options
-    #[clap(long, default_value = "100")]
+    #[clap(long, default_value = "100", action)]
     samples: usize,
 
-    #[clap(long)]
+    #[clap(long, action)]
     iop_limit: Option<usize>,
 
-    #[clap(long)]
+    #[clap(long, action)]
     io_size_in_bytes: Option<usize>,
 
-    #[clap(long)]
+    #[clap(long, action)]
     io_depth: Option<usize>,
 
-    #[clap(long)]
+    #[clap(long, action)]
     bw_limit_in_bytes: Option<usize>,
 }
 

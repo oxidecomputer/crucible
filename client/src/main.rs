@@ -35,16 +35,16 @@ enum Workload {
     /// Starts a CLI client
     Cli {
         /// Address to connect to
-        #[clap(long, short, default_value = "0.0.0.0:5050")]
+        #[clap(long, short, default_value = "0.0.0.0:5050", action)]
         attach: SocketAddr,
     },
     /// Start a server and listen on the given address and port
     CliServer {
         /// Address to listen on
-        #[clap(long, short, default_value = "0.0.0.0")]
+        #[clap(long, short, default_value = "0.0.0.0", action)]
         listen: IpAddr,
         /// Port to listen on
-        #[clap(long, short, default_value = "5050")]
+        #[clap(long, short, default_value = "5050", action)]
         port: u16,
     },
     Deactivate,
@@ -58,19 +58,19 @@ enum Workload {
     /// Run the perf test, random writes, then random reads
     Perf {
         /// Size in blocks of each IO
-        #[clap(long, default_value = "1")]
+        #[clap(long, default_value = "1", action)]
         io_size: usize,
         /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value = "1")]
+        #[clap(long, default_value = "1", action)]
         io_depth: usize,
         /// Output file for IO times
-        #[clap(long, global = true, parse(from_os_str), name = "PERF")]
+        #[clap(long, global = true, name = "PERF", action)]
         perf_out: Option<PathBuf>,
         /// Number of read test loops to do.
-        #[clap(long, default_value = "2")]
+        #[clap(long, default_value = "2", action)]
         read_loops: usize,
         /// Number of write test loops to do.
-        #[clap(long, default_value = "2")]
+        #[clap(long, default_value = "2", action)]
         write_loops: usize,
     },
     Rand,
@@ -85,10 +85,16 @@ enum Workload {
 pub struct Opt {
     ///  For tests that support it, pass this count value for the number
     ///  of loops the test should do.
-    #[clap(short, long, global = true, default_value = "0")]
+    #[clap(short, long, global = true, default_value = "0", action)]
     count: usize,
 
-    #[clap(short, long, global = true, default_value = "127.0.0.1:9000")]
+    #[clap(
+        short,
+        long,
+        global = true,
+        default_value = "127.0.0.1:9000",
+        action
+    )]
     target: Vec<SocketAddr>,
 
     #[clap(subcommand)]
@@ -100,67 +106,67 @@ pub struct Opt {
     ///  used in production.  Passing args like this to the upstairs
     ///  may not be the best way to test, but until we have something
     ///  better... XXX
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     lossy: bool,
 
     ///  quit after all crucible work queues are empty.
-    #[clap(short, global = true, long)]
+    #[clap(short, global = true, long, action)]
     quit: bool,
 
-    #[clap(short, global = true, long)]
+    #[clap(short, global = true, long, action)]
     key: Option<String>,
 
-    #[clap(short, global = true, long, default_value = "0")]
+    #[clap(short, global = true, long, default_value = "0", action)]
     gen: u64,
 
     /// For the verify test, if this option is included we will allow
     /// the write log range of data to pass the verify_volume check.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     range: bool,
 
     /// Retry for activate, as long as it takes.  If we pass this arg, the
     /// test will retry the initial activate command as long as it takes.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     retry_activate: bool,
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     verify: bool,
 
     /// For tests that support it, load the expected write count from
     /// the provided file.  The addition of a --verify option will also
     /// have the test verify what it imports from the file is valid.
-    #[clap(long, global = true, parse(from_os_str), name = "INFILE")]
+    #[clap(long, global = true, name = "INFILE", action)]
     verify_in: Option<PathBuf>,
 
     ///  For tests that support it, save the write count into the
     ///  provided file.
-    #[clap(long, global = true, parse(from_os_str), name = "FILE")]
+    #[clap(long, global = true, name = "FILE", action)]
     verify_out: Option<PathBuf>,
 
     // TLS options
-    #[clap(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     /// IP:Port for the upstairs control http server
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     control: Option<SocketAddr>,
 
     /// How long to wait before the auto flush check fires
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     flush_timeout: Option<u32>,
 
     /// IP:Port for the Oximeter register address, which is Nexus.
-    #[clap(long, global = true, default_value = "127.0.0.1:12221")]
+    #[clap(long, global = true, default_value = "127.0.0.1:12221", action)]
     metric_register: SocketAddr,
 
     /// IP:Port for the Oximeter listen address
-    #[clap(long, global = true, default_value = "127.0.0.1:55443")]
+    #[clap(long, global = true, default_value = "127.0.0.1:55443", action)]
     metric_collect: SocketAddr,
 }
 

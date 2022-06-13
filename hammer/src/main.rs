@@ -23,40 +23,40 @@ fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 #[derive(Debug, Parser)]
 #[clap(about = "volume-side storage component")]
 pub struct Opt {
-    #[clap(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000", action)]
     target: Vec<SocketAddr>,
 
     /*
      * Verify that writes don't extend before or after the actual location.
      */
-    #[clap(short, long)]
+    #[clap(short, long, action)]
     verify_isolation: bool,
 
-    #[clap(long)]
+    #[clap(long, action)]
     tracing_endpoint: Option<String>,
 
-    #[clap(short, long)]
+    #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0", action)]
     gen: u64,
 
     /*
      * Number of upstairs to sequentially activate and handoff to
      */
-    #[clap(short, long, default_value = "5")]
+    #[clap(short, long, default_value = "5", action)]
     num_upstairs: usize,
 
     // TLS options
-    #[clap(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     // Start upstairs control http server
-    #[clap(long)]
+    #[clap(long, action)]
     control: Option<SocketAddr>,
 }
 
