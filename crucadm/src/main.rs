@@ -7,7 +7,7 @@ use crucible_control_client::Client;
 #[clap(about, long_about = None)]
 struct Args {
     /// URL location of the Crucible control server
-    #[clap(short, long, default_value = "http://127.0.0.1:9999")]
+    #[clap(short, long, default_value = "http://127.0.0.1:9999", action)]
     control: String,
 }
 

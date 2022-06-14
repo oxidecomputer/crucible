@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
     Ro,
     Rw,
@@ -42,25 +42,30 @@ impl std::str::FromStr for Mode {
 #[clap(about = "disk-side storage component")]
 enum Args {
     Create {
-        #[clap(long, default_value = "512")]
+        #[clap(long, default_value = "512", action)]
         block_size: u64,
 
-        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
-        #[clap(long, default_value = "100")]
+        #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
-        #[clap(long, default_value = "15")]
+        #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
-        #[clap(short, long, parse(from_os_str), name = "FILE")]
+        #[clap(short, long, name = "FILE", action)]
         import_path: Option<PathBuf>,
 
-        #[clap(short, long, name = "UUID", parse(try_from_str))]
+        #[clap(short, long, name = "UUID", action)]
         uuid: Uuid,
 
-        #[clap(long, parse(try_from_str), default_value = "false")]
+        #[clap(
+            long,
+            default_value = "false",
+            default_missing_value = "true",
+            action(clap::ArgAction::Set)
+        )]
         encrypted: bool,
     },
     /*
@@ -74,59 +79,65 @@ enum Args {
         /*
          * Directories containing a region.
          */
-        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: Vec<PathBuf>,
 
         /*
          * Just dump this extent number
          */
-        #[clap(short, long)]
+        #[clap(short, long, action)]
         extent: Option<u32>,
 
         /*
          * Detailed view for a block
          */
-        #[clap(short, long)]
+        #[clap(short, long, action)]
         block: Option<u64>,
 
         /*
          * Only show differences
          */
-        #[clap(short, long)]
+        #[clap(short, long, action)]
         only_show_differences: bool,
 
         /// No color output
-        #[clap(long)]
+        #[clap(long, action)]
         no_color: bool,
     },
     Export {
         /*
          * Number of blocks to export.
          */
-        #[clap(long, default_value = "0", name = "COUNT")]
+        #[clap(long, default_value = "0", name = "COUNT", action)]
         count: u64,
 
-        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
-        #[clap(short, long, parse(from_os_str), name = "OUT_FILE")]
+        #[clap(short, long, name = "OUT_FILE", action)]
         export_path: PathBuf,
 
-        #[clap(short, long, default_value = "0", name = "SKIP")]
+        #[clap(short, long, default_value = "0", name = "SKIP", action)]
         skip: u64,
     },
     Run {
         /// Address the downstairs will listen for the upstairs on.
-        #[clap(short, long, default_value = "0.0.0.0", name = "ADDRESS")]
+        #[clap(
+            short,
+            long,
+            default_value = "0.0.0.0",
+            name = "ADDRESS",
+            action
+        )]
         address: IpAddr,
 
         /// Directory where the region is located.
-        #[clap(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
         /// Test option, makes the search for new work sleep and sometimes
         /// skip doing work.
-        #[clap(long)]
+        #[clap(long, action)]
         lossy: bool,
 
         /*
@@ -134,37 +145,37 @@ enum Args {
          * oximeter server, the downstairs will publish stats.
          */
         /// Use this address:port to send stats to an Oximeter server.
-        #[clap(long, name = "OXIMETER_ADDRESS:PORT")]
+        #[clap(long, name = "OXIMETER_ADDRESS:PORT", action)]
         oximeter: Option<SocketAddr>,
 
         /// Listen on this port for the upstairs to connect to us.
-        #[clap(short, long, default_value = "9000")]
+        #[clap(short, long, default_value = "9000", action)]
         port: u16,
 
-        #[clap(long)]
+        #[clap(long, action)]
         return_errors: bool,
 
-        #[clap(short, long)]
+        #[clap(short, long, action)]
         trace_endpoint: Option<String>,
 
         // TLS options
-        #[clap(long)]
+        #[clap(long, action)]
         cert_pem: Option<String>,
-        #[clap(long)]
+        #[clap(long, action)]
         key_pem: Option<String>,
-        #[clap(long)]
+        #[clap(long, action)]
         root_cert_pem: Option<String>,
 
-        #[clap(long, default_value = "rw")]
+        #[clap(long, default_value = "rw", action)]
         mode: Mode,
     },
     RepairAPI,
     Serve {
-        #[clap(short, long)]
+        #[clap(short, long, action)]
         trace_endpoint: Option<String>,
 
         // Dropshot server details
-        #[clap(long, default_value = "127.0.0.1:4567")]
+        #[clap(long, default_value = "127.0.0.1:4567", action)]
         bind_addr: SocketAddr,
     },
 }

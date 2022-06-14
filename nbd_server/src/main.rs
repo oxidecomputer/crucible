@@ -33,25 +33,25 @@ fn handle_nbd_client<T: crucible::BlockIO>(
 #[derive(Debug, Parser)]
 #[clap(about = "volume-side storage component")]
 pub struct Opt {
-    #[clap(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000", action)]
     target: Vec<SocketAddr>,
 
-    #[clap(short, long)]
+    #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0", action)]
     gen: u64,
 
     // TLS options
-    #[clap(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     // Start upstairs control http server
-    #[clap(long)]
+    #[clap(long, action)]
     control: Option<SocketAddr>,
 }
 

@@ -38,7 +38,7 @@ const DEFAULT_PORT_STEP: u32 = 10;
 #[clap(about = "A downstairs controller", long_about = None)]
 struct Cli {
     /// Delete all existing test and region directories
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     cleanup: bool,
 
     #[clap(subcommand)]
@@ -48,16 +48,17 @@ struct Cli {
     #[clap(
         long,
         global = true,
-        default_value = "target/release/crucible-downstairs"
+        default_value = "target/release/crucible-downstairs",
+        action
     )]
     ds_bin: String,
 
     /// default output directory
-    #[clap(long, global = true, default_value = "/tmp/dsc")]
+    #[clap(long, global = true, default_value = "/tmp/dsc", action)]
     output_dir: PathBuf,
 
     /// default region directory
-    #[clap(long, global = true, default_value = "/var/tmp/dsc/region")]
+    #[clap(long, global = true, default_value = "/var/tmp/dsc/region", action)]
     region_dir: PathBuf,
 }
 
@@ -66,26 +67,26 @@ enum Commands {
     /// Create a downstairs region then exit.
     Create {
         /// The block size for the region
-        #[clap(long, default_value = "4096")]
+        #[clap(long, default_value = "4096", action)]
         block_size: u32,
 
         /// The extent size for the region
-        #[clap(long, default_value = "100")]
+        #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
         /// The extent count for the region
-        #[clap(long, default_value = "15")]
+        #[clap(long, default_value = "15", action)]
         extent_count: u64,
     },
     /// Test creation of downstairs regions
     RegionPerf {
         /// Run a longer test, do 10 loops for each region size combo
         /// and report mean min max and stddev.
-        #[clap(long)]
+        #[clap(long, action)]
         long: bool,
         /// If supplied, also write create performance numbers in .csv
         /// format to the provided file name.
-        #[clap(long, parse(from_os_str), name = "CSV")]
+        #[clap(long, name = "CSV", action)]
         csv_out: Option<PathBuf>,
     },
     /// Start a downstairs region set
@@ -94,23 +95,23 @@ enum Commands {
     Start {
         /// Delete any existing region and create a new one using the
         /// default or provided block-size, extent-size, and extent-count.
-        #[clap(long)]
+        #[clap(long, action)]
         create: bool,
 
         /// If creating, the block size for the region
-        #[clap(long, default_value = "4096")]
+        #[clap(long, default_value = "4096", action)]
         block_size: u32,
 
         /// If creating, the extent size for the region
-        #[clap(long, default_value = "100")]
+        #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
         /// If creating, the extent count for the region
-        #[clap(long, default_value = "15")]
+        #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
         /// The IP/Port where the control server will listen
-        #[clap(long, default_value = "127.0.0.1:9998")]
+        #[clap(long, default_value = "127.0.0.1:9998", action)]
         control: SocketAddr,
     },
 }

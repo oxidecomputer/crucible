@@ -9,7 +9,7 @@ edition = "2018"
 anyhow = "1"
 bincode = "1.3.3"
 bytes = "1"
-clap = { version = "3.1.16", features = ["derive", "env"] }
+clap = { version = "3.2", features = ["derive", "env"] }
 crossterm = { version = "0.23.2" }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
