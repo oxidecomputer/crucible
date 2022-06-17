@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 pub use crucible_common::*;
-use crucible_protocol::*;
+pub use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
 pub use bytes::{Bytes, BytesMut};
