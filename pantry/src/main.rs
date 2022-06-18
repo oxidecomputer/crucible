@@ -20,11 +20,11 @@ mod pantry;
 #[clap(name = PROG, about = "Crucible volume maintenance agent")]
 enum Args {
     OpenApi {
-        #[clap(short = 'o', parse(try_from_str))]
+        #[clap(short = 'o', action)]
         output: PathBuf,
     },
     Run {
-        #[clap(short = 'l', parse(try_from_str))]
+        #[clap(short = 'l', action)]
         listen: SocketAddr,
     },
 }
