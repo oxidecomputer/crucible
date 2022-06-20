@@ -649,6 +649,7 @@ impl BlockIO for SubVolume {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
     Volume {
+        id: Uuid,
         block_size: u64,
         sub_volumes: Vec<VolumeConstructionRequest>,
         read_only_parent: Option<Box<VolumeConstructionRequest>>,
@@ -672,11 +673,12 @@ impl Volume {
     pub fn construct(request: VolumeConstructionRequest) -> Result<Volume> {
         match request {
             VolumeConstructionRequest::Volume {
+                id,
                 block_size,
                 sub_volumes,
                 read_only_parent,
             } => {
-                let mut vol = Volume::new(block_size);
+                let mut vol = Volume::new_with_id(block_size, id);
 
                 for subreq in sub_volumes {
                     vol.add_subvolume(Arc::new(Volume::construct(subreq)?))?;
@@ -1497,6 +1499,7 @@ mod test {
     #[tokio::test]
     async fn construct_snapshot_backed_vol() {
         let _request = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: 512,
@@ -1535,6 +1538,7 @@ mod test {
     #[tokio::test]
     async fn construct_read_only_iso_volume() {
         let _request = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![],
             read_only_parent: Some(Box::new(VolumeConstructionRequest::Url {
@@ -1560,6 +1564,7 @@ mod test {
         file.write_all(&vec![5u8; 512]).unwrap();
 
         let request = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![],
             read_only_parent: Some(Box::new(VolumeConstructionRequest::File {

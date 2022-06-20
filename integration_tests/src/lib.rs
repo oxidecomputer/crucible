@@ -79,6 +79,7 @@ mod test {
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -263,6 +264,7 @@ mod test {
         // Create volume with read only parent
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -367,6 +369,7 @@ mod test {
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -393,6 +396,7 @@ mod test {
                 }],
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Volume {
+                        id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
                         sub_volumes: vec![VolumeConstructionRequest::Url {
                             block_size: BLOCK_SIZE as u64,
