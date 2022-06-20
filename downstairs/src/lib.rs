@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use crucible::*;
 use crucible_common::{Block, CrucibleError, MAX_BLOCK_SIZE};
-use crucible_protocol::*;
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;

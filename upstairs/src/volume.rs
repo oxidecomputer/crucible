@@ -32,13 +32,17 @@ impl Debug for SubVolume {
 }
 
 impl Volume {
-    pub fn new(block_size: u64) -> Volume {
+    pub fn new_with_id(block_size: u64, uuid: Uuid) -> Volume {
         Self {
-            uuid: Uuid::new_v4(),
+            uuid,
             sub_volumes: vec![],
             read_only_parent: None,
             block_size,
         }
+    }
+
+    pub fn new(block_size: u64) -> Volume {
+        Volume::new_with_id(block_size, Uuid::new_v4())
     }
 
     // Create a simple Volume from a single guest
@@ -640,6 +644,7 @@ impl BlockIO for SubVolume {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
