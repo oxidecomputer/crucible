@@ -664,6 +664,7 @@ pub enum VolumeConstructionRequest {
         gen: u64,
     },
     File {
+        id: Uuid,
         block_size: u64,
         path: String,
     },
@@ -711,10 +712,14 @@ impl Volume {
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::File { block_size, path } => {
+            VolumeConstructionRequest::File {
+                id,
+                block_size,
+                path,
+            } => {
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume(Arc::new(FileBlockIO::new(
-                    block_size, path,
+                    id, block_size, path,
                 )?))?;
                 Ok(vol)
             }
@@ -1616,6 +1621,7 @@ mod test {
             block_size: 512,
             sub_volumes: vec![],
             read_only_parent: Some(Box::new(VolumeConstructionRequest::File {
+                id: Uuid::new_v4(),
                 block_size: 512,
                 path: file_path.into_os_string().into_string().unwrap(),
             })),
