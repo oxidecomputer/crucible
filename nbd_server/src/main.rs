@@ -79,6 +79,7 @@ fn main() -> Result<()> {
         control: opt.control,
         metric_collect: None,
         metric_register: None,
+        ..Default::default()
     };
 
     /*

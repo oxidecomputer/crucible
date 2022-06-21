@@ -453,6 +453,7 @@ fn main() -> Result<()> {
         control: opt.control,
         metric_collect: Some(opt.metric_collect),
         metric_register: Some(opt.metric_register),
+        ..Default::default()
     };
 
     /*

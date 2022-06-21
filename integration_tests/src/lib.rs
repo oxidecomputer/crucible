@@ -101,6 +101,7 @@ mod test {
                         control: None,
                         metric_collect: None,
                         metric_register: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],
@@ -190,6 +191,7 @@ mod test {
                 control: None,
                 metric_collect: None,
                 metric_register: None,
+                ..Default::default()
             },
             0,
         )?;
@@ -286,6 +288,7 @@ mod test {
                         control: None,
                         metric_collect: None,
                         metric_register: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],
@@ -391,6 +394,7 @@ mod test {
                         control: None,
                         metric_collect: None,
                         metric_register: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],

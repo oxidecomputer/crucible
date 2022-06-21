@@ -80,6 +80,7 @@ fn main() -> Result<()> {
         control: None,
         metric_collect: None,
         metric_register: None,
+        ..Default::default()
     };
 
     /*
