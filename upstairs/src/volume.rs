@@ -655,6 +655,7 @@ pub enum VolumeConstructionRequest {
         read_only_parent: Option<Box<VolumeConstructionRequest>>,
     },
     Url {
+        id: Uuid,
         block_size: u64,
         url: String,
     },
@@ -694,10 +695,14 @@ impl Volume {
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::Url { block_size, url } => {
+            VolumeConstructionRequest::Url {
+                id,
+                block_size,
+                url,
+            } => {
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume(Arc::new(ReqwestBlockIO::new(
-                    block_size, url,
+                    id, block_size, url,
                 )?))?;
                 Ok(vol)
             }
@@ -1595,6 +1600,7 @@ mod test {
             block_size: 512,
             sub_volumes: vec![],
             read_only_parent: Some(Box::new(VolumeConstructionRequest::Url {
+                id: Uuid::new_v4(),
                 block_size: 512,
                 // You can boot anything as long as it's Alpine
                 url: "https://fake.test/alpine.iso".to_string(),

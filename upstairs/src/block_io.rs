@@ -121,7 +121,11 @@ pub struct ReqwestBlockIO {
 }
 
 impl ReqwestBlockIO {
-    pub fn new(block_size: u64, url: String) -> Result<Self, CrucibleError> {
+    pub fn new(
+        id: Uuid,
+        block_size: u64,
+        url: String,
+    ) -> Result<Self, CrucibleError> {
         let client = Client::new();
 
         let response = client
@@ -141,7 +145,7 @@ impl ReqwestBlockIO {
         .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
         Ok(Self {
-            uuid: Uuid::new_v4(),
+            uuid: id,
             block_size,
             total_size: total_size as u64,
             client,

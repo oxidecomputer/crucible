@@ -409,6 +409,7 @@ mod test {
                         id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
                         sub_volumes: vec![VolumeConstructionRequest::Url {
+                            id: Uuid::new_v4(),
                             block_size: BLOCK_SIZE as u64,
                             url: server.url("/ff.raw").to_string(),
                         }],
