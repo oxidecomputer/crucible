@@ -800,14 +800,22 @@ mod test {
             sub_volumes: vec![
                 SubVolume {
                     lba_range: Range { start: 0, end: 512 },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
                 SubVolume {
                     lba_range: Range {
                         start: 512,
                         end: 1024,
                     },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
             ],
             read_only_parent: None,
@@ -830,21 +838,33 @@ mod test {
             sub_volumes: vec![
                 SubVolume {
                     lba_range: Range { start: 0, end: 512 },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
                 SubVolume {
                     lba_range: Range {
                         start: 512,
                         end: 1024,
                     },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
                 SubVolume {
                     lba_range: Range {
                         start: 1024,
                         end: 1536,
                     },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
             ],
             read_only_parent: None,
@@ -907,7 +927,11 @@ mod test {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range { start: 0, end: 512 },
-                block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                block_io: Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    512,
+                    512 * 512,
+                )),
             }],
             read_only_parent: None,
             block_size: 512,
@@ -926,11 +950,19 @@ mod test {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range { start: 0, end: 512 },
-                block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                block_io: Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    512,
+                    512 * 512,
+                )),
             }],
             read_only_parent: Some(SubVolume {
                 lba_range: Range { start: 0, end: 256 },
-                block_io: Arc::new(InMemoryBlockIO::new(512, 256 * 512)),
+                block_io: Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    512,
+                    256 * 512,
+                )),
             }),
             block_size: 512,
         };
@@ -957,7 +989,7 @@ mod test {
     #[test]
     fn test_in_memory_block_io() -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
-        let disk = InMemoryBlockIO::new(BLOCK_SIZE, 4096);
+        let disk = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096);
 
         // Initial read should come back all zeroes
         let buffer = Buffer::new(4096);
@@ -1193,8 +1225,9 @@ mod test {
     async fn test_parent_read_only_region_one_subvolume() -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
-        let disk = InMemoryBlockIO::new(BLOCK_SIZE, 4096);
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+        let disk = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096);
 
         // this layout has one volume that the parent lba range overlaps:
         //
@@ -1232,9 +1265,10 @@ mod test {
     ) -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
-        let subdisk1 = InMemoryBlockIO::new(BLOCK_SIZE, 1024);
-        let subdisk2 = InMemoryBlockIO::new(BLOCK_SIZE, 3072);
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+        let subdisk1 = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 1024);
+        let subdisk2 = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 3072);
 
         // this layout has two volumes that the parent lba range overlaps:
         //
@@ -1281,7 +1315,8 @@ mod test {
     fn test_volume_with_only_read_only_parent() -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
         parent.activate(0)?;
 
@@ -1328,7 +1363,8 @@ mod test {
     fn test_writing_to_volume_with_only_read_only_parent() {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
         let volume = Volume {
             uuid: Uuid::new_v4(),
@@ -1361,8 +1397,11 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Write 0x55 into parent
-        let parent =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let parent = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -1370,8 +1409,11 @@ mod test {
             )?
             .block_wait()?;
 
-        let overlay =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let overlay = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         {
             // Make a volume, verify orignal data, write new data to it, then
@@ -1429,8 +1471,11 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Write 0x55 into parent
-        let parent =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let parent = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -1449,8 +1494,11 @@ mod test {
         let mut parent_volume = Volume::new(BLOCK_SIZE as u64);
         parent_volume.add_subvolume(parent)?;
 
-        let overlay =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let overlay = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume(overlay)?;

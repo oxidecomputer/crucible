@@ -155,8 +155,11 @@ mod test {
             TestDownstairs::new("127.0.0.1".parse()?, 54006, true)?;
 
         // Create in memory block io full of 11
-        let in_memory_data =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         in_memory_data
             .write(
@@ -246,8 +249,11 @@ mod test {
             TestDownstairs::new("127.0.0.1".parse()?, 54009, true)?;
 
         // Create in memory block io full of 11
-        let in_memory_data =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         in_memory_data
             .write(
