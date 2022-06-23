@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 const PROG: &str = "crucible-pantry";
 
-mod server;
 mod pantry;
+mod server;
 
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible volume maintenance agent")]
@@ -52,9 +52,7 @@ async fn main() -> Result<()> {
                 .open(output)?;
             write_openapi(&mut f)
         }
-        Args::Run {
-            listen,
-        } => {
+        Args::Run { listen } => {
             let log = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
             }
@@ -63,8 +61,27 @@ async fn main() -> Result<()> {
             info!(log, "listen IP: {:?}", listen);
 
             let pan = Arc::new(pantry::Pantry::new(
-                log.new(o!("component" => "datafile")),
+                log.new(o!("component" => "pantry")),
             )?);
+
+            /*
+             * Start background processing task.
+             */
+            {
+                let pan = Arc::clone(&pan);
+                let log = log.clone();
+
+                tokio::task::spawn(async move {
+                    loop {
+                        if let Err(e) = pan.background_task().await {
+                            error!(log, "background task error: {:?}", e);
+                        }
+
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                            .await;
+                    }
+                });
+            }
 
             server::run_server(&log, listen, pan).await
         }
@@ -97,6 +114,9 @@ mod tests {
         let errors = openapi_lint::validate(&spec);
         assert!(errors.is_empty(), "{}", errors.join("\n\n"));
 
-        expectorate::assert_contents("../openapi/crucible-pantry.json", &actual);
+        expectorate::assert_contents(
+            "../openapi/crucible-pantry.json",
+            &actual,
+        );
     }
 }
