@@ -645,7 +645,7 @@ impl BlockIO for SubVolume {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
     Volume {

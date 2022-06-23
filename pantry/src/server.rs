@@ -8,7 +8,7 @@ use dropshot::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{o, Logger};
+use slog::{o, info, error, Logger};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::result::Result as SResult;
@@ -40,7 +40,7 @@ struct VolumePath {
     pub id: String,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Debug, JsonSchema)]
 struct AttachRequest {
     pub read_only: bool,
     pub gen: u64,
@@ -56,7 +56,21 @@ async fn attach(
     path: TypedPath<VolumePath>,
     body: TypedBody<AttachRequest>,
 ) -> DSResult<HttpResponseUpdatedNoContent> {
-    Ok(HttpResponseUpdatedNoContent())
+    let log = &rc.log;
+    let p = rc.context();
+
+    let id = path.into_inner().id;
+    let b = body.into_inner();
+
+    info!(log, "attach request: {} -> {:?}", id, b);
+
+    if let Err(e) = p.attach(id, b.volume_construction_request, b.gen).await {
+        error!(log, "attach fail: {:?}", e);
+        Err(HttpError::for_internal_error(format!("attach fail: {}", e)))
+    } else {
+        info!(log, "attach ok!");
+        Ok(HttpResponseUpdatedNoContent())
+    }
 }
 
 #[endpoint {

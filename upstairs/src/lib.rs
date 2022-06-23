@@ -180,7 +180,7 @@ mod cdt {
     fn gw__flush__done(_: u64) {}
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct CrucibleOpts {
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
