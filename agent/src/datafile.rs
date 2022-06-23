@@ -621,9 +621,15 @@ impl DataFile {
 
                     let path = path.to_str().unwrap().to_string();
 
-                    let mut chars = path.chars();
-                    chars.next();
-                    chars.as_str().to_string()
+                    // Get dataset name from path
+                    let output = std::process::Command::new("zfs")
+                        .args(["list", "-pH", "-o", "name", &path])
+                        .output()?;
+
+                    let output = String::from_utf8_lossy(&output.stdout);
+
+                    // remove '\n' from end
+                    output.trim_end().to_string()
                 };
 
                 let snapshot_name = format!("{}@{}", dataset_name, dir_name);
