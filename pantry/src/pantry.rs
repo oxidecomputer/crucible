@@ -14,6 +14,12 @@ pub struct Attachment {
     activated: bool,
 }
 
+impl Attachment {
+    pub fn volume(&mut self) -> Option<&mut Volume> {
+        self.volume.as_mut()
+    }
+}
+
 pub struct Pantry {
     log: Logger,
     attachments: Mutex<HashMap<String, Arc<Mutex<Attachment>>>>,
@@ -80,6 +86,18 @@ impl Pantry {
         }
 
         Ok(())
+    }
+
+    pub async fn lookup(
+        &self,
+        id: &str,
+    ) -> Result<Arc<Mutex<Attachment>>> {
+        let mut a = self.attachments.lock().await;
+        if let Some(a) = a.get(&id.to_string()) {
+            Ok(Arc::clone(a))
+        } else {
+            bail!("could not look up volume {:?}", id);
+        }
     }
 
     pub async fn attach(
