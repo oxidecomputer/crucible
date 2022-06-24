@@ -182,6 +182,7 @@ mod cdt {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CrucibleOpts {
+    pub id: Uuid,
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
     pub flush_timeout: Option<u32>,
@@ -3167,6 +3168,7 @@ pub struct Upstairs {
 impl Upstairs {
     pub fn default() -> Arc<Self> {
         let opts = CrucibleOpts {
+            id: Uuid::new_v4(),
             target: vec![],
             lossy: false,
             flush_timeout: None,
@@ -3221,7 +3223,7 @@ impl Upstairs {
             ))
         });
 
-        let uuid = Uuid::new_v4(); // XXX get from Nexus?
+        let uuid = opt.id;
         let stats = UpStatOuter {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
         };

@@ -79,6 +79,7 @@ mod test {
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -100,6 +101,7 @@ mod test {
                         control: None,
                         metric_collect: None,
                         metric_register: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],
@@ -153,8 +155,11 @@ mod test {
             TestDownstairs::new("127.0.0.1".parse()?, 54006, true)?;
 
         // Create in memory block io full of 11
-        let in_memory_data =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         in_memory_data
             .write(
@@ -189,6 +194,7 @@ mod test {
                 control: None,
                 metric_collect: None,
                 metric_register: None,
+                ..Default::default()
             },
             0,
         )?;
@@ -243,8 +249,11 @@ mod test {
             TestDownstairs::new("127.0.0.1".parse()?, 54009, true)?;
 
         // Create in memory block io full of 11
-        let in_memory_data =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         in_memory_data
             .write(
@@ -263,6 +272,7 @@ mod test {
         // Create volume with read only parent
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -284,6 +294,7 @@ mod test {
                         control: None,
                         metric_collect: None,
                         metric_register: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],
@@ -367,6 +378,7 @@ mod test {
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -388,13 +400,16 @@ mod test {
                         control: None,
                         metric_collect: None,
                         metric_register: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Volume {
+                        id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
                         sub_volumes: vec![VolumeConstructionRequest::Url {
+                            id: Uuid::new_v4(),
                             block_size: BLOCK_SIZE as u64,
                             url: server.url("/ff.raw").to_string(),
                         }],
