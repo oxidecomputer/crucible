@@ -1,6 +1,8 @@
 // Copyright 2021 Oxide Computer Company
 
 use super::*;
+use oximeter::types::ProducerRegistry;
+use tokio::sync::Mutex;
 
 use std::ops::Range;
 
@@ -107,6 +109,7 @@ impl Volume {
         &mut self,
         opts: CrucibleOpts,
         gen: u64,
+        producer_registry: Arc<tokio::sync::Mutex<Option<ProducerRegistry>>>,
     ) -> Result<(), CrucibleError> {
         let guest = Arc::new(Guest::new());
 
@@ -114,7 +117,7 @@ impl Volume {
         let guest_clone = guest.clone();
         tokio::spawn(async move {
             // XXX result eaten here!
-            let _ = up_main(opts, guest_clone).await;
+            let _ = up_main(opts, guest_clone, producer_registry).await;
         });
 
         guest.activate(gen)?;
@@ -169,6 +172,7 @@ impl Volume {
         &mut self,
         opts: CrucibleOpts,
         gen: u64,
+        producer_registry: Arc<tokio::sync::Mutex<Option<ProducerRegistry>>>,
     ) -> Result<(), CrucibleError> {
         let guest = Arc::new(Guest::new());
 
@@ -176,7 +180,7 @@ impl Volume {
         let guest_clone = guest.clone();
         tokio::spawn(async move {
             // XXX result eaten here!
-            let _ = up_main(opts, guest_clone).await;
+            let _ = up_main(opts, guest_clone, producer_registry).await;
         });
 
         guest.activate(gen)?;
@@ -314,7 +318,7 @@ impl BlockIO for Volume {
         offset: Block,
         data: Buffer,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        // In the cast that this volume only has a read only parent, serve
+        // In the case that this volume only has a read only parent, serve
         // reads directly from that
         if self.sub_volumes.is_empty() {
             if let Some(read_only_parent) = &self.read_only_parent {
@@ -672,7 +676,10 @@ pub enum VolumeConstructionRequest {
 }
 
 impl Volume {
-    pub fn construct(request: VolumeConstructionRequest) -> Result<Volume> {
+    pub fn construct(
+        request: VolumeConstructionRequest,
+        producer_registry: Arc<Mutex<Option<ProducerRegistry>>>,
+    ) -> Result<Volume> {
         match request {
             VolumeConstructionRequest::Volume {
                 id,
@@ -682,13 +689,18 @@ impl Volume {
             } => {
                 let mut vol = Volume::new_with_id(block_size, id);
 
+                println!("volume construct with sv:{:?}", sub_volumes);
                 for subreq in sub_volumes {
-                    vol.add_subvolume(Arc::new(Volume::construct(subreq)?))?;
+                    vol.add_subvolume(Arc::new(Volume::construct(
+                        subreq,
+                        producer_registry.clone(),
+                    )?))?;
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
                     vol.add_read_only_parent(Arc::new(Volume::construct(
                         *read_only_parent,
+                        producer_registry,
                     )?))?;
                 }
 
@@ -712,8 +724,9 @@ impl Volume {
                 opts,
                 gen,
             } => {
+                println!("WTH  a region?");
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume_create_guest(opts, gen)?;
+                vol.add_subvolume_create_guest(opts, gen, producer_registry)?;
                 Ok(vol)
             }
 
@@ -1632,8 +1645,8 @@ mod test {
                 path: file_path.into_os_string().into_string().unwrap(),
             })),
         };
-
-        let volume = Volume::construct(request).unwrap();
+        let pr = Arc::new(tokio::sync::Mutex::new(None));
+        let volume = Volume::construct(request, pr).unwrap();
 
         let buffer = Buffer::new(BLOCK_SIZE);
         volume

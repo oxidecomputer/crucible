@@ -89,8 +89,6 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
-        metric_collect: None,
-        metric_register: None,
     };
     let mut generation_number = opt.gen;
 
@@ -146,7 +144,8 @@ fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        runtime.spawn(up_main(crucible_opts.clone(), guest.clone()));
+        let pr = Arc::new(tokio::sync::Mutex::new(None));
+        runtime.spawn(up_main(crucible_opts.clone(), guest.clone(), pr));
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

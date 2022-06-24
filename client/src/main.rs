@@ -18,6 +18,8 @@ use uuid::Uuid;
 
 mod cli;
 mod protocol;
+mod stats;
+pub use stats::*;
 
 use crucible::*;
 
@@ -169,6 +171,11 @@ pub struct Opt {
     /// IP:Port for the Oximeter listen address
     #[clap(long, global = true, default_value = "127.0.0.1:55443", action)]
     metric_collect: SocketAddr,
+
+    /// Spin up a dropshot endpoint and serve metrics from it.
+    /// This will use the values in metric-register and metric-collect
+    #[clap(long, global = true, action)]
+    metrics: bool,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -453,8 +460,6 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
-        metric_collect: Some(opt.metric_collect),
-        metric_register: Some(opt.metric_register),
     };
 
     /*
@@ -487,7 +492,38 @@ fn main() -> Result<()> {
      */
     let guest = Arc::new(Guest::new());
 
-    runtime.spawn(up_main(crucible_opts, guest.clone()));
+    let pr;
+    if opt.metrics {
+        // If metrics are desired, we create and register the server
+        // first. Once we have the server, we clone the ProducerRegister
+        // so we can pass that on to the upstairs.
+        // Finally, spin out a task with the server to provide the endpoint
+        // so metrics can e collected by Oximeter.
+        println!(
+            "Creating a metric collect endpoint at {}",
+            opt.metric_collect
+        );
+        match runtime
+            .block_on(client_oximeter(opt.metric_collect, opt.metric_register))
+        {
+            Err(e) => {
+                println!("Failed to register with Oximeter {:?}", e);
+                pr = Arc::new(tokio::sync::Mutex::new(None));
+            }
+            Ok(server) => {
+                pr = Arc::new(tokio::sync::Mutex::new(Some(
+                    server.registry().clone(),
+                )));
+                // Now Spawn the metric endpoint.
+                runtime.spawn(async move {
+                    server.serve_forever().await.unwrap();
+                });
+            }
+        }
+    } else {
+        pr = Arc::new(tokio::sync::Mutex::new(None));
+    }
+    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {

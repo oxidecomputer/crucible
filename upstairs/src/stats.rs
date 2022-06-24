@@ -1,13 +1,10 @@
 // Copyright 2022 Oxide Computer Company
 use super::*;
 
-use dropshot::{ConfigDropshot, ConfigLogging, ConfigLoggingLevel};
-use omicron_common::api::internal::nexus::ProducerEndpoint;
 use oximeter::{
     types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
 };
-use oximeter_producer::{Config, Server};
 
 // These structs are used to construct the desired stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
@@ -141,6 +138,7 @@ impl Producer for UpStatOuter {
     }
 }
 
+/*
 /// Setup Oximeter
 /// This starts a dropshot server, and then registers the UpStatOuter
 /// producer with Oximeter.
@@ -197,3 +195,4 @@ pub async fn up_oximeter(
         }
     }
 }
+*/
