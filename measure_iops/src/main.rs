@@ -8,6 +8,7 @@ use clap::Parser;
 use rand::Rng;
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
+use uuid::Uuid;
 
 use crucible::*;
 
@@ -70,6 +71,7 @@ fn main() -> Result<()> {
     let opt = opts()?;
 
     let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
         target: opt.target,
         lossy: false,
         flush_timeout: None,
@@ -80,7 +82,6 @@ fn main() -> Result<()> {
         control: None,
         metric_collect: None,
         metric_register: None,
-        ..Default::default()
     };
 
     /*

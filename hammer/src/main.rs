@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::runtime::Builder;
+use uuid::Uuid;
 
 use crucible::*;
 
@@ -79,6 +80,7 @@ fn main() -> Result<()> {
     }
 
     let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
         target: opt.target,
         lossy: false,
         flush_timeout: None,
@@ -89,7 +91,6 @@ fn main() -> Result<()> {
         control: opt.control,
         metric_collect: None,
         metric_register: None,
-        ..Default::default()
     };
     let mut generation_number = opt.gen;
 
