@@ -713,6 +713,7 @@ dependencies = [
  "tokio",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -1706,6 +1707,7 @@ dependencies = [
  "rand 0.8.5",
  "statistical",
  "tokio",
+ "uuid 1.0.0",
 ]
 
 [[package]]

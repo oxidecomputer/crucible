@@ -14,6 +14,7 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
+use uuid::Uuid;
 
 mod cli;
 mod protocol;
@@ -443,6 +444,7 @@ fn main() -> Result<()> {
     }
 
     let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
         target: opt.target,
         lossy: opt.lossy,
         flush_timeout: opt.flush_timeout,
@@ -453,7 +455,6 @@ fn main() -> Result<()> {
         control: opt.control,
         metric_collect: Some(opt.metric_collect),
         metric_register: Some(opt.metric_register),
-        ..Default::default()
     };
 
     /*

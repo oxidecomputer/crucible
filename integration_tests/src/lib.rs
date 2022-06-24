@@ -84,6 +84,7 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
                         target: vec![
                             "127.0.0.1:54001".parse()?,
                             "127.0.0.1:54002".parse()?,
@@ -277,6 +278,7 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
                         target: vec![
                             "127.0.0.1:54007".parse()?,
                             "127.0.0.1:54008".parse()?,

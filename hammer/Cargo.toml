@@ -18,3 +18,4 @@ opentelemetry = "0.17.0"
 opentelemetry-jaeger = { version = "0.16.0" }
 tracing-subscriber = "0.3.11"
 tracing-opentelemetry = "0.17.3"
+uuid = "1"
