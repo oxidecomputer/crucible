@@ -14,12 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+      with:
+        fetch-depth: 5
     - name: Report rustfmt version
       run: cargo fmt -- --version
     - name: Check style
       run: cargo fmt -- --check
     - name: WTH
-      run: ls -lR
+      run: git log -5 
   build-docs:
     runs-on: ubuntu-latest
     steps:
@@ -31,11 +33,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+      with:
+        fetch-depth: 5
     - uses: dtolnay/rust-toolchain@nightly
     - name: Test git
       run: git status
     - name: Test two
-      run: git branch -r
+      run: git log
     - name: Test three
       run: ls -l upstairs/src/*
     - name: Build
