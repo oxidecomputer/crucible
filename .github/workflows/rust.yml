@@ -41,8 +41,8 @@ jobs:
     - uses: dtolnay/rust-toolchain@nightly
     - name: Test git
       run: git status
-    - name: Test two
-      run: git log -5 -p
+    - name: Replace rev
+      run: git checkout bf5b8670f3ade859982f5a8acf58c6420ee12f7f
     - name: Test three
       run: ls -l upstairs/src/*
     - name: Build
