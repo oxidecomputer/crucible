@@ -13,7 +13,8 @@ jobs:
   check-style:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    # uses: actions/checkout@v3
+    - uses: actions/checkout@28c7f3d2b5162b5ddd3dfd9a45aa55eaf396478b
       with:
         fetch-depth: 5
     - name: Report rustfmt version
@@ -25,21 +26,23 @@ jobs:
   build-docs:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    # uses: actions/checkout@v3
+    - uses: actions/checkout@28c7f3d2b5162b5ddd3dfd9a45aa55eaf396478b
     - uses: dtolnay/rust-toolchain@nightly
     - name: Test build documentation
       run: cargo doc
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    # uses: actions/checkout@v3
+    - uses: actions/checkout@28c7f3d2b5162b5ddd3dfd9a45aa55eaf396478b
       with:
         fetch-depth: 5
     - uses: dtolnay/rust-toolchain@nightly
     - name: Test git
       run: git status
     - name: Test two
-      run: git log
+      run: git log -5 -p
     - name: Test three
       run: ls -l upstairs/src/*
     - name: Build
