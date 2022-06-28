@@ -17,6 +17,9 @@ set -o xtrace
 cargo --version
 rustc --version
 
+banner GHA
+ls -l integration_tests/src/lib.rs
+
 banner build
 ptime -m cargo build --verbose
 
