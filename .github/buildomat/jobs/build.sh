@@ -37,5 +37,5 @@ echo in_work_bins
 ls -l /work/bins
 
 banner test
-ptime -m cargo test --verbose
+ptime -m cargo test --lib --verbose
 
