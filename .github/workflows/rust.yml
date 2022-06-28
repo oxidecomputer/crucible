@@ -18,6 +18,8 @@ jobs:
       run: cargo fmt -- --version
     - name: Check style
       run: cargo fmt -- --check
+    - name: WTH
+      run: ls -ltr
   build-docs:
     runs-on: ubuntu-latest
     steps:
@@ -30,6 +32,10 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: dtolnay/rust-toolchain@nightly
+    - name: Test git
+      run: git log -1
+    - name: Test two
+      run: ls -ltr integration_tests/src/ 
     - name: Build
       run: cargo build --verbose
     - name: Test test
