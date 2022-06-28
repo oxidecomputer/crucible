@@ -19,7 +19,7 @@ jobs:
     - name: Check style
       run: cargo fmt -- --check
     - name: WTH
-      run: ls -ltr
+      run: ls -lR
   build-docs:
     runs-on: ubuntu-latest
     steps:
@@ -33,11 +33,11 @@ jobs:
     - uses: actions/checkout@v3
     - uses: dtolnay/rust-toolchain@nightly
     - name: Test git
-      run: git log -10
+      run: git status
     - name: Test two
-      run: ls -ltr upstairs/src/*
+      run: git branch -r
     - name: Test three
-      run: ls -ltr
+      run: ls -l upstairs/src/*
     - name: Build
       run: cargo build --verbose
     - name: Test test
