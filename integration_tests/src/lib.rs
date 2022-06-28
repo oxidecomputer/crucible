@@ -454,7 +454,6 @@ mod test {
         .block_wait()?;
 
         assert_eq!(vec![0x01; BLOCK_SIZE], *buffer.as_vec());
-
         Ok(())
     }
 }
