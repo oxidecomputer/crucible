@@ -689,7 +689,6 @@ impl Volume {
             } => {
                 let mut vol = Volume::new_with_id(block_size, id);
 
-                println!("volume construct with sv:{:?}", sub_volumes);
                 for subreq in sub_volumes {
                     vol.add_subvolume(Arc::new(Volume::construct(
                         subreq,
@@ -724,7 +723,6 @@ impl Volume {
                 opts,
                 gen,
             } => {
-                println!("WTH  a region?");
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume_create_guest(opts, gen, producer_registry)?;
                 Ok(vol)
