@@ -32,5 +32,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@nightly
     - name: Build
       run: cargo build --verbose
+    - name: Test test
+      run: ls -ltr integration_tests/src/lib.rs
     - name: Test Libraries
       run: cargo test --lib --verbose
