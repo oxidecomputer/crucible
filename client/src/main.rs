@@ -447,11 +447,7 @@ fn main() -> Result<()> {
         bail!("Initial verify requires verify_in file");
     }
 
-    let up_uuid = if opt.uuid.is_some() {
-        opt.uuid.unwrap()
-    } else {
-        Uuid::new_v4()
-    };
+    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
 
     let crucible_opts = CrucibleOpts {
         id: up_uuid,
