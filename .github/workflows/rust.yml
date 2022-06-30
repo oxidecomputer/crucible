@@ -13,41 +13,24 @@ jobs:
   check-style:
     runs-on: ubuntu-latest
     steps:
-    # uses: actions/checkout@v3
-    - uses: actions/checkout@28c7f3d2b5162b5ddd3dfd9a45aa55eaf396478b
-      with:
-        fetch-depth: 5
+    - uses: actions/checkout@v3
     - name: Report rustfmt version
       run: cargo fmt -- --version
     - name: Check style
       run: cargo fmt -- --check
-    - name: WTH
-      run: git log -5 
   build-docs:
     runs-on: ubuntu-latest
     steps:
-    # uses: actions/checkout@v3
-    - uses: actions/checkout@28c7f3d2b5162b5ddd3dfd9a45aa55eaf396478b
+    - uses: actions/checkout@v3
     - uses: dtolnay/rust-toolchain@nightly
     - name: Test build documentation
       run: cargo doc
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-    # uses: actions/checkout@v3
-    - uses: actions/checkout@28c7f3d2b5162b5ddd3dfd9a45aa55eaf396478b
-      with:
-        fetch-depth: 5
+    - uses: actions/checkout@v3
     - uses: dtolnay/rust-toolchain@nightly
-    - name: Test git
-      run: git status
-    - name: Replace rev
-      run: git checkout bf5b8670f3ade859982f5a8acf58c6420ee12f7f
-    - name: Test three
-      run: ls -l upstairs/src/*
     - name: Build
       run: cargo build --verbose
-    - name: Test test
-      run: ls -ltr integration_tests/src/lib.rs
     - name: Test Libraries
       run: cargo test --lib --verbose
