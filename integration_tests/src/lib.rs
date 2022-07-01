@@ -493,8 +493,6 @@ mod test {
                             key_pem: None,
                             root_cert_pem: None,
                             control: None,
-                            metric_collect: None,
-                            metric_register: None,
                             ..Default::default()
                         },
                         gen: 0,
@@ -505,7 +503,9 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = tokio::task::block_in_place(|| Volume::construct(vcr))?;
+        let pr = Arc::new(tokio::sync::Mutex::new(None));
+        let volume =
+            tokio::task::block_in_place(|| Volume::construct(vcr, pr))?;
         volume.activate(0)?;
 
         // Read one block: should be all 0x00
