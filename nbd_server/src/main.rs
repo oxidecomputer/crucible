@@ -77,8 +77,6 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
-        metric_collect: None,
-        metric_register: None,
         ..Default::default()
     };
 
@@ -101,8 +99,9 @@ fn main() -> Result<()> {
      * the methods provided by guest to interact with Crucible.
      */
     let guest = Arc::new(Guest::new());
+    let pr = Arc::new(tokio::sync::Mutex::new(None));
 
-    runtime.spawn(up_main(crucible_opts, guest.clone()));
+    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
     println!("Crucible runtime is spawned");
 
     // NBD server

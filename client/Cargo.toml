@@ -15,9 +15,13 @@ crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 csv = "1.1.6"
+dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 futures = "0.3"
 futures-core = "0.3"
 indicatif = { version = "0.16.2", features = ["rayon"] }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 ringbuffer = "0.8"
 rand = "0.8.5"
 rand_chacha = "0.3.1"

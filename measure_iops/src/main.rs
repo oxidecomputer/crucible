@@ -80,8 +80,6 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: None,
-        metric_collect: None,
-        metric_register: None,
     };
 
     /*
@@ -117,8 +115,9 @@ fn main() -> Result<()> {
     }
 
     let guest = Arc::new(guest);
+    let pr = Arc::new(tokio::sync::Mutex::new(None));
 
-    runtime.spawn(up_main(crucible_opts, guest.clone()));
+    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
     println!("Crucible runtime is spawned");
 
     guest.activate(opt.gen)?;

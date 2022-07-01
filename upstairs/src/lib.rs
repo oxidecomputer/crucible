@@ -23,6 +23,7 @@ pub use crucible_protocol::*;
 use anyhow::{anyhow, bail, Result};
 pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
+use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use schemars::JsonSchema;
@@ -191,8 +192,6 @@ pub struct CrucibleOpts {
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
-    pub metric_collect: Option<SocketAddr>,
-    pub metric_register: Option<SocketAddr>,
 }
 
 impl CrucibleOpts {
@@ -3177,8 +3176,6 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
-            metric_collect: None,
-            metric_register: None,
         };
         Self::new(
             &opts,
@@ -3224,6 +3221,7 @@ impl Upstairs {
         });
 
         let uuid = opt.id;
+        println!("Crucible stats registered with UUID: {}", uuid);
         let stats = UpStatOuter {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
         };
@@ -6833,7 +6831,11 @@ async fn up_listen(
  * the connection to the downstairs and start listening for incoming
  * IO from the guest when the time is ready.
  */
-pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
+pub async fn up_main(
+    opt: CrucibleOpts,
+    guest: Arc<Guest>,
+    producer_registry: Arc<tokio::sync::Mutex<Option<ProducerRegistry>>>,
+) -> Result<()> {
     match register_probes() {
         Ok(()) => {
             println!("DTrace probes registered okay");
@@ -6879,21 +6881,13 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
         up_ds_listen(&upc, ds_done_rx).await;
     });
 
-    if opt.metric_register.is_some() && opt.metric_collect.is_some() {
-        /*
-         * spawn a task to register with Oximeter and handle it.
-         */
+    let prl = producer_registry.lock().await;
+    if let Some(pr) = &*prl {
         let up_oxc = Arc::clone(&up);
         let ups = up_oxc.stats.clone();
-        let listen = opt.metric_collect.unwrap();
-        let register = opt.metric_register.unwrap();
-        tokio::spawn(async move {
-            if let Err(e) = up_oximeter(ups, register, listen).await {
-                println!("ERROR: Oximeter failed: {:?}", e);
-            } else {
-                println!("OK: Oximeter stats exits.");
-            }
-        });
+        if let Err(e) = pr.register_producer(ups) {
+            println!("Failed to register metric producer: {}", e);
+        }
     }
 
     let tls_context = if let Some(cert_pem_path) = opt.cert_pem {

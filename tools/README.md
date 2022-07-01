@@ -29,6 +29,11 @@ that you already have downstairs running on port 88[1-3]0.
 The test will check for panic or assert in the output and stop if it
 detects them or a test exits with an error.
 
+## show_ox_propolis.sh
+A sample script that uses `oxdb` and `jq` to dump some oximeter stats
+produced from running propolis and requesting metrics. This requires
+oximeter running and collecting stats from propolis.
+
 ## show_ox_stats.sh
 A sample script that uses `oxdb` and `jq` to dump some oximeter stats
 produced from running downstairs with the `--oximeter` option.  This script

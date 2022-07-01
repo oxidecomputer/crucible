@@ -3,7 +3,7 @@
 if [[ -n $1 ]]; then
     UUID=$1
 else
-    echo "Please provide the Crucible Upstairs UUID"
+    echo "Please provide the UUID of the instance"
     exit 1
 fi
 
@@ -21,15 +21,17 @@ else
     exit 1
 fi
 
-echo "Showing upstairs stats for UUID: $UUID"
-for stat in activated flush read read_bytes write write_bytes ; do
-    last_time=$($OXDB -a fd00:1122:3344:101::5 query crucible_upstairs:$stat upstairs_uuid=="$UUID" | jq '.[].measurements[].timestamp '| sort -n | tail -1)
+target=instance_uuid
+
+echo "Showing $target stats for UUID: $UUID"
+for stat in reset ; do
+    last_time=$($OXDB -a fd00:1122:3344:101::5 query ${target}:${stat} uuid=="$UUID" | jq '.[].measurements[].timestamp '| sort -n | tail -1)
     if [[ -z "$last_time" ]]; then
         echo "Error finding last timestamp for $stat"
         continue
     fi
 
-    count=$($OXDB -a fd00:1122:3344:101::5 query crucible_upstairs:$stat upstairs_uuid=="$UUID" | jq ".[].measurements[] | select(.timestamp == $last_time) | .datum.datum.value")
+    count=$($OXDB -a fd00:1122:3344:101::5 query ${target}:${stat} uuid=="$UUID" | jq ".[].measurements[] | select(.timestamp == $last_time) | .datum.datum.value")
     if [[ -z "$count" ]]; then
         echo "Error finding count value for $stat"
         continue
