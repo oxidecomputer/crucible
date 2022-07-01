@@ -176,6 +176,10 @@ pub struct Opt {
     /// This will use the values in metric-register and metric-collect
     #[clap(long, global = true, action)]
     metrics: bool,
+
+    /// A UUID to use for the upstairs.
+    #[clap(long, global = true, action)]
+    uuid: Option<Uuid>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -450,8 +454,10 @@ fn main() -> Result<()> {
         bail!("Initial verify requires verify_in file");
     }
 
+    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
+
     let crucible_opts = CrucibleOpts {
-        id: Uuid::new_v4(),
+        id: up_uuid,
         target: opt.target,
         lossy: opt.lossy,
         flush_timeout: opt.flush_timeout,

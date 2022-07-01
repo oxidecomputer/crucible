@@ -1197,8 +1197,6 @@ impl Region {
      * Open any extents that are not.
      */
     pub fn reopen_all_extents(&mut self) -> Result<()> {
-        assert!(!self.read_only);
-
         let mut to_open = Vec::new();
         for (i, extent) in self.extents.iter().enumerate() {
             if extent.inner.is_none() {
