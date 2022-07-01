@@ -6,12 +6,8 @@ use oximeter_producer::{Config, Server};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
-pub fn client_ox() -> Result<()> {
-    println!("We got called");
-    Ok(())
-}
 // Create the dropshot endpoint we will open to Oximeter to read stats.
-// On success, return the not yet started Server.
+// On success, return the started but not yet running Server.
 pub async fn client_oximeter(
     my_address: SocketAddr,
     registration_address: SocketAddr,

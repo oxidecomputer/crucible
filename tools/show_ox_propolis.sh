@@ -3,8 +3,8 @@
 if [[ -n $1 ]]; then
     UUID=$1
 else
-    # Use this hard coded UUID, which is probably not what you want.
-    UUID=2effac35-a8ba-45ae-966d-4487e0df0ad6
+    echo "Please provide the UUID of the instance"
+    exit 1
 fi
 
 # Show me the stats for $UUID
@@ -24,7 +24,7 @@ fi
 target=instance_uuid
 
 echo "Showing $target stats for UUID: $UUID"
-for stat in rebooted ; do
+for stat in reset ; do
     last_time=$($OXDB -a fd00:1122:3344:101::5 query ${target}:${stat} uuid=="$UUID" | jq '.[].measurements[].timestamp '| sort -n | tail -1)
     if [[ -z "$last_time" ]]; then
         echo "Error finding last timestamp for $stat"

@@ -498,7 +498,7 @@ fn main() -> Result<()> {
         // first. Once we have the server, we clone the ProducerRegister
         // so we can pass that on to the upstairs.
         // Finally, spin out a task with the server to provide the endpoint
-        // so metrics can e collected by Oximeter.
+        // so metrics can be collected by Oximeter.
         println!(
             "Creating a metric collect endpoint at {}",
             opt.metric_collect

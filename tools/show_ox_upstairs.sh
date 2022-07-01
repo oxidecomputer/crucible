@@ -3,8 +3,8 @@
 if [[ -n $1 ]]; then
     UUID=$1
 else
-    # Use this hard coded UUID, which is probably not what you want.
-    UUID=2effac35-a8ba-45ae-966d-4487e0df0ad6
+    echo "Please provide the Crucible Upstairs UUID"
+    exit 1
 fi
 
 # Show me the stats for $UUID
