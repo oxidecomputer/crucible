@@ -144,8 +144,7 @@ fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
-        runtime.spawn(up_main(crucible_opts.clone(), guest.clone(), pr));
+        runtime.spawn(up_main(crucible_opts.clone(), guest.clone(), None));
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

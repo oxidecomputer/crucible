@@ -514,12 +514,10 @@ fn main() -> Result<()> {
         {
             Err(e) => {
                 println!("Failed to register with Oximeter {:?}", e);
-                pr = Arc::new(tokio::sync::Mutex::new(None));
+                pr = None;
             }
             Ok(server) => {
-                pr = Arc::new(tokio::sync::Mutex::new(Some(
-                    server.registry().clone(),
-                )));
+                pr = Some(server.registry().clone());
                 // Now Spawn the metric endpoint.
                 runtime.spawn(async move {
                     server.serve_forever().await.unwrap();
@@ -527,7 +525,7 @@ fn main() -> Result<()> {
             }
         }
     } else {
-        pr = Arc::new(tokio::sync::Mutex::new(None));
+        pr = None;
     }
     runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
     println!("Crucible runtime is spawned");
