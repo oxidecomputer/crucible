@@ -110,9 +110,8 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
         let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, pr)
+            Volume::construct(vcr, None)
         })?);
 
         volume.activate(0)?;
@@ -177,7 +176,6 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
         volume.add_subvolume_create_guest(
             CrucibleOpts {
                 target: vec![
@@ -197,7 +195,7 @@ mod test {
                 ..Default::default()
             },
             0,
-            pr,
+            None,
         )?;
         volume.add_read_only_parent(in_memory_data.clone())?;
 
@@ -303,9 +301,8 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
         let mut volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, pr))?;
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
 
         volume.add_read_only_parent({
             let mut volume = Volume::new(BLOCK_SIZE as u64);
@@ -419,9 +416,8 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
         let volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, pr))?;
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
         volume.activate(0)?;
 
         // Read one block: should be all 0xff
@@ -503,9 +499,8 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
         let volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, pr))?;
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
         volume.activate(0)?;
 
         // Read one block: should be all 0x00

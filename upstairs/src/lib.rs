@@ -6834,7 +6834,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     guest: Arc<Guest>,
-    producer_registry: Arc<tokio::sync::Mutex<Option<ProducerRegistry>>>,
+    producer_registry: Option<ProducerRegistry>,
 ) -> Result<()> {
     match register_probes() {
         Ok(()) => {
@@ -6881,8 +6881,7 @@ pub async fn up_main(
         up_ds_listen(&upc, ds_done_rx).await;
     });
 
-    let prl = producer_registry.lock().await;
-    if let Some(pr) = &*prl {
+    if let Some(pr) = producer_registry {
         let up_oxc = Arc::clone(&up);
         let ups = up_oxc.stats.clone();
         if let Err(e) = pr.register_producer(ups) {

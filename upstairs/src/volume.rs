@@ -2,7 +2,6 @@
 
 use super::*;
 use oximeter::types::ProducerRegistry;
-use tokio::sync::Mutex;
 
 use std::ops::Range;
 
@@ -109,7 +108,7 @@ impl Volume {
         &mut self,
         opts: CrucibleOpts,
         gen: u64,
-        producer_registry: Arc<tokio::sync::Mutex<Option<ProducerRegistry>>>,
+        producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
         let guest = Arc::new(Guest::new());
 
@@ -172,7 +171,7 @@ impl Volume {
         &mut self,
         opts: CrucibleOpts,
         gen: u64,
-        producer_registry: Arc<tokio::sync::Mutex<Option<ProducerRegistry>>>,
+        producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
         let guest = Arc::new(Guest::new());
 
@@ -678,7 +677,7 @@ pub enum VolumeConstructionRequest {
 impl Volume {
     pub fn construct(
         request: VolumeConstructionRequest,
-        producer_registry: Arc<Mutex<Option<ProducerRegistry>>>,
+        producer_registry: Option<ProducerRegistry>,
     ) -> Result<Volume> {
         match request {
             VolumeConstructionRequest::Volume {
@@ -1643,8 +1642,7 @@ mod test {
                 path: file_path.into_os_string().into_string().unwrap(),
             })),
         };
-        let pr = Arc::new(tokio::sync::Mutex::new(None));
-        let volume = Volume::construct(request, pr).unwrap();
+        let volume = Volume::construct(request, None).unwrap();
 
         let buffer = Buffer::new(BLOCK_SIZE);
         volume

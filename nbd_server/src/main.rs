@@ -99,9 +99,8 @@ fn main() -> Result<()> {
      * the methods provided by guest to interact with Crucible.
      */
     let guest = Arc::new(Guest::new());
-    let pr = Arc::new(tokio::sync::Mutex::new(None));
 
-    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
+    runtime.spawn(up_main(crucible_opts, guest.clone(), None));
     println!("Crucible runtime is spawned");
 
     // NBD server
