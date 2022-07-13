@@ -9,7 +9,7 @@ set -o pipefail
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
-    pkill -f -U "$(id -u)" downstairs
+    pkill -f -U "$(id -u)" crucible-downstairs
     if [[ -n "$dsc_pid" ]]; then
         kill "$dsc_pid"
     fi
@@ -30,7 +30,7 @@ function perf_round() {
     args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 16000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
-    "$dsc" start --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec" &
+    "$dsc" start --create --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec" &
     dsc_pid=$!
     sleep 5
     pfiles $dsc_pid > /dev/null
@@ -39,7 +39,7 @@ function perf_round() {
     "$cc" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
-    pkill -f -U "$(id -u)" downstairs
+    pkill -f -U "$(id -u)" crucible-downstairs
     kill $dsc_pid || true
     wait $dsc_pid || true
 }
@@ -50,9 +50,9 @@ BINDIR=${BINDIR:-$ROOT/target/release}
 echo "$ROOT"
 cd "$ROOT"
 
-if pgrep -fl -U "$(id -u)" downstairs; then
+if pgrep -fl -U "$(id -u)" crucible-downstairs; then
     echo "Downstairs already running" >&2
-    echo Run: pkill -f -U "$(id -u)" downstairs >&2
+    echo Run: pkill -f -U "$(id -u)" crucible-downstairs >&2
     exit 1
 fi
 

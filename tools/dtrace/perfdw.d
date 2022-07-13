@@ -7,12 +7,12 @@
  * arg0 is the job ID number.
  * arg1 is the client ID
  */
-cdt*:::ds-*-io-start
+crucible_upstairs*:::ds-*-io-start
 {
     start[arg0, arg1] = timestamp;
 }
 
-cdt*:::ds-*-io-done
+crucible_upstairs*:::ds-*-io-done
 /start[arg0, arg1]/
 {
     strtok(probename, "-");

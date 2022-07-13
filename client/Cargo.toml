@@ -9,24 +9,27 @@ edition = "2018"
 anyhow = "1"
 bincode = "1.3.3"
 bytes = "1"
-clap = { version = "3.1.16", features = ["derive", "env"] }
+clap = { version = "3.2", features = ["derive", "env"] }
 crossterm = { version = "0.23.2" }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
-crucible-scope = { path = "../scope" }
 csv = "1.1.6"
+dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 futures = "0.3"
 futures-core = "0.3"
 indicatif = { version = "0.16.2", features = ["rayon"] }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 ringbuffer = "0.8"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
-reedline = "0.5.0"
+reedline = "0.6.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 statistical = "1.0.0"
-tokio = { version = "1.18.1", features = ["full"] }
+tokio = { version = "1.19.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.5"
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }

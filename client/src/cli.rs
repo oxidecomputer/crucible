@@ -33,7 +33,7 @@ enum CliCommand {
     /// until all the downstairs answer
     Activate {
         /// Specify this generation number to use when requesting activation.
-        #[clap(long, short, default_value = "1")]
+        #[clap(long, short, default_value = "1", action)]
         gen: u64,
     },
     /// Commit the current write_log data to the minimum expected counts.
@@ -43,7 +43,7 @@ enum CliCommand {
     /// Report the expected read count for an offset.
     Expected {
         /// The desired offset to see the expected value for.
-        #[clap(long, short)]
+        #[clap(long, short, action)]
         offset: usize,
     },
     /// Export the current write count to the verify out file
@@ -55,7 +55,7 @@ enum CliCommand {
     /// Run Generic workload
     Generic {
         /// Number of IOs to execute
-        #[clap(long, short, default_value = "5000")]
+        #[clap(long, short, default_value = "5000", action)]
         count: usize,
     },
     /// Request region information
@@ -65,24 +65,30 @@ enum CliCommand {
     /// Run the client perf test
     Perf {
         /// Number of IOs to execute for each test phase
-        #[clap(long, short, default_value = "5000")]
+        #[clap(long, short, default_value = "5000", action)]
         count: usize,
         /// Size in blocks of each IO
-        #[clap(long, default_value = "1")]
+        #[clap(long, default_value = "1", action)]
         io_size: usize,
         /// Number of outstanding IOs at the same time
-        #[clap(long, default_value = "1")]
+        #[clap(long, default_value = "1", action)]
         io_depth: usize,
+        /// Number of read test loops to do.
+        #[clap(long, default_value = "2", action)]
+        read_loops: usize,
+        /// Number of write test loops to do.
+        #[clap(long, default_value = "2", action)]
+        write_loops: usize,
     },
     /// Quit the CLI
     Quit,
     /// Read from a given block offset
     Read {
         /// The desired offset in blocks to read from.
-        #[clap(long, short)]
+        #[clap(long, short, action)]
         offset: usize,
         /// The number of blocks to read.
-        #[clap(long, short, default_value = "1")]
+        #[clap(long, short, default_value = "1", action)]
         len: usize,
     },
     /// Issue a random read
@@ -98,10 +104,10 @@ enum CliCommand {
     /// Write to a given block offset
     Write {
         /// The desired offset in blocks to write to.
-        #[clap(short)]
+        #[clap(short, action)]
         offset: usize,
         /// The number of blocks to write.
-        #[clap(long, short, default_value = "1")]
+        #[clap(long, short, default_value = "1", action)]
         len: usize,
     },
     /// Get the upstairs UUID
@@ -266,8 +272,17 @@ async fn cmd_to_msg(
             count,
             io_size,
             io_depth,
+            read_loops,
+            write_loops,
         } => {
-            fw.send(CliMessage::Perf(count, io_size, io_depth)).await?;
+            fw.send(CliMessage::Perf(
+                count,
+                io_size,
+                io_depth,
+                read_loops,
+                write_loops,
+            ))
+            .await?;
         }
         CliCommand::Quit => {
             println!("The quit command has nothing to send");
@@ -622,7 +637,7 @@ async fn process_cli_command(
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
         }
-        CliMessage::Perf(count, io_size, io_depth) => {
+        CliMessage::Perf(count, io_size, io_depth, read_loops, write_loops) => {
             if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -630,7 +645,14 @@ async fn process_cli_command(
                 .await
             } else {
                 match perf_workload(
-                    guest, ri, &mut None, count, io_size, io_depth,
+                    guest,
+                    ri,
+                    &mut None,
+                    count,
+                    io_size,
+                    io_depth,
+                    read_loops,
+                    write_loops,
                 )
                 .await
                 {

@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use structopt::StructOpt;
+use clap::Parser;
 use tokio::runtime::Builder;
+use uuid::Uuid;
 
 use crucible::*;
 
@@ -20,48 +21,48 @@ fn do_vecs_match<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     matching == a.len() && matching == b.len()
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "volume-side storage component")]
+#[derive(Debug, Parser)]
+#[clap(about = "volume-side storage component")]
 pub struct Opt {
-    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000", action)]
     target: Vec<SocketAddr>,
 
     /*
      * Verify that writes don't extend before or after the actual location.
      */
-    #[structopt(short, long)]
+    #[clap(short, long, action)]
     verify_isolation: bool,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     tracing_endpoint: Option<String>,
 
-    #[structopt(short, long)]
+    #[clap(short, long, action)]
     key: Option<String>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0", action)]
     gen: u64,
 
     /*
      * Number of upstairs to sequentially activate and handoff to
      */
-    #[structopt(short, long, default_value = "5")]
+    #[clap(short, long, default_value = "5", action)]
     num_upstairs: usize,
 
     // TLS options
-    #[structopt(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
-    #[structopt(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     // Start upstairs control http server
-    #[structopt(long)]
+    #[clap(long, action)]
     control: Option<SocketAddr>,
 }
 
 pub fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
     println!("raw options: {:?}", opt);
 
     if opt.target.is_empty() {
@@ -79,8 +80,10 @@ fn main() -> Result<()> {
     }
 
     let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
         target: opt.target,
         lossy: false,
+        flush_timeout: None,
         key: opt.key,
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
@@ -141,7 +144,7 @@ fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        runtime.spawn(up_main(crucible_opts.clone(), guest.clone()));
+        runtime.spawn(up_main(crucible_opts.clone(), guest.clone(), None));
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

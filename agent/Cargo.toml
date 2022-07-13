@@ -7,9 +7,10 @@ edition = "2018"
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = [ "serde" ] }
+clap = { version = "3.2", features = ["derive"] }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 futures = "0.3.21"
-http = "0.2.7"
+http = "0.2.8"
 hyper = "0.14"
 schemars = { version = "0.8.10", features = [ "chrono", "uuid1" ] }
 serde = { version = "1.0", features = [ "derive" ] }
@@ -18,12 +19,11 @@ slog = { version = "2.7", features = [ "max_level_trace", "release_max_level_deb
 crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-structopt = "0.3"
-tokio = { version = "1.18", features = [ "full" ] }
+tokio = { version = "1.19", features = [ "full" ] }
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }
 
 [dev-dependencies]
 expectorate = "1.0.5"
 openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
-subprocess = "0.2.8"
+subprocess = "0.2.9"

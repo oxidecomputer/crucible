@@ -324,9 +324,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "3.1.16"
+version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52d4f8e4a1419219935762e32913b4430f37cb0c0200ad17a89ee18c0188a9f"
+checksum = "a836566fa5f52f7ddf909a8a2f9029b9f78ca584cd95cf7e87f8073110f4c5c9"
 dependencies = [
  "atty",
  "bitflags",
@@ -341,9 +341,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "3.1.7"
+version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3aab4734e083b809aaf5794e14e756d1c798d2c69c7f7de7a09a2f5214993c1"
+checksum = "986fd75d1dfd2c34eb8c9275ae38ad87ea9478c9b79e87f1801f7d866dfb1e37"
 dependencies = [
  "heck 0.4.0",
  "proc-macro-error",
@@ -354,9 +354,9 @@ dependencies = [
 
 [[package]]
 name = "clap_lex"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a37c35f1112dad5e6e0b1adaff798507497a18fceeb30cceb3bae7d1427b9213"
+checksum = "5538cd660450ebeb4234cfecf8f2284b844ffc4c50531e66d584ad5b91293613"
 dependencies = [
  "os_str_bytes",
 ]
@@ -500,7 +500,7 @@ dependencies = [
 name = "crucadm"
 version = "0.1.0"
 dependencies = [
- "clap 3.1.16",
+ "clap 3.2.1",
  "crucible",
  "crucible-control-client",
  "tokio",
@@ -514,15 +514,18 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
+ "chrono",
  "crucible-common",
  "crucible-protocol",
- "crucible-scope",
  "dropshot",
  "expectorate",
  "futures",
  "futures-core",
+ "omicron-common",
  "openapi-lint",
  "openapiv3",
+ "oximeter",
+ "oximeter-producer",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "reqwest",
@@ -530,7 +533,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "structopt",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -539,7 +541,7 @@ dependencies = [
  "toml",
  "tracing",
  "usdt",
- "uuid",
+ "uuid 1.0.0",
  "version_check",
 ]
 
@@ -549,6 +551,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "clap 3.2.1",
  "crucible-common",
  "crucible-smf",
  "dropshot",
@@ -563,10 +566,9 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "structopt",
  "subprocess",
  "tokio",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -590,16 +592,19 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytes",
- "clap 3.1.16",
+ "clap 3.2.1",
  "crossterm",
  "crucible",
  "crucible-common",
  "crucible-protocol",
- "crucible-scope",
  "csv",
+ "dropshot",
  "futures",
  "futures-core",
  "indicatif",
+ "omicron-common",
+ "oximeter",
+ "oximeter-producer",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "reedline",
@@ -610,7 +615,7 @@ dependencies = [
  "tokio",
  "tokio-util 0.7.0",
  "toml",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -627,7 +632,7 @@ dependencies = [
  "tokio-rustls",
  "toml",
  "twox-hash",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -651,6 +656,7 @@ dependencies = [
  "bincode",
  "bytes",
  "chrono",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "crucible-protocol",
@@ -683,7 +689,6 @@ dependencies = [
  "slog",
  "slog-async",
  "slog-term",
- "structopt",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -692,7 +697,8 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid",
+ "usdt",
+ "uuid 1.0.0",
  "version_check",
 ]
 
@@ -702,15 +708,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "opentelemetry",
  "opentelemetry-jaeger",
  "rand 0.8.5",
- "structopt",
  "tokio",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -726,7 +733,7 @@ dependencies = [
  "httptest",
  "tempfile",
  "tokio",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -735,17 +742,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "crucible-protocol",
- "crucible-scope",
  "futures",
  "futures-core",
  "nbd",
  "ringbuffer",
  "serde",
  "serde_json",
- "structopt",
  "tokio",
  "tokio-util 0.7.0",
  "toml",
@@ -770,21 +776,7 @@ dependencies = [
  "crucible-common",
  "serde",
  "tokio-util 0.7.0",
- "uuid",
-]
-
-[[package]]
-name = "crucible-scope"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "futures",
- "futures-core",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util 0.7.0",
- "toml",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -959,7 +951,7 @@ dependencies = [
  "tokio-rustls",
  "toml",
  "usdt",
- "uuid",
+ "uuid 1.0.0",
  "version_check",
 ]
 
@@ -981,10 +973,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byte-unit",
- "clap 3.1.16",
+ "clap 3.2.1",
  "csv",
+ "dropshot",
+ "expectorate",
+ "openapi-lint",
+ "openapiv3",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "schemars",
+ "serde",
+ "serde_json",
  "statistical",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -1388,9 +1390,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff8670570af52249509a86f5e3e18a08c60b177071826898fde8997cf5f6bfbb"
+checksum = "75f43d41e26995c17e71ee126451dd3941010b0514a81a9d11f3b341debc2399"
 dependencies = [
  "bytes",
  "fnv",
@@ -1487,9 +1489,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-staticfile"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d5ff45ea721e295c400e4c65b1c855d43d329b8ae8ec12520ab1860a240debf"
+checksum = "b558728d3c96e74c39398c9083c760f3ca068134ff342a8dbf1b296e1d83bb80"
 dependencies = [
  "futures-util",
  "http",
@@ -1623,9 +1625,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.125"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5916d2ae698f6de9bfb891ad7a8d65c09d232dc58cc4ac433c7da3b2fd84bc2b"
+checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
 
 [[package]]
 name = "libsqlite3-sys"
@@ -1703,12 +1705,13 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
+ "clap 3.2.1",
  "crucible",
  "crucible-common",
  "rand 0.8.5",
  "statistical",
- "structopt",
  "tokio",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -1829,7 +1832,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -1996,7 +1999,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-postgres",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -2165,7 +2168,7 @@ dependencies = [
  "schemars",
  "serde",
  "thiserror",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -2196,7 +2199,7 @@ dependencies = [
  "slog-dtrace",
  "thiserror",
  "tokio",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -2409,7 +2412,7 @@ dependencies = [
  "chrono",
  "fallible-iterator",
  "postgres-protocol",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -2715,9 +2718,9 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d96c36021d0668f3b4f8c054fce3a9b9b0aa83fc60aa6c59df0e2165f9980763"
+checksum = "422f144c06f679da4ab4f082a6d1d43e28bfabb68d009100e6e5520728f99fec"
 dependencies = [
  "chrono",
  "crossterm",
@@ -2965,7 +2968,8 @@ dependencies = [
  "schemars_derive",
  "serde",
  "serde_json",
- "uuid",
+ "uuid 0.8.2",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -3344,7 +3348,7 @@ dependencies = [
  "slog",
  "thiserror",
  "tokio",
- "uuid",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -3446,9 +3450,9 @@ dependencies = [
 
 [[package]]
 name = "subprocess"
-version = "0.2.8"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "055cf3ebc2981ad8f0a5a17ef6652f652d87831f79fddcba2ac57bcb9a0aa407"
+checksum = "0c2e86926081dda636c546d8c5e641661049d7562a68f5488be4a1f7f66f6086"
 dependencies = [
  "libc",
  "winapi",
@@ -3667,9 +3671,9 @@ checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "tokio"
-version = "1.18.1"
+version = "1.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce653fb475565de9f6fb0614b28bca8df2c430c0cf84bcd9c843f15de5414cc"
+checksum = "c51a52ed6686dd62c320f9b89299e9dfb46f730c7a48e635c19f21d116cb1439"
 dependencies = [
  "bytes",
  "libc",
@@ -3866,10 +3870,11 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.17.2"
+version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f9378e96a9361190ae297e7f3a8ff644aacd2897f244b1ff81f381669196fa6"
+checksum = "93600c803bb15e2a32bd376001b8625587f268fe887669b5ac86af524637c242"
 dependencies = [
+ "once_cell",
  "opentelemetry",
  "tracing",
  "tracing-core",
@@ -3904,7 +3909,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
- "rand 0.6.5",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
@@ -4113,6 +4118,12 @@ name = "utf8parse"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "936e4b492acfd135421d8dca4b1aa80a7bfc26e702ef3af710e0752684df5372"
+
+[[package]]
+name = "uuid"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
 
 [[package]]
 name = "uuid"

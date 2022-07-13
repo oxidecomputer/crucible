@@ -18,11 +18,12 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 pub use crucible_common::*;
-use crucible_protocol::*;
+pub use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
 pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
+use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use schemars::JsonSchema;
@@ -55,6 +56,9 @@ pub use block_io::{FileBlockIO, ReqwestBlockIO};
 mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
+
+mod stats;
+pub use stats::*;
 
 pub trait BlockIO {
     fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
@@ -111,28 +115,78 @@ pub trait BlockIO {
     }
 }
 
-#[usdt::provider]
+/// DTrace probes in the upstairs
+///
+/// up__status: This tracks the state of each of the three downstairs
+/// as well as the work queue counts for the upstairs work queue and the
+/// downstairs work queue.
+///
+/// For each read/write/flush, we have a DTrace probe at specific
+/// points throughout its path through the upstairs.  Below is the basic
+/// order of probes an IO will hit as it works its way through the
+/// system.
+///
+/// gw__*__start: This is when the upstairs has taken work from the
+/// `guest` structure and created a new `gw_id` used to track this IO
+/// through the system.  At the point of this probe, we have already
+/// taken two locks, so it's not the very beginning of an IO, but it is
+/// as close as we get after the `gw_id` is created.
+///
+/// up__to__ds_*_start: (Upstairs__to__Downstairs) At this point we have
+/// created the structures to track this IO through the Upstairs and added
+/// it to internal work queues, including the work queue for the three
+/// downstairs tasks that are responsible for sending IO to each
+/// downstairs.  This probe firing does not mean that a downstairs task
+/// has received or is acting on the IO yet, it just means the notification
+/// has been sent.
+///
+/// ds__*__io__start: This is when a downstairs task puts an IO on the
+/// wire to the actual downstairs that will do the work. This probe has
+/// both the job ID and the client ID so we can tell the individual
+/// downstairs apart.
+///
+/// ds__*__io_done: An ACK has been received from a downstairs for an IO
+/// sent to it. At the point of this probe the IO has just come off the
+/// wire and we have not processed it yet.
+///
+/// up__to__ds__*__done: (Upstairs__to__Downstairs) This is the point where
+/// the upstairs has decided that it has enough data to complete an IO
+/// and send an ACK back to the guest.  For a read, this could be the the
+/// first IO to respond from the downstairs.  For a write/flush, we have
+/// two downstairs that have ACK'd the IO.
+///
+/// gw__*__done: An IO is completed and the Upstairs has sent the
+/// completion notice to the guest.
+#[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__read__done(_: u64) {}
-    fn gw__write__done(_: u64) {}
-    fn gw__flush__done(_: u64) {}
+    fn up__to__ds__read__start(_: u64) {}
+    fn up__to__ds__write__start(_: u64) {}
+    fn up__to__ds__flush__start(_: u64) {}
     fn ds__read__io__start(_: u64, _: u64) {}
     fn ds__write__io__start(_: u64, _: u64) {}
     fn ds__flush__io__start(_: u64, _: u64) {}
     fn ds__read__io__done(_: u64, _: u64) {}
     fn ds__write__io__done(_: u64, _: u64) {}
     fn ds__flush__io__done(_: u64, _: u64) {}
+    fn up__to__ds__read__done(_: u64) {}
+    fn up__to__ds__write__done(_: u64) {}
+    fn up__to__ds__flush__done(_: u64) {}
+    fn gw__read__done(_: u64) {}
+    fn gw__write__done(_: u64) {}
+    fn gw__flush__done(_: u64) {}
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CrucibleOpts {
+    pub id: Uuid,
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
+    pub flush_timeout: Option<u32>,
     pub key: Option<String>,
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
@@ -2223,10 +2277,16 @@ impl Downstairs {
     }
 
     /*
-     * This function just does the match on IOop type and updates the dtrace
-     * probe for that operation finishing.
+     * This function does a match on IOop type and updates the oximeter
+     * stat and dtrace probe for that operation.
      */
-    fn cdt_gw_work_done(&self, ds_id: u64, gw_id: u64) {
+    fn cdt_gw_work_done(
+        &self,
+        ds_id: u64,
+        gw_id: u64,
+        io_size: usize,
+        stats: &UpStatOuter,
+    ) {
         let job = self
             .active
             .get(&ds_id)
@@ -2239,12 +2299,14 @@ impl Downstairs {
                 requests: _,
             } => {
                 cdt::gw__read__done!(|| (gw_id));
+                stats.add_read(io_size as i64);
             }
             IOop::Write {
                 dependencies: _,
                 writes: _,
             } => {
                 cdt::gw__write__done!(|| (gw_id));
+                stats.add_write(io_size as i64);
             }
             IOop::Flush {
                 dependencies: _,
@@ -2253,6 +2315,7 @@ impl Downstairs {
                 snapshot_details: _,
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
+                stats.add_flush();
             }
         }
     }
@@ -2678,6 +2741,7 @@ impl Downstairs {
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__read__done!(|| job.guest_id);
                     } else {
                         /*
                          * If another job has finished already, we can
@@ -2710,6 +2774,7 @@ impl Downstairs {
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__write__done!(|| job.guest_id);
                     }
                 }
                 IOop::Flush {
@@ -2730,6 +2795,7 @@ impl Downstairs {
                     {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__flush__done!(|| job.guest_id);
                         if deactivate {
                             println!(
                                 "[{}] deactivate flush {} done",
@@ -3004,6 +3070,7 @@ impl UpstairsState {
         }
         self.active_request = false;
         self.up_state = UpState::Active;
+
         println!("{} is now active", uuid);
         Ok(())
     }
@@ -3090,13 +3157,20 @@ pub struct Upstairs {
      * queue was not a flush.
      */
     need_flush: Mutex<bool>,
+
+    /*
+     * Upstairs stats.
+     */
+    stats: UpStatOuter,
 }
 
 impl Upstairs {
     pub fn default() -> Arc<Self> {
         let opts = CrucibleOpts {
+            id: Uuid::new_v4(),
             target: vec![],
             lossy: false,
+            flush_timeout: None,
             key: None,
             cert_pem: None,
             key_pem: None,
@@ -3146,9 +3220,15 @@ impl Upstairs {
             ))
         });
 
+        let uuid = opt.id;
+        println!("Crucible stats registered with UUID: {}", uuid);
+        let stats = UpStatOuter {
+            up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
+        };
+
         Arc::new(Upstairs {
             active: Mutex::new(UpstairsState::default()),
-            uuid: Uuid::new_v4(),      // XXX get from Nexus?
+            uuid,
             generation: Mutex::new(0), // XXX Also get from Nexus?
             guest,
             downstairs: Mutex::new(Downstairs::new(opt.target.clone())),
@@ -3156,6 +3236,7 @@ impl Upstairs {
             ddef: Mutex::new(def),
             encryption_context,
             need_flush: Mutex::new(false),
+            stats,
         })
     }
 
@@ -3193,10 +3274,13 @@ impl Upstairs {
      * re-join than the original compare all downstairs to each other
      * that happens on initial startup. This is because the running
      * upstairs has some state it can use to re-verify a downstairs.
+     *
+     * Note this method is only called during tests.
      */
     #[cfg(test)]
     fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().unwrap();
+        self.stats.add_activation();
         active.set_active(self.uuid)
     }
 
@@ -3545,6 +3629,7 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
         let next_id = downstairs.next_id();
         let next_flush = self.next_flush_id();
+        cdt::gw__flush__start!(|| (gw_id));
 
         /*
          * Walk the downstairs work active list, and pull out all the active
@@ -3579,9 +3664,9 @@ impl Upstairs {
 
         let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), sender);
         gw.active.insert(gw_id, new_gtos);
-        cdt::gw__flush__start!(|| (gw_id));
 
         downstairs.enqueue(fl);
+        cdt::up__to__ds__flush__start!(|| (gw_id));
 
         Ok(())
     }
@@ -3629,6 +3714,7 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
+        cdt::gw__write__start!(|| (gw_id));
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -3697,9 +3783,9 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt::gw__write__start!(|| (gw_id));
 
         downstairs.enqueue(wr);
+        cdt::up__to__ds__write__start!(|| (gw_id));
 
         Ok(())
     }
@@ -3746,6 +3832,7 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
+        cdt::gw__read__start!(|| (gw_id));
 
         /*
          * Create the tracking info for downstairs request numbers (ds_id) we
@@ -3787,9 +3874,9 @@ impl Upstairs {
         {
             gw.active.insert(gw_id, new_gtos);
         }
-        cdt::gw__read__start!(|| (gw_id));
 
         downstairs.enqueue(wr);
+        cdt::up__to__ds__read__start!(|| (gw_id));
 
         Ok(())
     }
@@ -4420,6 +4507,7 @@ impl Upstairs {
                     *s = DsState::Active;
                 }
                 active.set_active(self.uuid)?;
+                self.stats.add_activation();
             }
         } else {
             /*
@@ -4447,6 +4535,7 @@ impl Upstairs {
                     *s = DsState::Active;
                 }
                 active.set_active(self.uuid)?;
+                self.stats.add_activation();
                 println!("{} Set Active after no repair", self.uuid);
             }
         }
@@ -4897,6 +4986,37 @@ impl DownstairsIO {
         }
 
         wc
+    }
+
+    /*
+     * Return the size of the IO in bytes
+     * Depending on the IO (write or read) we have to look in a different
+     * location to get the size.
+     */
+    pub fn io_size(&self) -> usize {
+        match &self.work {
+            IOop::Write {
+                dependencies: _,
+                writes,
+            } => writes.iter().map(|w| w.data.len()).sum(),
+            IOop::Flush {
+                dependencies: _,
+                flush_number: _flush_number,
+                gen_number: _,
+                snapshot_details: _,
+            } => 0,
+            IOop::Read {
+                dependencies: _,
+                requests: _,
+            } => {
+                if self.data.is_some() {
+                    let rrs = self.data.as_ref().unwrap();
+                    rrs.iter().map(|r| r.data.len()).sum()
+                } else {
+                    0
+                }
+            }
+        }
     }
 }
 
@@ -6326,9 +6446,9 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
         let mut gw = up.guest.guest_work.lock().unwrap();
         for ds_id_done in ack_list.iter() {
-            let mut work = up.downstairs.lock().unwrap();
+            let mut ds = up.downstairs.lock().unwrap();
 
-            let done = work.active.get_mut(ds_id_done).unwrap();
+            let done = ds.active.get_mut(ds_id_done).unwrap();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -6342,15 +6462,16 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let ds_id = done.ds_id;
             assert_eq!(*ds_id_done, ds_id);
 
+            let io_size = done.io_size();
             let data = done.data.take();
 
-            work.ack(ds_id);
+            ds.ack(ds_id);
 
-            gw.gw_ds_complete(gw_id, ds_id, data, work.result(ds_id));
+            gw.gw_ds_complete(gw_id, ds_id, data, ds.result(ds_id));
 
-            work.cdt_gw_work_done(ds_id, gw_id);
+            ds.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats);
 
-            work.retire_check(ds_id);
+            ds.retire_check(ds_id);
         }
     }
     println!("up_ds_listen loop done");
@@ -6595,8 +6716,11 @@ async fn up_listen(
     dst: Vec<Target>,
     mut ds_status_rx: mpsc::Receiver<Condition>,
     mut ds_reconcile_done_rx: mpsc::Receiver<Repair>,
+    timeout: Option<u32>,
 ) {
     println!("Wait for all three downstairs to come online");
+    let flush_timeout = timeout.unwrap_or(5);
+    println!("Flush timeout: {}", flush_timeout);
     let mut lastcast = 1;
 
     /*
@@ -6610,7 +6734,7 @@ async fn up_listen(
     let mut leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
 
     up.stat_update("start");
-    let mut flush_check = deadline_secs(5);
+    let mut flush_check = deadline_secs(flush_timeout.into());
     let mut show_work_interval = deadline_secs(5);
     loop {
         /*
@@ -6691,7 +6815,7 @@ async fn up_listen(
                  */
                 up.stat_update("loop");
 
-                flush_check = deadline_secs(5);
+                flush_check = deadline_secs(flush_timeout.into());
             }
             _ = sleep_until(show_work_interval) => {
                 //show_all_work(up);
@@ -6707,7 +6831,11 @@ async fn up_listen(
  * the connection to the downstairs and start listening for incoming
  * IO from the guest when the time is ready.
  */
-pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
+pub async fn up_main(
+    opt: CrucibleOpts,
+    guest: Arc<Guest>,
+    producer_registry: Option<ProducerRegistry>,
+) -> Result<()> {
     match register_probes() {
         Ok(()) => {
             println!("DTrace probes registered okay");
@@ -6752,6 +6880,14 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
     tokio::spawn(async move {
         up_ds_listen(&upc, ds_done_rx).await;
     });
+
+    if let Some(pr) = producer_registry {
+        let up_oxc = Arc::clone(&up);
+        let ups = up_oxc.stats.clone();
+        if let Err(e) = pr.register_producer(ups) {
+            println!("Failed to register metric producer: {}", e);
+        }
+    }
 
     let tls_context = if let Some(cert_pem_path) = opt.cert_pem {
         let key_pem_path = opt.key_pem.unwrap();
@@ -6838,7 +6974,14 @@ pub async fn up_main(opt: CrucibleOpts, guest: Arc<Guest>) -> Result<()> {
      * Once connected, we then take work requests from the guest and
      * submit them into the upstairs
      */
-    up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx).await;
+    up_listen(
+        &up,
+        dst,
+        ds_status_rx,
+        ds_reconcile_done_rx,
+        opt.flush_timeout,
+    )
+    .await;
 
     Ok(())
 }
@@ -6955,8 +7098,8 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let gior = up.guest_io_ready();
     let up_count = up.guest.guest_work.lock().unwrap().active.len();
 
-    let work = up.downstairs.lock().unwrap();
-    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    let ds = up.downstairs.lock().unwrap();
+    let mut kvec: Vec<u64> = ds.active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
     );
@@ -6988,7 +7131,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
         kvec.sort_unstable();
         for id in kvec.iter() {
-            let job = work.active.get(id).unwrap();
+            let job = ds.active.get(id).unwrap();
             let ack = job.ack_status;
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
@@ -7055,13 +7198,13 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
         iosc.show_all();
         print!("Last Flush: ");
-        for lf in work.ds_last_flush.iter() {
+        for lf in ds.ds_last_flush.iter() {
             print!("{} ", lf);
         }
         println!();
     }
 
-    let done = work.completed.to_vec();
+    let done = ds.completed.to_vec();
     let mut count = 0;
     print!("Downstairs last five completed:");
     for j in done.iter().rev() {
@@ -7072,7 +7215,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     }
     println!();
-    drop(work);
+    drop(ds);
 
     let up_done = up.guest.guest_work.lock().unwrap().completed.to_vec();
     print!("Upstairs last five completed:  ");

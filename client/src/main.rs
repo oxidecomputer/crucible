@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -14,9 +14,12 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
+use uuid::Uuid;
 
 mod cli;
 mod protocol;
+mod stats;
+pub use stats::*;
 
 use crucible::*;
 
@@ -35,16 +38,16 @@ enum Workload {
     /// Starts a CLI client
     Cli {
         /// Address to connect to
-        #[clap(long, short, default_value = "0.0.0.0:5050")]
+        #[clap(long, short, default_value = "0.0.0.0:5050", action)]
         attach: SocketAddr,
     },
     /// Start a server and listen on the given address and port
     CliServer {
         /// Address to listen on
-        #[clap(long, short, default_value = "0.0.0.0")]
+        #[clap(long, short, default_value = "0.0.0.0", action)]
         listen: IpAddr,
         /// Port to listen on
-        #[clap(long, short, default_value = "5050")]
+        #[clap(long, short, default_value = "5050", action)]
         port: u16,
     },
     Deactivate,
@@ -58,14 +61,20 @@ enum Workload {
     /// Run the perf test, random writes, then random reads
     Perf {
         /// Size in blocks of each IO
-        #[clap(long, default_value = "1")]
+        #[clap(long, default_value = "1", action)]
         io_size: usize,
         /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value = "1")]
+        #[clap(long, default_value = "1", action)]
         io_depth: usize,
         /// Output file for IO times
-        #[clap(long, global = true, parse(from_os_str), name = "PERF")]
+        #[clap(long, global = true, name = "PERF", action)]
         perf_out: Option<PathBuf>,
+        /// Number of read test loops to do.
+        #[clap(long, default_value = "2", action)]
+        read_loops: usize,
+        /// Number of write test loops to do.
+        #[clap(long, default_value = "2", action)]
+        write_loops: usize,
     },
     Rand,
     Repair,
@@ -79,10 +88,16 @@ enum Workload {
 pub struct Opt {
     ///  For tests that support it, pass this count value for the number
     ///  of loops the test should do.
-    #[clap(short, long, global = true, default_value = "0")]
+    #[clap(short, long, global = true, default_value = "0", action)]
     count: usize,
 
-    #[clap(short, long, global = true, default_value = "127.0.0.1:9000")]
+    #[clap(
+        short,
+        long,
+        global = true,
+        default_value = "127.0.0.1:9000",
+        action
+    )]
     target: Vec<SocketAddr>,
 
     #[clap(subcommand)]
@@ -94,56 +109,77 @@ pub struct Opt {
     ///  used in production.  Passing args like this to the upstairs
     ///  may not be the best way to test, but until we have something
     ///  better... XXX
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     lossy: bool,
 
     ///  quit after all crucible work queues are empty.
-    #[clap(short, global = true, long)]
+    #[clap(short, global = true, long, action)]
     quit: bool,
 
-    #[clap(short, global = true, long)]
+    #[clap(short, global = true, long, action)]
     key: Option<String>,
 
-    #[clap(short, global = true, long, default_value = "0")]
+    #[clap(short, global = true, long, default_value = "0", action)]
     gen: u64,
 
     /// For the verify test, if this option is included we will allow
     /// the write log range of data to pass the verify_volume check.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     range: bool,
 
     /// Retry for activate, as long as it takes.  If we pass this arg, the
     /// test will retry the initial activate command as long as it takes.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     retry_activate: bool,
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     verify: bool,
 
     /// For tests that support it, load the expected write count from
     /// the provided file.  The addition of a --verify option will also
     /// have the test verify what it imports from the file is valid.
-    #[clap(long, global = true, parse(from_os_str), name = "INFILE")]
+    #[clap(long, global = true, name = "INFILE", action)]
     verify_in: Option<PathBuf>,
 
     ///  For tests that support it, save the write count into the
     ///  provided file.
-    #[clap(long, global = true, parse(from_os_str), name = "FILE")]
+    #[clap(long, global = true, name = "FILE", action)]
     verify_out: Option<PathBuf>,
 
     // TLS options
-    #[clap(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
-    #[clap(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     /// IP:Port for the upstairs control http server
-    #[clap(long, global = true)]
+    #[clap(long, global = true, action)]
     control: Option<SocketAddr>,
+
+    /// How long to wait before the auto flush check fires
+    #[clap(long, global = true, action)]
+    flush_timeout: Option<u32>,
+
+    /// IP:Port for the Oximeter register address, which is Nexus.
+    #[clap(long, global = true, default_value = "127.0.0.1:12221", action)]
+    metric_register: SocketAddr,
+
+    /// IP:Port for the Oximeter listen address
+    #[clap(long, global = true, default_value = "127.0.0.1:55443", action)]
+    metric_collect: SocketAddr,
+
+    /// Spin up a dropshot endpoint and serve metrics from it.
+    /// This will use the values in metric-register and metric-collect
+    #[clap(long, global = true, action)]
+    metrics: bool,
+
+    /// A UUID to use for the upstairs.
+    #[clap(long, global = true, action)]
+    uuid: Option<Uuid>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -418,9 +454,13 @@ fn main() -> Result<()> {
         bail!("Initial verify requires verify_in file");
     }
 
+    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
+
     let crucible_opts = CrucibleOpts {
+        id: up_uuid,
         target: opt.target,
         lossy: opt.lossy,
+        flush_timeout: opt.flush_timeout,
         key: opt.key,
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
@@ -458,7 +498,36 @@ fn main() -> Result<()> {
      */
     let guest = Arc::new(Guest::new());
 
-    runtime.spawn(up_main(crucible_opts, guest.clone()));
+    let pr;
+    if opt.metrics {
+        // If metrics are desired, we create and register the server
+        // first. Once we have the server, we clone the ProducerRegister
+        // so we can pass that on to the upstairs.
+        // Finally, spin out a task with the server to provide the endpoint
+        // so metrics can be collected by Oximeter.
+        println!(
+            "Creating a metric collect endpoint at {}",
+            opt.metric_collect
+        );
+        match runtime
+            .block_on(client_oximeter(opt.metric_collect, opt.metric_register))
+        {
+            Err(e) => {
+                println!("Failed to register with Oximeter {:?}", e);
+                pr = None;
+            }
+            Ok(server) => {
+                pr = Some(server.registry().clone());
+                // Now Spawn the metric endpoint.
+                runtime.spawn(async move {
+                    server.serve_forever().await.unwrap();
+                });
+            }
+        }
+    } else {
+        pr = None;
+    }
+    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
@@ -484,12 +553,6 @@ fn main() -> Result<()> {
 
     println!("Wait for a query_work_queue command to finish before sending IO");
     guest.query_work_queue()?;
-    /*
-     * Create the interactive input scope that will generate and send
-     * work to the Crucible thread that listens to work from outside
-     * (Propolis).  XXX Test code here..
-     * runtime.spawn(run_scope(prop_work));
-     */
 
     /*
      * Build the region info struct that all the tests will use.
@@ -643,6 +706,8 @@ fn main() -> Result<()> {
             io_size,
             io_depth,
             perf_out,
+            read_loops,
+            write_loops,
         } => {
             println!("Perf test");
             let ops = {
@@ -693,17 +758,16 @@ fn main() -> Result<()> {
                 "ES",
                 "EC",
             );
-
-            for _ in 0..2 {
-                runtime.block_on(perf_workload(
-                    &guest,
-                    &mut region_info,
-                    &mut opt_wtr,
-                    ops,
-                    io_depth,
-                    io_size,
-                ))?;
-            }
+            runtime.block_on(perf_workload(
+                &guest,
+                &mut region_info,
+                &mut opt_wtr,
+                ops,
+                io_depth,
+                io_size,
+                write_loops,
+                read_loops,
+            ))?;
             if opt.quit {
                 return Ok(());
             }
@@ -1443,12 +1507,16 @@ struct Record {
 /**
  * A simple IO test in two stages: 100% random writes, then 100% random
  * reads. The caller can select:
- * io_depth: The number of outstanding IOs issued at a time
+ * io_depth:      The number of outstanding IOs issued at a time
  * blocks_per_io: The size of each io (in multiple of block size).
- * count: The number of loops to perform for each test (all IOs in io_depth
- *        are considered as a single loop).
+ * count:         The number of loops to perform for each test (all IOs
+ *                in io_depth are considered as a single loop).
+ * write_loop:    The number of times to do the 100% write loop.
+ * read_loop:     The number of times to do the 100% read loop.
+ *
  * A summary is printed at the end of each stage.
  */
+#[allow(clippy::too_many_arguments)]
 async fn perf_workload(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
@@ -1456,7 +1524,18 @@ async fn perf_workload(
     count: usize,
     io_depth: usize,
     blocks_per_io: usize,
+    write_loop: usize,
+    read_loop: usize,
 ) -> Result<()> {
+    // Before we start, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue()?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
     let mut rng = rand::thread_rng();
     let io_size = blocks_per_io * ri.block_size as usize;
 
@@ -1481,99 +1560,112 @@ async fn perf_workload(
     let offset_mod =
         rng.gen::<u64>() % (ri.total_blocks - blocks_per_io) as u64;
 
-    let mut wtime = Vec::with_capacity(count);
-    let big_start = Instant::now();
-    for _ in 0..count {
-        let burst_start = Instant::now();
-        let mut write_waiters = Vec::with_capacity(io_depth);
-        for write_buffer in write_buffers.iter().take(io_depth) {
-            let offset: u64 = rng.gen::<u64>() % offset_mod;
+    for _ in 0..write_loop {
+        let mut wtime = Vec::with_capacity(count);
+        let big_start = Instant::now();
+        for _ in 0..count {
+            let burst_start = Instant::now();
+            let mut write_waiters = Vec::with_capacity(io_depth);
+            for write_buffer in write_buffers.iter().take(io_depth) {
+                let offset: u64 = rng.gen::<u64>() % offset_mod;
 
-            let waiter = guest.write_to_byte_offset(
-                offset * ri.block_size,
-                write_buffer.clone(),
-            )?;
-            write_waiters.push(waiter);
+                let waiter = guest.write_to_byte_offset(
+                    offset * ri.block_size,
+                    write_buffer.clone(),
+                )?;
+                write_waiters.push(waiter);
+            }
+
+            for mut waiter in write_waiters {
+                waiter.block_wait()?;
+            }
+            wtime.push(burst_start.elapsed());
         }
+        let big_end = big_start.elapsed();
 
-        for mut waiter in write_waiters {
-            waiter.block_wait()?;
-        }
-        wtime.push(burst_start.elapsed());
-    }
-    let big_end = big_start.elapsed();
-
-    guest.flush(None)?;
-    perf_summary("rwrites", count, io_depth, wtime.clone(), big_end, es, ec);
-    if let Some(wtr) = wtr {
-        perf_csv(
-            wtr,
-            "rwrite",
+        guest.flush(None)?;
+        perf_summary(
+            "rwrites",
             count,
             io_depth,
-            blocks_per_io,
-            big_end,
             wtime.clone(),
+            big_end,
             es,
             ec,
         );
-    }
-
-    // Before we start reads, make sure the work queues are empty.
-    loop {
-        let wc = guest.query_work_queue()?;
-        if wc.up_count + wc.ds_count == 0 {
-            break;
+        if let Some(wtr) = wtr {
+            perf_csv(
+                wtr,
+                "rwrite",
+                count,
+                io_depth,
+                blocks_per_io,
+                big_end,
+                wtime.clone(),
+                es,
+                ec,
+            );
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Before we loop or end, make sure the work queues are empty.
+        loop {
+            let wc = guest.query_work_queue()?;
+            if wc.up_count + wc.ds_count == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     let mut rtime = Vec::with_capacity(count);
-    let big_start = Instant::now();
-    for _ in 0..count {
-        let burst_start = Instant::now();
-        let mut read_waiters = Vec::with_capacity(io_depth);
-        for read_buffer in read_buffers.iter().take(io_depth) {
-            let offset: u64 = rng.gen::<u64>() % offset_mod;
+    for _ in 0..read_loop {
+        let big_start = Instant::now();
+        for _ in 0..count {
+            let burst_start = Instant::now();
+            let mut read_waiters = Vec::with_capacity(io_depth);
+            for read_buffer in read_buffers.iter().take(io_depth) {
+                let offset: u64 = rng.gen::<u64>() % offset_mod;
 
-            let waiter = guest.read_from_byte_offset(
-                offset * ri.block_size,
-                read_buffer.clone(),
-            )?;
-            read_waiters.push(waiter);
+                let waiter = guest.read_from_byte_offset(
+                    offset * ri.block_size,
+                    read_buffer.clone(),
+                )?;
+                read_waiters.push(waiter);
+            }
+            for mut waiter in read_waiters {
+                waiter.block_wait()?;
+            }
+            rtime.push(burst_start.elapsed());
         }
-        for mut waiter in read_waiters {
-            waiter.block_wait()?;
+        let big_end = big_start.elapsed();
+
+        perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
+
+        if let Some(wtr) = wtr {
+            perf_csv(
+                wtr,
+                "rread",
+                count,
+                io_depth,
+                blocks_per_io,
+                big_end,
+                rtime.clone(),
+                es,
+                ec,
+            );
         }
-        rtime.push(burst_start.elapsed());
-    }
-    let big_end = big_start.elapsed();
 
-    perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
-
-    if let Some(wtr) = wtr {
-        perf_csv(
-            wtr,
-            "rread",
-            count,
-            io_depth,
-            blocks_per_io,
-            big_end,
-            rtime.clone(),
-            es,
-            ec,
-        );
-    }
-
-    guest.flush(None)?;
-    // Before we return, make sure the work queues are empty.
-    loop {
-        let wc = guest.query_work_queue()?;
-        if wc.up_count + wc.ds_count == 0 {
-            return Ok(());
+        guest.flush(None)?;
+        // Before we finish, make sure the work queues are empty.
+        loop {
+            let wc = guest.query_work_queue()?;
+            if wc.up_count + wc.ds_count == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(4));
         }
-        std::thread::sleep(std::time::Duration::from_secs(4));
     }
+    Ok(())
 }
 /*
  * Generate a random offset and length, and write to then read from
@@ -2285,55 +2377,6 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     println!("dep test done");
     Ok(())
-}
-
-async fn _run_scope(guest: Arc<Guest>) -> Result<()> {
-    let scope =
-        crucible_scope::Server::new(".scope.upstairs.sock", "upstairs").await?;
-    let mut my_offset = 512 * 99;
-    scope.wait_for("Send all the IOs").await;
-    loop {
-        let mut data = BytesMut::with_capacity(512 * 2);
-        for seed in 44..46 {
-            data.put(&[seed; 512][..]);
-        }
-        my_offset += 512 * 2;
-        scope.wait_for("write 1").await;
-
-        println!("send write 1");
-        guest.write_to_byte_offset(my_offset, data.freeze())?;
-
-        scope.wait_for("show work").await;
-        guest.show_work()?;
-
-        let mut read_offset = 512 * 99;
-        const READ_SIZE: usize = 4096;
-        for _ in 0..4 {
-            let data = crucible::Buffer::from_slice(&[0x99; READ_SIZE]);
-
-            println!("send a read");
-            // scope.wait_for("send Read").await;
-            guest.read_from_byte_offset(read_offset, data)?;
-            read_offset += READ_SIZE as u64;
-            // scope.wait_for("show work").await;
-            guest.show_work()?;
-        }
-
-        // scope.wait_for("Flush step").await;
-        println!("send flush");
-        guest.flush(None)?;
-
-        let mut data = BytesMut::with_capacity(512);
-        data.put(&[0xbb; 512][..]);
-
-        // scope.wait_for("write 2").await;
-        println!("send write 2");
-        guest.write_to_byte_offset(my_offset, data.freeze())?;
-        my_offset += 512;
-        // scope.wait_for("show work").await;
-        guest.show_work()?;
-        //scope.wait_for("at the bottom").await;
-    }
 }
 
 #[cfg(test)]

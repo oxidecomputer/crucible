@@ -10,9 +10,9 @@ pub struct InMemoryBlockIO {
 }
 
 impl InMemoryBlockIO {
-    pub fn new(block_size: u64, total_size: usize) -> Self {
+    pub fn new(id: Uuid, block_size: u64, total_size: usize) -> Self {
         Self {
-            uuid: Uuid::new_v4(),
+            uuid: id,
             block_size,
             bytes: Mutex::new(vec![0; total_size]),
             owned: Mutex::new(vec![false; total_size]),

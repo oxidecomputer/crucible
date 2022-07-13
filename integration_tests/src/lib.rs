@@ -24,6 +24,7 @@ mod test {
             address: IpAddr,
             port: u16,
             encrypted: bool,
+            read_only: bool,
         ) -> Result<Self> {
             let tempdir = tempdir()?;
 
@@ -40,7 +41,7 @@ mod test {
                 &tempdir.path(),
                 false, /* lossy */
                 false, /* return_errors */
-                false, /* read_only */
+                read_only,
             )?;
 
             let adownstairs = downstairs.clone();
@@ -71,24 +72,27 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54001, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54001, true, false)?;
         let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54002, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54002, true, false)?;
         let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54003, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54003, true, false)?;
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
                         target: vec![
                             "127.0.0.1:54001".parse()?,
                             "127.0.0.1:54002".parse()?,
                             "127.0.0.1:54003".parse()?,
                         ],
                         lossy: false,
+                        flush_timeout: None,
                         key: Some(
                             "YVubErJfMsHeaM+v3UY+11IutzbiArT1woP91BWj/Zc="
                                 .to_string(),
@@ -106,8 +110,9 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let volume =
-            Arc::new(tokio::task::block_in_place(|| Volume::construct(vcr))?);
+        let volume = Arc::new(tokio::task::block_in_place(|| {
+            Volume::construct(vcr, None)
+        })?);
 
         volume.activate(0)?;
 
@@ -143,15 +148,18 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54004, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54004, true, false)?;
         let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54005, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54005, true, false)?;
         let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54006, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54006, true, false)?;
 
         // Create in memory block io full of 11
-        let in_memory_data =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         in_memory_data
             .write(
@@ -176,6 +184,7 @@ mod test {
                     "127.0.0.1:54006".parse()?,
                 ],
                 lossy: false,
+                flush_timeout: None,
                 key: Some(
                     "6Yiim0tnK91G7O0KTRLumpuhkr9T0X1AVSVYJUhRcxs=".to_string(),
                 ),
@@ -183,8 +192,10 @@ mod test {
                 key_pem: None,
                 root_cert_pem: None,
                 control: None,
+                ..Default::default()
             },
             0,
+            None,
         )?;
         volume.add_read_only_parent(in_memory_data.clone())?;
 
@@ -230,15 +241,18 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54007, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54007, true, false)?;
         let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54008, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54008, true, false)?;
         let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54009, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54009, true, false)?;
 
         // Create in memory block io full of 11
-        let in_memory_data =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         in_memory_data
             .write(
@@ -257,16 +271,19 @@ mod test {
         // Create volume with read only parent
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
                         target: vec![
                             "127.0.0.1:54007".parse()?,
                             "127.0.0.1:54008".parse()?,
                             "127.0.0.1:54009".parse()?,
                         ],
                         lossy: false,
+                        flush_timeout: None,
                         key: Some(
                             "/Gud6zA+MoI/lvt+0dqf3wIMyTfNqp1Bw6FKuM+zFWM="
                                 .to_string(),
@@ -285,7 +302,7 @@ mod test {
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
         let mut volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr))?;
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
 
         volume.add_read_only_parent({
             let mut volume = Volume::new(BLOCK_SIZE as u64);
@@ -335,11 +352,11 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54010, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54010, true, false)?;
         let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54011, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54011, true, false)?;
         let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54012, true)?;
+            TestDownstairs::new("127.0.0.1".parse()?, 54012, true, false)?;
 
         let server = Server::run();
         server.expect(
@@ -358,6 +375,7 @@ mod test {
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
@@ -368,6 +386,7 @@ mod test {
                             "127.0.0.1:54012".parse()?,
                         ],
                         lossy: false,
+                        flush_timeout: None,
                         key: Some(
                             "+3AhoL47nkZPwj9XRmoCnOKa66Cfb8Q2gmQ84pVlsbw="
                                 .to_string(),
@@ -376,13 +395,16 @@ mod test {
                         key_pem: None,
                         root_cert_pem: None,
                         control: None,
+                        ..Default::default()
                     },
                     gen: 0,
                 }],
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Volume {
+                        id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
                         sub_volumes: vec![VolumeConstructionRequest::Url {
+                            id: Uuid::new_v4(),
                             block_size: BLOCK_SIZE as u64,
                             url: server.url("/ff.raw").to_string(),
                         }],
@@ -394,7 +416,8 @@ mod test {
         // XXX Crucible uses std::sync::mpsc::Receiver, not
         // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
         // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = tokio::task::block_in_place(|| Volume::construct(vcr))?;
+        let volume =
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
         volume.activate(0)?;
 
         // Read one block: should be all 0xff
@@ -428,6 +451,69 @@ mod test {
         .block_wait()?;
 
         assert_eq!(vec![0x01; BLOCK_SIZE], *buffer.as_vec());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_read_only() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let _downstairs1 =
+            TestDownstairs::new("127.0.0.1".parse()?, 54013, true, true)?;
+        let _downstairs2 =
+            TestDownstairs::new("127.0.0.1".parse()?, 54014, true, true)?;
+        let _downstairs3 =
+            TestDownstairs::new("127.0.0.1".parse()?, 54015, true, true)?;
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Region {
+                        block_size: BLOCK_SIZE as u64,
+                        opts: CrucibleOpts {
+                            target: vec![
+                                "127.0.0.1:54013".parse()?,
+                                "127.0.0.1:54014".parse()?,
+                                "127.0.0.1:54015".parse()?,
+                            ],
+                            lossy: false,
+                            flush_timeout: None,
+                            key: Some(
+                                "+3AhoL47nkZPwj9XRmoCnOKa66Cfb8Q2gmQ84pVlsbw="
+                                    .to_string(),
+                            ),
+                            cert_pem: None,
+                            key_pem: None,
+                            root_cert_pem: None,
+                            control: None,
+                            ..Default::default()
+                        },
+                        gen: 0,
+                    },
+                )),
+            };
+
+        // XXX Crucible uses std::sync::mpsc::Receiver, not
+        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
+        // Remove that when Crucible changes over to the tokio mpsc.
+        let volume =
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+        volume.activate(0)?;
+
+        // Read one block: should be all 0x00
+        let buffer = Buffer::new(BLOCK_SIZE);
+        tokio::task::block_in_place(|| {
+            volume.read(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                buffer.clone(),
+            )
+        })?
+        .block_wait()?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
 
         Ok(())
     }

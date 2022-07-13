@@ -7,9 +7,10 @@ edition = "2018"
 [dependencies]
 anyhow = "1"
 bytes = "1"
+clap = { version = "3.2", features = ["derive"] }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
-structopt = "0.3"
 rand = "0.8.5"
-tokio = { version = "1.18.1", features = ["full"] }
+tokio = { version = "1.19.2", features = ["full"] }
 statistical = "1.0.0"
+uuid = "1"

@@ -9,16 +9,17 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
+use clap::Parser;
 use slog::Drain;
-use structopt::StructOpt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use usdt::register_probes;
 use uuid::Uuid;
 
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
     Ro,
     Rw,
@@ -37,29 +38,34 @@ impl std::str::FromStr for Mode {
     }
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "disk-side storage component")]
+#[derive(Debug, Parser)]
+#[clap(about = "disk-side storage component")]
 enum Args {
     Create {
-        #[structopt(long, default_value = "512")]
+        #[clap(long, default_value = "512", action)]
         block_size: u64,
 
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
-        #[structopt(long, default_value = "100")]
+        #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
-        #[structopt(long, default_value = "15")]
+        #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
-        #[structopt(short, long, parse(from_os_str), name = "FILE")]
+        #[clap(short, long, name = "FILE", action)]
         import_path: Option<PathBuf>,
 
-        #[structopt(short, long, name = "UUID", parse(try_from_str))]
+        #[clap(short, long, name = "UUID", action)]
         uuid: Uuid,
 
-        #[structopt(long, parse(try_from_str), default_value = "false")]
+        #[clap(
+            long,
+            default_value = "false",
+            default_missing_value = "true",
+            action(clap::ArgAction::Set)
+        )]
         encrypted: bool,
     },
     /*
@@ -73,59 +79,65 @@ enum Args {
         /*
          * Directories containing a region.
          */
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: Vec<PathBuf>,
 
         /*
          * Just dump this extent number
          */
-        #[structopt(short, long)]
+        #[clap(short, long, action)]
         extent: Option<u32>,
 
         /*
          * Detailed view for a block
          */
-        #[structopt(short, long)]
+        #[clap(short, long, action)]
         block: Option<u64>,
 
         /*
          * Only show differences
          */
-        #[structopt(short, long)]
+        #[clap(short, long, action)]
         only_show_differences: bool,
 
         /// No color output
-        #[structopt(long)]
+        #[clap(long, action)]
         no_color: bool,
     },
     Export {
         /*
          * Number of blocks to export.
          */
-        #[structopt(long, default_value = "0", name = "COUNT")]
+        #[clap(long, default_value = "0", name = "COUNT", action)]
         count: u64,
 
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
-        #[structopt(short, long, parse(from_os_str), name = "OUT_FILE")]
+        #[clap(short, long, name = "OUT_FILE", action)]
         export_path: PathBuf,
 
-        #[structopt(short, long, default_value = "0", name = "SKIP")]
+        #[clap(short, long, default_value = "0", name = "SKIP", action)]
         skip: u64,
     },
     Run {
         /// Address the downstairs will listen for the upstairs on.
-        #[structopt(short, long, default_value = "0.0.0.0", name = "ADDRESS")]
+        #[clap(
+            short,
+            long,
+            default_value = "0.0.0.0",
+            name = "ADDRESS",
+            action
+        )]
         address: IpAddr,
 
         /// Directory where the region is located.
-        #[structopt(short, long, parse(from_os_str), name = "DIRECTORY")]
+        #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
         /// Test option, makes the search for new work sleep and sometimes
         /// skip doing work.
-        #[structopt(long)]
+        #[clap(long, action)]
         lossy: bool,
 
         /*
@@ -133,44 +145,44 @@ enum Args {
          * oximeter server, the downstairs will publish stats.
          */
         /// Use this address:port to send stats to an Oximeter server.
-        #[structopt(long, name = "OXIMETER_ADDRESS:PORT")]
+        #[clap(long, name = "OXIMETER_ADDRESS:PORT", action)]
         oximeter: Option<SocketAddr>,
 
         /// Listen on this port for the upstairs to connect to us.
-        #[structopt(short, long, default_value = "9000")]
+        #[clap(short, long, default_value = "9000", action)]
         port: u16,
 
-        #[structopt(long)]
+        #[clap(long, action)]
         return_errors: bool,
 
-        #[structopt(short, long)]
+        #[clap(short, long, action)]
         trace_endpoint: Option<String>,
 
         // TLS options
-        #[structopt(long)]
+        #[clap(long, action)]
         cert_pem: Option<String>,
-        #[structopt(long)]
+        #[clap(long, action)]
         key_pem: Option<String>,
-        #[structopt(long)]
+        #[clap(long, action)]
         root_cert_pem: Option<String>,
 
-        #[structopt(long, default_value = "rw")]
+        #[clap(long, default_value = "rw", action)]
         mode: Mode,
     },
     RepairAPI,
     Serve {
-        #[structopt(short, long)]
+        #[clap(short, long, action)]
         trace_endpoint: Option<String>,
 
         // Dropshot server details
-        #[structopt(long, default_value = "127.0.0.1:4567")]
+        #[clap(long, default_value = "127.0.0.1:4567", action)]
         bind_addr: SocketAddr,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::from_args_safe()?;
+    let args = Args::try_parse()?;
 
     /*
      * Everyone needs a region
@@ -202,7 +214,7 @@ async fn main() -> Result<()> {
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None)?;
+                region.region_flush(1, 0, &None, 0)?;
             }
 
             println!("UUID: {:?}", region.def().uuid());
@@ -277,6 +289,15 @@ async fn main() -> Result<()> {
                     .with(telemetry)
                     .try_init()
                     .expect("Error init tracing subscriber");
+            }
+
+            match register_probes() {
+                Ok(()) => {
+                    println!("DTrace probes registered okay");
+                }
+                Err(e) => {
+                    println!("Error registering DTrace probes: {:?}", e);
+                }
             }
 
             let read_only = mode == Mode::Ro;

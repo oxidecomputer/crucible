@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 
 use super::*;
+use oximeter::types::ProducerRegistry;
 
 use std::ops::Range;
 
@@ -32,13 +33,17 @@ impl Debug for SubVolume {
 }
 
 impl Volume {
-    pub fn new(block_size: u64) -> Volume {
+    pub fn new_with_id(block_size: u64, uuid: Uuid) -> Volume {
         Self {
-            uuid: Uuid::new_v4(),
+            uuid,
             sub_volumes: vec![],
             read_only_parent: None,
             block_size,
         }
+    }
+
+    pub fn new(block_size: u64) -> Volume {
+        Volume::new_with_id(block_size, Uuid::new_v4())
     }
 
     // Create a simple Volume from a single guest
@@ -103,6 +108,7 @@ impl Volume {
         &mut self,
         opts: CrucibleOpts,
         gen: u64,
+        producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
         let guest = Arc::new(Guest::new());
 
@@ -110,7 +116,7 @@ impl Volume {
         let guest_clone = guest.clone();
         tokio::spawn(async move {
             // XXX result eaten here!
-            let _ = up_main(opts, guest_clone).await;
+            let _ = up_main(opts, guest_clone, producer_registry).await;
         });
 
         guest.activate(gen)?;
@@ -165,6 +171,7 @@ impl Volume {
         &mut self,
         opts: CrucibleOpts,
         gen: u64,
+        producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
         let guest = Arc::new(Guest::new());
 
@@ -172,7 +179,7 @@ impl Volume {
         let guest_clone = guest.clone();
         tokio::spawn(async move {
             // XXX result eaten here!
-            let _ = up_main(opts, guest_clone).await;
+            let _ = up_main(opts, guest_clone, producer_registry).await;
         });
 
         guest.activate(gen)?;
@@ -310,7 +317,7 @@ impl BlockIO for Volume {
         offset: Block,
         data: Buffer,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        // In the cast that this volume only has a read only parent, serve
+        // In the case that this volume only has a read only parent, serve
         // reads directly from that
         if self.sub_volumes.is_empty() {
             if let Some(read_only_parent) = &self.read_only_parent {
@@ -640,15 +647,18 @@ impl BlockIO for SubVolume {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
     Volume {
+        id: Uuid,
         block_size: u64,
         sub_volumes: Vec<VolumeConstructionRequest>,
         read_only_parent: Option<Box<VolumeConstructionRequest>>,
     },
     Url {
+        id: Uuid,
         block_size: u64,
         url: String,
     },
@@ -658,38 +668,51 @@ pub enum VolumeConstructionRequest {
         gen: u64,
     },
     File {
+        id: Uuid,
         block_size: u64,
         path: String,
     },
 }
 
 impl Volume {
-    pub fn construct(request: VolumeConstructionRequest) -> Result<Volume> {
+    pub fn construct(
+        request: VolumeConstructionRequest,
+        producer_registry: Option<ProducerRegistry>,
+    ) -> Result<Volume> {
         match request {
             VolumeConstructionRequest::Volume {
+                id,
                 block_size,
                 sub_volumes,
                 read_only_parent,
             } => {
-                let mut vol = Volume::new(block_size);
+                let mut vol = Volume::new_with_id(block_size, id);
 
                 for subreq in sub_volumes {
-                    vol.add_subvolume(Arc::new(Volume::construct(subreq)?))?;
+                    vol.add_subvolume(Arc::new(Volume::construct(
+                        subreq,
+                        producer_registry.clone(),
+                    )?))?;
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
                     vol.add_read_only_parent(Arc::new(Volume::construct(
                         *read_only_parent,
+                        producer_registry,
                     )?))?;
                 }
 
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::Url { block_size, url } => {
+            VolumeConstructionRequest::Url {
+                id,
+                block_size,
+                url,
+            } => {
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume(Arc::new(ReqwestBlockIO::new(
-                    block_size, url,
+                    id, block_size, url,
                 )?))?;
                 Ok(vol)
             }
@@ -700,14 +723,18 @@ impl Volume {
                 gen,
             } => {
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume_create_guest(opts, gen)?;
+                vol.add_subvolume_create_guest(opts, gen, producer_registry)?;
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::File { block_size, path } => {
+            VolumeConstructionRequest::File {
+                id,
+                block_size,
+                path,
+            } => {
                 let mut vol = Volume::new(block_size);
                 vol.add_subvolume(Arc::new(FileBlockIO::new(
-                    block_size, path,
+                    id, block_size, path,
                 )?))?;
                 Ok(vol)
             }
@@ -793,14 +820,22 @@ mod test {
             sub_volumes: vec![
                 SubVolume {
                     lba_range: Range { start: 0, end: 512 },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
                 SubVolume {
                     lba_range: Range {
                         start: 512,
                         end: 1024,
                     },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
             ],
             read_only_parent: None,
@@ -823,21 +858,33 @@ mod test {
             sub_volumes: vec![
                 SubVolume {
                     lba_range: Range { start: 0, end: 512 },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
                 SubVolume {
                     lba_range: Range {
                         start: 512,
                         end: 1024,
                     },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
                 SubVolume {
                     lba_range: Range {
                         start: 1024,
                         end: 1536,
                     },
-                    block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                    block_io: Arc::new(InMemoryBlockIO::new(
+                        Uuid::new_v4(),
+                        512,
+                        512 * 512,
+                    )),
                 },
             ],
             read_only_parent: None,
@@ -900,7 +947,11 @@ mod test {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range { start: 0, end: 512 },
-                block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                block_io: Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    512,
+                    512 * 512,
+                )),
             }],
             read_only_parent: None,
             block_size: 512,
@@ -919,11 +970,19 @@ mod test {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range { start: 0, end: 512 },
-                block_io: Arc::new(InMemoryBlockIO::new(512, 512 * 512)),
+                block_io: Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    512,
+                    512 * 512,
+                )),
             }],
             read_only_parent: Some(SubVolume {
                 lba_range: Range { start: 0, end: 256 },
-                block_io: Arc::new(InMemoryBlockIO::new(512, 256 * 512)),
+                block_io: Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    512,
+                    256 * 512,
+                )),
             }),
             block_size: 512,
         };
@@ -950,7 +1009,7 @@ mod test {
     #[test]
     fn test_in_memory_block_io() -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
-        let disk = InMemoryBlockIO::new(BLOCK_SIZE, 4096);
+        let disk = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096);
 
         // Initial read should come back all zeroes
         let buffer = Buffer::new(4096);
@@ -1186,8 +1245,9 @@ mod test {
     async fn test_parent_read_only_region_one_subvolume() -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
-        let disk = InMemoryBlockIO::new(BLOCK_SIZE, 4096);
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+        let disk = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096);
 
         // this layout has one volume that the parent lba range overlaps:
         //
@@ -1225,9 +1285,10 @@ mod test {
     ) -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
-        let subdisk1 = InMemoryBlockIO::new(BLOCK_SIZE, 1024);
-        let subdisk2 = InMemoryBlockIO::new(BLOCK_SIZE, 3072);
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+        let subdisk1 = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 1024);
+        let subdisk2 = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 3072);
 
         // this layout has two volumes that the parent lba range overlaps:
         //
@@ -1274,7 +1335,8 @@ mod test {
     fn test_volume_with_only_read_only_parent() -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
         parent.activate(0)?;
 
@@ -1321,7 +1383,8 @@ mod test {
     fn test_writing_to_volume_with_only_read_only_parent() {
         const BLOCK_SIZE: u64 = 512;
 
-        let parent = Arc::new(InMemoryBlockIO::new(BLOCK_SIZE, 2048));
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
         let volume = Volume {
             uuid: Uuid::new_v4(),
@@ -1354,8 +1417,11 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Write 0x55 into parent
-        let parent =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let parent = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -1363,8 +1429,11 @@ mod test {
             )?
             .block_wait()?;
 
-        let overlay =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let overlay = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         {
             // Make a volume, verify orignal data, write new data to it, then
@@ -1422,8 +1491,11 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Write 0x55 into parent
-        let parent =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let parent = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -1442,8 +1514,11 @@ mod test {
         let mut parent_volume = Volume::new(BLOCK_SIZE as u64);
         parent_volume.add_subvolume(parent)?;
 
-        let overlay =
-            Arc::new(InMemoryBlockIO::new(BLOCK_SIZE as u64, BLOCK_SIZE * 10));
+        let overlay = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume(overlay)?;
@@ -1492,6 +1567,7 @@ mod test {
     #[tokio::test]
     async fn construct_snapshot_backed_vol() {
         let _request = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: 512,
@@ -1530,9 +1606,11 @@ mod test {
     #[tokio::test]
     async fn construct_read_only_iso_volume() {
         let _request = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![],
             read_only_parent: Some(Box::new(VolumeConstructionRequest::Url {
+                id: Uuid::new_v4(),
                 block_size: 512,
                 // You can boot anything as long as it's Alpine
                 url: "https://fake.test/alpine.iso".to_string(),
@@ -1555,15 +1633,16 @@ mod test {
         file.write_all(&vec![5u8; 512]).unwrap();
 
         let request = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![],
             read_only_parent: Some(Box::new(VolumeConstructionRequest::File {
+                id: Uuid::new_v4(),
                 block_size: 512,
                 path: file_path.into_os_string().into_string().unwrap(),
             })),
         };
-
-        let volume = Volume::construct(request).unwrap();
+        let volume = Volume::construct(request, None).unwrap();
 
         let buffer = Buffer::new(BLOCK_SIZE);
         volume

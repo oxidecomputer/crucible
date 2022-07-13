@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use crucible::*;
 use crucible_common::{Block, CrucibleError, MAX_BLOCK_SIZE};
-use crucible_protocol::*;
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
@@ -95,11 +94,17 @@ pub fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
-                let mut responses = region.region_read(&[ReadRequest {
-                    eid: eid as u64,
-                    offset: Block::new_with_ddef(block_offset, &region.def()),
-                    num_blocks: 1,
-                }])?;
+                let mut responses = region.region_read(
+                    &[ReadRequest {
+                        eid: eid as u64,
+                        offset: Block::new_with_ddef(
+                            block_offset,
+                            &region.def(),
+                        ),
+                        num_blocks: 1,
+                    }],
+                    0,
+                )?;
                 let response = responses.pop().unwrap();
 
                 out_file.write_all(&response.data).unwrap();
@@ -233,7 +238,8 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
             pos.advance(len);
         }
 
-        region.region_write(&writes)?;
+        // We have no job ID, so it makes no sense for accounting.
+        region.region_write(&writes, 0)?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -310,6 +316,23 @@ async fn _show_work(ds: &Downstairs) {
     println!("--------------------------------------");
 }
 
+// DTrace probes for the downstairs
+#[usdt::provider(provider = "crucible_downstairs")]
+pub mod cdt {
+    use crate::Arg;
+    fn submit__read__start(_: u64) {}
+    fn submit__write__start(_: u64) {}
+    fn submit__flush__start(_: u64) {}
+    fn os__read__start(_: u64) {}
+    fn os__write__start(_: u64) {}
+    fn os__flush__start(_: u64) {}
+    fn os__read__done(_: u64) {}
+    fn os__write__done(_: u64) {}
+    fn os__flush__done(_: u64) {}
+    fn submit__read__done(_: u64) {}
+    fn submit__write__done(_: u64) {}
+    fn submit__flush__done(_: u64) {}
+}
 /*
  * A new IO request has been received.
  * If the message is a ping or negotiation message, send the correct
@@ -332,6 +355,7 @@ where
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
                 return Ok(());
             }
+            cdt::submit__write__start!(|| *ds_id);
 
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
@@ -355,6 +379,7 @@ where
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
                 return Ok(());
             }
+            cdt::submit__flush__start!(|| *ds_id);
 
             let new_flush = IOop::Flush {
                 dependencies: dependencies.to_vec(),
@@ -374,6 +399,7 @@ where
                 return Ok(());
             }
 
+            cdt::submit__read__start!(|| *ds_id);
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
                 requests: requests.to_vec(),
@@ -394,6 +420,7 @@ where
                     *eid,
                     *flush_number,
                     *gen_number,
+                    *rep_id,
                 ) {
                     Ok(()) => Message::RepairAckId(*rep_id),
                     Err(e) => Message::ExtentError(*rep_id, *eid, e),
@@ -529,7 +556,7 @@ where
                 let m = ads.lock().await.do_work(job_id).await?;
 
                 if let Some(m) = m {
-                    ads.lock().await.complete_work_stat(&m).await?;
+                    ads.lock().await.complete_work_stat(&m, job_id).await?;
                     // Notify the upstairs before completing work
                     let mut fw = fw.lock().await;
                     fw.send(&m).await?;
@@ -1124,15 +1151,22 @@ impl Downstairs {
      * After we complete a read/write/flush on a region, update the
      * Oximeter counter for the operation.
      */
-    async fn complete_work_stat(&mut self, m: &Message) -> Result<()> {
+    async fn complete_work_stat(
+        &mut self,
+        m: &Message,
+        ds_id: u64,
+    ) -> Result<()> {
         match m {
             Message::FlushAck(_, _, _) => {
+                cdt::submit__flush__done!(|| ds_id);
                 self.dss.add_flush().await;
             }
             Message::WriteAck(_, _, _) => {
+                cdt::submit__write__done!(|| ds_id);
                 self.dss.add_write().await;
             }
             Message::ReadResponse(_, _, _) => {
+                cdt::submit__read__done!(|| ds_id);
                 self.dss.add_read().await;
             }
             _ => (),
@@ -1469,7 +1503,7 @@ impl Work {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_read(requests)
+                    ds.region.region_read(requests, job_id)
                 };
 
                 Ok(Some(Message::ReadResponse(
@@ -1489,7 +1523,7 @@ impl Work {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_write(writes)
+                    ds.region.region_write(writes, job_id)
                 };
 
                 Ok(Some(Message::WriteAck(
@@ -1515,6 +1549,7 @@ impl Work {
                         *flush_number,
                         *gen_number,
                         snapshot_details,
+                        job_id,
                     )
                 };
 
@@ -2310,7 +2345,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None)?;
+        region.region_flush(1, 1, &None, 0)?;
 
         // export region to another file
 
@@ -2378,7 +2413,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None)?;
+        region.region_flush(1, 1, &None, 0)?;
 
         // export region to another file (note: 100 fewer bytes imported than
         // region size still means the whole region is exported)
@@ -2460,7 +2495,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None)?;
+        region.region_flush(1, 1, &None, 0)?;
 
         // export region to another file (note: 100 more bytes will have caused
         // 10 more extents to be added, but someone running the export command
@@ -2543,18 +2578,20 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None)?;
+        region.region_flush(1, 1, &None, 0)?;
 
         // read block by block
         let mut read_data = Vec::with_capacity(total_bytes as usize);
         for eid in 0..region.def().extent_count() {
             for offset in 0..region.def().extent_size().value {
-                let responses =
-                    region.region_read(&[crucible_protocol::ReadRequest {
+                let responses = region.region_read(
+                    &[crucible_protocol::ReadRequest {
                         eid: eid.into(),
                         offset: Block::new_512(offset),
                         num_blocks: 1,
-                    }])?;
+                    }],
+                    0,
+                )?;
 
                 assert_eq!(responses.len(), 1);
 

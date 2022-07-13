@@ -7,9 +7,19 @@ edition = "2018"
 [dependencies]
 anyhow = "1"
 byte-unit = "4.0.14"
-clap = { version = "3.1.16", features = ["derive", "env"] }
+clap = { version = "3.2", features = ["derive", "env"] }
 csv = "1.1.6"
+dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
+rand = "0.8.5"
+rand_chacha = "0.3.1"
+schemars = { version = "0.8.8", features = [ "uuid" ] }
+serde = { version = "1", features = ["derive"] }
 statistical = "1.0.0"
+tokio = { version = "1.19.2", features = ["full"] }
 
 [dev-dependencies]
+expectorate = "1.0.5"
+openapiv3 = "1.0.1"
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
 tempfile = "3"
+serde_json = "1"

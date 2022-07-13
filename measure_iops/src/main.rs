@@ -4,54 +4,55 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use clap::Parser;
 use rand::Rng;
-use structopt::StructOpt;
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
+use uuid::Uuid;
 
 use crucible::*;
 
-#[derive(Debug, StructOpt)]
-#[structopt(about = "measure iops!")]
+#[derive(Debug, Parser)]
+#[clap(about = "measure iops!")]
 pub struct Opt {
     // Upstairs options
-    #[structopt(short, long, default_value = "127.0.0.1:9000")]
+    #[clap(short, long, default_value = "127.0.0.1:9000", action)]
     target: Vec<SocketAddr>,
 
-    #[structopt(short, long)]
+    #[clap(short, long, action)]
     key: Option<String>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[clap(short, long, default_value = "0", action)]
     gen: u64,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     cert_pem: Option<String>,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     key_pem: Option<String>,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     root_cert_pem: Option<String>,
 
     // Tool options
-    #[structopt(long, default_value = "100")]
+    #[clap(long, default_value = "100", action)]
     samples: usize,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     iop_limit: Option<usize>,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     io_size_in_bytes: Option<usize>,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     io_depth: Option<usize>,
 
-    #[structopt(long)]
+    #[clap(long, action)]
     bw_limit_in_bytes: Option<usize>,
 }
 
 pub fn opts() -> Result<Opt> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
 
     if opt.target.is_empty() {
         bail!("must specify at least one --target");
@@ -70,8 +71,10 @@ fn main() -> Result<()> {
     let opt = opts()?;
 
     let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
         target: opt.target,
         lossy: false,
+        flush_timeout: None,
         key: opt.key,
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
@@ -112,8 +115,7 @@ fn main() -> Result<()> {
     }
 
     let guest = Arc::new(guest);
-
-    runtime.spawn(up_main(crucible_opts, guest.clone()));
+    runtime.spawn(up_main(crucible_opts, guest.clone(), None));
     println!("Crucible runtime is spawned");
 
     guest.activate(opt.gen)?;
