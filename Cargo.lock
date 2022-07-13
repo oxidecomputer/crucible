@@ -1597,6 +1597,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9a9d19fa1e79b6215ff29b9d6880b706147f16e9b1dbb1e4e5947b5b02bc5e3"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1846,9 +1855,9 @@ dependencies = [
 
 [[package]]
 name = "nu-ansi-term"
-version = "0.45.1"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7bca0d33a384280d1563b97f49cb95303df9fa22588739a04b7d8015c1ccd50"
+checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
 dependencies = [
  "overload",
  "winapi",
@@ -2718,18 +2727,20 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.6.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "422f144c06f679da4ab4f082a6d1d43e28bfabb68d009100e6e5520728f99fec"
+checksum = "d064ec92a21deb048c440b6461ccf0d0babdb5f2160ea9dfac451bc7b4b556e2"
 dependencies = [
  "chrono",
  "crossterm",
  "fd-lock",
+ "itertools",
  "nu-ansi-term",
  "serde",
  "strip-ansi-escapes",
  "strum",
  "strum_macros",
+ "thiserror",
  "unicode-segmentation",
  "unicode-width",
 ]
