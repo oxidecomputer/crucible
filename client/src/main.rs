@@ -752,8 +752,8 @@ fn main() -> Result<()> {
                 "DPTH",
                 "IOPS",
                 "MEAN",
-                "STDV",
-                "MIN",
+                "P95",
+                "P99",
                 "MAX",
                 "ES",
                 "EC",
@@ -1416,6 +1416,43 @@ pub fn perf_csv(
     wtr.flush().unwrap();
 }
 
+// Percentile
+// Given a SORTED vec of f32's (I'm trusting you to provide that),
+// and a value between 1 and 99 (the desired percentile),
+// determine which index (or which indexes to average) contain our desired
+// percentile.
+// Once we have the value at our index (or the average of two values at the
+// desired indices), return that to the caller.
+//
+// Remember, the array index is one less (zero-based index)
+fn percentile(times: &[f32], perc: u8) -> Result<f32> {
+    if times.is_empty() {
+        bail!("Array for percentile too short");
+    }
+    if perc == 0 || perc >= 100 {
+        bail!("Requested percentile not: 0 < {} < 100", perc);
+    }
+
+    let position = times.len() as f32 * (perc as f32 / 100.0);
+
+    if position == position.trunc() {
+        // Our position is a whole number.
+        // We use the rounded up position as our second index because the
+        // array index is zero based.
+        let index_two = position.ceil() as usize;
+        let index_one = index_two - 1;
+
+        Ok((times[index_one] + times[index_two]) / 2.0)
+    } else {
+        // Our position is not an integer, so round up to get the correct
+        // position for our percentile.  However, since we need to subtract
+        // one to get the zero-based index, we can just round down here.
+        // This is the same as rounding up, then subtracting one.
+        let index = position.trunc() as usize;
+        Ok(times[index])
+    }
+}
+
 /*
  * Display the summary results from a perf run.
  */
@@ -1448,8 +1485,8 @@ fn perf_summary(
         io_depth,
         count as f32 / time_f,
         statistical::mean(&times),
-        statistical::standard_deviation(&times, None),
-        times.first().unwrap(),
+        percentile(&times, 95).unwrap(),
+        percentile(&times, 99).unwrap(),
         times.last().unwrap(),
         es,
         ec,
@@ -2766,5 +2803,88 @@ mod test {
             validate_vec(vec, 0, &mut write_log, bs, false),
             ValidateStatus::Good
         );
+    }
+
+    #[test]
+    fn test_95_small() {
+        // Test of one element
+        let fv = vec![10.0];
+        let pp = percentile(&fv, 95).unwrap();
+        assert_eq!(pp, 10.0);
+    }
+
+    #[test]
+    fn test_perc_bad_perc() {
+        // Should fail on a bad percentile value
+        let fv = vec![10.0];
+        let res = percentile(&fv, 0);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_perc_bad_big_perc() {
+        // Should fail on a bad percentile value
+        let fv = vec![10.0];
+        let res = percentile(&fv, 100);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_95_2() {
+        // Determine the 95th percentile value with 2 elements
+        // We must round up.
+        let fv = vec![10.0, 20.0];
+        let pp = percentile(&fv, 95).unwrap();
+        assert_eq!(pp, 20.0);
+    }
+
+    #[test]
+    fn test_95_10() {
+        // Determine the 95th percentile value with 10 elements
+        // We must round up.
+        let fv = vec![1.1, 2.2, 3.3, 4.4, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+
+        let pp = percentile(&fv, 95).unwrap();
+        assert_eq!(pp, 10.0);
+    }
+    #[test]
+    fn test_95_20() {
+        // Determine the 95th percentile value with 20 elements
+        // There is a whole number position for this array, so we must
+        // return the average of two elements.
+        let fv = vec![
+            1.1, 2.2, 3.3, 4.4, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+        ];
+
+        let pp = percentile(&fv, 95).unwrap();
+        assert_eq!(pp, 19.5);
+    }
+    #[test]
+    fn test_95_21() {
+        // Determine the 95th percentile value with 21 elements
+        let fv = vec![
+            1.1, 2.2, 3.3, 4.4, 5.0, 6.0, 7.0, 8.0, 9.0, 8.0, 10.0, 11.0, 12.0,
+            13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+        ];
+
+        let pp = percentile(&fv, 95).unwrap();
+        assert_eq!(pp, 19.0);
+    }
+    #[test]
+    fn test_perc_mixed() {
+        // Determine the 95th, 90th, and 20th percentile values
+        let fv = vec![
+            43.0, 54.0, 56.0, 61.0, 62.0, 66.0, 68.0, 69.0, 69.0, 70.0, 71.0,
+            72.0, 77.0, 78.0, 79.0, 85.0, 87.0, 88.0, 89.0, 93.0, 95.0, 96.0,
+            98.0, 99.0, 99.4,
+        ];
+
+        let pp = percentile(&fv, 95).unwrap();
+        assert_eq!(pp, 99.0);
+        let pp = percentile(&fv, 90).unwrap();
+        assert_eq!(pp, 98.0);
+        let pp = percentile(&fv, 20).unwrap();
+        assert_eq!(pp, 64.0);
     }
 }
