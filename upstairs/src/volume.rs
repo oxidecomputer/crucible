@@ -49,6 +49,8 @@ impl Volume {
         Volume::new_with_id(block_size, Uuid::new_v4())
     }
 
+    // Increment the counter to allow all IOs to have a unique number
+    // for dtrace probes.
     pub fn next_count(&self) -> u32 {
         self.count.fetch_add(1, Ordering::Relaxed)
     }
@@ -501,7 +503,7 @@ impl BlockIO for Volume {
             waiter.block_wait()?;
         }
 
-        // no need to flush read only parent. we assume that read only parents
+        // no need to flush read only parent. We assume that read only parents
         // are already consistent, because we can't write to them (they may be
         // served out of a ZFS snapshot and be read only at the filesystem
         // level)

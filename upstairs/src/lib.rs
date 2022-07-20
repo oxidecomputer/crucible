@@ -161,6 +161,10 @@ pub trait BlockIO {
 /// gw__*__done: An IO is completed and the Upstairs has sent the
 /// completion notice to the guest.
 ///
+/// reqwest__read__[start|done] a probe covering BlockIO reqwest read
+/// requests. These happen if a volume has a read only parent and either
+/// there is no sub volume, or the sub volume did not contain any data.
+///
 /// volume__*__done: An IO is completed at the volume layer.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
@@ -187,6 +191,8 @@ mod cdt {
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn reqwest__read__start(_: u32) {}
+    fn reqwest__read__done(_: u32) {}
     fn volume__read__done(_: u32) {}
     fn volume__write__done(_: u32) {}
     fn volume__flush__done(_: u32) {}
