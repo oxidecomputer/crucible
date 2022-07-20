@@ -1,5 +1,5 @@
 /*
- * Trace all the guest submitted and completed IOs.
+ * Trace read ReqwestBlockIO.
  */
 crucible_upstairs*:::reqwest-read-start
 {

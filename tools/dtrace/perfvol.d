@@ -1,5 +1,5 @@
 /*
- * Trace all the guest submitted and completed IOs.
+ * Trace all the volume submitted and completed IOs.
  */
 crucible_upstairs*:::volume-*-start
 {
