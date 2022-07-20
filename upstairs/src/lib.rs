@@ -126,6 +126,9 @@ pub trait BlockIO {
 /// order of probes an IO will hit as it works its way through the
 /// system.
 ///
+/// volume__*__start: This is when the volume layer has received an
+/// IO request and has started work on it.
+///
 /// gw__*__start: This is when the upstairs has taken work from the
 /// `guest` structure and created a new `gw_id` used to track this IO
 /// through the system.  At the point of this probe, we have already
@@ -157,10 +160,15 @@ pub trait BlockIO {
 ///
 /// gw__*__done: An IO is completed and the Upstairs has sent the
 /// completion notice to the guest.
+///
+/// volume__*__done: An IO is completed at the volume layer.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
+    fn volume__read__start(_: u32) {}
+    fn volume__write__start(_: u32) {}
+    fn volume__flush__start(_: u32) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
@@ -179,6 +187,9 @@ mod cdt {
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn volume__read__done(_: u32) {}
+    fn volume__write__done(_: u32) {}
+    fn volume__flush__done(_: u32) {}
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]

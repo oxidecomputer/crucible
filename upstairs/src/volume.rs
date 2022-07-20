@@ -2,6 +2,7 @@
 
 use super::*;
 use oximeter::types::ProducerRegistry;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::ops::Range;
 
@@ -17,6 +18,7 @@ pub struct Volume {
      * Each sub volume should be the same block size (unit is bytes)
      */
     block_size: u64,
+    count: AtomicU32,
 }
 
 pub struct SubVolume {
@@ -39,11 +41,16 @@ impl Volume {
             sub_volumes: vec![],
             read_only_parent: None,
             block_size,
+            count: AtomicU32::new(0),
         }
     }
 
     pub fn new(block_size: u64) -> Volume {
         Volume::new_with_id(block_size, Uuid::new_v4())
+    }
+
+    pub fn next_count(&self) -> u32 {
+        self.count.fetch_add(1, Ordering::Relaxed)
     }
 
     // Create a simple Volume from a single guest
@@ -64,6 +71,7 @@ impl Volume {
             sub_volumes: vec![sub_volume],
             read_only_parent: None,
             block_size,
+            count: AtomicU32::new(0),
         })
     }
 
@@ -319,9 +327,13 @@ impl BlockIO for Volume {
     ) -> Result<BlockReqWaiter, CrucibleError> {
         // In the case that this volume only has a read only parent, serve
         // reads directly from that
+        let cc = self.next_count();
+        cdt::volume__read__start!(|| (cc));
         if self.sub_volumes.is_empty() {
             if let Some(read_only_parent) = &self.read_only_parent {
-                return read_only_parent.read(offset, data);
+                let res = read_only_parent.read(offset, data);
+                cdt::volume__read__done!(|| (cc));
+                return res;
             } else {
                 crucible_bail!(
                     CannotServeBlocks,
@@ -430,6 +442,7 @@ impl BlockIO for Volume {
 
         assert_eq!(data.len(), data_index);
 
+        cdt::volume__read__done!(|| (cc));
         BlockReqWaiter::immediate()
     }
 
@@ -438,7 +451,10 @@ impl BlockIO for Volume {
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        // In the cast that this volume only has a read only parent, return an
+        let cc = self.next_count();
+        cdt::volume__write__start!(|| (cc));
+
+        // In the case that this volume only has a read only parent, return an
         // error.
         if self.sub_volumes.is_empty() {
             crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
@@ -470,6 +486,7 @@ impl BlockIO for Volume {
             data_index += sz;
         }
 
+        cdt::volume__write__done!(|| (cc));
         BlockReqWaiter::immediate()
     }
 
@@ -477,6 +494,8 @@ impl BlockIO for Volume {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
+        let cc = self.next_count();
+        cdt::volume__flush__start!(|| (cc));
         for sub_volume in &self.sub_volumes {
             let mut waiter = sub_volume.flush(snapshot_details.clone())?;
             waiter.block_wait()?;
@@ -487,6 +506,7 @@ impl BlockIO for Volume {
         // served out of a ZFS snapshot and be read only at the filesystem
         // level)
 
+        cdt::volume__flush__done!(|| (cc));
         BlockReqWaiter::immediate()
     }
 
@@ -840,6 +860,7 @@ mod test {
             ],
             read_only_parent: None,
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         assert_eq!(volume.total_size()?, 512 * 1024);
@@ -889,6 +910,7 @@ mod test {
             ],
             read_only_parent: None,
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         // volume:       |--------|--------|--------|
@@ -955,6 +977,7 @@ mod test {
             }],
             read_only_parent: None,
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_none());
@@ -985,6 +1008,7 @@ mod test {
                 )),
             }),
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_some());
@@ -1273,6 +1297,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume).await?;
@@ -1324,6 +1349,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume).await?;
@@ -1359,6 +1385,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         volume.activate(0)?;
@@ -1397,6 +1424,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         volume.activate(0).unwrap();
