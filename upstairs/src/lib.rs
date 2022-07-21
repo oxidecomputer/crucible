@@ -192,6 +192,7 @@ pub struct CrucibleOpts {
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
+    pub read_only: bool,
 }
 
 impl CrucibleOpts {
@@ -461,6 +462,7 @@ async fn proc_stream(
     connected: &mut bool,
     up_coms: &mut UpComs,
     lossy: bool,
+    read_only: bool,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -469,7 +471,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms, lossy, read_only).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -477,7 +479,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms, lossy, read_only).await
         }
     }
 }
@@ -490,6 +492,7 @@ async fn proc_stream(
  * determine if it goes into repair mode, or goes straight to receiving
  * IO from the guest.
  */
+#[allow(clippy::too_many_arguments)]
 async fn proc<RT, WT>(
     target: &SocketAddr,
     up: &Arc<Upstairs>,
@@ -498,6 +501,7 @@ async fn proc<RT, WT>(
     connected: &mut bool,
     up_coms: &mut UpComs,
     lossy: bool,
+    read_only: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -668,7 +672,7 @@ where
                     up_coms.client_id
                 );
                 self_promotion = true;
-                fw.send(Message::PromoteToActive(up.uuid)).await?;
+                fw.send(Message::PromoteToActive(up.uuid, read_only)).await?;
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -684,6 +688,14 @@ where
                         return Ok(())
                     }
                     Some(Message::Imok) => {}
+                    Some(Message::ReadOnlyMismatch(downstairs_read_only)) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs read_only is {}, ours is {}!",
+                            downstairs_read_only,
+                            read_only,
+                        );
+                    }
                     Some(Message::YesItsMe(version)) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
@@ -719,7 +731,7 @@ where
                                 up_coms.client_id
                             );
                             self_promotion = true;
-                            fw.send(Message::PromoteToActive(up.uuid)).await?;
+                            fw.send(Message::PromoteToActive(up.uuid, read_only)).await?;
                         } else {
                             /*
                              * Transition this Downstairs to WaitActive
@@ -751,7 +763,7 @@ where
                                 }
                                 self_promotion = true;
                                 fw.send(
-                                    Message::PromoteToActive(up.uuid)
+                                    Message::PromoteToActive(up.uuid, read_only)
                                 ).await?;
                             }
                         }
@@ -1576,6 +1588,7 @@ async fn looper(
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
     lossy: bool,
+    read_only: bool,
 ) {
     let mut firstgo = true;
     let mut connected = false;
@@ -1661,9 +1674,16 @@ async fn looper(
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
          */
-        if let Err(e) =
-            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
-                .await
+        if let Err(e) = proc_stream(
+            &target,
+            up,
+            tcp,
+            &mut connected,
+            &mut up_coms,
+            lossy,
+            read_only,
+        )
+        .await
         {
             eprintln!("ERROR: {}: proc: {:?}", target, e);
             // XXX proc can return fatal and non-fatal errors, figure out what
@@ -3176,6 +3196,7 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
+            read_only: false,
         };
         Self::new(
             &opts,
@@ -5076,6 +5097,27 @@ impl IOop {
             } => dependencies,
         }
     }
+
+    pub fn read_only(&self) -> bool {
+        match &self {
+            IOop::Write {
+                dependencies: _,
+                writes: _,
+            } => false,
+
+            IOop::Flush {
+                dependencies: _,
+                flush_number: _,
+                gen_number: _,
+                snapshot_details: _,
+            } => false,
+
+            IOop::Read {
+                dependencies: _,
+                requests: _,
+            } => true,
+        }
+    }
 }
 
 /*
@@ -6846,6 +6888,7 @@ pub async fn up_main(
     }
 
     let lossy = opt.lossy;
+    let read_only = opt.read_only;
 
     /*
      * Build the Upstairs struct that we use to share data between
@@ -6942,7 +6985,7 @@ pub async fn up_main(
             };
             let tls_context = tls_context.clone();
             tokio::spawn(async move {
-                looper(t0, tls_context, &up, up_coms, lossy).await;
+                looper(t0, tls_context, &up, up_coms, lossy, read_only).await;
             });
             client_id += 1;
 

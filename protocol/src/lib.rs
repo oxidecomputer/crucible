@@ -118,13 +118,15 @@ pub enum Message {
     HereIAm(u32, Uuid),
     YesItsMe(u32),
 
+    ReadOnlyMismatch(bool),
+
     /*
-     * Forcefully tell this downstairs to promote us (an Upstairs) to
-     * active.
+     * If read only is false, forcefully tell this downstairs to promote us
+     * (an Upstairs) to active. Kick out the old Upstairs.
      *
-     * Kick out the old Upstairs.
+     * If read only is true, multiple upstairs can connect ok.
      */
-    PromoteToActive(Uuid),
+    PromoteToActive(Uuid, bool),
     YouAreNowActive(Uuid),
     YouAreNoLongerActive(Uuid), // UUID of new active Upstairs
 

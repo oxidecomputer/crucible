@@ -104,6 +104,9 @@ pub enum CrucibleError {
 
     #[error("Repair stream error {0}")]
     RepairStreamError(String),
+
+    #[error("Read-only mismatch")]
+    ReadOnlyMismatch,
 }
 
 impl From<std::io::Error> for CrucibleError {

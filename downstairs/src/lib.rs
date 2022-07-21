@@ -265,55 +265,60 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
  * Debug function to dump the work list.
  */
 async fn _show_work(ds: &Downstairs) {
-    println!("Active Upstairs UUID: {:?}", ds.active_upstairs());
-    let work = ds.work.lock().await;
+    let active_upstairs_uuids = ds._active_upstairs();
+    println!("Active Upstairs {:?}", active_upstairs_uuids);
 
-    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    for uuid in active_upstairs_uuids {
+        let work = ds.work_lock(uuid).await.unwrap();
 
-    if kvec.is_empty() {
-        println!("Crucible Downstairs work queue:  Empty");
-    } else {
-        println!("Crucible Downstairs work queue:");
-        kvec.sort_unstable();
-        for id in kvec.iter() {
-            let dsw = work.active.get(id).unwrap();
-            let dsw_type;
-            let dep_list;
-            match &dsw.work {
-                IOop::Read {
-                    dependencies,
-                    requests: _,
-                } => {
-                    dsw_type = "Read ".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-                IOop::Write {
-                    dependencies,
-                    writes: _,
-                } => {
-                    dsw_type = "Write".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-                IOop::Flush {
-                    dependencies,
-                    flush_number: _flush_number,
-                    gen_number: _gen_number,
-                    snapshot_details: _,
-                } => {
-                    dsw_type = "Flush".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-            };
-            println!(
-                "DSW:[{:04}] {} {:?} deps:{:?}",
-                id, dsw_type, dsw.state, dep_list,
-            );
+        let mut kvec: Vec<u64> =
+            work.active.keys().cloned().collect::<Vec<u64>>();
+
+        if kvec.is_empty() {
+            println!("Crucible Downstairs work queue:  Empty");
+        } else {
+            println!("Crucible Downstairs work queue:");
+            kvec.sort_unstable();
+            for id in kvec.iter() {
+                let dsw = work.active.get(id).unwrap();
+                let dsw_type;
+                let dep_list;
+                match &dsw.work {
+                    IOop::Read {
+                        dependencies,
+                        requests: _,
+                    } => {
+                        dsw_type = "Read ".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                    IOop::Write {
+                        dependencies,
+                        writes: _,
+                    } => {
+                        dsw_type = "Write".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                    IOop::Flush {
+                        dependencies,
+                        flush_number: _flush_number,
+                        gen_number: _gen_number,
+                        snapshot_details: _,
+                    } => {
+                        dsw_type = "Flush".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                };
+                println!(
+                    "DSW:[{:04}] {} {:?} deps:{:?}",
+                    id, dsw_type, dsw.state, dep_list,
+                );
+            }
         }
-    }
 
-    println!("Done tasks {:?}", work.completed);
-    println!("last_flush: {:?}", work.last_flush);
-    println!("--------------------------------------");
+        println!("Done tasks {:?}", work.completed);
+        println!("last_flush: {:?}", work.last_flush);
+        println!("--------------------------------------");
+    }
 }
 
 // DTrace probes for the downstairs
@@ -494,6 +499,7 @@ where
 
 async fn do_work_task<T>(
     ads: &mut Arc<Mutex<Downstairs>>,
+    upstairs_uuid: Uuid,
     mut job_channel_rx: Receiver<u64>,
     fw: &mut Arc<Mutex<FramedWrite<T, CrucibleEncoder>>>,
 ) -> Result<()>
@@ -509,14 +515,10 @@ where
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let upstairs_uuid = {
-            if let Some(upstairs_uuid) = ads.lock().await.active_upstairs() {
-                upstairs_uuid
-            } else {
-                // We are not an active downstairs, wait until we are
-                continue;
-            }
-        };
+        if !ads.lock().await.is_active(upstairs_uuid) {
+            // We are not an active downstairs, wait until we are
+            continue;
+        }
 
         /*
          * Build ourselves a list of all the jobs on the work hashmap that
@@ -551,9 +553,10 @@ where
              * in_progress method will only return a job if all
              * dependencies are met.
              */
-            let job_id = ads.lock().await.in_progress(*new_id).await;
+            let job_id =
+                ads.lock().await.in_progress(upstairs_uuid, *new_id).await;
             if let Some(job_id) = job_id {
-                let m = ads.lock().await.do_work(job_id).await?;
+                let m = ads.lock().await.do_work(upstairs_uuid, job_id).await?;
 
                 if let Some(m) = m {
                     ads.lock().await.complete_work_stat(&m, job_id).await?;
@@ -562,7 +565,10 @@ where
                     fw.send(&m).await?;
                     drop(fw);
 
-                    ads.lock().await.complete_work(job_id, m).await?;
+                    ads.lock()
+                        .await
+                        .complete_work(upstairs_uuid, job_id, m)
+                        .await?;
                 }
             }
         }
@@ -658,16 +664,19 @@ where
              * this signal).
              */
             _ = another_upstairs_active_rx.recv() => {
+                // should never receive this when running in read only!
+                let read_only = {
+                    let ds = ads.lock().await;
+                    ds.read_only
+                };
+                assert!(!read_only);
+
                 let upstairs_uuid = upstairs_uuid.unwrap();
                 println!("Another upstairs promoted to active, \
                     shutting down connection for {:?}", upstairs_uuid);
 
-                let active_upstairs = {
-                    let ds = ads.lock().await;
-                    ds.active_upstairs().unwrap()
-                };
                 let mut fw = fw.lock().await;
-                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
+                fw.send(Message::YouAreNoLongerActive(upstairs_uuid)).await?;
 
                 return Ok(());
             }
@@ -682,19 +691,16 @@ where
                         if let Some(upstairs_uuid) = upstairs_uuid {
                             println!(
                                 "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_uuid, ds.jobs().await,
+                                upstairs_uuid, ds.jobs(upstairs_uuid).await?,
                             );
 
                             if ds.is_active(upstairs_uuid) {
                                 println!("upstairs {:?} was previously \
                                     active, clearing", upstairs_uuid);
-                                ds.clear_active().await;
+                                ds.clear_active(upstairs_uuid);
                             }
                         } else {
-                            println!(
-                                "upstairs disconnected, {} jobs left",
-                                ds.jobs().await,
-                            );
+                            println!("unknown upstairs disconnected");
                         }
 
                         return Ok(());
@@ -708,9 +714,11 @@ where
                             bail!("Received connect out of order {}",
                                 negotiated);
                         }
+
                         if version != 1 {
                             bail!("expected version 1, got {}", version);
                         }
+
                         negotiated = 1;
                         upstairs_uuid = Some(uuid);
                         println!("upstairs {:?} connected",
@@ -719,33 +727,40 @@ where
                         let mut fw = fw.lock().await;
                         fw.send(Message::YesItsMe(1)).await?;
                     }
-                    Some(Message::PromoteToActive(uuid)) => {
+                    Some(Message::PromoteToActive(uuid, read_only)) => {
                         if negotiated != 1 {
                             bail!("Received activate out of order {}",
                                 negotiated);
                         }
-                        // Only allowed to promote or demote self
-                        if upstairs_uuid.unwrap() != uuid {
-                            let mut fw = fw.lock().await;
-                            fw.send(
-                                Message::UuidMismatch(upstairs_uuid.unwrap())
-                            ).await?;
-                            /*
-                             * At this point, should we just return error?
-                             * XXX
-                             */
-                        } else {
-                            {
-                                let mut ds = ads.lock().await;
-                                ds.promote_to_active(
-                                    uuid,
-                                    another_upstairs_active_tx.clone()
-                                ).await?;
-                            }
-                            negotiated = 2;
 
+                        let ds_read_only = ads.lock().await.read_only;
+                        if read_only != ds_read_only {
                             let mut fw = fw.lock().await;
-                            fw.send(Message::YouAreNowActive(uuid)).await?;
+                            fw.send(Message::ReadOnlyMismatch(ds_read_only)).await?;
+                        } else {
+                            // Only allowed to promote or demote self
+                            if upstairs_uuid.unwrap() != uuid {
+                                let mut fw = fw.lock().await;
+                                fw.send(
+                                    Message::UuidMismatch(upstairs_uuid.unwrap())
+                                ).await?;
+                                /*
+                                 * At this point, should we just return error?
+                                 * XXX
+                                 */
+                            } else {
+                                {
+                                    let mut ds = ads.lock().await;
+                                    ds.promote_to_active(
+                                        uuid,
+                                        another_upstairs_active_tx.clone()
+                                    ).await?;
+                                }
+                                negotiated = 2;
+
+                                let mut fw = fw.lock().await;
+                                fw.send(Message::YouAreNowActive(uuid)).await?;
+                            }
                         }
                     }
                     Some(Message::RegionInfoPlease) => {
@@ -868,7 +883,8 @@ where
         let mut adc = ads.clone();
         let mut fwc = fw.clone();
         tokio::spawn(async move {
-            do_work_task(&mut adc, job_channel_rx, &mut fwc).await
+            do_work_task(&mut adc, upstairs_uuid, job_channel_rx, &mut fwc)
+                .await
         })
     };
 
@@ -938,13 +954,8 @@ where
                 println!("Another upstairs promoted to active, \
                     shutting down connection for {:?}", upstairs_uuid);
 
-                let active_upstairs = {
-                    let ds = ads.lock().await;
-                    ds.active_upstairs().unwrap()
-                };
-
                 let mut fw = fw.lock().await;
-                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
+                fw.send(Message::YouAreNoLongerActive(upstairs_uuid)).await?;
 
                 return Ok(());
             }
@@ -955,13 +966,13 @@ where
 
                         println!(
                             "upstairs {:?} disconnected, {} jobs left",
-                            upstairs_uuid, ds.jobs().await,
+                            upstairs_uuid, ds.jobs(upstairs_uuid).await?,
                         );
 
                         if ds.is_active(upstairs_uuid) {
                             println!("upstairs {:?} was previously \
                                 active, clearing", upstairs_uuid);
-                            ds.clear_active().await;
+                            ds.clear_active(upstairs_uuid);
                         }
 
                         return Ok(());
@@ -986,6 +997,13 @@ where
     }
 }
 
+#[derive(Debug)]
+pub struct ActiveUpstairs {
+    pub id: Uuid,
+    pub work: Mutex<Work>,
+    pub terminate_sender: Arc<Sender<u64>>,
+}
+
 /*
  * Overall structure for things the downstairs is tracking.
  * This includes the extents and their status as well as the
@@ -994,38 +1012,46 @@ where
 #[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
-    work: Mutex<Work>,
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
-    active_upstairs: Option<(Uuid, Arc<Sender<u64>>)>,
+    active_upstairs: HashMap<Uuid, ActiveUpstairs>,
     dss: DsStatOuter,
+    pub read_only: bool,
 }
 
 impl Downstairs {
-    fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
+    fn new(
+        region: Region,
+        lossy: bool,
+        return_errors: bool,
+        read_only: bool,
+    ) -> Self {
         let dss = DsStatOuter {
             ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
                 region.def().uuid(),
             ))),
         };
+
         Downstairs {
             region,
-            work: Mutex::new(Work::default()),
             lossy,
             return_errors,
-            active_upstairs: None,
+            active_upstairs: HashMap::new(),
             dss,
+            read_only,
         }
     }
 
     /*
-     * Only grab the lock if the Upstairs UUID matches.
+     * # Read-write mode
      *
-     * Multiple Upstairs connecting to this Downstairs will spawn multiple
-     * threads that all can potentially add work to the same `active` hash
-     * map. Only one Upstairs can be "active" at any one time though.
-     * When promote_to_active takes the work lock, it will clear out the
-     * `active` hash map and (if applicable) will signal to the currently
+     * In read-write mode, only grab the lock if the Upstairs UUID matches.
+     *
+     * Multiple Upstairs with different UUIDs connecting to this Downstairs
+     * will spawn multiple threads that all can potentially add work.
+     * Only one Upstairs can be "active" at any one time though. When
+     * promote_to_active takes the work lock, it will clear out
+     * the `active` hash map and (if applicable) will signal to the currently
      * active Upstairs to terminate the connection.
      *
      * `new_work` and `add_work` both grab their work lock through this
@@ -1048,30 +1074,55 @@ impl Downstairs {
      * Grabbing the lock in this way should properly clear out the previously
      * active Upstairs without causing jobs to be incorrectly sent to the
      * newly active Upstairs.
+     *
+     * # Read-only mode
+     *
+     * In read-only mode, multiple Upstairs with different UUIDs can connect
+     * to the same downstairs and
      */
     async fn work_lock(
         &self,
         upstairs_uuid: Uuid,
     ) -> Result<MutexGuard<'_, Work>> {
-        if let Some(active_upstairs) = &self.active_upstairs {
-            let active_uuid = active_upstairs.0;
-            if active_uuid != upstairs_uuid {
+        if !self.active_upstairs.contains_key(&upstairs_uuid) {
+            bail!("cannot grab work lock, {} is not in map!", upstairs_uuid);
+        }
+
+        if self.read_only {
+            // Multiple read-only active Upstairs allowed, grab the
+            // corresponding Work struct
+            let active_upstairs =
+                self.active_upstairs.get(&upstairs_uuid).unwrap();
+            Ok(active_upstairs.work.lock().await)
+        } else {
+            // Only one active Upstairs allowed for read-write mode
+            let active_upstairs_list: Vec<&Uuid> =
+                self.active_upstairs.keys().collect();
+            if active_upstairs_list.len() != 1 {
+                bail!(
+                    "too many active upstairs {:?}, should only be one!",
+                    active_upstairs_list
+                );
+            }
+
+            let active_uuid = active_upstairs_list[0];
+            if *active_uuid != upstairs_uuid {
                 println!(
                     "{:?} cannot grab lock, {:?} is active!",
                     upstairs_uuid, active_uuid
                 );
                 bail!(CrucibleError::UpstairsInactive)
             } else {
-                Ok(self.work.lock().await)
+                let active_upstairs =
+                    self.active_upstairs.get(active_uuid).unwrap();
+                Ok(active_upstairs.work.lock().await)
             }
-        } else {
-            bail!("cannot grab work lock, nothing is active!");
         }
     }
 
-    async fn jobs(&self) -> usize {
-        let work = self.work.lock().await;
-        work.jobs()
+    async fn jobs(&self, upstairs_uuid: Uuid) -> Result<usize> {
+        let work = self.work_lock(upstairs_uuid).await?;
+        Ok(work.jobs())
     }
 
     async fn new_work(&self, upstairs_uuid: Uuid) -> Result<Vec<u64>> {
@@ -1085,6 +1136,10 @@ impl Downstairs {
         ds_id: u64,
         work: IOop,
     ) -> Result<()> {
+        if self.read_only && !work.read_only() {
+            bail!(CrucibleError::ReadOnlyMismatch);
+        }
+
         let dsw = DownstairsWork {
             upstairs_uuid,
             ds_id,
@@ -1098,8 +1153,12 @@ impl Downstairs {
         Ok(())
     }
 
-    async fn in_progress(&self, ds_id: u64) -> Option<u64> {
-        let mut work = self.work.lock().await;
+    async fn in_progress(
+        &self,
+        upstairs_uuid: Uuid,
+        ds_id: u64,
+    ) -> Option<u64> {
+        let mut work = self.work_lock(upstairs_uuid).await.unwrap();
         if let Some((job_id, upstairs_uuid)) = work.in_progress(ds_id) {
             if !self.is_active(upstairs_uuid) {
                 // Don't return a job with the wrong uuid! `promote_to_active`
@@ -1115,8 +1174,12 @@ impl Downstairs {
     }
 
     /// Given a job ID, do the work for that IO.
-    async fn do_work(&self, job_id: u64) -> Result<Option<Message>> {
-        let mut work = self.work.lock().await;
+    async fn do_work(
+        &self,
+        upstairs_uuid: Uuid,
+        job_id: u64,
+    ) -> Result<Option<Message>> {
+        let mut work = self.work_lock(upstairs_uuid).await?;
         work.do_work(self, job_id).await
     }
 
@@ -1128,8 +1191,13 @@ impl Downstairs {
      * - removing the response
      * - putting the id on the completed list.
      */
-    async fn complete_work(&mut self, ds_id: u64, m: Message) -> Result<()> {
-        let mut work = self.work.lock().await;
+    async fn complete_work(
+        &mut self,
+        upstairs_uuid: Uuid,
+        ds_id: u64,
+        m: Message,
+    ) -> Result<()> {
+        let mut work = self.work_lock(upstairs_uuid).await?;
 
         // Complete the job
         let is_flush = matches!(m, Message::FlushAck(_, _, _));
@@ -1180,92 +1248,122 @@ impl Downstairs {
         uuid: Uuid,
         tx: Arc<Sender<u64>>,
     ) -> Result<()> {
-        let mut work = self.work.lock().await;
-
-        /*
-         * If there's an existing Upstairs connection, signal to terminate
-         * it. Do this while holding the work lock so the previously
-         * active Upstairs isn't adding more work.
-         */
-        if let Some(old_upstairs) = &self.active_upstairs {
-            println!("Signaling to {:?} thread", old_upstairs.0);
-            match futures::executor::block_on(old_upstairs.1.send(0)) {
-                Ok(_) => {}
-                Err(e) => {
-                    /*
-                     * It's possible the old thread died due to some
-                     * connection error. In that case the
-                     * receiver will have closed and
-                     * the above send will fail.
-                     */
-                    println!(
-                        "Error while signaling to {:?} thread: {:?}",
-                        old_upstairs.0, e,
-                    );
-                }
-            }
-        }
-
-        self.active_upstairs = Some((uuid, tx));
-
-        /*
-         * Note: in the future, differentiate between new upstairs connecting
-         * vs same upstairs reconnecting here.
-         *
-         * Clear out active jobs, the last flush, and completed information,
-         * as that will not be valid any longer.
-         *
-         * TODO: Really work through this error case
-         */
-        if work.active.keys().len() > 0 {
-            println!(
-                "Crucible Downstairs promoting {} to active, \
-                discarding {} jobs",
+        if self.read_only {
+            // If in read only mode, multiple read-only activations are allowed.
+            self.active_upstairs.insert(
                 uuid,
-                work.active.keys().len()
+                ActiveUpstairs {
+                    id: uuid,
+                    work: Mutex::new(Work::default()),
+                    terminate_sender: tx,
+                },
             );
 
-            /*
-             * In the future, we may decide there is some way to continue
-             * working on outstanding jobs, or a way to merge. But for now,
-             * we just throw out what we have and let the upstairs resend
-             * anything to us that it did not get an ACK for.
-             */
-            work.active = HashMap::new();
+            println!("{:?} is now active (read-only)", uuid);
+        } else {
+            // If in read-write mode, only one activation is allowed.
+
+            // If there's an existing Upstairs connection, signal to terminate
+            // it. Do this while holding the work lock for the previously active
+            // Upstairs so it isn't adding more work.
+            if !self.active_upstairs.is_empty() {
+                // Only one active upstairs possible in read-write mode,
+                // terminate the other thread.
+                let active_upstairs_uuids: Vec<Uuid> =
+                    self.active_upstairs.keys().copied().collect();
+                assert_eq!(active_upstairs_uuids.len(), 1);
+
+                let old_upstairs_id = active_upstairs_uuids[0];
+                let mut work = self.work_lock(old_upstairs_id).await?;
+
+                let old_upstairs =
+                    self.active_upstairs.get(&old_upstairs_id).unwrap();
+
+                println!("Signaling to {:?} thread to stop", old_upstairs_id);
+                match futures::executor::block_on(
+                    old_upstairs.terminate_sender.send(0),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        // It's possible the old thread died due to some
+                        // connection error. In that case the receiver will have
+                        // closed and the above send will fail.
+                        println!(
+                            "Error while signaling to {:?} thread: {:?}",
+                            old_upstairs_id, e,
+                        );
+                    }
+                }
+
+                // Note: in the future, differentiate between new upstairs
+                // connecting vs same upstairs reconnecting here.
+                //
+                // Clear out active jobs, the last flush, and completed
+                // information, as that will not be valid any longer.
+                //
+                // TODO: Really work through this error case
+                if work.active.keys().len() > 0 {
+                    println!(
+                        "Crucible Downstairs promoting {} to active, \
+                        discarding {} jobs",
+                        uuid,
+                        work.active.keys().len()
+                    );
+
+                    // In the future, we may decide there is some way to
+                    // continue working on outstanding jobs, or a way to merge.
+                    // But for now, we just throw out what we have and let the
+                    // upstairs resend anything to us that it did not get an ACK
+                    // for.
+                    work.active = HashMap::new();
+                }
+
+                work.completed = Vec::with_capacity(32);
+                work.last_flush = 0;
+                drop(work);
+
+                // Re-open any closed extents
+                self.region.reopen_all_extents()?;
+
+                // Re-add only one active upstairs, taking new terminate sender,
+                // and using a completely new work struct.
+                self.active_upstairs.remove(&old_upstairs_id);
+                self.active_upstairs.insert(
+                    uuid,
+                    ActiveUpstairs {
+                        id: uuid,
+                        work: Mutex::new(Work::default()),
+                        terminate_sender: tx,
+                    },
+                );
+            } else {
+                // Add new (only) active upstairs
+                self.active_upstairs.insert(
+                    uuid,
+                    ActiveUpstairs {
+                        id: uuid,
+                        work: Mutex::new(Work::default()),
+                        terminate_sender: tx,
+                    },
+                );
+            }
+
+            println!("{:?} is now active", uuid);
         }
-
-        work.completed = Vec::with_capacity(32);
-        work.last_flush = 0;
-
-        /*
-         * Re-open any closed extents
-         */
-        self.region.reopen_all_extents()?;
-
-        println!("{:?} is now active", uuid);
 
         Ok(())
     }
 
     fn is_active(&self, uuid: Uuid) -> bool {
-        match self.active_upstairs.as_ref() {
-            None => false,
-            Some(tuple) => tuple.0 == uuid,
-        }
+        self.active_upstairs.contains_key(&uuid)
     }
 
-    fn active_upstairs(&self) -> Option<Uuid> {
-        self.active_upstairs.as_ref().map(|e| e.0)
+    fn _active_upstairs(&self) -> Vec<Uuid> {
+        self.active_upstairs.keys().copied().collect()
     }
 
-    async fn clear_active(&mut self) {
-        let mut work = self.work.lock().await;
-
-        self.active_upstairs = None;
-
-        work.active = HashMap::new();
-        work.completed = Vec::with_capacity(32);
-        work.last_flush = 0;
+    fn clear_active(&mut self, uuid: Uuid) {
+        self.active_upstairs.remove(&uuid);
     }
 }
 
@@ -1647,6 +1745,7 @@ pub fn build_downstairs_for_region(
         region,
         lossy,
         return_errors,
+        read_only,
     ))))
 }
 
