@@ -16,6 +16,7 @@ crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 csv = "1.1.6"
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
+dsc-client = { path = "../dsc-client" }
 futures = "0.3"
 futures-core = "0.3"
 indicatif = { version = "0.16.2", features = ["rayon"] }
