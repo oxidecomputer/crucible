@@ -1138,7 +1138,15 @@ impl Downstairs {
     ) -> Result<()> {
         // The Upstairs will send Flushes periodically, even in read only mode
         // we have to accept them.
-        if self.read_only && matches!(work, IOop::Write { dependencies: _, writes: _ }) {
+        if self.read_only
+            && matches!(
+                work,
+                IOop::Write {
+                    dependencies: _,
+                    writes: _
+                }
+            )
+        {
             eprintln!("read-only but received work {:?}", work);
             bail!(CrucibleError::ReadOnlyMismatch);
         }
