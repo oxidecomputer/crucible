@@ -644,6 +644,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
+                perf_header();
                 match perf_workload(
                     guest,
                     ri,
