@@ -315,7 +315,7 @@ async fn handle_dsc(
                 println!("Got res: {:?}", res);
             }
             DscCommand::StopRand => {
-                let res = dsc_client.dsc_stop_all().await;
+                let res = dsc_client.dsc_stop_rand().await;
                 println!("Got res: {:?}", res);
             }
             DscCommand::State { cid } => {
