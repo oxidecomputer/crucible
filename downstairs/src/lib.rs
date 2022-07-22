@@ -917,8 +917,8 @@ where
             _ = &mut dw_task => {
                 bail!("do_work_task task has ended");
             }
-            _ = &mut pf_task => {
-                bail!("pf task ended");
+            e = &mut pf_task => {
+                bail!("pf task ended: {:?}", e);
             }
             /*
              * If we have set "lossy", then we need to check every now and
@@ -1136,7 +1136,10 @@ impl Downstairs {
         ds_id: u64,
         work: IOop,
     ) -> Result<()> {
-        if self.read_only && !work.read_only() {
+        // The Upstairs will send Flushes periodically, even in read only mode
+        // we have to accept them.
+        if self.read_only && matches!(work, IOop::Write { dependencies: _, writes: _ }) {
+            eprintln!("read-only but received work {:?}", work);
             bail!(CrucibleError::ReadOnlyMismatch);
         }
 

@@ -5097,27 +5097,6 @@ impl IOop {
             } => dependencies,
         }
     }
-
-    pub fn read_only(&self) -> bool {
-        match &self {
-            IOop::Write {
-                dependencies: _,
-                writes: _,
-            } => false,
-
-            IOop::Flush {
-                dependencies: _,
-                flush_number: _,
-                gen_number: _,
-                snapshot_details: _,
-            } => false,
-
-            IOop::Read {
-                dependencies: _,
-                requests: _,
-            } => true,
-        }
-    }
 }
 
 /*
