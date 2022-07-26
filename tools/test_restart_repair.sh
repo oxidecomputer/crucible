@@ -28,21 +28,28 @@ function ctrl_c() {
 
 loop_log=/tmp/repair_restart.log
 test_log=/tmp/repair_restart_test.log
+
 echo "" > ${loop_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-cds="./target/debug/crucible-downstairs"
-cc="./target/debug/crucible-client"
-if [[ ! -f ${cds} ]] || [[ ! -f ${cc} ]]; then
-    echo "Can't find crucible binary at $cds or $cc"
-    exit 1
-fi
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export BINDIR=${BINDIR:-$ROOT/target/debug}
+
+cds="$BINDIR/crucible-downstairs"
+cc="$BINDIR/crucible-client"
+dsc="$BINDIR/dsc"
+for bin in $cds $cc $dsc; do
+    if [[ ! -f "$bin" ]]; then
+        echo "Can't find crucible binary at $bin" >&2
+        exit 1
+    fi
+done
 
 echo "Create a new region to test" | tee "${loop_log}"
 ulimit -n 65536
-if ! ./tools/create-generic-ds.sh -d -b 4096 -c 61 -s 5120; then
-    echo "Failed to create new region"
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 --extent-size 5120 --region-dir ./var; then
+    echo "Failed to create region"
     exit 1
 fi
 

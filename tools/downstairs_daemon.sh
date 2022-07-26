@@ -114,7 +114,8 @@ while getopts 'ru' opt; do
             echo "Run on start"
             ;;
         r)  release_build=1
-            echo "Building with release"
+            export BINDIR=${ROOT}/release
+            echo "Building with release in $BINDIR"
             ;;
         *)  echo "Usage: $0 [-u]" >&2
             echo "u: Don't restart downstairs initially"
@@ -136,19 +137,9 @@ if pgrep -fl -U $(id -u) target/release/crucible-downstairs; then
     exit 1
 fi
 
-if [[ release_build -eq 1 ]] ; then
-    if ! cargo build --release; then
-        echo "Initial Build failed, no tests ran"
-        exit 1
-    fi
-    cds="target/release/crucible-downstairs"
-else
-    if ! cargo build; then
-        echo "Initial Build failed, no tests ran"
-        exit 1
-    fi
-    cds="target/debug/crucible-downstairs"
-fi
+export BINDIR=${BINDIR:-$ROOT/debug}
+cds="$BINDIR/crucible-downstairs"
+dsc="$BINDIR/dsc"
 
 if [[ ! -f ${cds} ]]; then
     echo "Can't find crucible binary at $cds"
@@ -173,7 +164,8 @@ for (( i = 0; i < 3; i++ )); do
     fi
 done
 if [[ missing -eq 1 ]]; then
-    if ! ./tools/create-generic-ds.sh; then
+    if ! "$dsc" create --region-dir ./var \
+            --block_size 512 --extent_size 100 --extent_count 20 ; then
         echo "Failed to create region directories"
         exit 1
     fi

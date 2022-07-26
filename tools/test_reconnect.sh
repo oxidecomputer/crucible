@@ -21,12 +21,22 @@ function ctrl_c() {
 
 loop_log=/tmp/reconnect.log
 test_log=/tmp/reconnect_test.log
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export BINDIR=${BINDIR:-$ROOT/target/debug}
+crucible_client="$BINDIR/crucible-client"
+if [[ ! -f "$crucible_client" ]]; then
+    echo "Can't find crucible-client binary at $crucible_client"
+    exit 1
+fi
+
 echo "" > ${loop_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-./tools/downstairs_daemon.sh -u >> "$test_log" 2>&1 &
+./tools/downstairs_daemon.sh -r -u >> "$test_log" 2>&1 &
 dsd_pid=$!
+sleep 5
 
 if ! ps -p $dsd_pid > /dev/null; then
     echo "downstairs_daemon failed to start"
@@ -41,7 +51,7 @@ for (( i = 0; i < 30; i += 10 )); do
 done
 
 # Initial seed for verify file
-if ! cargo run -q -p crucible-client -- fill "${args[@]}" -q \
+if ! "$crucible_client" fill "${args[@]}" -q \
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     touch /var/tmp/ds_test/stop
@@ -58,7 +68,7 @@ do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    cargo run -q -p crucible-client -- generic "${args[@]}" \
+    "$crucible_client" generic "${args[@]}" \
             -q --verify-out alan \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1
