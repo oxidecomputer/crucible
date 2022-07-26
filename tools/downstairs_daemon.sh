@@ -114,8 +114,8 @@ while getopts 'ru' opt; do
             echo "Run on start"
             ;;
         r)  release_build=1
-            export BINDIR=${ROOT}/release
-            echo "Building with release in $BINDIR"
+            export BINDIR=${ROOT}/target/release
+            echo "Using $BINDIR for binaries"
             ;;
         *)  echo "Usage: $0 [-u]" >&2
             echo "u: Don't restart downstairs initially"
@@ -128,18 +128,14 @@ done
 # Remove all options passed by getopts options
 shift $((OPTIND-1))
 
-if pgrep -fl -U $(id -u) target/debug/crucible-downstairs; then
-    echo 'Some downstairs already running?' >&2
-    exit 1
-fi
-if pgrep -fl -U $(id -u) target/release/crucible-downstairs; then
-    echo 'Some downstairs already running?' >&2
-    exit 1
-fi
-
 export BINDIR=${BINDIR:-$ROOT/debug}
 cds="$BINDIR/crucible-downstairs"
 dsc="$BINDIR/dsc"
+
+if pgrep -fl -U $(id -u) "$cds"; then
+    echo 'Some downstairs already running?' >&2
+    exit 1
+fi
 
 if [[ ! -f ${cds} ]]; then
     echo "Can't find crucible binary at $cds"
@@ -165,7 +161,7 @@ for (( i = 0; i < 3; i++ )); do
 done
 if [[ missing -eq 1 ]]; then
     if ! "$dsc" create --region-dir ./var \
-            --block_size 512 --extent_size 100 --extent_count 20 ; then
+            --block-size 512 --extent-size 100 --extent-count 20 ; then
         echo "Failed to create region directories"
         exit 1
     fi

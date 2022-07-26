@@ -7,7 +7,18 @@
 #: output_rules = [
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
+#:  "/out/*",
 #: ]
+#:
+#: [[publish]]
+#: series = "nightly-image"
+#: name = "crucible-nightly.tar.gz"
+#: from_output = "/out/crucible-nightly.tar.gz"
+#:
+#: [[publish]]
+#: series = "nightly-image"
+#: name = "crucible-nightly.sha256.txt"
+#: from_output = "/out/crucible.sha256.txt"
 #:
 
 set -o errexit
@@ -34,8 +45,22 @@ for s in tools/test_perf.sh; do
 	cp "$s" /work/scripts/
 done
 
-echo in_work_scripts
-ls -l /work/scripts
-echo in_work_rbins
-ls -l /work/rbins
+banner nightly
+mkdir -p out
+tar cavf out/crucible-nightly.tar.gz \
+    target/release/crucible-client \
+    target/release/crucible-downstairs \
+    target/release/crucible-hammer \
+    target/release/dsc \
+    tools/downstairs_daemon.sh \
+    tools/hammer_loop.sh \
+    tools/test_reconnect.sh \
+    tools/test_repair.sh \
+    tools/test_restart_repair.sh
 
+banner copy
+pfexec mkdir -p /out
+pfexec chown "$UID" /out
+mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
+cd /out
+digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt

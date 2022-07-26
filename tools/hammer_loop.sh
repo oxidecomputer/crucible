@@ -23,6 +23,12 @@ for bin in $hammer $cds $dsc; do
     fi
 done
 
+if pgrep -fl -U "$(id -u)" "$cds"; then
+    echo "Downstairs already running" >&2
+    echo Run: pkill -f -U "$(id -u)" "$cds" >&2
+    exit 1
+fi
+
 if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 --extent-size 50; then
     echo "Failed to create region"
     exit 1
@@ -37,6 +43,9 @@ function ctrl_c() {
     if [[ -n "$dsc_pid" ]]; then
         kill "$dsc_pid"
     fi
+    if pgrep -fl -U "$(id -u)" "$cds"; then
+        pkill -f -U "$(id -u)" "$cds"
+    fi
     exit 1
 }
 
@@ -46,7 +55,7 @@ echo "" > ${loop_log}
 echo "starting Hammer test on $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-for i in {1..10}
+for i in {1..20}
 do
     SECONDS=0
     echo "" > "$test_log"
@@ -87,5 +96,11 @@ printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d
 echo "Stopping dsc"
 kill $dsc_pid
 wait $dsc_pid
+# Also remove any leftover downstairs
+if pgrep -fl -U "$(id -u)" "$cds" > /dev/null; then
+    echo "Removing any remaining downstairs processes"
+    pkill -f -U "$(id -u)" "$cds"
+fi
+
 exit "$err"
 
