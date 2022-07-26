@@ -8,6 +8,7 @@ members = [
     "crucadm",
     "downstairs",
     "dsc",
+    "dsc-client",
     "hammer",
     "integration_tests",
     "measure_iops",

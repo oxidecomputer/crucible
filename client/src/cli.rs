@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 
 use crossterm::style::Color;
+use dsc_client::Client;
 use futures::{SinkExt, StreamExt};
 use reedline::{
     FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
@@ -20,6 +21,47 @@ use protocol::*;
 pub struct CliAction {
     #[clap(subcommand)]
     cmd: CliCommand,
+}
+
+#[derive(Debug, Parser, PartialEq)]
+pub enum DscCommand {
+    /// Connect to the default DSC server (http://127.0.0.1:9998)
+    Connect,
+    /// Disable auto restart on the given downstairs client ID
+    DisableRestart {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Disable auto restart on all downstairs
+    DisableRestartAll,
+    /// Disable restart on the given client ID
+    EnableRestart {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Enable auto restart on all downstairs
+    EnableRestartAll,
+    /// Start the downstairs at the given client ID
+    Start {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Start all downstairs
+    StartAll,
+    /// Get the state of the given client ID
+    State {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Stop the downstairs at the given client ID
+    Stop {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Stop all the downstairs
+    StopAll,
+    /// Stop a random downstairs
+    StopRand,
 }
 /*
  * Commands supported by the crucible CLI.  Most of these translate into
@@ -40,6 +82,12 @@ enum CliCommand {
     Commit,
     /// Deactivate the upstairs
     Deactivate,
+    /// DSC
+    Dsc {
+        /// Subcommand please
+        #[clap(subcommand)]
+        dsc_cmd: DscCommand,
+    },
     /// Report the expected read count for an offset.
     Expected {
         /// The desired offset to see the expected value for.
@@ -224,6 +272,66 @@ fn cli_write(
     Ok(())
 }
 
+// Handle dsc commands
+async fn handle_dsc(
+    dsc_client: &mut Option<dsc_client::Client>,
+    dsc_cmd: DscCommand,
+) {
+    if let Some(dsc_client) = dsc_client {
+        match dsc_cmd {
+            DscCommand::Connect => {
+                println!("Already connected");
+            }
+            DscCommand::DisableRestart { cid } => {
+                let res = dsc_client.dsc_disable_restart(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::DisableRestartAll => {
+                let res = dsc_client.dsc_disable_restart_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::EnableRestart { cid } => {
+                let res = dsc_client.dsc_enable_restart(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::EnableRestartAll => {
+                let res = dsc_client.dsc_enable_restart_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::Start { cid } => {
+                let res = dsc_client.dsc_start(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::StartAll => {
+                let res = dsc_client.dsc_start_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::Stop { cid } => {
+                let res = dsc_client.dsc_stop(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::StopAll => {
+                let res = dsc_client.dsc_stop_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::StopRand => {
+                let res = dsc_client.dsc_stop_rand().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::State { cid } => {
+                let res = dsc_client.dsc_get_state(cid).await;
+                println!("Got res: {:?}", res);
+            }
+        }
+    } else if dsc_cmd == DscCommand::Connect {
+        let url = "http://127.0.0.1:9998".to_string();
+        println!("Connect to {:?}", url);
+        let rs = Client::new(&url);
+        *dsc_client = Some(rs);
+    } else {
+        println!("dsc: Need to be connected first");
+    }
+}
 /*
  * Take a CLI cmd coming from our client program and translate it into
  * an actual CliMessage to send to the cli server.
@@ -231,11 +339,17 @@ fn cli_write(
  * At the moment, we ping pong here, where we send a command to the
  * cli_server, then we wait for the response.
  * Eventually we could make this async, but, yeah, I got things to do.
+ *
+ * Also, some commands (dsc for example) don't talk to the cliserver, so
+ * those and commands like them should return status directly instead of
+ * falling through the match and then entering the "wait for a response"
+ * side where they will never get a response.
  */
 async fn cmd_to_msg(
     cmd: CliCommand,
     fr: &mut FramedRead<tokio::net::tcp::ReadHalf<'_>, CliDecoder>,
     fw: &mut FramedWrite<WriteHalf<'_>, CliEncoder>,
+    dsc_client: &mut Option<dsc_client::Client>,
 ) -> Result<()> {
     match cmd {
         CliCommand::Activate { gen } => {
@@ -246,6 +360,10 @@ async fn cmd_to_msg(
         }
         CliCommand::Deactivate => {
             fw.send(CliMessage::Deactivate).await?;
+        }
+        CliCommand::Dsc { dsc_cmd } => {
+            handle_dsc(dsc_client, dsc_cmd).await;
+            return Ok(());
         }
         CliCommand::Expected { offset } => {
             fw.send(CliMessage::Expected(offset)).await?;
@@ -451,6 +569,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         );
         let mut line_editor = Reedline::create().with_history(history);
         let prompt = CliPrompt::new();
+        let mut dsc_client = None;
 
         loop {
             let sig = line_editor.read_line(&prompt)?;
@@ -467,7 +586,8 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                             break;
                         }
                         Ok(vc) => {
-                            cmd_to_msg(vc, &mut fr, &mut fw).await?;
+                            cmd_to_msg(vc, &mut fr, &mut fw, &mut dsc_client)
+                                .await?;
                             // TODO: Handle this error
                         }
                         Err(e) => {

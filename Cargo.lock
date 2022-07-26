@@ -599,6 +599,7 @@ dependencies = [
  "crucible-protocol",
  "csv",
  "dropshot",
+ "dsc-client",
  "futures",
  "futures-core",
  "indicatif",
@@ -987,6 +988,19 @@ dependencies = [
  "statistical",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "dsc-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "percent-encoding",
+ "progenitor",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
