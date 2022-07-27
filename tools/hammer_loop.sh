@@ -55,7 +55,7 @@ echo "" > ${loop_log}
 echo "starting Hammer test on $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-for i in {1..20}
+for i in {1..10}
 do
     SECONDS=0
     echo "" > "$test_log"

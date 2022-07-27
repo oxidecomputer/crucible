@@ -56,7 +56,8 @@ tar cavf out/crucible-nightly.tar.gz \
     tools/hammer_loop.sh \
     tools/test_reconnect.sh \
     tools/test_repair.sh \
-    tools/test_restart_repair.sh
+    tools/test_restart_repair.sh \
+    tools/test_nightly.sh
 
 banner copy
 pfexec mkdir -p /out

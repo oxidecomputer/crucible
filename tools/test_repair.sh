@@ -104,7 +104,7 @@ then
 fi
 
 # Start loop
-for (( i = 0; i < 20; i += 1 )); do
+for (( i = 0; i < 10; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""

@@ -63,7 +63,7 @@ rm -f /var/tmp/ds_test/up
 sleep 5
 
 # Now run the quick client test in a loop
-for i in {1..100}
+for i in {1..10}
 do
     SECONDS=0
     echo "" > "$test_log"
