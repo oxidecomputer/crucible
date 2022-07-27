@@ -281,14 +281,42 @@ if [[ "$hc" -ne 400 ]]; then
     (( res += 1 ))
 fi
 
+# The final test is to clean it all up!
+echo "Test /shutdown endpoint"
+hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"shutdown)
+if [[ "$hc" -ne 204 ]]; then
+    echo "Failed to shutdown, got $hc" | tee -a "$fail_log"
+    (( res += 1 ))
+else
+    retry=0
+    # Loop until we exit, or have exhausted our retry count
+    while :; do
+        if ps -p $dsc_pid > /dev/null; then
+            (( retry += 1 ))
+        else
+            break;
+        fi
+        if [[ $retry -eq 5 ]]; then
+            echo "Failed to shutdown with /shutdown" | tee -a "$fail_log"
+            (( res += 1 ))
+            break;
+        fi
+        sleep 1
+    done
+fi
+
 # Tests are done
 echo ""
-echo "Tests done, cleanup $dsc_pid"
-kill $dsc_pid
-sleep 1
-kill -9 $dsc_pid 2> /dev/null
-echo "Wait on pid $dsc_pid"
-wait $dsc_pid
+echo "Tests done"
+if ps -p $dsc_pid > /dev/null; then
+    echo "Cleanup $dsc_pid"
+    kill $dsc_pid
+    sleep 1
+    kill -9 $dsc_pid 2> /dev/null
+    echo "Wait on pid $dsc_pid"
+    wait $dsc_pid
+fi
+
 if [[ $res != 0 ]]; then
     echo "$res Tests have failed"
     cat "$fail_log"

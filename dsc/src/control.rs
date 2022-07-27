@@ -29,6 +29,7 @@ pub(crate) fn build_api() -> ApiDescription<DownstairsControl> {
     api.register(dsc_disable_restart_all).unwrap();
     api.register(dsc_enable_restart).unwrap();
     api.register(dsc_enable_restart_all).unwrap();
+    api.register(dsc_shutdown).unwrap();
 
     api
 }
@@ -353,6 +354,23 @@ async fn dsc_enable_restart_all(
 
     let mut dsc_work = api_context.dsci.work.lock().unwrap();
     dsc_work.add_cmd(DscCmd::EnableRestartAll);
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Stop all downstairs, then stop ourselves.
+ */
+#[endpoint {
+    method = GET,
+    path = "/shutdown",
+}]
+async fn dsc_shutdown(
+    rqctx: Arc<RequestContext<DownstairsControl>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let api_context = rqctx.context();
+
+    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    dsc_work.add_cmd(DscCmd::Shutdown);
     Ok(HttpResponseUpdatedNoContent())
 }
 

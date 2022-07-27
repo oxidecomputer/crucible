@@ -192,6 +192,12 @@ impl RegionSet {
     }
 }
 
+// Used to return state or info to the main dsc task loop for commands
+// handled my the do_dsc_work task.
+// TODO: an update for enable/disable "loop restart random downstairs"
+pub enum DscMainUpdate {
+    Shutdown,
+}
 // This holds the overall info for the regions we have created.
 #[derive(Debug)]
 pub struct DscInfo {
@@ -480,61 +486,80 @@ pub fn deadline_secs(secs: u64) -> tokio::time::Instant {
 // work on the work queue.  Take the oldest item on the list and then
 // send a message to one (or possibly all) downstairs tasks with the
 // piece of work they next need to do.
-// TODO: "start random restart with interval", we have to return
-// something from this?  Or send it to each DS?
-fn do_dsc_work(dsci: &DscInfo, action_tx_list: &[watch::Sender<Action>]) {
+async fn do_dsc_work(
+    dsci: &DscInfo,
+    action_tx_list: &[mpsc::Sender<Action>],
+) -> Option<DscMainUpdate> {
     let mut dsc_work = dsci.work.lock().unwrap();
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    let mut main_update = None;
+
     while let Some(work) = dsc_work.get_cmd() {
         println!("got dsc {:?}", work);
         match work {
             DscCmd::Start(cid) => {
                 println!("start {}", cid);
-                action_tx_list[cid].send(Action::Start).unwrap();
+                action_tx_list[cid].send(Action::Start).await.unwrap();
             }
             DscCmd::StartAll => {
                 println!("start all downstairs: {}", action_tx_list.len());
                 for action_tx in action_tx_list {
-                    action_tx.send(Action::Start).unwrap();
+                    action_tx.send(Action::Start).await.unwrap();
                 }
             }
             DscCmd::Stop(cid) => {
                 println!("stop {}", cid);
-                action_tx_list[cid].send(Action::Stop).unwrap();
+                action_tx_list[cid].send(Action::Stop).await.unwrap();
             }
             DscCmd::StopRand => {
                 let cid = rng.gen_range(0..3) as usize;
                 println!("stop rand {}", cid);
-                action_tx_list[cid].send(Action::Stop).unwrap();
+                action_tx_list[cid].send(Action::Stop).await.unwrap();
             }
             DscCmd::StopAll => {
                 println!("Stop all downstairs: {}", action_tx_list.len());
                 for action_tx in action_tx_list {
-                    action_tx.send(Action::Stop).unwrap();
+                    action_tx.send(Action::Stop).await.unwrap();
                 }
             }
             DscCmd::DisableRestart(cid) => {
                 println!("disable restart {}", cid);
-                action_tx_list[cid].send(Action::DisableRestart).unwrap();
+                action_tx_list[cid]
+                    .send(Action::DisableRestart)
+                    .await
+                    .unwrap();
             }
             DscCmd::DisableRestartAll => {
                 println!("disable restart on all: {}", action_tx_list.len());
                 for action_tx in action_tx_list {
-                    action_tx.send(Action::DisableRestart).unwrap();
+                    action_tx.send(Action::DisableRestart).await.unwrap();
                 }
             }
             DscCmd::EnableRestart(cid) => {
                 println!("enable restart {}", cid);
-                action_tx_list[cid].send(Action::EnableRestart).unwrap();
+                action_tx_list[cid]
+                    .send(Action::EnableRestart)
+                    .await
+                    .unwrap();
             }
             DscCmd::EnableRestartAll => {
                 println!("enable restart on all: {}", action_tx_list.len());
                 for action_tx in action_tx_list {
-                    action_tx.send(Action::EnableRestart).unwrap();
+                    action_tx.send(Action::EnableRestart).await.unwrap();
                 }
+            }
+            DscCmd::Shutdown => {
+                println!("Shutdown");
+                for action_tx in action_tx_list {
+                    action_tx.send(Action::DisableRestart).await.unwrap();
+                    action_tx.send(Action::Stop).await.unwrap();
+                }
+                main_update = Some(DscMainUpdate::Shutdown);
             }
         }
     }
+    main_update
 }
 
 /// Start the DownStairs Controller (dsc).
@@ -594,7 +619,7 @@ async fn start_dsc(
         println!("start ds: {:?}", ds.port);
         let txc = tx.clone();
         let dsc = ds.clone();
-        let (action_tx, action_rx) = watch::channel(Action::Start);
+        let (action_tx, action_rx) = mpsc::channel(100);
         let handle = tokio::spawn(async move {
             ds_start_monitor(dsc, txc, action_rx).await;
         });
@@ -605,15 +630,51 @@ async fn start_dsc(
     drop(rs);
 
     let mut timeout_deadline = deadline_secs(5);
+    let mut shutdown_sent = false;
     loop {
         tokio::select! {
             _ = sleep_until(timeout_deadline) => {
-                // println!("Timeout");
-                timeout_deadline = deadline_secs(15);
+
+                // If we are trying to shutdown, go and check the state
+                // of all downstairs and see if they have stopped.  If so,
+                // we can exit this loop and the program.
+                if shutdown_sent {
+                    let mut keep_waiting = false;
+                    let rs = dsci.rs.lock().unwrap();
+
+                    for state in rs.ds_state.clone() {
+                        match state {
+                            DownstairsState::Stopping |
+                            DownstairsState::Starting |
+                            DownstairsState::Running => {
+                                println!("Waiting for all downstairs to exit");
+                                keep_waiting = true;
+                                break;
+                            },
+                            _ => {},
+                        }
+                    }
+
+                    if keep_waiting {
+                        timeout_deadline = deadline_secs(1);
+                    } else {
+                        break;
+                    }
+                } else {
+                    timeout_deadline = deadline_secs(65);
+                }
             },
             _ = notify_rx.changed() => {
                 println!("Main task has work to do, go find it");
-                do_dsc_work(dsci, &action_tx_list);
+                if let Some(update) = do_dsc_work(dsci, &action_tx_list).await {
+                    match update {
+                        DscMainUpdate::Shutdown => {
+                            println!("Shut it down");
+                            timeout_deadline = deadline_secs(1);
+                            shutdown_sent = true;
+                        },
+                    }
+                }
             },
             res = rx.recv() => {
                 if let Some(mi) = res {
@@ -629,6 +690,7 @@ async fn start_dsc(
             }
         }
     }
+    Ok(())
 }
 
 /// Create a path for a region
@@ -708,6 +770,8 @@ enum DscCmd {
     EnableRestart(usize),
     /// Enable auto restart of all downstairs
     EnableRestartAll,
+    /// Stop all downstairs, then stop ourselves (exit).
+    Shutdown,
 }
 
 /// Start a process for a downstairs.
@@ -748,7 +812,7 @@ async fn start_ds(
 async fn ds_start_monitor(
     ds: Arc<DownstairsInfo>,
     tx: mpsc::Sender<MonitorInfo>,
-    mut action_rx: watch::Receiver<Action>,
+    mut action_rx: mpsc::Receiver<Action>,
 ) {
     // Start by starting.
     let mut cmd = start_ds(&ds, &tx).await;
@@ -758,46 +822,42 @@ async fn ds_start_monitor(
     let mut stop_notify = true;
     loop {
         tokio::select! {
-            a = action_rx.changed() => {
-                match a {
-                    Ok(_) => {
-                        let act = action_rx.borrow();
-                        match *act {
-                            Action::Start => {
-                                println!("[{}] got start action", ds.port);
-                                // This does nothing if we are already
-                                // running. If we are not running, then this
-                                // will start the downstairs.
-                                start_once = true;
-                            },
-                            Action::Stop => {
+            a = action_rx.recv() => {
+                if let Some(act) = a {
+                    match act {
+                        Action::Start => {
+                            println!("[{}] got start action", ds.port);
+                            // This does nothing if we are already
+                            // running. If we are not running, then this
+                            // will start the downstairs.
+                            start_once = true;
+                        },
+                        Action::Stop => {
+                            println!(
+                                "[{}] Got stop action so:{} kr:{}",
+                                ds.port,
+                                start_once,
+                                keep_running);
+                            start_once = false;
+                            if let Err(e) = cmd.start_kill() {
                                 println!(
-                                    "[{}] got stop action so:{} kr:{}",
-                                    ds.port,
-                                    start_once,
-                                    keep_running);
-                                start_once = false;
-                                if let Err(e) = cmd.start_kill() {
-                                    println!(
-                                        "[{}] kill attempt returned {:?}",
-                                        ds.port, e,
-                                    );
-                                }
-                            },
-                            Action::DisableRestart => {
-                                keep_running = false;
-                                start_once = false;
-                                println!("[{}] Disable keep_running", ds.port);
-                            },
-                            Action::EnableRestart => {
-                                keep_running = true;
-                                println!("[{}] Enable  keep_running", ds.port);
+                                    "[{}] Kill attempt returned {:?}",
+                                    ds.port, e,
+                                );
                             }
+                        },
+                        Action::DisableRestart => {
+                            keep_running = false;
+                            start_once = false;
+                            println!("[{}] Disable keep_running", ds.port);
+                        },
+                        Action::EnableRestart => {
+                            keep_running = true;
+                            println!("[{}] Enable  keep_running", ds.port);
                         }
-                    },
-                    Err(e) => {
-                        println!("recv got error {:?}", e);
                     }
+                } else {
+                    println!("recv got error {:?}", a);
                 }
             }
             c = cmd.wait() => {
@@ -807,7 +867,7 @@ async fn ds_start_monitor(
                     Ok(status) => {
                         // Only notify we are down once,
                         if stop_notify {
-                            println!("[{}] exited with: {}", ds.port, status);
+                            println!("[{}] Exited with: {}", ds.port, status);
                             let _ = tx.send(MonitorInfo {
                                 port: ds.port,
                                 client_id: ds.client_id,
@@ -833,7 +893,7 @@ async fn ds_start_monitor(
                 }
                 // restart if desired, otherwise stay down.
                 if keep_running || start_once {
-                    println!("[{}]I am going to restart", ds.port);
+                    println!("[{}] I am going to restart", ds.port);
                     cmd = start_ds(&ds, &tx).await;
                     start_once = false;
                     stop_notify = true;
