@@ -449,6 +449,12 @@ where
                 ))
                 .await?
             }
+            IOop::ReadFill {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("ReadFill not supported");
+            }
         }
     }
     Ok(false)
@@ -2264,6 +2270,10 @@ impl Downstairs {
                 gen_number: _gen_number,
                 snapshot_details: _,
             } => wc.error >= 2,
+            IOop::ReadFill {
+                dependencies: _dependencies,
+                writes: _,
+            } => wc.error == 2,
         };
 
         if bad_job {
@@ -2316,6 +2326,12 @@ impl Downstairs {
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
                 stats.add_flush();
+            }
+            IOop::ReadFill {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("ReadFill not supported");
             }
         }
     }
@@ -2661,6 +2677,12 @@ impl Downstairs {
                                 }
                             }
                         }
+                        IOop::ReadFill {
+                            dependencies: _,
+                            writes: _,
+                        } => {
+                            panic!("Readfill not supported");
+                        }
                     }
                 }
             }
@@ -2715,7 +2737,7 @@ impl Downstairs {
                         }
                     }
                 }
-                _ => { /* Write IOs have no action here */ }
+                _ => { /* Write and ReadFill IOs have no action here */ }
             }
         } else {
             assert_eq!(newstate, IOState::Done);
@@ -2765,6 +2787,13 @@ impl Downstairs {
                             );
                         }
                     }
+                }
+                IOop::ReadFill {
+                    dependencies: _,
+                    writes: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    panic!("ReadFill not supported");
                 }
                 IOop::Write {
                     dependencies: _,
@@ -2910,6 +2939,12 @@ impl Downstairs {
                 dependencies: _dependencies,
                 requests: _,
             } => Ok(true),
+            IOop::ReadFill {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("ReadFill not supported");
+            }
             _ => Ok(false),
         }
     }
@@ -4812,6 +4847,9 @@ impl Upstairs {
                         flush_number: _,
                         gen_number: _,
                         snapshot_details: _,
+                    } | IOop::ReadFill {
+                        dependencies: _,
+                        writes: _,
                     }
                 ) {
                     self.ds_transition(client_id, DsState::Failed);
@@ -4999,6 +5037,10 @@ impl DownstairsIO {
                 dependencies: _,
                 writes,
             } => writes.iter().map(|w| w.data.len()).sum(),
+            IOop::ReadFill {
+                dependencies: _,
+                writes,
+            } => writes.iter().map(|w| w.data.len()).sum(),
             IOop::Flush {
                 dependencies: _,
                 flush_number: _flush_number,
@@ -5045,6 +5087,10 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
+    ReadFill {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        writes: Vec<crucible_protocol::Write>,
+    },
     Read {
         dependencies: Vec<u64>, // Jobs that must finish before this
         requests: Vec<ReadRequest>,
@@ -5073,6 +5119,10 @@ impl IOop {
             IOop::Read {
                 dependencies,
                 requests: _,
+            } => dependencies,
+            IOop::ReadFill {
+                dependencies,
+                writes: _,
             } => dependencies,
         }
     }
@@ -7153,6 +7203,20 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     writes,
                 } => {
                     let job_type = "Write".to_string();
+                    let mut num_blocks = 0;
+
+                    for write in writes {
+                        let block_size = write.offset.block_size_in_bytes();
+                        num_blocks += write.data.len() / block_size as usize;
+                    }
+
+                    (job_type, num_blocks)
+                }
+                IOop::ReadFill {
+                    dependencies: _dependencies,
+                    writes,
+                } => {
+                    let job_type = "ReadF".to_string();
                     let mut num_blocks = 0;
 
                     for write in writes {

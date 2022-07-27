@@ -239,7 +239,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, 0)?;
+        region.region_write(&writes, 0, false)?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -284,7 +284,7 @@ async fn _show_work(ds: &Downstairs) {
                     dependencies,
                     requests: _,
                 } => {
-                    dsw_type = "Read ".to_string();
+                    dsw_type = "Read".to_string();
                     dep_list = dependencies.to_vec();
                 }
                 IOop::Write {
@@ -303,9 +303,16 @@ async fn _show_work(ds: &Downstairs) {
                     dsw_type = "Flush".to_string();
                     dep_list = dependencies.to_vec();
                 }
+                IOop::ReadFill {
+                    dependencies,
+                    writes: _,
+                } => {
+                    dsw_type = "ReadF".to_string();
+                    dep_list = dependencies.to_vec();
+                }
             };
             println!(
-                "DSW:[{:04}] {} {:?} deps:{:?}",
+                "DSW:[{:04}] {:>05} {:>05} deps:{:?}",
                 id, dsw_type, dsw.state, dep_list,
             );
         }
@@ -321,15 +328,19 @@ async fn _show_work(ds: &Downstairs) {
 pub mod cdt {
     use crate::Arg;
     fn submit__read__start(_: u64) {}
+    fn submit__readfill__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
     fn os__read__start(_: u64) {}
+    fn os__readfill__start(_: u64) {}
     fn os__write__start(_: u64) {}
     fn os__flush__start(_: u64) {}
     fn os__read__done(_: u64) {}
+    fn os__readfill__done(_: u64) {}
     fn os__write__done(_: u64) {}
     fn os__flush__done(_: u64) {}
     fn submit__read__done(_: u64) {}
+    fn submit__readfill__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
 }
@@ -390,6 +401,23 @@ where
 
             let d = ad.lock().await;
             d.add_work(*uuid, *ds_id, new_flush).await?;
+            Some(*ds_id)
+        }
+        Message::ReadFill(uuid, ds_id, dependencies, writes) => {
+            if upstairs_uuid != *uuid {
+                let mut fw = fw.lock().await;
+                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                return Ok(());
+            }
+
+            cdt::submit__readfill__start!(|| *ds_id);
+            let new_read = IOop::ReadFill {
+                dependencies: dependencies.to_vec(),
+                writes: writes.to_vec(),
+            };
+
+            let d = ad.lock().await;
+            d.add_work(*uuid, *ds_id, new_read).await?;
             Some(*ds_id)
         }
         Message::ReadRequest(uuid, ds_id, dependencies, requests) => {
@@ -1079,6 +1107,7 @@ impl Downstairs {
         Ok(work.new_work(upstairs_uuid))
     }
 
+    // Add work to the Downstairs
     async fn add_work(
         &self,
         upstairs_uuid: Uuid,
@@ -1098,6 +1127,7 @@ impl Downstairs {
         Ok(())
     }
 
+    // Downstairs, move a job to in_progress, if we can
     async fn in_progress(&self, ds_id: u64) -> Option<u64> {
         let mut work = self.work.lock().await;
         if let Some((job_id, upstairs_uuid)) = work.in_progress(ds_id) {
@@ -1114,7 +1144,7 @@ impl Downstairs {
         }
     }
 
-    /// Given a job ID, do the work for that IO.
+    // Downstairs, given a job ID, do the work for that IO.
     async fn do_work(&self, job_id: u64) -> Result<Option<Message>> {
         let mut work = self.work.lock().await;
         work.do_work(self, job_id).await
@@ -1163,6 +1193,10 @@ impl Downstairs {
             }
             Message::WriteAck(_, _, _) => {
                 cdt::submit__write__done!(|| ds_id);
+                self.dss.add_write().await;
+            }
+            Message::ReadFillAck(_, _, _) => {
+                cdt::submit__readfill__done!(|| ds_id);
                 self.dss.add_write().await;
             }
             Message::ReadResponse(_, _, _) => {
@@ -1328,8 +1362,8 @@ impl Work {
 
     /**
      * If the requested job is still new, and the dependencies are all met,
-     * return the DownstairsWork struct and let the caller take action
-     * with it, leaving the state as InProgress.
+     * return the job ID and the upstairs UUID, moving the state of the
+     * job as InProgress.
      *
      * If this job is not new, then just return none.  This can be okay as
      * we build or work list with the new_work fn above, but we drop and
@@ -1399,6 +1433,10 @@ impl Work {
                                     dependencies: _,
                                     requests: _,
                                 } => "Read",
+                                IOop::ReadFill {
+                                    dependencies: _,
+                                    writes: _,
+                                } => "ReadFill",
                             },
                             job.upstairs_uuid,
                             deps_outstanding.len(),
@@ -1512,6 +1550,32 @@ impl Work {
                     responses,
                 )))
             }
+            IOop::ReadFill {
+                dependencies: _dependencies,
+                writes,
+            } => {
+                /*
+                 * Any error from an IO should be intercepted here and passed
+                 * back to the upstairs.
+                 */
+                let result = if ds.return_errors && random() && random() {
+                    println!("returning error on readfill!");
+                    Err(CrucibleError::GenericError("test error".to_string()))
+                } else if !ds.is_active(job.upstairs_uuid) {
+                    println!("Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    // The region_write will handle what happens to each block
+                    // based on if they have data or not.
+                    ds.region.region_write(writes, job_id, true)
+                };
+
+                Ok(Some(Message::ReadFillAck(
+                    job.upstairs_uuid,
+                    job.ds_id,
+                    result,
+                )))
+            }
             IOop::Write {
                 dependencies: _dependencies,
                 writes,
@@ -1523,7 +1587,7 @@ impl Work {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_write(writes, job_id)
+                    ds.region.region_write(writes, job_id, false)
                 };
 
                 Ok(Some(Message::WriteAck(
@@ -1810,6 +1874,21 @@ mod test {
         );
     }
 
+    fn add_work_rf(work: &mut Work, uuid: Uuid, ds_id: u64, deps: Vec<u64>) {
+        work.add_work(
+            ds_id,
+            DownstairsWork {
+                upstairs_uuid: uuid,
+                ds_id: ds_id,
+                work: IOop::ReadFill {
+                    dependencies: deps,
+                    writes: Vec::with_capacity(1),
+                },
+                state: WorkState::New,
+            },
+        );
+    }
+
     fn complete(work: &mut Work, ds_id: u64) {
         let is_flush = {
             let job = work.active.get(&ds_id).unwrap();
@@ -1884,6 +1963,100 @@ mod test {
         let uuid = Uuid::new_v4();
 
         add_work(&mut work, uuid, 1000, vec![], false);
+
+        assert_eq!(work.new_work(uuid), vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_simple_read() -> Result<()> {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_uuid = Uuid::new_v4();
+        // For the other_active_upstairs, unused.
+        let (_tx, mut _rx) = channel(1);
+        let tx = Arc::new(_tx);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_uuid, tx.clone()).await?;
+
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_uuid, 1000, rio).await?;
+
+        let deps = vec![1000];
+        let rio = IOop::Read {
+            dependencies: deps,
+            requests: vec![ReadRequest {
+                eid: 1,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_uuid, 1001, rio).await?;
+
+        _show_work(&ds).await;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_uuid).await.unwrap();
+        println!("Got new work: {:?}", new_work);
+        assert_eq!(new_work.len(), 2);
+
+        for id in new_work.iter() {
+            let ip_id = ds.in_progress(*id).await.unwrap();
+            assert_eq!(ip_id, *id);
+            println!("Do IOop {}", *id);
+            let m = ds.do_work(*id).await?.unwrap();
+            println!("Got m: {:?}", m);
+            ds.complete_work(*id, m).await?;
+        }
+        _show_work(&ds).await;
+        Ok(())
+    }
+
+    #[test]
+    fn jobs_readfill() {
+        // Verify ReadFill jobs move through the queue
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        add_work_rf(&mut work, uuid, 1000, vec![]);
 
         assert_eq!(work.new_work(uuid), vec![1000]);
 
