@@ -53,12 +53,6 @@ if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 --extent-size 512
     exit 1
 fi
 
-# Create the "old" region files
-rm -rf var/8810.old var/8820.old var/8830.old
-cp -R  var/8810 var/8810.old || ctrl_c
-cp -R  var/8820 var/8820.old || ctrl_c
-cp -R  var/8830 var/8830.old || ctrl_c
-
 ./tools/downstairs_daemon.sh -u >> "$test_log" 2>&1 &
 dsd_pid=$!
 
@@ -79,12 +73,36 @@ for (( i = 0; i < 30; i += 10 )); do
     args+=( -t "127.0.0.1:$port" )
 done
 
-# Initial seed for verify file
+# Send something to the region so our old region files have data.
+echo "$(date) pre-fill" >> "$test_log"
+echo "$cc" fill "${args[@]}" -q >> "$test_log"
+"$cc" fill "${args[@]}" -q >> "$test_log" 2>&1
+if [[ $? -ne 0 ]]; then
+    echo "Error in initial pre-fill"
+    ctrl_c
+fi
+
+touch /var/tmp/ds_test/pause
+rm -f /var/tmp/ds_test/up
+# Give "pause" time to stop all running downstairs.
+# We need to do this before moving the region directory out from
+# under a downstairs, otherwise it can fail and exit and the
+# downstairs daemon will think it is a real failure.
+sleep 7
+
+# Create the "old" region files
+rm -rf var/8810.old var/8820.old var/8830.old
+cp -R  var/8810 var/8810.old || ctrl_c
+cp -R  var/8820 var/8820.old || ctrl_c
+cp -R  var/8830 var/8830.old || ctrl_c
+
+# Bring the upstairs back online.
+touch /var/tmp/ds_test/up
+rm -f /var/tmp/ds_test/pause
+# Now do Initial seed for verify file
 echo "$(date) fill" >> "$test_log"
-echo "$cc" fill "${args[@]}" \
-      -q --verify-out alan >> "$test_log"
-"$cc" fill "${args[@]}" \
-      -q --verify-out alan >> "$test_log" 2>&1
+echo "$cc" fill "${args[@]}" -q --verify-out alan >> "$test_log"
+"$cc" fill "${args[@]}" -q --verify-out alan >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
@@ -140,18 +158,6 @@ do
         (( err += 1 ))
         duration=$SECONDS
         printf "[%03d] Error $result in one test after %d:%02d\n" "$i" \
-                $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
-        mv "$test_log" "$test_log".lastfail
-        break
-    fi
-
-    # XXX This check is here because we don't yet have a way of getting
-    # error status from the upstairs to indicate this has happened.
-    if grep "read hash mismatch" "$test_log"; then
-        touch /var/tmp/ds_test/up 2> /dev/null
-        (( err += 1 ))
-        duration=$SECONDS
-        printf "[%03d] Hash fail in one test after %d:%02d\n" "$i" \
                 $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
         mv "$test_log" "$test_log".lastfail
         break

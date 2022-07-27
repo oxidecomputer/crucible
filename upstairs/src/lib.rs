@@ -2709,7 +2709,7 @@ impl Downstairs {
                             job.state,
                         );
                         if job.replay {
-                            println!("{} REPLAY", msg);
+                            println!("REPLAY {}", msg);
                         } else {
                             panic!("{}", msg);
                         }
