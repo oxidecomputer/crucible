@@ -2,7 +2,6 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 
-use crossterm::style::Color;
 use dsc_client::Client;
 use futures::{SinkExt, StreamExt};
 use reedline::{
@@ -495,9 +494,6 @@ impl Prompt for CliPrompt {
         _history_search: PromptHistorySearch,
     ) -> Cow<str> {
         Cow::Owned(String::from(""))
-    }
-    fn get_prompt_color(&self) -> Color {
-        Color::White
     }
 }
 
