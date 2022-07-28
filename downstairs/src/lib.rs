@@ -1078,7 +1078,9 @@ impl Downstairs {
      * # Read-only mode
      *
      * In read-only mode, multiple Upstairs with different UUIDs can connect
-     * to the same downstairs and
+     * read-only to the same downstairs and they will not be forcibly
+     * disconnected. In this case, multiple Work structs will be created, and
+     * `work_lock` is still the way to access the appropriate Work struct.
      */
     async fn work_lock(
         &self,
