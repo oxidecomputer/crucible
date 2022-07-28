@@ -419,6 +419,12 @@ where
                 ))
                 .await?
             }
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("WriteUnwritten not supported");
+            }
             IOop::Flush {
                 dependencies,
                 flush_number,
@@ -2258,6 +2264,10 @@ impl Downstairs {
                 dependencies: _dependencies,
                 writes: _,
             } => wc.error >= 2,
+            IOop::WriteUnwritten {
+                dependencies: _dependencies,
+                writes: _,
+            } => wc.error == 2,
             IOop::Flush {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
@@ -2307,6 +2317,12 @@ impl Downstairs {
             } => {
                 cdt::gw__write__done!(|| (gw_id));
                 stats.add_write(io_size as i64);
+            }
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("WriteUnwritten not supported");
             }
             IOop::Flush {
                 dependencies: _,
@@ -2631,6 +2647,12 @@ impl Downstairs {
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
                         }
+                        IOop::WriteUnwritten {
+                            dependencies: _,
+                            writes: _,
+                        } => {
+                            panic!("WriteUnwritten not supported");
+                        }
                         IOop::Read {
                             dependencies: _,
                             requests: _,
@@ -2715,7 +2737,7 @@ impl Downstairs {
                         }
                     }
                 }
-                _ => { /* Write IOs have no action here */ }
+                _ => { /* Write and WriteUnwritten IOs have no action here */ }
             }
         } else {
             assert_eq!(newstate, IOState::Done);
@@ -2776,6 +2798,13 @@ impl Downstairs {
                         job.ack_status = AckStatus::AckReady;
                         cdt::up__to__ds__write__done!(|| job.guest_id);
                     }
+                }
+                IOop::WriteUnwritten {
+                    dependencies: _,
+                    writes: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    panic!("WriteUnwritten not supported");
                 }
                 IOop::Flush {
                     dependencies: _dependencies,
@@ -2910,6 +2939,12 @@ impl Downstairs {
                 dependencies: _dependencies,
                 requests: _,
             } => Ok(true),
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("WriteUnwritten not supported");
+            }
             _ => Ok(false),
         }
     }
@@ -4812,6 +4847,9 @@ impl Upstairs {
                         flush_number: _,
                         gen_number: _,
                         snapshot_details: _,
+                    } | IOop::WriteUnwritten {
+                        dependencies: _,
+                        writes: _,
                     }
                 ) {
                     self.ds_transition(client_id, DsState::Failed);
@@ -4999,6 +5037,10 @@ impl DownstairsIO {
                 dependencies: _,
                 writes,
             } => writes.iter().map(|w| w.data.len()).sum(),
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes,
+            } => writes.iter().map(|w| w.data.len()).sum(),
             IOop::Flush {
                 dependencies: _,
                 flush_number: _flush_number,
@@ -5045,6 +5087,10 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
+    WriteUnwritten {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        writes: Vec<crucible_protocol::Write>,
+    },
     Read {
         dependencies: Vec<u64>, // Jobs that must finish before this
         requests: Vec<ReadRequest>,
@@ -5073,6 +5119,10 @@ impl IOop {
             IOop::Read {
                 dependencies,
                 requests: _,
+            } => dependencies,
+            IOop::WriteUnwritten {
+                dependencies,
+                writes: _,
             } => dependencies,
         }
     }
@@ -7162,6 +7212,20 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
                     (job_type, num_blocks)
                 }
+                IOop::WriteUnwritten {
+                    dependencies: _dependencies,
+                    writes,
+                } => {
+                    let job_type = "WriteU".to_string();
+                    let mut num_blocks = 0;
+
+                    for write in writes {
+                        let block_size = write.offset.block_size_in_bytes();
+                        num_blocks += write.data.len() / block_size as usize;
+                    }
+
+                    (job_type, num_blocks)
+                }
                 IOop::Flush {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
@@ -7174,7 +7238,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             };
 
             print!(
-                "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7}",
+                "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7}",
                 job.guest_id, ack, id, job_type, num_blocks
             );
 

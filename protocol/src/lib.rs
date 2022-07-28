@@ -197,6 +197,10 @@ pub enum Message {
     ReadRequest(Uuid, u64, Vec<u64>, Vec<ReadRequest>),
     ReadResponse(Uuid, u64, Result<Vec<ReadResponse>, CrucibleError>),
 
+    // WriteUnwritten: Uuid, job id, dependencies, [ReadRequest], [Write]
+    WriteUnwritten(Uuid, u64, Vec<u64>, Vec<Write>),
+    WriteUnwrittenAck(Uuid, u64, Result<(), CrucibleError>),
+
     Unknown(u32, BytesMut),
 }
 
