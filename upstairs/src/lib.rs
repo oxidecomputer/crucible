@@ -419,6 +419,12 @@ where
                 ))
                 .await?
             }
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("WriteUnwritten not supported");
+            }
             IOop::Flush {
                 dependencies,
                 flush_number,
@@ -448,12 +454,6 @@ where
                     requests,
                 ))
                 .await?
-            }
-            IOop::ReadFill {
-                dependencies: _,
-                writes: _,
-            } => {
-                panic!("ReadFill not supported");
             }
         }
     }
@@ -2264,16 +2264,16 @@ impl Downstairs {
                 dependencies: _dependencies,
                 writes: _,
             } => wc.error >= 2,
+            IOop::WriteUnwritten {
+                dependencies: _dependencies,
+                writes: _,
+            } => wc.error == 2,
             IOop::Flush {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
                 gen_number: _gen_number,
                 snapshot_details: _,
             } => wc.error >= 2,
-            IOop::ReadFill {
-                dependencies: _dependencies,
-                writes: _,
-            } => wc.error == 2,
         };
 
         if bad_job {
@@ -2318,6 +2318,12 @@ impl Downstairs {
                 cdt::gw__write__done!(|| (gw_id));
                 stats.add_write(io_size as i64);
             }
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                panic!("WriteUnwritten not supported");
+            }
             IOop::Flush {
                 dependencies: _,
                 flush_number: _,
@@ -2326,12 +2332,6 @@ impl Downstairs {
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
                 stats.add_flush();
-            }
-            IOop::ReadFill {
-                dependencies: _,
-                writes: _,
-            } => {
-                panic!("ReadFill not supported");
             }
         }
     }
@@ -2647,6 +2647,12 @@ impl Downstairs {
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
                         }
+                        IOop::WriteUnwritten {
+                            dependencies: _,
+                            writes: _,
+                        } => {
+                            panic!("WriteUnwritten not supported");
+                        }
                         IOop::Read {
                             dependencies: _,
                             requests: _,
@@ -2676,12 +2682,6 @@ impl Downstairs {
                                     );
                                 }
                             }
-                        }
-                        IOop::ReadFill {
-                            dependencies: _,
-                            writes: _,
-                        } => {
-                            panic!("Readfill not supported");
                         }
                     }
                 }
@@ -2737,7 +2737,7 @@ impl Downstairs {
                         }
                     }
                 }
-                _ => { /* Write and ReadFill IOs have no action here */ }
+                _ => { /* Write and WriteUnwritten IOs have no action here */ }
             }
         } else {
             assert_eq!(newstate, IOState::Done);
@@ -2788,13 +2788,6 @@ impl Downstairs {
                         }
                     }
                 }
-                IOop::ReadFill {
-                    dependencies: _,
-                    writes: _,
-                } => {
-                    assert!(read_data.is_empty());
-                    panic!("ReadFill not supported");
-                }
                 IOop::Write {
                     dependencies: _,
                     writes: _,
@@ -2805,6 +2798,13 @@ impl Downstairs {
                         job.ack_status = AckStatus::AckReady;
                         cdt::up__to__ds__write__done!(|| job.guest_id);
                     }
+                }
+                IOop::WriteUnwritten {
+                    dependencies: _,
+                    writes: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    panic!("WriteUnwritten not supported");
                 }
                 IOop::Flush {
                     dependencies: _dependencies,
@@ -2939,11 +2939,11 @@ impl Downstairs {
                 dependencies: _dependencies,
                 requests: _,
             } => Ok(true),
-            IOop::ReadFill {
+            IOop::WriteUnwritten {
                 dependencies: _,
                 writes: _,
             } => {
-                panic!("ReadFill not supported");
+                panic!("WriteUnwritten not supported");
             }
             _ => Ok(false),
         }
@@ -4847,7 +4847,7 @@ impl Upstairs {
                         flush_number: _,
                         gen_number: _,
                         snapshot_details: _,
-                    } | IOop::ReadFill {
+                    } | IOop::WriteUnwritten {
                         dependencies: _,
                         writes: _,
                     }
@@ -5037,7 +5037,7 @@ impl DownstairsIO {
                 dependencies: _,
                 writes,
             } => writes.iter().map(|w| w.data.len()).sum(),
-            IOop::ReadFill {
+            IOop::WriteUnwritten {
                 dependencies: _,
                 writes,
             } => writes.iter().map(|w| w.data.len()).sum(),
@@ -5087,7 +5087,7 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
-    ReadFill {
+    WriteUnwritten {
         dependencies: Vec<u64>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
@@ -5120,7 +5120,7 @@ impl IOop {
                 dependencies,
                 requests: _,
             } => dependencies,
-            IOop::ReadFill {
+            IOop::WriteUnwritten {
                 dependencies,
                 writes: _,
             } => dependencies,
@@ -7212,11 +7212,11 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
                     (job_type, num_blocks)
                 }
-                IOop::ReadFill {
+                IOop::WriteUnwritten {
                     dependencies: _dependencies,
                     writes,
                 } => {
-                    let job_type = "ReadF".to_string();
+                    let job_type = "WriteU".to_string();
                     let mut num_blocks = 0;
 
                     for write in writes {
@@ -7238,7 +7238,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             };
 
             print!(
-                "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7}",
+                "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7}",
                 job.guest_id, ack, id, job_type, num_blocks
             );
 

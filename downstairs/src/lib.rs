@@ -303,11 +303,11 @@ async fn _show_work(ds: &Downstairs) {
                     dsw_type = "Flush".to_string();
                     dep_list = dependencies.to_vec();
                 }
-                IOop::ReadFill {
+                IOop::WriteUnwritten {
                     dependencies,
                     writes: _,
                 } => {
-                    dsw_type = "ReadF".to_string();
+                    dsw_type = "WriteU".to_string();
                     dep_list = dependencies.to_vec();
                 }
             };
@@ -328,19 +328,19 @@ async fn _show_work(ds: &Downstairs) {
 pub mod cdt {
     use crate::Arg;
     fn submit__read__start(_: u64) {}
-    fn submit__readfill__start(_: u64) {}
+    fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
     fn os__read__start(_: u64) {}
-    fn os__readfill__start(_: u64) {}
+    fn os__writeunwritten__start(_: u64) {}
     fn os__write__start(_: u64) {}
     fn os__flush__start(_: u64) {}
     fn os__read__done(_: u64) {}
-    fn os__readfill__done(_: u64) {}
+    fn os__writeunwritten__done(_: u64) {}
     fn os__write__done(_: u64) {}
     fn os__flush__done(_: u64) {}
     fn submit__read__done(_: u64) {}
-    fn submit__readfill__done(_: u64) {}
+    fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
 }
@@ -403,21 +403,21 @@ where
             d.add_work(*uuid, *ds_id, new_flush).await?;
             Some(*ds_id)
         }
-        Message::ReadFill(uuid, ds_id, dependencies, writes) => {
+        Message::WriteUnwritten(uuid, ds_id, dependencies, writes) => {
             if upstairs_uuid != *uuid {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
                 return Ok(());
             }
 
-            cdt::submit__readfill__start!(|| *ds_id);
-            let new_read = IOop::ReadFill {
+            cdt::submit__writeunwritten__start!(|| *ds_id);
+            let new_write = IOop::WriteUnwritten {
                 dependencies: dependencies.to_vec(),
                 writes: writes.to_vec(),
             };
 
             let d = ad.lock().await;
-            d.add_work(*uuid, *ds_id, new_read).await?;
+            d.add_work(*uuid, *ds_id, new_write).await?;
             Some(*ds_id)
         }
         Message::ReadRequest(uuid, ds_id, dependencies, requests) => {
@@ -1195,8 +1195,8 @@ impl Downstairs {
                 cdt::submit__write__done!(|| ds_id);
                 self.dss.add_write().await;
             }
-            Message::ReadFillAck(_, _, _) => {
-                cdt::submit__readfill__done!(|| ds_id);
+            Message::WriteUnwrittenAck(_, _, _) => {
+                cdt::submit__writeunwritten__done!(|| ds_id);
                 self.dss.add_write().await;
             }
             Message::ReadResponse(_, _, _) => {
@@ -1423,6 +1423,10 @@ impl Work {
                                     dependencies: _,
                                     writes: _,
                                 } => "Write",
+                                IOop::WriteUnwritten {
+                                    dependencies: _,
+                                    writes: _,
+                                } => "WriteUnwritten",
                                 IOop::Flush {
                                     dependencies: _,
                                     flush_number: _flush_number,
@@ -1433,10 +1437,6 @@ impl Work {
                                     dependencies: _,
                                     requests: _,
                                 } => "Read",
-                                IOop::ReadFill {
-                                    dependencies: _,
-                                    writes: _,
-                                } => "ReadFill",
                             },
                             job.upstairs_uuid,
                             deps_outstanding.len(),
@@ -1550,7 +1550,7 @@ impl Work {
                     responses,
                 )))
             }
-            IOop::ReadFill {
+            IOop::WriteUnwritten {
                 dependencies: _dependencies,
                 writes,
             } => {
@@ -1559,7 +1559,7 @@ impl Work {
                  * back to the upstairs.
                  */
                 let result = if ds.return_errors && random() && random() {
-                    println!("returning error on readfill!");
+                    println!("returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !ds.is_active(job.upstairs_uuid) {
                     println!("Upstairs inactive error");
@@ -1570,7 +1570,7 @@ impl Work {
                     ds.region.region_write(writes, job_id, true)
                 };
 
-                Ok(Some(Message::ReadFillAck(
+                Ok(Some(Message::WriteUnwrittenAck(
                     job.upstairs_uuid,
                     job.ds_id,
                     result,
@@ -1880,7 +1880,7 @@ mod test {
             DownstairsWork {
                 upstairs_uuid: uuid,
                 ds_id: ds_id,
-                work: IOop::ReadFill {
+                work: IOop::WriteUnwritten {
                     dependencies: deps,
                     writes: Vec::with_capacity(1),
                 },
@@ -2051,8 +2051,8 @@ mod test {
     }
 
     #[test]
-    fn jobs_readfill() {
-        // Verify ReadFill jobs move through the queue
+    fn jobs_write_unwritten() {
+        // Verify WriteUnwritten jobs move through the queue
         let mut work = Work::default();
         let uuid = Uuid::new_v4();
 

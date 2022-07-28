@@ -957,7 +957,7 @@ impl Extent {
     pub fn write(
         &self,
         writes: &[&crucible_protocol::Write],
-        read_fill: bool,
+        only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
 
@@ -996,10 +996,11 @@ impl Extent {
          * 2) gather and write all encryption contexts + hashes
          * 3) write all extent data
          *
-         * If "read_fill" is true, then we only issue a write for a
-         * block if that block has not been written to yet.  Note that we
-         * can have a write that is "sparse" if the range of blocks it
-         * contains has a mix of written an unwritten blocks.
+         * If "only_write_unwritten" is true, then we only issue a write for
+         * a block if that block has not been written to yet.  Note
+         * that we can have a write that is "sparse" if the range of
+         * blocks it contains has a mix of written an unwritten
+         * blocks.
          *
          * We define a block being written to or not has if that block has
          * a checksum or not.  So it is required that a written block has
@@ -1007,14 +1008,14 @@ impl Extent {
          */
 
         let mut writes_to_skip: Vec<u64> = Vec::new();
-        if read_fill {
+        if only_write_unwritten {
             for write in writes {
                 if !inner.get_hashes(write.offset.value).unwrap().is_empty() {
                     writes_to_skip.push(write.offset.value);
                 }
             }
         }
-        if read_fill && writes_to_skip.len() == writes.len() {
+        if only_write_unwritten && writes_to_skip.len() == writes.len() {
             // For read fill, if the list of blocks to skip is the same
             // length as the number of blocks in the write list, then we
             // have no work to do here.
@@ -1026,11 +1027,12 @@ impl Extent {
 
         let tx = inner.metadb_transaction()?;
         for write in writes {
-            // Since we only add to writes_to_skip if this is a read_fill,
-            // this will be empty if read_fill is false, so we don't need to
-            // check again here for read_fill being true.
+            // Since we only add to writes_to_skip if only_write_unwritten,
+            // this will be empty if only_write_unwritten is false, so we
+            // don't need to check again here for only_write_unwritten
+            // being true.
             if writes_to_skip.contains(&write.offset.value) {
-                assert!(read_fill);
+                assert!(only_write_unwritten);
                 continue;
             }
             if let Some(encryption_context) = &write.encryption_context {
@@ -1046,8 +1048,7 @@ impl Extent {
 
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
-                println!("skip this write");
-                assert!(read_fill);
+                assert!(only_write_unwritten);
                 continue;
             }
             let byte_offset = write.offset.value * self.block_size;
@@ -1554,7 +1555,7 @@ impl Region {
                 };
 
             if computed_hash != write.hash {
-                println!("Failed write hash validation {}", computed_hash);
+                println!("Failed write hash validation");
                 crucible_bail!(HashMismatch);
             }
         }
@@ -1567,7 +1568,7 @@ impl Region {
         &self,
         writes: &[crucible_protocol::Write],
         job_id: u64,
-        read_fill: bool,
+        only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
@@ -1592,18 +1593,18 @@ impl Region {
             extent_vec.push(write);
         }
 
-        if read_fill {
-            cdt::os__readfill__start!(|| job_id);
+        if only_write_unwritten {
+            cdt::os__writeunwritten__start!(|| job_id);
         } else {
             cdt::os__write__start!(|| job_id);
         }
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
-            extent.write(&writes[..], read_fill)?;
+            extent.write(&writes[..], only_write_unwritten)?;
         }
-        if read_fill {
-            cdt::os__readfill__done!(|| job_id);
+        if only_write_unwritten {
+            cdt::os__writeunwritten__done!(|| job_id);
         } else {
             cdt::os__write__done!(|| job_id);
         }
@@ -3057,7 +3058,7 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_when_empty() -> Result<()> {
+    fn test_write_unwritten_when_empty() -> Result<()> {
         // Verify that a read fill does write to a block when there is
         // no data written yet.
         let dir = tempdir()?;
@@ -3109,7 +3110,7 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_when_written() -> Result<()> {
+    fn test_write_unwritten_when_written() -> Result<()> {
         // Verify that a read fill does not write to the block when
         // there is data written already.
         let dir = tempdir()?;
@@ -3153,7 +3154,7 @@ mod test {
                 ),
                 hash: 5061083712412462836, // hash for all 1s
             }];
-        // Do the write again, but with read_fill set now.
+        // Do the write again, but with only_write_unwritten set now.
         region.region_write(&writes, 1, true)?;
 
         // Now read back that block, make sure it has the first write
@@ -3177,7 +3178,7 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_when_written_flush() -> Result<()> {
+    fn test_write_unwritten_when_written_flush() -> Result<()> {
         // Verify that a read fill does not write to the block when
         // there is data written already.  This time run a flush after the
         // first write.  Verify correct state of dirty bit as well.
@@ -3238,7 +3239,7 @@ mod test {
                 hash: 5061083712412462836, // hash for all 1s
             }];
 
-        // Do the write again, but with read_fill set now.
+        // Do the write again, but with only_write_unwritten set now.
         region.region_write(&writes, 1, true)?;
 
         // Verify the dirty bit is not set.
@@ -3267,7 +3268,7 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_big_write() -> Result<()> {
+    fn test_write_unwritten_big_write() -> Result<()> {
         // Do a multi block write where all blocks start new (unwritten)
         // Verify only empty blocks have data.
         let dir = tempdir()?;
@@ -3351,10 +3352,10 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_big_write_partial_0() -> Result<()> {
-        // Do a write to block zero, then do a multi block read_fill.
-        // verify block zero is the first write, and the remaining blocks
-        // have the contents from the multi block fill.
+    fn test_write_unwritten_big_write_partial_0() -> Result<()> {
+        // Do a write to block zero, then do a multi block write with
+        // only_write_unwritten set. Verify block zero is the first write, and
+        // the remaining blocks have the contents from the multi block fill.
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options())?;
         region.extend(3)?;
@@ -3417,8 +3418,8 @@ mod test {
 
         region.region_write(&writes, 0, true)?;
 
-        // Because we did read_fill, the block we already written should
-        // still have the data from the first write.  Update our buffer
+        // Because we set only_write_unwritten, the block we already written
+        // should still have the data from the first write.  Update our buffer
         // for the first block to have that original data.
         for i in 0..512 {
             buffer[i] = 9;
@@ -3466,7 +3467,7 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_big_write_partial_1() -> Result<()> {
+    fn test_write_unwritten_big_write_partial_1() -> Result<()> {
         // Write to the second block, then do a multi block fill.
         // Verify the second block has the original data we wrote, and all
         // the other blocks have the data from the multi block fill.
@@ -3530,11 +3531,11 @@ mod test {
             });
         }
 
-        // send read_fill command.
+        // send write_unwritten command.
         region.region_write(&writes, 0, true)?;
 
-        // Because we did read_fill, the block we already written should
-        // still have the data from the first write.  Update our buffer
+        // Because we set only_write_unwritten, the block we already written
+        // should still have the data from the first write.  Update our buffer
         // for the first block to have that original data.
         for i in 512..1024 {
             buffer[i] = 9;
@@ -3582,7 +3583,7 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_big_write_partial_final() -> Result<()> {
+    fn test_write_unwritten_big_write_partial_final() -> Result<()> {
         // Do a write to the fourth block, then do a multi block read fill
         // where the last block of the read fill is what we wrote to in
         // our first write.
@@ -3650,12 +3651,12 @@ mod test {
             });
         }
 
-        // send read_fill command.
+        // send only_write_unwritten command.
         region.region_write(&writes, 0, true)?;
 
-        // Because we did read_fill, the block we already written should
-        // still have the data from the first write.  Update our expected
-        // buffer for the final block to have that original data.
+        // Because we set only_write_unwritten, the block we already written
+        // should still have the data from the first write.  Update our
+        // expected buffer for the final block to have that original data.
         for i in 1536..2048 {
             buffer[i] = 9;
         }
@@ -3692,8 +3693,8 @@ mod test {
     }
 
     #[test]
-    fn test_read_fill_big_write_partial_sparse() -> Result<()> {
-        // Do a multi block read_fill where a few different blocks have
+    fn test_write_unwritten_big_write_partial_sparse() -> Result<()> {
+        // Do a multi block write_unwritten where a few different blocks have
         // data. Verify only unwritten blocks get the data.
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options())?;
@@ -3761,7 +3762,7 @@ mod test {
 
         region.region_write(&writes, 0, true)?;
 
-        // Because we did read_fill, the block we already written should
+        // Because we did write_unwritten, the block we already written should
         // still have the data from the first write.  Update our buffer
         // for these blocks to have that original data.
         for b in blocks_to_write {
