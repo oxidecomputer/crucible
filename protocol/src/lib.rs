@@ -113,26 +113,39 @@ pub struct SnapshotDetails {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     /**
-     * Initial negotiation: version, upstairs uuid.
+     * Initial negotiation messages
      */
-    HereIAm(u32, Uuid),
-    YesItsMe(u32),
+    HereIAm {
+        version: u32,
+        upstairs_id: Uuid,
+    },
+    YesItsMe {
+        version: u32,
+    },
 
-    /*
+    /**
      * Forcefully tell this downstairs to promote us (an Upstairs) to
      * active.
      *
      * Kick out the old Upstairs.
      */
-    PromoteToActive(Uuid),
-    YouAreNowActive(Uuid),
-    YouAreNoLongerActive(Uuid), // UUID of new active Upstairs
+    PromoteToActive {
+        upstairs_id: Uuid,
+    },
+    YouAreNowActive {
+        upstairs_id: Uuid,
+    },
+    YouAreNoLongerActive {
+        new_upstairs_id: Uuid,
+    },
 
     /*
      * If downstairs sees a UUID that doesn't match what was negotiated, it
      * will send this message.
      */
-    UuidMismatch(Uuid),
+    UuidMismatch {
+        expected_id: Uuid,
+    },
 
     /*
      * Ping related
@@ -148,59 +161,128 @@ pub enum Message {
      * downstairs before the next one can be sent.
      */
     /// Send a close the given extent ID on the downstairs.
-    /// We send the downstairs the repair ID (rep_id) and the extent number.
-    ExtentClose(u64, usize),
-    /// Send a request (with rep_id) to reopen the given extent.
-    ExtentReopen(u64, usize),
+    ExtentClose {
+        repair_id: u64,
+        extent_id: usize,
+    },
+
+    /// Send a request to reopen the given extent.
+    ExtentReopen {
+        repair_id: u64,
+        extent_id: usize,
+    },
+
     /// Ack the Re-Open of an extent from the downstairs using the rep_id.
+    // XXX missing?
 
     /// Flush just this extent on just this downstairs client.
-    /// rep_id, extent ID, downstairs client ID, flush number, gen number.
-    ExtentFlush(u64, usize, u8, u64, u64),
+    ExtentFlush {
+        repair_id: u64,
+        extent_id: usize,
+        client_id: u8,
+        flush_number: u64,
+        gen_number: u64,
+    },
+
     /// Replace an extent with data from the given downstairs.
-    /// rep_id, extent ID, source extent, Vec of extents to repair
-    ExtentRepair(u64, usize, u8, SocketAddr, Vec<u8>),
+    ExtentRepair {
+        repair_id: u64,
+        extent_id: usize,
+        source_client_id: u8,
+        source_repair_address: SocketAddr,
+        dest_clients: Vec<u8>,
+    },
 
     /// The given repair job ID has finished without error
-    RepairAckId(u64),
+    RepairAckId {
+        repair_id: u64,
+    },
+
     /// A problem with the given extent
-    ExtentError(u64, usize, CrucibleError),
+    ExtentError {
+        repair_id: u64,
+        extent_id: usize,
+        error: CrucibleError,
+    },
+
     /*
      * Metadata exchange
      */
     RegionInfoPlease,
-    RegionInfo(RegionDefinition),
+    RegionInfo {
+        region_def: RegionDefinition,
+    },
+
     ExtentVersionsPlease,
-    LastFlush(u64),
-    LastFlushAck(u64),
-    ExtentVersions(Vec<u64>, Vec<u64>, Vec<bool>),
+    ExtentVersions {
+        gen_numbers: Vec<u64>,
+        flush_numbers: Vec<u64>,
+        dirty_bits: Vec<bool>,
+    },
+
+    LastFlush {
+        last_flush_number: u64,
+    },
+    LastFlushAck {
+        last_flush_number: u64,
+    },
 
     /*
-     * Write: Uuid, job id, dependencies, [Write]
-     * WriteAck: Uuid, job id, result
+     * IO related
      */
-    Write(Uuid, u64, Vec<u64>, Vec<Write>),
-    WriteAck(Uuid, u64, Result<(), CrucibleError>),
+    Write {
+        upstairs_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        writes: Vec<Write>,
+    },
+    WriteAck {
+        upstairs_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
+    },
+
+    Flush {
+        upstairs_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        flush_number: u64,
+        gen_number: u64,
+        snapshot_details: Option<SnapshotDetails>,
+    },
+    FlushAck {
+        upstairs_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
+    },
+
+    ReadRequest {
+        upstairs_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        requests: Vec<ReadRequest>,
+    },
+    ReadResponse {
+        upstairs_id: Uuid,
+        job_id: u64,
+        responses: Result<Vec<ReadResponse>, CrucibleError>,
+    },
+
+    WriteUnwritten {
+        upstairs_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        writes: Vec<Write>,
+    },
+    WriteUnwrittenAck {
+        upstairs_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
+    },
 
     /*
-     * Flush: Uuid, job id, dependencies, flush number generation number,
-     *        and optional snapshot details
-     * FlushAck: Uuid, job id, result
+     * Misc
      */
-    Flush(Uuid, u64, Vec<u64>, u64, u64, Option<SnapshotDetails>),
-    FlushAck(Uuid, u64, Result<(), CrucibleError>),
-
-    /*
-     * ReadRequest: Uuid, job id, dependencies, [ReadRequest]
-     * ReadResponse: Uuid, job id, Result<[ReadRequest]>
-     */
-    ReadRequest(Uuid, u64, Vec<u64>, Vec<ReadRequest>),
-    ReadResponse(Uuid, u64, Result<Vec<ReadResponse>, CrucibleError>),
-
-    // WriteUnwritten: Uuid, job id, dependencies, [ReadRequest], [Write]
-    WriteUnwritten(Uuid, u64, Vec<u64>, Vec<Write>),
-    WriteUnwrittenAck(Uuid, u64, Result<(), CrucibleError>),
-
     Unknown(u32, BytesMut),
 }
 
@@ -253,14 +335,14 @@ impl CrucibleEncoder {
 
         // Maximum frame length divided by a write of one block is the lower
         // bound.
-        let lower_size_write_message = Message::Write(
-            Uuid::new_v4(),
-            1,
-            vec![1],
-            (0..(MAX_FRM_LEN / size_of_write_message))
+        let lower_size_write_message = Message::Write {
+            upstairs_id: Uuid::new_v4(),
+            job_id: 1,
+            dependencies: vec![1],
+            writes: (0..(MAX_FRM_LEN / size_of_write_message))
                 .map(|_| CrucibleEncoder::a_write(bs))
                 .collect(),
-        );
+        };
 
         assert!(
             CrucibleEncoder::serialized_size(&lower_size_write_message)?
@@ -269,14 +351,14 @@ impl CrucibleEncoder {
 
         // The upper bound is the maximum frame length divided by the block
         // size.
-        let upper_size_write_message = Message::Write(
-            Uuid::new_v4(),
-            1,
-            vec![1],
-            (0..(MAX_FRM_LEN / bs))
+        let upper_size_write_message = Message::Write {
+            upstairs_id: Uuid::new_v4(),
+            job_id: 1,
+            dependencies: vec![1],
+            writes: (0..(MAX_FRM_LEN / bs))
                 .map(|_| CrucibleEncoder::a_write(bs))
                 .collect(),
-        );
+        };
 
         assert!(
             CrucibleEncoder::serialized_size(&upper_size_write_message)?
@@ -287,14 +369,24 @@ impl CrucibleEncoder {
         // given MAX_FRM_LEN.
 
         let mut lower = match lower_size_write_message {
-            Message::Write(_, _, _, vec) => vec.len(),
+            Message::Write {
+                upstairs_id: _,
+                job_id: _,
+                dependencies: _,
+                writes,
+            } => writes.len(),
             _ => {
                 bail!("wat");
             }
         };
 
         let mut upper = match upper_size_write_message {
-            Message::Write(_, _, _, vec) => vec.len(),
+            Message::Write {
+                upstairs_id: _,
+                job_id: _,
+                dependencies: _,
+                writes,
+            } => writes.len(),
             _ => {
                 bail!("wat");
             }
@@ -307,12 +399,14 @@ impl CrucibleEncoder {
                 return Ok(mid);
             }
 
-            let mid_size_write_message = Message::Write(
-                Uuid::new_v4(),
-                1,
-                vec![1],
-                (0..mid).map(|_| CrucibleEncoder::a_write(bs)).collect(),
-            );
+            let mid_size_write_message = Message::Write {
+                upstairs_id: Uuid::new_v4(),
+                job_id: 1,
+                dependencies: vec![1],
+                writes: (0..mid)
+                    .map(|_| CrucibleEncoder::a_write(bs))
+                    .collect(),
+            };
 
             let mid_size =
                 CrucibleEncoder::serialized_size(&mid_size_write_message)?;
@@ -457,14 +551,17 @@ mod tests {
 
     #[test]
     fn rt_here_i_am() -> Result<()> {
-        let input = Message::HereIAm(2, Uuid::new_v4());
+        let input = Message::HereIAm {
+            version: 2,
+            upstairs_id: Uuid::new_v4(),
+        };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
 
     #[test]
     fn rt_yes_its_me() -> Result<()> {
-        let input = Message::YesItsMe(20000);
+        let input = Message::YesItsMe { version: 20000 };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
@@ -492,18 +589,22 @@ mod tests {
 
     #[test]
     fn rt_ev_0() -> Result<()> {
-        let input = Message::ExtentVersions(vec![], vec![], vec![]);
+        let input = Message::ExtentVersions {
+            gen_numbers: vec![],
+            flush_numbers: vec![],
+            dirty_bits: vec![],
+        };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
 
     #[test]
     fn rt_ev_7() -> Result<()> {
-        let input = Message::ExtentVersions(
-            vec![1, 2, 3, 4, u64::MAX, 1, 0],
-            vec![1, 2, 3, 4, u64::MAX, 1, 0],
-            vec![true, true, false, true, true, false, true],
-        );
+        let input = Message::ExtentVersions {
+            gen_numbers: vec![1, 2, 3, 4, u64::MAX, 1, 0],
+            flush_numbers: vec![1, 2, 3, 4, u64::MAX, 1, 0],
+            dirty_bits: vec![true, true, false, true, true, false, true],
+        };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
@@ -513,7 +614,10 @@ mod tests {
         let mut encoder = CrucibleEncoder::new();
         let mut decoder = CrucibleDecoder::new();
 
-        let input = Message::HereIAm(0, Uuid::new_v4());
+        let input = Message::HereIAm {
+            version: 0,
+            upstairs_id: Uuid::new_v4(),
+        };
         let mut buffer = BytesMut::new();
 
         encoder.encode(input, &mut buffer)?;
