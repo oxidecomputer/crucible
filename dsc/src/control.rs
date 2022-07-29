@@ -29,6 +29,7 @@ pub(crate) fn build_api() -> ApiDescription<DownstairsControl> {
     api.register(dsc_disable_restart_all).unwrap();
     api.register(dsc_enable_restart).unwrap();
     api.register(dsc_enable_restart_all).unwrap();
+    api.register(dsc_shutdown).unwrap();
 
     api
 }
@@ -172,7 +173,7 @@ async fn dsc_get_state(
  * Stop the downstairs at the given client_id
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/stop/cid/{cid}",
 }]
 async fn dsc_stop(
@@ -197,7 +198,7 @@ async fn dsc_stop(
  * Stop all downstairs
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/stop/all",
 }]
 async fn dsc_stop_all(
@@ -214,7 +215,7 @@ async fn dsc_stop_all(
  * Stop a random downstairs
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/stop/rand",
 }]
 async fn dsc_stop_rand(
@@ -231,7 +232,7 @@ async fn dsc_stop_rand(
  * Start the downstairs at the given client_id
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/start/cid/{cid}",
 }]
 async fn dsc_start(
@@ -257,7 +258,7 @@ async fn dsc_start(
  * Start all the downstairs
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/start/all",
 }]
 async fn dsc_start_all(
@@ -274,7 +275,7 @@ async fn dsc_start_all(
  * Disable automatic restart on the given client_id
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/disablerestart/cid/{cid}",
 }]
 async fn dsc_disable_restart(
@@ -300,7 +301,7 @@ async fn dsc_disable_restart(
  * Disable automatic restart on all downstairs
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/disablerestart/all",
 }]
 async fn dsc_disable_restart_all(
@@ -317,7 +318,7 @@ async fn dsc_disable_restart_all(
  * Enable automatic restart on the given client_id
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/enablerestart/cid/{cid}",
 }]
 async fn dsc_enable_restart(
@@ -343,7 +344,7 @@ async fn dsc_enable_restart(
  * Enable automatic restart on all downstairs
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/enablerestart/all",
 }]
 async fn dsc_enable_restart_all(
@@ -353,6 +354,23 @@ async fn dsc_enable_restart_all(
 
     let mut dsc_work = api_context.dsci.work.lock().unwrap();
     dsc_work.add_cmd(DscCmd::EnableRestartAll);
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Stop all downstairs, then stop ourselves.
+ */
+#[endpoint {
+    method = POST,
+    path = "/shutdown",
+}]
+async fn dsc_shutdown(
+    rqctx: Arc<RequestContext<DownstairsControl>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let api_context = rqctx.context();
+
+    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    dsc_work.add_cmd(DscCmd::Shutdown);
     Ok(HttpResponseUpdatedNoContent())
 }
 
