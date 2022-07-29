@@ -747,6 +747,7 @@ where
             _ = sleep_until(deadline_secs(50)) => {
                 bail!("did not negotiate a protocol");
             }
+
             /*
              * This Upstairs' thread will receive this signal when another
              * Upstairs promotes itself to active. The only way this path is
@@ -761,11 +762,23 @@ where
             new_upstairs_id = another_upstairs_active_rx.recv() => {
                 match new_upstairs_id {
                     None => {
-                        // XXX channel closed, what do we do?
+                        // There shouldn't be a path through the code where we
+                        // close the channel before sending a message through it
+                        // (see [`promote_to_active`]), though [`clear_active`]
+                        // simply drops the active_upstairs tuple - but the only
+                        // place that calls `clear_active` is below when the
+                        // Upstairs disconnects.
+                        //
+                        // We have to bail here though - the Downstairs can't be
+                        // running without the ability for another Upstairs to
+                        // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during negotiation");
                     }
 
                     Some(new_upstairs_id) => {
+                        // another upstairs negotiated and went active after
+                        // this one did (and before this one completed
+                        // negotiation)
                         let upstairs_uuid = upstairs_uuid.unwrap();
                         println!("Another upstairs promoted to active, \
                             shutting down connection for {:?}", upstairs_uuid);
@@ -777,12 +790,14 @@ where
                     }
                 }
             }
+
             new_read = fr.next() => {
                 /*
                  * Negotiate protocol before we take any IO requests.
                  */
                 match new_read.transpose()? {
                     None => {
+                        // Upstairs disconnected
                         let mut ds = ads.lock().await;
 
                         if let Some(upstairs_uuid) = upstairs_uuid {
@@ -1029,6 +1044,7 @@ where
             _ = sleep_until(deadline_secs(50)) => {
                 bail!("inactivity timeout");
             }
+
             /*
              * This Upstairs' thread will receive this signal when another
              * Upstairs promotes itself to active. The only way this path is
@@ -1043,11 +1059,22 @@ where
             new_upstairs_id = another_upstairs_active_rx.recv() => {
                 match new_upstairs_id {
                     None => {
-                        // XXX channel closed, what do we do?
+                        // There shouldn't be a path through the code where we
+                        // close the channel before sending a message through it
+                        // (see [`promote_to_active`]), though [`clear_active`]
+                        // simply drops the active_upstairs tuple - but the only
+                        // place that calls `clear_active` is below when the
+                        // Upstairs disconnects.
+                        //
+                        // We have to bail here though - the Downstairs can't be
+                        // running without the ability for another Upstairs to
+                        // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during resp_loop");
                     }
 
                     Some(new_upstairs_id) => {
+                        // another upstairs negotiated and went active after
+                        // this one did
                         println!("Another upstairs promoted to active, \
                             shutting down connection for {:?}", upstairs_uuid);
 
@@ -1061,6 +1088,7 @@ where
             new_read = fr.next() => {
                 match new_read {
                     None => {
+                        // Upstairs disconnected
                         let mut ds = ads.lock().await;
 
                         println!(
