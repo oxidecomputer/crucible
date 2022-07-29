@@ -1244,14 +1244,7 @@ impl Downstairs {
         let mut work = self.work.lock().await;
 
         // Complete the job
-        let is_flush = matches!(
-            m,
-            Message::FlushAck {
-                upstairs_id: _,
-                job_id: _,
-                result: _
-            }
-        );
+        let is_flush = matches!(m, Message::FlushAck { .. });
 
         // _ can be None if promote_to_active ran and cleared out active.
         let _ = work.active.remove(&ds_id);
@@ -1276,35 +1269,19 @@ impl Downstairs {
         ds_id: u64,
     ) -> Result<()> {
         match m {
-            Message::FlushAck {
-                upstairs_id: _,
-                job_id: _,
-                result: _,
-            } => {
+            Message::FlushAck { .. } => {
                 cdt::submit__flush__done!(|| ds_id);
                 self.dss.add_flush().await;
             }
-            Message::WriteAck {
-                upstairs_id: _,
-                job_id: _,
-                result: _,
-            } => {
+            Message::WriteAck { .. } => {
                 cdt::submit__write__done!(|| ds_id);
                 self.dss.add_write().await;
             }
-            Message::WriteUnwrittenAck {
-                upstairs_id: _,
-                job_id: _,
-                result: _,
-            } => {
+            Message::WriteUnwrittenAck { .. } => {
                 cdt::submit__writeunwritten__done!(|| ds_id);
                 self.dss.add_write().await;
             }
-            Message::ReadResponse {
-                upstairs_id: _,
-                job_id: _,
-                responses: _,
-            } => {
+            Message::ReadResponse { .. } => {
                 cdt::submit__read__done!(|| ds_id);
                 self.dss.add_read().await;
             }
