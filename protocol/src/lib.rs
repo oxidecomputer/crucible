@@ -172,9 +172,6 @@ pub enum Message {
         extent_id: usize,
     },
 
-    /// Ack the Re-Open of an extent from the downstairs using the rep_id.
-    // XXX missing?
-
     /// Flush just this extent on just this downstairs client.
     ExtentFlush {
         repair_id: u64,
