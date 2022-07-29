@@ -1406,7 +1406,13 @@ where
                          * must not get a message.
                          */
                         match op {
-                            Message::ExtentRepair { repair_id, extent_id: _, source_client_id: _, source_repair_address: _, ref dest_clients} => {
+                            Message::ExtentRepair {
+                                repair_id,
+                                extent_id: _,
+                                source_client_id: _,
+                                source_repair_address: _,
+                                ref dest_clients,
+                            } => {
                                 let mut send_repair = false;
                                 for d in dest_clients {
                                     if *d == up_coms.client_id {
@@ -1428,7 +1434,13 @@ where
                                     rep_done = Some(repair_id);
                                 }
                             },
-                            Message::ExtentFlush { repair_id, extent_id: _, client_id, flush_number: _, gen_number: _ } => {
+                            Message::ExtentFlush {
+                                repair_id,
+                                extent_id: _,
+                                client_id,
+                                flush_number: _,
+                                gen_number: _,
+                            } => {
                                 if up_coms.client_id != client_id {
                                     rep_done = Some(repair_id);
                                 } else {
