@@ -198,7 +198,7 @@ async fn dsc_stop(
  * Stop all downstairs
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/stop/all",
 }]
 async fn dsc_stop_all(
