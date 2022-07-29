@@ -141,7 +141,7 @@
       }
     },
     "/shutdown": {
-      "get": {
+      "post": {
         "summary": "Stop all downstairs, then stop ourselves.",
         "operationId": "dsc_shutdown",
         "responses": {
@@ -242,7 +242,7 @@
       }
     },
     "/stop/all": {
-      "get": {
+      "post": {
         "summary": "Stop all downstairs",
         "operationId": "dsc_stop_all",
         "responses": {

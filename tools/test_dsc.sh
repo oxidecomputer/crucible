@@ -167,7 +167,7 @@ if [[ "$hc" -ne 204 ]]; then
 fi
 
 echo "Test stop/all"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"stop/all)
+hc=$(curl ${curl_flags} -w "%{http_code}\n" -X POST -H "Content-Type: application/json" "${dsc_url}"stop/all)
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to stop all" | tee -a "$fail_log"
     (( res += 1 ))
@@ -283,7 +283,7 @@ fi
 
 # The final test is to clean it all up!
 echo "Test /shutdown endpoint"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"shutdown)
+hc=$(curl ${curl_flags} -w "%{http_code}\n" -X POST -H "Content-Type: application/json" "${dsc_url}"shutdown)
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to shutdown, got $hc" | tee -a "$fail_log"
     (( res += 1 ))

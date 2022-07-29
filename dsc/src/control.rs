@@ -361,7 +361,7 @@ async fn dsc_enable_restart_all(
  * Stop all downstairs, then stop ourselves.
  */
 #[endpoint {
-    method = GET,
+    method = POST,
     path = "/shutdown",
 }]
 async fn dsc_shutdown(
