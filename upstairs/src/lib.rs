@@ -226,17 +226,29 @@ async fn process_message(
 ) -> Result<()> {
     let (uuid, ds_id, result) = match m {
         Message::Imok => return Ok(()),
-        Message::WriteAck(uuid, ds_id, result) => {
-            cdt::ds__write__io__done!(|| (ds_id, up_coms.client_id as u64));
-            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
+        Message::WriteAck {
+            upstairs_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__write__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
         }
-        Message::FlushAck(uuid, ds_id, result) => {
-            cdt::ds__flush__io__done!(|| (ds_id, up_coms.client_id as u64));
-            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
+        Message::FlushAck {
+            upstairs_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__flush__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
         }
-        Message::ReadResponse(uuid, ds_id, responses) => {
-            cdt::ds__read__io__done!(|| (ds_id, up_coms.client_id as u64));
-            (*uuid, *ds_id, responses.clone())
+        Message::ReadResponse {
+            upstairs_id,
+            job_id,
+            responses,
+        } => {
+            cdt::ds__read__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, responses.clone())
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -411,12 +423,12 @@ where
                 writes,
             } => {
                 cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
-                fw.send(Message::Write(
-                    u.uuid,
-                    *new_id,
-                    dependencies.clone(),
-                    writes.clone(),
-                ))
+                fw.send(Message::Write {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                    writes: writes.clone(),
+                })
                 .await?
             }
             IOop::WriteUnwritten {
@@ -432,14 +444,14 @@ where
                 snapshot_details,
             } => {
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
-                fw.send(Message::Flush(
-                    u.uuid,
-                    *new_id,
-                    dependencies.clone(),
+                fw.send(Message::Flush {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
                     flush_number,
                     gen_number,
                     snapshot_details,
-                ))
+                })
                 .await?
             }
             IOop::Read {
@@ -447,12 +459,12 @@ where
                 requests,
             } => {
                 cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
-                fw.send(Message::ReadRequest(
-                    u.uuid,
-                    *new_id,
-                    dependencies.clone(),
+                fw.send(Message::ReadRequest {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
                     requests,
-                ))
+                })
                 .await?
             }
         }
@@ -551,7 +563,10 @@ where
     /*
      * As the "client", we must begin the negotiation.
      */
-    let m = Message::HereIAm(1, up.uuid);
+    let m = Message::HereIAm {
+        version: 1,
+        upstairs_id: up.uuid,
+    };
     fw.send(m).await?;
 
     /*
@@ -674,7 +689,7 @@ where
                     up_coms.client_id
                 );
                 self_promotion = true;
-                fw.send(Message::PromoteToActive(up.uuid)).await?;
+                fw.send(Message::PromoteToActive { upstairs_id: up.uuid }).await?;
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -690,7 +705,7 @@ where
                         return Ok(())
                     }
                     Some(Message::Imok) => {}
-                    Some(Message::YesItsMe(version)) => {
+                    Some(Message::YesItsMe { version }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
@@ -725,7 +740,7 @@ where
                                 up_coms.client_id
                             );
                             self_promotion = true;
-                            fw.send(Message::PromoteToActive(up.uuid)).await?;
+                            fw.send(Message::PromoteToActive { upstairs_id: up.uuid }).await?;
                         } else {
                             /*
                              * Transition this Downstairs to WaitActive
@@ -757,17 +772,17 @@ where
                                 }
                                 self_promotion = true;
                                 fw.send(
-                                    Message::PromoteToActive(up.uuid)
+                                    Message::PromoteToActive { upstairs_id: up.uuid }
                                 ).await?;
                             }
                         }
                     }
-                    Some(Message::YouAreNowActive(uuid)) => {
-                        if up.uuid != uuid {
+                    Some(Message::YouAreNowActive { upstairs_id }) => {
+                        if up.uuid != upstairs_id {
                             println!(
                                 "[{}] {} client activate with wrong UUID {}",
                                 up.uuid,
-                                uuid,
+                                upstairs_id,
                                 up_coms.client_id
                             );
                             up.ds_transition(up_coms.client_id, DsState::New);
@@ -785,7 +800,7 @@ where
                         fw.send(Message::RegionInfoPlease).await?;
 
                     }
-                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
                         /*
                          * XXX If we get this response, but the new uuid is
                          * actually our uuid, do we just ignore it?
@@ -794,11 +809,11 @@ where
                             "[{}] {} downstairs self deactivate: new {:?}",
                             up_coms.client_id,
                             up.uuid,
-                            new_active_uuid,
+                            new_upstairs_id,
                         );
                         up.ds_transition(up_coms.client_id, DsState::New);
                         up.set_inactive();
-                        if up.uuid == new_active_uuid {
+                        if up.uuid == new_upstairs_id {
                             /*
                              * Now, this is really going off the rails.  Our
                              * downstairs thinks we have a different UUID
@@ -808,12 +823,12 @@ where
                              */
                             bail!(
                                 "[{}] {} bad YouAreNoLongerActive, {:?}!",
-                                up_coms.client_id, up.uuid, new_active_uuid,
+                                up_coms.client_id, up.uuid, new_upstairs_id,
                             );
                         }
                         return Err(CrucibleError::UuidMismatch.into());
                     }
-                    Some(Message::RegionInfo(region_def)) => {
+                    Some(Message::RegionInfo { region_def }) => {
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
                         }
@@ -824,7 +839,6 @@ where
                             state[up_coms.client_id as usize]
                         };
                         if my_state == DsState::Offline {
-
                             /*
                              * If we are coming from state Offline, then it
                              * means the downstairs has departed then came
@@ -840,7 +854,7 @@ where
                             println!("[{}] send last flush ID to this DS: {}",
                                 up_coms.client_id, lf);
                             negotiated = 3;
-                            fw.send(Message::LastFlush(lf)).await?;
+                            fw.send(Message::LastFlush { last_flush_number: lf }).await?;
 
                         } else if my_state == DsState::WaitActive {
                             /*
@@ -869,7 +883,7 @@ where
                         up.ds_state_show();
 
                     }
-                    Some(Message::LastFlushAck(last_flush)) => {
+                    Some(Message::LastFlushAck { last_flush_number }) => {
                         if negotiated != 3 {
                             bail!("Received LastFlushAck out of order!");
                         }
@@ -880,12 +894,12 @@ where
                         assert_eq!(my_state, DsState::Offline);
                         println!("[{}] replied this last flush ID: {}",
                             up_coms.client_id,
-                            last_flush,
+                            last_flush_number,
                         );
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            up.last_flush_id(up_coms.client_id), last_flush
+                            up.last_flush_id(up_coms.client_id), last_flush_number
                         );
                         up.ds_transition(
                             up_coms.client_id, DsState::Replay);
@@ -893,7 +907,7 @@ where
                         *connected = true;
                         negotiated = 5;
                     },
-                    Some(Message::ExtentVersions(gen, flush, dirty)) => {
+                    Some(Message::ExtentVersions { gen_numbers, flush_numbers, dirty_bits }) => {
                         if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
@@ -909,9 +923,9 @@ where
                          * region set.
                          */
                         let dsr = RegionMetadata {
-                            generation: gen,
-                            flush_numbers: flush.clone(),
-                            dirty,
+                            generation: gen_numbers,
+                            flush_numbers: flush_numbers.clone(),
+                            dirty: dirty_bits,
                         };
 
                         up.downstairs
@@ -928,7 +942,7 @@ where
 
                         *connected = true;
                     }
-                    Some(Message::UuidMismatch(expected_uuid)) => {
+                    Some(Message::UuidMismatch { expected_id }) => {
                         /*
                          * XXX Our downstairs is returning a different
                          * UUID then we have, can this happen in a case where
@@ -941,13 +955,13 @@ where
                          */
                         println!(
                             "[{}] {} received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, up.uuid, expected_uuid
+                            up_coms.client_id, up.uuid, expected_id
                         );
                         up.ds_transition(
                             up_coms.client_id, DsState::Disabled
                         );
                         up.set_inactive();
-                        if up.uuid == expected_uuid {
+                        if up.uuid == expected_id {
                             /*
                              * Now, this is really going off the rails.  OUr
                              * downstairs thinks we have a different UUID
@@ -957,12 +971,12 @@ where
                              */
                             bail!(
                                 "[{}] {} received bad UuidMismatch, {:?}!",
-                                up_coms.client_id, up.uuid, expected_uuid
+                                up_coms.client_id, up.uuid, expected_id
                             );
                         }
                         bail!(
                             "[{}] {} received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, up.uuid, expected_uuid
+                            up_coms.client_id, up.uuid, expected_id
                         );
                     }
                     Some(m) => {
@@ -1125,10 +1139,10 @@ where
                         println!("[{}] None response", up_coms.client_id);
                         return Ok(())
                     },
-                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
                         up.set_inactive();
-                        if up.uuid != new_active_uuid {
+                        if up.uuid != new_upstairs_id {
                             bail!("[{}] received disconnect from downstairs",
                                 up_coms.client_id
                             );
@@ -1144,7 +1158,7 @@ where
                             );
                         }
                     }
-                    Some(Message::UuidMismatch(expected_uuid)) => {
+                    Some(Message::UuidMismatch { expected_id }) => {
                         /*
                          * For now, when we get the wrong UUID back from
                          * the downstairs, take ourselves out.
@@ -1157,7 +1171,7 @@ where
                         up.set_inactive();
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, expected_uuid
+                            up_coms.client_id, expected_id
                         );
                     }
                     Some(m) => {
@@ -1299,9 +1313,9 @@ where
                         bail!("[{}] None response during repair",
                             up_coms.client_id);
                     },
-                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
-                        if up.uuid != new_active_uuid {
+                        if up.uuid != new_upstairs_id {
                             bail!("[{}] received disconnect from downstairs",
                                 up_coms.client_id
                             );
@@ -1311,20 +1325,20 @@ where
                             );
                         }
                     }
-                    Some(Message::UuidMismatch(expected_uuid)) => {
+                    Some(Message::UuidMismatch { expected_id }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, expected_uuid
+                            up_coms.client_id, expected_id
                         );
                     }
-                    Some(Message::RepairAckId(rep_id)) => {
+                    Some(Message::RepairAckId { repair_id }) => {
                         if up.downstairs.lock().unwrap().rep_done(
-                            up_coms.client_id, rep_id
+                            up_coms.client_id, repair_id
                         ) {
                             up.ds_repair_done_notify(
                                 up_coms.client_id,
-                                rep_id,
+                                repair_id,
                                 &up_coms.ds_reconcile_done_tx,
                             ).await?;
                         }
@@ -1332,19 +1346,19 @@ where
                     Some(Message::Imok) => {
                         println!("[{}] Received Imok", up_coms.client_id);
                     }
-                    Some(Message::ExtentError(rep_id, eid, error)) => {
+                    Some(Message::ExtentError { repair_id, extent_id, error }) => {
                         println!(
                             "[{}] Extent {} error on job {}: {}",
                             up_coms.client_id,
-                            eid,
-                            rep_id,
+                            extent_id,
+                            repair_id,
                             error,
                         );
                         bail!(
                             "[{}] Extent {} error on job {}: {}",
                             up_coms.client_id,
-                            eid,
-                            rep_id,
+                            extent_id,
+                            repair_id,
                             error,
                         );
                     }
@@ -1392,9 +1406,15 @@ where
                          * must not get a message.
                          */
                         match op {
-                            Message::ExtentRepair(rep_id, _, _, _, ref dest) => {
+                            Message::ExtentRepair {
+                                repair_id,
+                                extent_id: _,
+                                source_client_id: _,
+                                source_repair_address: _,
+                                ref dest_clients,
+                            } => {
                                 let mut send_repair = false;
-                                for d in dest {
+                                for d in dest_clients {
                                     if *d == up_coms.client_id {
                                         send_repair = true;
                                         break;
@@ -1403,20 +1423,26 @@ where
                                 if send_repair {
                                     println!(
                                         "[{}] Sending repair request {:?}",
-                                        up_coms.client_id, rep_id,
+                                        up_coms.client_id, repair_id,
                                     );
                                     fw.send(op.clone()).await?;
                                 } else {
                                     println!(
                                         "[{}] No action required {:?}",
-                                        up_coms.client_id, rep_id,
+                                        up_coms.client_id, repair_id,
                                     );
-                                    rep_done = Some(rep_id);
+                                    rep_done = Some(repair_id);
                                 }
                             },
-                            Message::ExtentFlush(rep_id, _, src, _, _) => {
-                                if up_coms.client_id != src {
-                                    rep_done = Some(rep_id);
+                            Message::ExtentFlush {
+                                repair_id,
+                                extent_id: _,
+                                client_id,
+                                flush_number: _,
+                                gen_number: _,
+                            } => {
+                                if up_coms.client_id != client_id {
+                                    rep_done = Some(repair_id);
                                 } else {
                                     fw.send(op).await?;
                                 }
@@ -2009,26 +2035,44 @@ impl Downstairs {
              */
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentFlush(
-                    rep_id, ext, ef.source, max_flush, max_gen,
-                ),
-            ));
-            rep_id += 1;
-            self.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id,
-                Message::ExtentClose(rep_id, ext),
-            ));
-            rep_id += 1;
-            let repair = self.repair_addr(ef.source);
-            self.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id,
-                Message::ExtentRepair(rep_id, ext, ef.source, repair, ef.dest),
+                Message::ExtentFlush {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                    client_id: ef.source,
+                    flush_number: max_flush,
+                    gen_number: max_gen,
+                },
             ));
             rep_id += 1;
 
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentReopen(rep_id, ext),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                },
+            ));
+            rep_id += 1;
+
+            let repair = self.repair_addr(ef.source);
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentRepair {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                    source_client_id: ef.source,
+                    source_repair_address: repair,
+                    dest_clients: ef.dest,
+                },
+            ));
+            rep_id += 1;
+
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentReopen {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                },
             ));
             rep_id += 1;
         }
@@ -3297,6 +3341,7 @@ impl Upstairs {
         *gen = new_gen;
         println!("Set generation to :{}", *gen);
     }
+
     fn get_generation(&self) -> u64 {
         *self.generation.lock().unwrap()
     }
