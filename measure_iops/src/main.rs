@@ -115,7 +115,7 @@ fn main() -> Result<()> {
     }
 
     let guest = Arc::new(guest);
-    runtime.spawn(up_main(crucible_opts, guest.clone(), None));
+    runtime.spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
     println!("Crucible runtime is spawned");
 
     guest.activate(opt.gen)?;

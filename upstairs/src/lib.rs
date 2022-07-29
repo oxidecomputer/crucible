@@ -566,6 +566,8 @@ where
     let m = Message::HereIAm {
         version: 1,
         upstairs_id: up.uuid,
+        session_id: up.session_id,
+        gen: up.get_generation(),
     };
     fw.send(m).await?;
 
@@ -590,8 +592,8 @@ where
      * negotiated variable on the left:
      *
      *          Upstairs             Downstairs
-     * 0:          HereIAm(v)  --->
-     *                         <---  YesItsMe(v)
+     * 0:        HereIAm(...)  --->
+     *                         <---  YesItsMe(...)
      *
      * At this point, a downstairs will wait for a "PromoteToActive" message
      * to be sent to it.  If this is a new upstairs that has not yet
@@ -689,7 +691,11 @@ where
                     up_coms.client_id
                 );
                 self_promotion = true;
-                fw.send(Message::PromoteToActive { upstairs_id: up.uuid }).await?;
+                fw.send(Message::PromoteToActive {
+                    upstairs_id: up.uuid,
+                    session_id: up.session_id,
+                    gen: up.get_generation(),
+                }).await?;
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -698,6 +704,7 @@ where
 
                 match f.transpose()? {
                     None => {
+                        // Downstairs disconnected
                         println!(
                             "[{}] client hung up",
                             up_coms.client_id
@@ -740,7 +747,11 @@ where
                                 up_coms.client_id
                             );
                             self_promotion = true;
-                            fw.send(Message::PromoteToActive { upstairs_id: up.uuid }).await?;
+                            fw.send(Message::PromoteToActive {
+                                upstairs_id: up.uuid,
+                                session_id: up.session_id,
+                                gen: up.get_generation(),
+                            }).await?;
                         } else {
                             /*
                              * Transition this Downstairs to WaitActive
@@ -771,20 +782,45 @@ where
                                     up_coms.ds_active_rx.borrow_and_update();
                                 }
                                 self_promotion = true;
-                                fw.send(
-                                    Message::PromoteToActive { upstairs_id: up.uuid }
-                                ).await?;
+                                fw.send(Message::PromoteToActive {
+                                    upstairs_id: up.uuid,
+                                    session_id: up.session_id,
+                                    gen: up.get_generation(),
+                                }).await?;
                             }
                         }
                     }
-                    Some(Message::YouAreNowActive { upstairs_id }) => {
-                        if up.uuid != upstairs_id {
+                    Some(Message::YouAreNowActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    }) => {
+                        let match_uuid = up.uuid == upstairs_id;
+                        let match_session = up.session_id == session_id;
+                        let match_gen = up.get_generation() == gen;
+                        let matches_self = match_uuid && match_session && match_gen;
+
+                        if !matches_self {
                             println!(
-                                "[{}] {} client activate with wrong UUID {}",
-                                up.uuid,
-                                upstairs_id,
-                                up_coms.client_id
+                                "[{}] YouAreNowActive didn't match self! {} {} {}",
+                                up_coms.client_id,
+                                if !match_uuid {
+                                    format!("UUID {:?} != {:?}", up.uuid, upstairs_id)
+                                } else {
+                                    String::new()
+                                },
+                                if !match_session {
+                                    format!("session {:?} != {:?}", up.session_id, session_id)
+                                } else {
+                                    String::new()
+                                },
+                                if !match_gen {
+                                    format!("gen {:?} != {:?}", up.get_generation(), gen)
+                                } else {
+                                    String::new()
+                                },
                             );
+
                             up.ds_transition(up_coms.client_id, DsState::New);
                             up.set_inactive();
                             return Err(CrucibleError::UuidMismatch.into());
@@ -800,33 +836,68 @@ where
                         fw.send(Message::RegionInfoPlease).await?;
 
                     }
-                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
-                        /*
-                         * XXX If we get this response, but the new uuid is
-                         * actually our uuid, do we just ignore it?
-                         */
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id,
+                        new_gen,
+                    }) => {
                         println!(
-                            "[{}] {} downstairs self deactivate: new {:?}",
+                            "[{}] {} saw YouAreNoLongerActive {:?} {:?} {}",
                             up_coms.client_id,
                             up.uuid,
                             new_upstairs_id,
+                            new_session_id,
+                            new_gen,
                         );
+
                         up.ds_transition(up_coms.client_id, DsState::New);
                         up.set_inactive();
+
+                        // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
-                            /*
-                             * Now, this is really going off the rails.  Our
-                             * downstairs thinks we have a different UUID
-                             * and is sending us the UUID of the "new"
-                             * downstairs, but that UUID IS our UUID.  So
-                             * clearly the downstairs is confused.
-                             */
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                return Ok(());
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, {:?}!",
-                                up_coms.client_id, up.uuid, new_upstairs_id,
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
+                            );
+                        } else {
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                return Err(CrucibleError::UuidMismatch.into());
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
-                        return Err(CrucibleError::UuidMismatch.into());
+
                     }
                     Some(Message::RegionInfo { region_def }) => {
                         if negotiated != 2 {
@@ -1136,25 +1207,60 @@ where
 
                 match f.transpose()? {
                     None => {
+                        // Downstairs disconnected
                         println!("[{}] None response", up_coms.client_id);
                         return Ok(())
                     },
-                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id: _,
+                        new_gen,
+                    }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
                         up.set_inactive();
-                        if up.uuid != new_upstairs_id {
-                            bail!("[{}] received disconnect from downstairs",
-                                up_coms.client_id
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                return Ok(());
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
                             );
                         } else {
-                            /*
-                             * XXX Is this the correct thing to do here?
-                             * The downstairs is telling us to disconnect
-                             * because it believes it has a new UUID, but
-                             * it does not.
-                             */
-                            bail!("[{}] bad disconnect from downstairs",
-                                up_coms.client_id
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                return Err(CrucibleError::UuidMismatch.into());
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
                     }
@@ -1313,15 +1419,55 @@ where
                         bail!("[{}] None response during repair",
                             up_coms.client_id);
                     },
-                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id: _,
+                        new_gen,
+                    }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
-                        if up.uuid != new_upstairs_id {
-                            bail!("[{}] received disconnect from downstairs",
-                                up_coms.client_id
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                return Ok(());
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
                             );
                         } else {
-                            bail!("[{}] bad disconnect from downstairs",
-                                up_coms.client_id
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                return Err(CrucibleError::UuidMismatch.into());
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
                     }
@@ -3174,6 +3320,9 @@ pub struct Upstairs {
      */
     uuid: Uuid,
 
+    // A unique session ID
+    session_id: Uuid,
+
     /*
      * Upstairs Generation number.
      * Will always increase each time an Upstairs starts.
@@ -3258,6 +3407,7 @@ impl Upstairs {
         };
         Self::new(
             &opts,
+            0,
             RegionDefinition::default(),
             Arc::new(Guest::default()),
         )
@@ -3265,6 +3415,7 @@ impl Upstairs {
 
     pub fn new(
         opt: &CrucibleOpts,
+        gen: u64,
         def: RegionDefinition,
         guest: Arc<Guest>,
     ) -> Arc<Upstairs> {
@@ -3308,7 +3459,8 @@ impl Upstairs {
         Arc::new(Upstairs {
             active: Mutex::new(UpstairsState::default()),
             uuid,
-            generation: Mutex::new(0), // XXX Also get from Nexus?
+            session_id: Uuid::new_v4(),
+            generation: Mutex::new(gen),
             guest,
             downstairs: Mutex::new(Downstairs::new(opt.target.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
@@ -6928,6 +7080,7 @@ async fn up_listen(
  */
 pub async fn up_main(
     opt: CrucibleOpts,
+    gen: u64,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<()> {
@@ -6946,7 +7099,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, RegionDefinition::default(), guest);
+    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest);
 
     /*
      * Use this channel to receive updates on target status from each task

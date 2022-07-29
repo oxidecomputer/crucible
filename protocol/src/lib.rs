@@ -118,6 +118,8 @@ pub enum Message {
     HereIAm {
         version: u32,
         upstairs_id: Uuid,
+        session_id: Uuid,
+        gen: u64,
     },
     YesItsMe {
         version: u32,
@@ -131,12 +133,18 @@ pub enum Message {
      */
     PromoteToActive {
         upstairs_id: Uuid,
+        session_id: Uuid,
+        gen: u64,
     },
     YouAreNowActive {
         upstairs_id: Uuid,
+        session_id: Uuid,
+        gen: u64,
     },
     YouAreNoLongerActive {
         new_upstairs_id: Uuid,
+        new_session_id: Uuid,
+        new_gen: u64,
     },
 
     /*
@@ -551,6 +559,8 @@ mod tests {
         let input = Message::HereIAm {
             version: 2,
             upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 123,
         };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
@@ -614,6 +624,8 @@ mod tests {
         let input = Message::HereIAm {
             version: 0,
             upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 23849183,
         };
         let mut buffer = BytesMut::new();
 

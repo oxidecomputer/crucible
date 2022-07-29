@@ -144,7 +144,12 @@ fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        runtime.spawn(up_main(crucible_opts.clone(), guest.clone(), None));
+        runtime.spawn(up_main(
+            crucible_opts.clone(),
+            opt.gen,
+            guest.clone(),
+            None,
+        )); // XXX increase gen per upstairs
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);
