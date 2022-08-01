@@ -742,12 +742,14 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "crucible",
  "crucible-downstairs",
  "futures",
  "futures-core",
  "httptest",
+ "rand 0.8.5",
  "tempfile",
  "tokio",
  "uuid 1.0.0",
