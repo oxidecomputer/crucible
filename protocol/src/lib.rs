@@ -120,9 +120,19 @@ pub enum Message {
         upstairs_id: Uuid,
         session_id: Uuid,
         gen: u64,
+        read_only: bool,
+        encrypted: bool,
     },
     YesItsMe {
         version: u32,
+    },
+
+    // Reasons to reject the initial negotiation
+    ReadOnlyMismatch {
+        expected: bool,
+    },
+    EncryptedMismatch {
+        expected: bool,
     },
 
     /**
@@ -561,6 +571,8 @@ mod tests {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             gen: 123,
+            read_only: false,
+            encrypted: true,
         };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
@@ -626,6 +638,8 @@ mod tests {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             gen: 23849183,
+            read_only: true,
+            encrypted: false,
         };
         let mut buffer = BytesMut::new();
 

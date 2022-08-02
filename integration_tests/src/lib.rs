@@ -101,6 +101,7 @@ mod test {
             key_pem: None,
             root_cert_pem: None,
             control: None,
+            read_only,
         };
         Ok(co)
     }
