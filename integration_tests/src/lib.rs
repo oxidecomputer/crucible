@@ -461,7 +461,7 @@ mod test {
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(0)?;
