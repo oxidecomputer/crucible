@@ -780,7 +780,8 @@ where
                         // We have to bail here though - the Downstairs can't be
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
-                        bail!("another_upstairs_active_rx closed during negotiation");
+                        bail!("another_upstairs_active_rx closed during \
+                            negotiation");
                     }
 
                     Some(new_upstairs_connection) => {
@@ -794,8 +795,10 @@ where
 
                         let mut fw = fw.lock().await;
                         fw.send(Message::YouAreNoLongerActive {
-                            new_upstairs_id: new_upstairs_connection.upstairs_id,
-                            new_session_id: new_upstairs_connection.session_id,
+                            new_upstairs_id:
+                                new_upstairs_connection.upstairs_id,
+                            new_session_id:
+                                new_upstairs_connection.session_id,
                             new_gen: new_upstairs_connection.gen,
                         }).await?;
 
@@ -862,14 +865,19 @@ where
                         let mut fw = fw.lock().await;
                         fw.send(Message::YesItsMe { version: 1 }).await?;
                     }
-                    Some(Message::PromoteToActive { upstairs_id, session_id, gen }) => {
+                    Some(Message::PromoteToActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    }) => {
                         if negotiated != 1 {
                             bail!("Received activate out of order {}",
                                 negotiated);
                         }
 
                         // Only allowed to promote or demote self
-                        let mut upstairs_connection = upstairs_connection.unwrap();
+                        let mut upstairs_connection =
+                            upstairs_connection.unwrap();
                         let matches_self =
                             upstairs_connection.upstairs_id == upstairs_id &&
                             upstairs_connection.session_id == session_id;
@@ -878,7 +886,8 @@ where
                             let mut fw = fw.lock().await;
                             fw.send(
                                 Message::UuidMismatch {
-                                    expected_id: upstairs_connection.upstairs_id,
+                                    expected_id:
+                                        upstairs_connection.upstairs_id,
                                 }
                             ).await?;
 
@@ -887,10 +896,11 @@ where
                              * XXX
                              */
                         } else {
-                            // matches_self above should include a check for gen,
-                            // but gen number may change between negotiation and
-                            // activation (see `XXX because the generation number`
-                            // upstairs). update generation number here.
+                            // matches_self above should include a check for
+                            // gen, but gen number may change between
+                            // negotiation and activation (see `XXX because the
+                            // generation number` upstairs). update generation
+                            // number here.
                             if upstairs_connection.gen != gen {
                                 println!(
                                     "warning: generation number at \
@@ -950,7 +960,10 @@ where
                         }
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::LastFlushAck { last_flush_number }).await?;
+                        fw.send(Message::LastFlushAck {
+                            last_flush_number
+                        }).await?;
+
                         /*
                          * Once this command is sent, we are ready to exit
                          * the loop and move forward with receiving IOs
@@ -1122,19 +1135,24 @@ where
                         // We have to bail here though - the Downstairs can't be
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
-                        bail!("another_upstairs_active_rx closed during resp_loop");
+                        bail!("another_upstairs_active_rx closed during \
+                            resp_loop");
                     }
 
                     Some(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did
                         println!("Another upstairs promoted to active, \
-                            shutting down connection for {:?}", upstairs_connection);
+                            shutting down connection for {:?}",
+                            upstairs_connection,
+                        );
 
                         let mut fw = fw.lock().await;
                         fw.send(Message::YouAreNoLongerActive {
-                            new_upstairs_id: new_upstairs_connection.upstairs_id,
-                            new_session_id: new_upstairs_connection.session_id,
+                            new_upstairs_id:
+                                new_upstairs_connection.upstairs_id,
+                            new_session_id:
+                                new_upstairs_connection.session_id,
                             new_gen: new_upstairs_connection.gen,
                         }).await?;
 
