@@ -6,10 +6,12 @@ mod test {
     use std::sync::Arc;
 
     use anyhow::*;
+    use base64::encode;
     use crucible::{Bytes, *};
     use crucible_downstairs::*;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
+    use rand::Rng;
     use tempfile::*;
     use uuid::*;
 
@@ -65,18 +67,54 @@ mod test {
         }
     }
 
-    // Note each downstairs in each test must be unique!
+    // Spin off three downstairs at the given ports.
+    // Return a Crucible Opts struct pre-populated with the same
+    // three given ports for targets.
+    fn three_downstairs(
+        port1: u16,
+        port2: u16,
+        port3: u16,
+        read_only: bool,
+    ) -> Result<CrucibleOpts> {
+        let _downstairs1 =
+            TestDownstairs::new("127.0.0.1".parse()?, port1, true, read_only)?;
+        let _downstairs2 =
+            TestDownstairs::new("127.0.0.1".parse()?, port2, true, read_only)?;
+        let _downstairs3 =
+            TestDownstairs::new("127.0.0.1".parse()?, port3, true, read_only)?;
+
+        // Generate random data for our key
+        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+        let key_string = encode(&key_bytes);
+
+        let co = CrucibleOpts {
+            id: Uuid::new_v4(),
+            target: vec![
+                format!("127.0.0.1:{}", port1).parse()?,
+                format!("127.0.0.1:{}", port2).parse()?,
+                format!("127.0.0.1:{}", port3).parse()?,
+            ],
+            lossy: false,
+            flush_timeout: None,
+            key: Some(key_string),
+            cert_pem: None,
+            key_pem: None,
+            root_cert_pem: None,
+            control: None,
+        };
+        Ok(co)
+    }
+
+    // Note the port number for downstairs in each test must be unique
+    // from both the other downstairs in the same test, AND with other
+    // downstairs in other tests.  The helpful three_downstairs()
+    // function should help to make this easier.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_downstairs() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54001, true, false)?;
-        let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54002, true, false)?;
-        let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54003, true, false)?;
+        let opts = three_downstairs(54001, 54002, 54003, false).unwrap();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -84,24 +122,7 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
-                    opts: CrucibleOpts {
-                        id: Uuid::new_v4(),
-                        target: vec![
-                            "127.0.0.1:54001".parse()?,
-                            "127.0.0.1:54002".parse()?,
-                            "127.0.0.1:54003".parse()?,
-                        ],
-                        lossy: false,
-                        flush_timeout: None,
-                        key: Some(
-                            "YVubErJfMsHeaM+v3UY+11IutzbiArT1woP91BWj/Zc="
-                                .to_string(),
-                        ),
-                        cert_pem: None,
-                        key_pem: None,
-                        root_cert_pem: None,
-                        control: None,
-                    },
+                    opts,
                     gen: 0,
                 }],
                 read_only_parent: None,
@@ -147,12 +168,7 @@ mod test {
     async fn integration_test_two_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54004, true, false)?;
-        let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54005, true, false)?;
-        let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54006, true, false)?;
+        let opts = three_downstairs(54004, 54005, 54006, false).unwrap();
 
         // Create in memory block io full of 11
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -176,27 +192,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(
-            CrucibleOpts {
-                target: vec![
-                    "127.0.0.1:54004".parse()?,
-                    "127.0.0.1:54005".parse()?,
-                    "127.0.0.1:54006".parse()?,
-                ],
-                lossy: false,
-                flush_timeout: None,
-                key: Some(
-                    "6Yiim0tnK91G7O0KTRLumpuhkr9T0X1AVSVYJUhRcxs=".to_string(),
-                ),
-                cert_pem: None,
-                key_pem: None,
-                root_cert_pem: None,
-                control: None,
-                ..Default::default()
-            },
-            0,
-            None,
-        )?;
+        volume.add_subvolume_create_guest(opts, 0, None)?;
         volume.add_read_only_parent(in_memory_data.clone())?;
 
         volume.activate(0)?;
@@ -240,12 +236,7 @@ mod test {
     async fn integration_test_three_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54007, true, false)?;
-        let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54008, true, false)?;
-        let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54009, true, false)?;
+        let opts = three_downstairs(54007, 54008, 54009, false).unwrap();
 
         // Create in memory block io full of 11
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -275,24 +266,7 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
-                    opts: CrucibleOpts {
-                        id: Uuid::new_v4(),
-                        target: vec![
-                            "127.0.0.1:54007".parse()?,
-                            "127.0.0.1:54008".parse()?,
-                            "127.0.0.1:54009".parse()?,
-                        ],
-                        lossy: false,
-                        flush_timeout: None,
-                        key: Some(
-                            "/Gud6zA+MoI/lvt+0dqf3wIMyTfNqp1Bw6FKuM+zFWM="
-                                .to_string(),
-                        ),
-                        cert_pem: None,
-                        key_pem: None,
-                        root_cert_pem: None,
-                        control: None,
-                    },
+                    opts,
                     gen: 0,
                 }],
                 read_only_parent: None,
@@ -351,12 +325,7 @@ mod test {
     async fn integration_test_url() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54010, true, false)?;
-        let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54011, true, false)?;
-        let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54012, true, false)?;
+        let opts = three_downstairs(54010, 54011, 54012, false).unwrap();
 
         let server = Server::run();
         server.expect(
@@ -379,24 +348,7 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
-                    opts: CrucibleOpts {
-                        target: vec![
-                            "127.0.0.1:54010".parse()?,
-                            "127.0.0.1:54011".parse()?,
-                            "127.0.0.1:54012".parse()?,
-                        ],
-                        lossy: false,
-                        flush_timeout: None,
-                        key: Some(
-                            "+3AhoL47nkZPwj9XRmoCnOKa66Cfb8Q2gmQ84pVlsbw="
-                                .to_string(),
-                        ),
-                        cert_pem: None,
-                        key_pem: None,
-                        root_cert_pem: None,
-                        control: None,
-                        ..Default::default()
-                    },
+                    opts,
                     gen: 0,
                 }],
                 read_only_parent: Some(Box::new(
@@ -458,12 +410,7 @@ mod test {
     async fn integration_test_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54013, true, true)?;
-        let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54014, true, true)?;
-        let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, 54015, true, true)?;
+        let opts = three_downstairs(54013, 54014, 54015, true).unwrap();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -473,24 +420,7 @@ mod test {
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
-                        opts: CrucibleOpts {
-                            target: vec![
-                                "127.0.0.1:54013".parse()?,
-                                "127.0.0.1:54014".parse()?,
-                                "127.0.0.1:54015".parse()?,
-                            ],
-                            lossy: false,
-                            flush_timeout: None,
-                            key: Some(
-                                "+3AhoL47nkZPwj9XRmoCnOKa66Cfb8Q2gmQ84pVlsbw="
-                                    .to_string(),
-                            ),
-                            cert_pem: None,
-                            key_pem: None,
-                            root_cert_pem: None,
-                            control: None,
-                            ..Default::default()
-                        },
+                        opts,
                         gen: 0,
                     },
                 )),
@@ -514,6 +444,52 @@ mod test {
         .block_wait()?;
 
         assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs() -> Result<()> {
+        // Test using the guest layer to verify a new region is
+        // what we expect, and a write and read work as expected
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54016, 54017, 54018, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(0)?;
+        guest.query_work_queue()?;
+
+        // Verify contents are zero on init
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Write data in
+        guest
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read parent, verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
 
         Ok(())
     }
