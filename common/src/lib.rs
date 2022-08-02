@@ -104,6 +104,9 @@ pub enum CrucibleError {
 
     #[error("Repair stream error {0}")]
     RepairStreamError(String),
+
+    #[error("Generation number is too low: {0}")]
+    GenerationNumberTooLow(String),
 }
 
 impl From<std::io::Error> for CrucibleError {

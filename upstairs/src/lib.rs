@@ -859,7 +859,13 @@ where
                                 // The next generation of this Upstairs
                                 // connected, bail - this generation won't be
                                 // able to connect again.
-                                return Ok(());
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
                             }
 
                             // Here, our generation number is greater than or
@@ -867,8 +873,8 @@ where
                             // our UUID. We shouldn't have received this
                             // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
-                                uuid and our gen {} >= new gen {}!",
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
                                 up.get_generation(),
@@ -879,7 +885,13 @@ where
                             if new_gen > up.get_generation() {
                                 // The next generation of another Upstairs
                                 // connected.
-                                return Err(CrucibleError::UuidMismatch.into());
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
                             }
 
                             // Here, our generation number is greater than or
@@ -1225,7 +1237,13 @@ where
                                 // The next generation of this Upstairs
                                 // connected, bail - this generation won't be
                                 // able to connect again.
-                                return Ok(());
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
                             }
 
                             // Here, our generation number is greater than or
@@ -1245,7 +1263,13 @@ where
                             if new_gen > up.get_generation() {
                                 // The next generation of another Upstairs
                                 // connected.
-                                return Err(CrucibleError::UuidMismatch.into());
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
                             }
 
                             // Here, our generation number is greater than or
@@ -1432,7 +1456,13 @@ where
                                 // The next generation of this Upstairs
                                 // connected, bail - this generation won't be
                                 // able to connect again.
-                                return Ok(());
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
                             }
 
                             // Here, our generation number is greater than or
@@ -1452,7 +1482,13 @@ where
                             if new_gen > up.get_generation() {
                                 // The next generation of another Upstairs
                                 // connected.
-                                return Err(CrucibleError::UuidMismatch.into());
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
                             }
 
                             // Here, our generation number is greater than or
@@ -1492,7 +1528,11 @@ where
                     Some(Message::Imok) => {
                         println!("[{}] Received Imok", up_coms.client_id);
                     }
-                    Some(Message::ExtentError { repair_id, extent_id, error }) => {
+                    Some(Message::ExtentError {
+                        repair_id,
+                        extent_id,
+                        error,
+                    }) => {
                         println!(
                             "[{}] Extent {} error on job {}: {}",
                             up_coms.client_id,
@@ -1643,7 +1683,8 @@ where
                  * notify if all other downstairs are also complete.
                  */
                 if let Some(rep_id) = rep_done {
-                    if up.downstairs.lock().unwrap().rep_done(up_coms.client_id, rep_id) {
+                    if up.downstairs.lock().unwrap()
+                        .rep_done(up_coms.client_id, rep_id) {
                         println!("[{}] self notify as src for {}",
                             up_coms.client_id,
                             rep_id
@@ -1839,13 +1880,19 @@ async fn looper(
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
          */
-        if let Err(e) =
-            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
-                .await
+        match proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
+            .await
         {
-            eprintln!("ERROR: {}: proc: {:?}", target, e);
-            // XXX proc can return fatal and non-fatal errors, figure out what
-            // to do here
+            Ok(()) => {
+                // XXX figure out what to do here
+            }
+
+            Err(e) => {
+                eprintln!("ERROR: {}: proc: {:?}", target, e);
+
+                // XXX proc can return fatal and non-fatal errors, figure out
+                // what to do here
+            }
         }
 
         /*
