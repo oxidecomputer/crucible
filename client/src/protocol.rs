@@ -47,6 +47,7 @@ pub enum CliMessage {
     // Run the Verify test.
     Verify,
     Write(usize, usize),
+    WriteUnwritten(usize),
     Unknown(u32, BytesMut),
     Uuid,
 }
@@ -270,6 +271,13 @@ mod tests {
     #[test]
     fn rt_write() -> Result<()> {
         let input = CliMessage::Write(32, 22);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_write_unwritten() -> Result<()> {
+        let input = CliMessage::WriteUnwritten(32);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

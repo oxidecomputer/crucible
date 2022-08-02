@@ -33,8 +33,8 @@ mod test {
             let _region = create_region(
                 512, /* block_size */
                 tempdir.path().to_path_buf(),
-                10, /* extent_size */
-                1,  /* extent_count */
+                5, /* extent_size */
+                2, /* extent_count */
                 Uuid::new_v4(),
                 encrypted,
             )?;
@@ -490,6 +490,373 @@ mod test {
             .block_wait()?;
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs_unwritten() -> Result<()> {
+        // Test using the guest layer to verify a new region is
+        // what we expect, and a write_unwritten and read work as expected
+        // The size here spans two extents.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54019, 54020, 54021, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(1)?;
+        guest.query_work_queue()?;
+
+        // Write_unwritten data in
+        guest
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read parent, verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Write_unwritten again with different data
+        guest
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x99; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read back the same blocks.
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Verify data is still the original contents.
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Now, just write.  This should update our data.
+        guest
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x89; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read back the same blocks.
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Verify data is now from the new write.
+        assert_eq!(vec![0x89_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs_unwritten_sparse_1() -> Result<()>
+    {
+        // Test using the guest layer to verify a new region is
+        // what we expect, and a write_unwritten and read work as expected,
+        // this time with sparse writes
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54022, 54023, 54024, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(1)?;
+        guest.query_work_queue()?;
+
+        // Write_unwritten data in the first block
+        guest
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        // Write_unwritten again with different data and same start
+        // range, but write to blocks 2 and 3 this time as well.
+        guest
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+            )?
+            .block_wait()?;
+
+        // Read back the first block.
+        let buffer = Buffer::new(BLOCK_SIZE);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Verify data is still the original contents.
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], *buffer.as_vec());
+
+        // Read back the next two blocks.
+        let buffer = Buffer::new(BLOCK_SIZE * 2);
+        guest
+            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Verify data is still the original contents.
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs_unwritten_sparse_mid(
+    ) -> Result<()> {
+        // Test using the guest layer to verify a new region is
+        // what we expect, and a write_unwritten and read work as expected,
+        // this time with sparse writes where the middle block is written
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54025, 54026, 54027, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(1)?;
+        guest.query_work_queue()?;
+
+        // Write_unwritten data in the second block
+        guest
+            .write_unwritten(
+                Block::new(1, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        // Write_unwritten again with different data and writing
+        // to blocks 0, 1, and 2.
+        guest
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+            )?
+            .block_wait()?;
+
+        // Read back the all three blocks.
+        let buffer = Buffer::new(BLOCK_SIZE * 3);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Get the data into a vec we can take slices of.
+        let dl = buffer.as_vec().to_vec();
+
+        // Verify data in the first block is from the second write_unwritten
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+
+        // Verify data in the second block is from the first write_unwritten
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[BLOCK_SIZE..(BLOCK_SIZE * 2)]);
+
+        // Verify data in the third block is from the second write_unwritten
+        assert_eq!(
+            vec![0x99_u8; BLOCK_SIZE],
+            dl[(BLOCK_SIZE * 2)..(BLOCK_SIZE * 2 + BLOCK_SIZE)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs_unwritten_sparse_end(
+    ) -> Result<()> {
+        // Test write_unwritten and read work as expected,
+        // this time with sparse writes where the last block is written
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54028, 54029, 54030, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(1)?;
+        guest.query_work_queue()?;
+
+        // Write_unwritten data in the third block
+        guest
+            .write_unwritten(
+                Block::new(2, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 1]),
+            )?
+            .block_wait()?;
+
+        // Write_unwritten again with different data and writing
+        // to blocks 0, 1, and 2.
+        guest
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+            )?
+            .block_wait()?;
+
+        // Read back the all three blocks.
+        let buffer = Buffer::new(BLOCK_SIZE * 3);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Get the data into a vec we can take slices of.
+        let dl = buffer.as_vec().to_vec();
+
+        // Verify data in the first two blocks is the data from the
+        // second write_unwritten
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], dl[0..BLOCK_SIZE * 2]);
+
+        // Verify data in the third block is from the first write_unwritten
+        assert_eq!(
+            vec![0x55_u8; BLOCK_SIZE],
+            dl[(BLOCK_SIZE * 2)..(BLOCK_SIZE * 2 + BLOCK_SIZE)]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs_unwritten_span() -> Result<()> {
+        // Test write_unwritten and read work as expected,
+        // Have the IO span an extent boundary.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54031, 54032, 54033, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(1)?;
+        guest.query_work_queue()?;
+
+        // Write_unwritten data in last block of the extent
+        guest
+            .write_unwritten(
+                Block::new(4, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        // Write_unwritten again with different data and a larger
+        // write size to include the first block in the 2nd extent.
+        guest
+            .write_unwritten(
+                Block::new(4, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Read back both blocks
+        let buffer = Buffer::new(BLOCK_SIZE * 2);
+        guest
+            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Get the data into a vec we can take slices of.
+        let dl = buffer.as_vec().to_vec();
+
+        // Verify data in the first block is the data from the first write.
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+
+        // Verify data in the second block is from the 2nd write
+        assert_eq!(
+            vec![0x99_u8; BLOCK_SIZE],
+            dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_guest_downstairs_unwritten_span_2() -> Result<()>
+    {
+        // Test write_unwritten and read work as expected,
+        // Have the IO span an extent boundary.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let opts = three_downstairs(54034, 54035, 54036, false).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        tokio::spawn(async move {
+            up_main(opts, gc, None).await.unwrap();
+        });
+
+        guest.activate(1)?;
+        guest.query_work_queue()?;
+
+        // Write_unwritten data in last block of the extent
+        guest
+            .write_unwritten(
+                Block::new(4, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        // Write_unwritten again with different data and a larger
+        // write size to include the first block in the 2nd extent.
+        guest
+            .write_unwritten(
+                Block::new(4, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Read back both blocks
+        let buffer = Buffer::new(BLOCK_SIZE * 2);
+        guest
+            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Get the data into a vec we can take slices of.
+        let dl = buffer.as_vec().to_vec();
+
+        // Verify data in the first block is the data from the first write.
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+
+        // Verify data in the second block is from the 2nd write
+        assert_eq!(
+            vec![0x99_u8; BLOCK_SIZE],
+            dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
+        );
 
         Ok(())
     }

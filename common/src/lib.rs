@@ -27,6 +27,9 @@ pub enum CrucibleError {
     #[error("IO Error: {0}")]
     IoError(String),
 
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
+
     #[error("data store disconnected")]
     Disconnect,
 

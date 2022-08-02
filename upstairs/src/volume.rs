@@ -438,7 +438,7 @@ impl BlockIO for Volume {
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        // In the cast that this volume only has a read only parent, return an
+        // In the case that this volume only has a read only parent, return an
         // error.
         if self.sub_volumes.is_empty() {
             crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
@@ -473,6 +473,14 @@ impl BlockIO for Volume {
         BlockReqWaiter::immediate()
     }
 
+    fn write_unwritten(
+        &self,
+        _offset: Block,
+        _data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        crucible_bail!(Unsupported, "write_unwritten not supported for volumes")
+    }
+
     fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
@@ -482,7 +490,7 @@ impl BlockIO for Volume {
             waiter.block_wait()?;
         }
 
-        // no need to flush read only parent. we assume that read only parents
+        // no need to flush read only parent. We assume that read only parents
         // are already consistent, because we can't write to them (they may be
         // served out of a ZFS snapshot and be read only at the filesystem
         // level)
@@ -633,6 +641,14 @@ impl BlockIO for SubVolume {
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         self.block_io.write(offset, data)
+    }
+
+    fn write_unwritten(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.block_io.write_unwritten(offset, data)
     }
 
     fn flush(

@@ -1361,7 +1361,18 @@ mod test {
     }
 
     #[test]
-    fn work_assert_ok_transfer_of_read_after_downstairs_write_errors() {
+    fn work_transfer_of_read_after_downstairs_write_errors() {
+        work_transfer_of_read_after_downstairs_errors(false);
+    }
+
+    #[test]
+    fn work_ransfer_of_read_after_downstairs_write_unwritten_errors() {
+        work_transfer_of_read_after_downstairs_errors(true);
+    }
+
+    // Instead of copying all the write tests, we put a wrapper around them
+    // that takes write_unwritten as an arg.
+    fn work_transfer_of_read_after_downstairs_errors(is_write_unwritten: bool) {
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut ds = upstairs.downstairs.lock().unwrap();
@@ -1381,6 +1392,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
 
         ds.enqueue(op);
@@ -1788,11 +1800,21 @@ mod test {
     }
 
     #[test]
-    fn work_delay_completion_flush() {
-        // Verify that a write remains on the active queue until a flush
-        // comes through and clears it.  In this case, we only complete
-        // 2/3 for each IO.  We later come back and finish the 3rd IO
-        // and the flush, which then allows the work to be completed.
+    fn work_delay_completion_flush_write() {
+        work_delay_completion_flush(false);
+    }
+
+    #[test]
+    fn work_delay_completion_flush_write_unwritten() {
+        work_delay_completion_flush(true);
+    }
+
+    fn work_delay_completion_flush(is_write_unwritten: bool) {
+        // Verify that a write/write_unwritten remains on the active
+        // queue until a flush comes through and clears it.  In this case,
+        // we only complete 2/3 for each IO.  We later come back and finish
+        // the 3rd IO and the flush, which then allows the work to be
+        // completed.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut ds = upstairs.downstairs.lock().unwrap();
@@ -1812,6 +1834,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -1826,6 +1849,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -1990,8 +2014,17 @@ mod test {
 
     #[test]
     fn work_completed_write_flush() {
-        // Verify that a write remains on the active queue until a flush
-        // comes through and clears it.
+        work_completed_writeio_flush(false);
+    }
+
+    #[test]
+    fn work_completed_write_unwritten_flush() {
+        work_completed_writeio_flush(true);
+    }
+
+    fn work_completed_writeio_flush(is_write_unwritten: bool) {
+        // Verify that a write or write_unwritten remains on the active
+        // queue until a flush comes through and clears it.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut ds = upstairs.downstairs.lock().unwrap();
@@ -2010,6 +2043,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         // Put the write on the queue.
         ds.enqueue(op);
@@ -2117,11 +2151,19 @@ mod test {
     }
 
     #[test]
-    fn work_delay_completion_flush_order() {
-        // Verify that a write remains on the active queue until a flush
-        // comes through and clears it.  In this case, we only complete
-        // 2 of 3 for each IO.  We later come back and finish the 3rd IO
-        // and the flush, which then allows the work to be completed.
+    fn work_delay_completion_flush_order_write() {
+        work_delay_completion_flush_order(false);
+    }
+    #[test]
+    fn work_delay_completion_flush_order_write_unwritten() {
+        work_delay_completion_flush_order(true);
+    }
+
+    fn work_delay_completion_flush_order(is_write_unwritten: bool) {
+        // Verify that a write/write_unwritten remains on the active queue
+        // until a flush comes through and clears it.  In this case, we only
+        // complete 2 of 3 for each IO.  We later come back and finish the
+        // 3rd IO and the flush, which then allows the work to be completed.
         // Also, we mix up which client finishes which job first.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
@@ -2142,6 +2184,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -2156,6 +2199,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -2772,9 +2816,18 @@ mod test {
     }
 
     #[test]
-    fn work_completed_write_ack_ready_replay() {
-        // Verify that a replay when we have two completed writes will
-        // change state from AckReady back to NotAcked.
+    fn work_completed_write_ack_ready_replay_write() {
+        work_completed_write_ack_ready_replay(false);
+    }
+
+    #[test]
+    fn work_completed_write_ack_ready_replay_write_unwritten() {
+        work_completed_write_ack_ready_replay(true);
+    }
+
+    fn work_completed_write_ack_ready_replay(is_write_unwritten: bool) {
+        // Verify that a replay when we have two completed writes or
+        // write_unwritten will change state from AckReady back to NotAcked.
         // If we then redo the work, it should go back to AckReady.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
@@ -2793,6 +2846,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -2859,9 +2913,17 @@ mod test {
     }
 
     #[test]
-    fn work_completed_write_acked_replay() {
-        // Verify that a replay when we have acked a write will not
-        // undo that ack.
+    fn work_completed_write_acked_replay_write() {
+        work_completed_write_acked_replay(false);
+    }
+    #[test]
+    fn work_completed_write_acked_replay_write_unwritten() {
+        work_completed_write_acked_replay(true);
+    }
+
+    fn work_completed_write_acked_replay(is_write_unwritten: bool) {
+        // Verify that a replay when we have acked a write or write_unwritten
+        // will not undo that ack.
         let upstairs = Upstairs::default();
         upstairs.set_active().unwrap();
         let mut ds = upstairs.downstairs.lock().unwrap();
@@ -2879,6 +2941,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -3016,7 +3079,16 @@ mod test {
 
     // Deactivate tests
     #[test]
-    fn deactivate_after_work_completed() {
+    fn deactivate_after_work_completed_write() {
+        deactivate_after_work_completed(false);
+    }
+
+    #[test]
+    fn deactivate_after_work_completed_write_unwritten() {
+        deactivate_after_work_completed(true);
+    }
+
+    fn deactivate_after_work_completed(is_write_unwritten: bool) {
         // Verify that submitted IO will continue after a deactivate.
         // Verify that the flush takes three completions.
         // Verify that deactivate done returns the upstairs to init.
@@ -3042,6 +3114,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
@@ -3194,7 +3267,16 @@ mod test {
     }
 
     #[test]
-    fn deactivate_not_without_flush() {
+    fn deactivate_not_without_flush_write() {
+        deactivate_not_without_flush(false);
+    }
+
+    #[test]
+    fn deactivate_not_without_flush_write_unwritten() {
+        deactivate_not_without_flush(true);
+    }
+
+    fn deactivate_not_without_flush(is_write_unwritten: bool) {
         // Verify that we can't deactivate without a flush as the
         // last job on the list
 
@@ -3219,6 +3301,7 @@ mod test {
                 encryption_context: None,
                 hash: 0,
             }],
+            is_write_unwritten,
         );
         ds.enqueue(op);
 
