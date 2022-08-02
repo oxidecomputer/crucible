@@ -40,7 +40,7 @@ mod test {
             )?;
 
             let downstairs = build_downstairs_for_region(
-                &tempdir.path(),
+                tempdir.path(),
                 false, /* lossy */
                 false, /* return_errors */
                 read_only,

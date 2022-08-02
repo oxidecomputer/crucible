@@ -2397,7 +2397,7 @@ mod test {
         assert_eq!(write_log.get_seed(0), 1);
         assert_eq!(write_log.get_seed(1), 0);
         // Non zero size is not empty
-        assert_eq!(write_log.is_empty(), false);
+        assert!(!write_log.is_empty());
     }
 
     #[test]
@@ -2409,14 +2409,14 @@ mod test {
         write_log.update_wc(0);
         assert_eq!(write_log.get_seed(0), 0);
         // Seed at zero does not mean the counter is zero
-        assert_eq!(write_log.unwritten(0), false);
+        assert!(!write_log.unwritten(0));
     }
 
     #[test]
     fn test_wl_empty() {
         // No size is empty
         let mut write_log = WriteLog::new(0);
-        assert_eq!(write_log.is_empty(), true);
+        assert!(write_log.is_empty());
     }
 
     #[test]
@@ -2461,12 +2461,13 @@ mod test {
         write_log.update_wc(bi); // 3
         write_log.update_wc(bi); // 4
 
-        // 2 is the minimum
-        assert_eq!(write_log.validate_seed_range(bi, 1, false), false);
-        assert_eq!(write_log.validate_seed_range(bi, 2, false), true);
-        assert_eq!(write_log.validate_seed_range(bi, 3, false), true);
-        assert_eq!(write_log.validate_seed_range(bi, 4, false), true);
-        assert_eq!(write_log.validate_seed_range(bi, 5, false), false);
+        // 2 is the minimum, less than should fail
+        assert!(!write_log.validate_seed_range(bi, 1, false));
+        assert!(write_log.validate_seed_range(bi, 2, false));
+        assert!(write_log.validate_seed_range(bi, 3, false));
+        assert!(write_log.validate_seed_range(bi, 4, false));
+        // More than 4 should fail
+        assert!(!write_log.validate_seed_range(bi, 5, false));
     }
 
     #[test]
@@ -2508,7 +2509,7 @@ mod test {
         );
         // The original good is now bad.
         assert_eq!(
-            validate_vec(vec_at_four.clone(), bi, &mut write_log, bs, true),
+            validate_vec(vec_at_four, bi, &mut write_log, bs, true),
             ValidateStatus::Bad
         );
     }
@@ -2525,7 +2526,7 @@ mod test {
         write_log.update_wc(1);
         assert_eq!(write_log.get_seed(1), 4);
         // Once we call this, it becomes the new expected value
-        assert_eq!(write_log.validate_seed_range(1, 3, true), true);
+        assert!(write_log.validate_seed_range(1, 3, true));
         assert_eq!(write_log.get_seed(1), 3);
     }
     #[test]
@@ -2540,7 +2541,7 @@ mod test {
         write_log.update_wc(1);
         assert_eq!(write_log.get_seed(1), 4);
         // Once we call this, it becomes the new expected value
-        assert_eq!(write_log.validate_seed_range(1, 2, true), true);
+        assert!(write_log.validate_seed_range(1, 2, true));
         assert_eq!(write_log.get_seed(1), 2);
     }
     #[test]
@@ -2555,7 +2556,7 @@ mod test {
         write_log.update_wc(1);
         assert_eq!(write_log.get_seed(1), 4);
         // Once we call this, it becomes the new expected value
-        assert_eq!(write_log.validate_seed_range(1, 4, true), true);
+        assert!(write_log.validate_seed_range(1, 4, true));
         // Still the same after the update
         assert_eq!(write_log.get_seed(1), 4);
     }
@@ -2570,12 +2571,12 @@ mod test {
         write_log.update_wc(0); // 0
         write_log.update_wc(0); // 1
         assert_eq!(write_log.get_seed(0), 1);
-        assert_eq!(write_log.validate_seed_range(0, 247, false), false);
-        assert_eq!(write_log.validate_seed_range(0, 248, false), true);
-        assert_eq!(write_log.validate_seed_range(0, 249, false), true);
-        assert_eq!(write_log.validate_seed_range(0, 0, false), true);
-        assert_eq!(write_log.validate_seed_range(0, 1, false), true);
-        assert_eq!(write_log.validate_seed_range(0, 2, false), false);
+        assert!(!write_log.validate_seed_range(0, 247, false));
+        assert!(write_log.validate_seed_range(0, 248, false));
+        assert!(write_log.validate_seed_range(0, 249, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
     }
 
     #[test]
@@ -2590,10 +2591,10 @@ mod test {
     fn test_wl_is_zero() {
         // Write log returns true when unwritten
         let mut write_log = WriteLog::new(10);
-        assert_eq!(write_log.unwritten(0), true);
+        assert!(write_log.unwritten(0));
         // Even after updating a different index
         write_log.update_wc(1);
-        assert_eq!(write_log.unwritten(0), true);
+        assert!(write_log.unwritten(0));
     }
 
     #[test]

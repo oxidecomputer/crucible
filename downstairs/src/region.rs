@@ -234,7 +234,7 @@ impl Inner {
         let tx = self.metadb.transaction()?;
 
         for tuple in encryption_context_params {
-            Self::tx_set_encryption_context(&tx, &tuple)?;
+            Self::tx_set_encryption_context(&tx, tuple)?;
         }
 
         tx.commit()?;
@@ -341,7 +341,7 @@ impl Inner {
     ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
-            .prepare(&"SELECT block, counter FROM encryption_context")?;
+            .prepare("SELECT block, counter FROM encryption_context")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -361,7 +361,7 @@ impl Inner {
     ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
-            .prepare(&"SELECT block, counter FROM integrity_hashes")?;
+            .prepare("SELECT block, counter FROM integrity_hashes")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -2305,7 +2305,7 @@ mod test {
         std::fs::copy(source_path.clone(), dest_path.clone())?;
 
         let rd = replace_dir(&dir, 1);
-        rename(cp.clone(), rd.clone())?;
+        rename(cp, rd.clone())?;
 
         drop(region);
 
@@ -2325,7 +2325,7 @@ mod test {
     #[test]
     fn validate_repair_files_empty() {
         // No repair files is a failure
-        assert_eq!(validate_repair_files(1, &Vec::new()), false);
+        assert!(!validate_repair_files(1, &Vec::new()));
     }
 
     #[test]
@@ -2354,7 +2354,7 @@ mod test {
         // duplicate file names for extent 2
         let good_files: Vec<String> =
             vec!["002".to_string(), "002".to_string()];
-        assert_eq!(validate_repair_files(2, &good_files), false);
+        assert!(!validate_repair_files(2, &good_files));
     }
 
     #[test]
@@ -2366,7 +2366,7 @@ mod test {
             "002.db".to_string(),
             "002.db".to_string(),
         ];
-        assert_eq!(validate_repair_files(2, &good_files), false);
+        assert!(!validate_repair_files(2, &good_files));
     }
 
     #[test]
@@ -2378,7 +2378,7 @@ mod test {
             "001.db-shm".to_string(),
             "001.db-shm".to_string(),
         ];
-        assert_eq!(validate_repair_files(1, &good_files), false);
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[test]
@@ -2391,7 +2391,7 @@ mod test {
             "001.db-wal".to_string(),
         ];
 
-        assert_eq!(validate_repair_files(2, &good_files), false);
+        assert!(!validate_repair_files(2, &good_files));
     }
 
     #[test]
@@ -2404,7 +2404,7 @@ mod test {
             "001.db-shm".to_string(),
             "001.db-wal".to_string(),
         ];
-        assert_eq!(validate_repair_files(1, &good_files), false);
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[test]
@@ -2415,7 +2415,7 @@ mod test {
             "001.db".to_string(),
             "001.db-wal".to_string(),
         ];
-        assert_eq!(validate_repair_files(1, &good_files), false);
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[test]
@@ -2471,7 +2471,7 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn bad_import_region() -> () {
+    fn bad_import_region() {
         let _ = Region::open(
             &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
@@ -2479,7 +2479,6 @@ mod test {
             false,
         )
         .unwrap();
-        ()
     }
 
     #[test]
@@ -2488,8 +2487,8 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        assert_eq!((), ext.check_input(Block::new_512(0), &data).unwrap());
-        assert_eq!((), ext.check_input(Block::new_512(99), &data).unwrap());
+        ext.check_input(Block::new_512(0), &data).unwrap();
+        ext.check_input(Block::new_512(99), &data).unwrap();
     }
 
     #[test]
@@ -2539,7 +2538,7 @@ mod test {
         data.put(&[1; 512 * 100][..]);
 
         let ext = new_extent(0);
-        assert_eq!((), ext.check_input(Block::new_512(1), &data).unwrap());
+        ext.check_input(Block::new_512(1), &data).unwrap();
     }
 
     #[test]
@@ -2651,9 +2650,7 @@ mod test {
         /*
          * Build the Vec for our region dir
          */
-        let pdir = dir.into_path();
-        let mut dvec = Vec::new();
-        dvec.push(pdir);
+        let dvec = vec![dir.into_path()];
 
         /*
          * Dump the region
@@ -2960,8 +2957,7 @@ mod test {
         // use region_write to fill region
 
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3090,7 +3086,7 @@ mod test {
         // We know our EID, so we can shortcut to getting the actual extent.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, true);
+        assert!(dirty);
 
         // Now read back that block, make sure it is updated.
         let responses = region.region_read(
@@ -3211,8 +3207,7 @@ mod test {
         // Verify the dirty bit is now set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, true);
-        drop(dirty);
+        assert!(dirty);
 
         // Flush extent with eid, fn, gen, job_id.
         region.region_flush_extent(eid as usize, 1, 1, 1)?;
@@ -3220,8 +3215,7 @@ mod test {
         // Verify the dirty bit is no longer set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, false);
-        drop(dirty);
+        assert!(!dirty);
 
         // Create a new write IO with different data.
         let data = BytesMut::from(&[1u8; 512][..]);
@@ -3245,7 +3239,7 @@ mod test {
         // Verify the dirty bit is not set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, false);
+        assert!(!dirty);
 
         // Read back our block, make sure it has the first write data
         let responses = region.region_read(
@@ -3283,8 +3277,7 @@ mod test {
         // use region_write to fill region
 
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3391,8 +3384,7 @@ mod test {
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3421,8 +3413,8 @@ mod test {
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
         // for the first block to have that original data.
-        for i in 0..512 {
-            buffer[i] = 9;
+        for a_buf in buffer.iter_mut().take(512) {
+            *a_buf = 9;
         }
 
         // read data into File, compare what was written to buffer
@@ -3506,8 +3498,7 @@ mod test {
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3537,8 +3528,8 @@ mod test {
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
         // for the first block to have that original data.
-        for i in 512..1024 {
-            buffer[i] = 9;
+        for a_buf in buffer.iter_mut().take(1024).skip(512) {
+            *a_buf = 9;
         }
 
         // read data into File, compare what was written to buffer
@@ -3625,8 +3616,7 @@ mod test {
 
         // Now use region_write to fill four blocks
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         println!("buffer size:{}", buffer.len());
         rng.fill_bytes(&mut buffer);
 
@@ -3657,8 +3647,8 @@ mod test {
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our
         // expected buffer for the final block to have that original data.
-        for i in 1536..2048 {
-            buffer[i] = 9;
+        for a_buf in buffer.iter_mut().take(2048).skip(1536) {
+            *a_buf = 9;
         }
 
         // read all using region_read
@@ -3735,8 +3725,7 @@ mod test {
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3768,8 +3757,8 @@ mod test {
         for b in blocks_to_write {
             let b_start = b * 512;
             let b_end = b_start + 512;
-            for i in b_start..b_end {
-                buffer[i] = 9;
+            for a_buf in buffer.iter_mut().take(b_end).skip(b_start) {
+                *a_buf = 9;
             }
         }
 
@@ -3833,7 +3822,7 @@ mod test {
                 // ok
             }
             _ => {
-                assert!(false);
+                panic!("Incorrect error with hash mismatch");
             }
         }
 

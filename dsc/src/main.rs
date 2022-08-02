@@ -1308,7 +1308,7 @@ mod test {
         // Manually create the region directory.  We have to convert the
         // PathBuf back into a string.
         let ds_region_dir = port_to_region(
-            dir.clone().into_os_string().into_string().unwrap(),
+            dir.into_os_string().into_string().unwrap(),
             8810,
         )
         .unwrap();

@@ -2046,7 +2046,7 @@ mod test {
             ds_id,
             DownstairsWork {
                 upstairs_uuid: uuid,
-                ds_id: ds_id,
+                ds_id,
                 work: if is_flush {
                     IOop::Flush {
                         dependencies: deps,
@@ -2074,7 +2074,7 @@ mod test {
             ds_id,
             DownstairsWork {
                 upstairs_uuid: uuid,
-                ds_id: ds_id,
+                ds_id,
                 work: IOop::WriteUnwritten {
                     dependencies: deps,
                     writes: Vec::with_capacity(1),
@@ -2702,7 +2702,7 @@ mod test {
         // create random file
 
         let total_bytes = region.def().total_size();
-        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
         let mut rng = ChaCha20Rng::from_entropy();
@@ -2770,7 +2770,7 @@ mod test {
         // create random file (100 fewer bytes than region size)
 
         let total_bytes = region.def().total_size() - 100;
-        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
         let mut rng = ChaCha20Rng::from_entropy();
@@ -2817,7 +2817,7 @@ mod test {
         let padding_size = actual.len() - total_bytes;
         assert_eq!(padding_size, 100);
 
-        let mut padding = Vec::with_capacity(padding_size);
+        let mut padding = vec![0; padding_size];
         padding.resize(padding_size, 0);
         assert_eq!(actual[total_bytes..], padding);
 
@@ -2852,7 +2852,7 @@ mod test {
         // create random file (100 more bytes than region size)
 
         let total_bytes = region.def().total_size() + 100;
-        let mut random_data = Vec::with_capacity(total_bytes as usize);
+        let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
         let mut rng = ChaCha20Rng::from_entropy();
@@ -2899,7 +2899,7 @@ mod test {
         // the export only exported the extra block, not the extra extent
         let padding_in_extra_block: usize = 512 - 100;
 
-        let mut padding = Vec::with_capacity(padding_in_extra_block);
+        let mut padding = vec![0; padding_in_extra_block];
         padding.resize(padding_in_extra_block, 0);
         assert_eq!(actual[total_bytes..], padding);
 
@@ -2935,8 +2935,8 @@ mod test {
         // create random file
 
         let total_bytes = region.def().total_size();
-        let mut random_data = Vec::with_capacity(total_bytes as usize);
-        random_data.resize(total_bytes as usize, 0);
+        let mut random_data = vec![0u8; total_bytes as usize];
+        random_data.resize(total_bytes as usize, 0u8);
 
         let mut rng = ChaCha20Rng::from_entropy();
         rng.fill_bytes(&mut random_data);
