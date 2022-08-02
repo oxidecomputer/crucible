@@ -454,7 +454,7 @@ mod test {
         // what we expect, and a write and read work as expected
         const BLOCK_SIZE: usize = 512;
 
-        // Spin of three downstairs, build our Crucible struct.
+        // Spin off three downstairs, build our Crucible struct.
         let opts = three_downstairs(54016, 54017, 54018, false).unwrap();
 
         let guest = Arc::new(Guest::new());
