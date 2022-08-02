@@ -99,7 +99,8 @@ curl_flags="-o /dev/null -s "
 dsc_url="http://127.0.0.1:9998/"
 
 echo "Test start/all"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"start/all)
+hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"start/all)
+echo hc is:  "$hc"
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to start all" | tee -a "$fail_log"
     (( res += 1 ))
@@ -129,7 +130,7 @@ for cid in {0..2}; do
 
 	# Next, stop the downstairs.  It should restart with a new pid.
     echo "Stop client id $cid"
-    hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"stop/cid/"$cid")
+    hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"stop/cid/"$cid")
     if [[ "$hc" -ne 204 ]]; then
         echo "Failed to stop cid:$cid http:$hc" | tee -a "$fail_log"
         (( res += 1 ))
@@ -160,14 +161,14 @@ done
 
 sleep 2
 echo "Test disable/all"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"disablerestart/all)
+hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"disablerestart/all)
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to disable restart all" | tee -a "$fail_log"
     (( res += 1 ))
 fi
 
 echo "Test stop/all"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"stop/all)
+hc=$(curl ${curl_flags} -w "%{http_code}\n" -X POST -H "Content-Type: application/json" "${dsc_url}"stop/all)
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to stop all" | tee -a "$fail_log"
     (( res += 1 ))
@@ -199,7 +200,7 @@ for cid in {0..2}; do
 done
 
 echo "Start up ds 1"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"start/cid/1)
+hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"start/cid/1)
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to start cid:1 after stop/all" | tee -a "$fail_log"
     (( res += 1 ))
@@ -230,7 +231,7 @@ while :; do
 done
 
 echo "Stop ds 1, should not restart"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"stop/cid/1)
+hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"stop/cid/1)
 if [[ "$hc" -ne 204 ]]; then
     echo "Failed to stop cid:1 after stop/all then start" | tee -a "$fail_log"
     (( res += 1 ))
@@ -253,7 +254,7 @@ echo "Test invalid cid for pid"
 hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"pid/cid/3)
 if [[ "$hc" -ne 400 ]]; then
     echo ""
-    echo Failed to fail pid request with bad cid >> "$fail_log"
+    echo Failed to fail pid request with bad cid: "$hc" >> "$fail_log"
     (( res += 1 ))
 fi
 
@@ -261,34 +262,62 @@ echo "Test invalid cid for state"
 hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"state/cid/3)
 if [[ "$hc" -ne 400 ]]; then
     echo ""
-    echo Failed to fail state request with bad cid >> "$fail_log"
+    echo Failed to fail state request with bad cid: "$hc" >> "$fail_log"
     (( res += 1 ))
 fi
 
 echo "Test invalid cid for start"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"start/cid/3)
+hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"start/cid/3)
 if [[ "$hc" -ne 400 ]]; then
     echo ""
-    echo Failed to fail start request with bad cid >> "$fail_log"
+    echo Failed to fail start request with bad cid: "$hc" >> "$fail_log"
     (( res += 1 ))
 fi
 
 echo "Test invalid cid for stop"
-hc=$(curl ${curl_flags} -w "%{http_code}\n" "${dsc_url}"stop/cid/3)
+hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"stop/cid/3)
 if [[ "$hc" -ne 400 ]]; then
     echo ""
-    echo Failed to fail stop request with bad cid >> "$fail_log"
+    echo Failed to fail stop request with bad cid: "$hc" >> "$fail_log"
     (( res += 1 ))
+fi
+
+# The final test is to clean it all up!
+echo "Test /shutdown endpoint"
+hc=$(curl ${curl_flags} -w "%{http_code}\n" -X POST -H "Content-Type: application/json" "${dsc_url}"shutdown)
+if [[ "$hc" -ne 204 ]]; then
+    echo "Failed to shutdown, got $hc" | tee -a "$fail_log"
+    (( res += 1 ))
+else
+    retry=0
+    # Loop until we exit, or have exhausted our retry count
+    while :; do
+        if ps -p $dsc_pid > /dev/null; then
+            (( retry += 1 ))
+        else
+            break;
+        fi
+        if [[ $retry -eq 5 ]]; then
+            echo "Failed to shutdown with /shutdown" | tee -a "$fail_log"
+            (( res += 1 ))
+            break;
+        fi
+        sleep 1
+    done
 fi
 
 # Tests are done
 echo ""
-echo "Tests done, cleanup $dsc_pid"
-kill $dsc_pid
-sleep 1
-kill -9 $dsc_pid 2> /dev/null
-echo "Wait on pid $dsc_pid"
-wait $dsc_pid
+echo "Tests done"
+if ps -p $dsc_pid > /dev/null; then
+    echo "Cleanup $dsc_pid"
+    kill $dsc_pid
+    sleep 1
+    kill -9 $dsc_pid 2> /dev/null
+    echo "Wait on pid $dsc_pid"
+    wait $dsc_pid
+fi
+
 if [[ $res != 0 ]]; then
     echo "$res Tests have failed"
     cat "$fail_log"
