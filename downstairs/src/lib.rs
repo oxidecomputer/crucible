@@ -1337,17 +1337,16 @@ impl Downstairs {
     ) -> Result<()> {
         // The Upstairs will send Flushes periodically, even in read only mode
         // we have to accept them. But read-only should never accept writes!
-        if self.read_only
-            && matches!(
-                work,
-                IOop::Write {
-                    dependencies: _,
-                    writes: _
-                }
-            )
-        {
-            eprintln!("read-only but received work {:?}", work);
-            bail!(CrucibleError::ModifyingReadOnlyRegion);
+        if self.read_only {
+            let is_write = match work {
+                IOop::Write { .. } | IOop::WriteUnwritten { .. } => true,
+                IOop::Read { .. } | IOop::Flush { .. } => false,
+            };
+
+            if is_write {
+                eprintln!("read-only but received write {:?}", work);
+                bail!(CrucibleError::ModifyingReadOnlyRegion);
+            }
         }
 
         let dsw = DownstairsWork {
