@@ -2603,8 +2603,8 @@ impl Downstairs {
                 writes: _,
             } => {
                 cdt::gw__write__unwritten__done!(|| (gw_id));
-                // XXX Should the guest see as writes?
-                stats.add_write(io_size as i64);
+                // We don't include WriteUnwritten operation in the
+                // metrics for this guest.
             }
             IOop::Flush {
                 dependencies: _,
@@ -4015,6 +4015,10 @@ impl Upstairs {
      * and build both the upstairs work guest tracking struct as well as the
      * downstairs work struct. Once both are ready, submit them to the
      * required places.
+     *
+     * The is_write_unwritten bool indicates if this write is a regular
+     * write (false) or a write_unwritten write (true) and allows us to
+     * construct the proper IOop to submit to the downstairs.
      */
     #[instrument]
     fn submit_write(
@@ -5771,6 +5775,10 @@ impl BlockOp {
      *   A write of 16k is 1 IOP
      *   A write of 16001b is 2 IOPs
      *   A flush isn't an IOP
+     *
+     * We are not counting WriteUnwritten ops as IO toward the users IO
+     * limits.  Though, if too many volumes are created with scrubbers
+     * running, we may have to revisit that.
      */
     pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
@@ -5778,10 +5786,6 @@ impl BlockOp {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
             BlockOp::Write { offset: _, data } => {
-                Some(ceiling_div!(data.len(), iop_sz))
-            }
-            BlockOp::WriteUnwritten { offset: _, data } => {
-                // XXX maybe don't for the scrubber?
                 Some(ceiling_div!(data.len(), iop_sz))
             }
             _ => None,
@@ -5793,7 +5797,6 @@ impl BlockOp {
             self,
             BlockOp::Read { offset: _, data: _ }
                 | BlockOp::Write { offset: _, data: _ }
-                | BlockOp::WriteUnwritten { offset: _, data: _ }
         )
     }
 
@@ -5802,7 +5805,6 @@ impl BlockOp {
         match self {
             BlockOp::Read { offset: _, data } => Some(data.len()),
             BlockOp::Write { offset: _, data } => Some(data.len()),
-            BlockOp::WriteUnwritten { offset: _, data } => Some(data.len()),
             _ => None,
         }
     }
@@ -7413,6 +7415,10 @@ pub async fn up_main(
 /*
  * Create a write DownstairsIO structure from an EID, and offset, and
  * the data buffer
+ *
+ * The is_write_unwritten bool indicates if this write is a regular
+ * write (false) or a write_unwritten write (true) and allows us to
+ * construct the proper IOop to submit to the downstairs.
  */
 fn create_write_eob(
     ds_id: u64,

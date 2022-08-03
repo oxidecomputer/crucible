@@ -86,7 +86,7 @@ impl BlockIO for InMemoryBlockIO {
         _data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         Err(CrucibleError::Unsupported(
-            "write_unwritten unsupported".to_string(),
+            "write_unwritten unsupported for InMemoryBlockIO".to_string(),
         ))
     }
 

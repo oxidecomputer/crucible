@@ -602,9 +602,8 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn integration_test_guest_downstairs_unwritten_sparse_1(
-    ) -> Result<()> {
-
+    async fn integration_test_guest_downstairs_unwritten_sparse_1() -> Result<()>
+    {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected,
         // this time with sparse writes

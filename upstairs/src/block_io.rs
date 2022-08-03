@@ -95,7 +95,10 @@ impl BlockIO for FileBlockIO {
         _offset: Block,
         _data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        unimplemented!();
+        crucible_bail!(
+            Unsupported,
+            "write_unwritten unsupported for FileBlockIO"
+        )
     }
 
     fn flush(
@@ -238,7 +241,7 @@ impl BlockIO for ReqwestBlockIO {
         _offset: Block,
         _data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        unimplemented!();
+        crucible_bail!(Unsupported, "write unsupported for ReqwestBlockIO")
     }
 
     fn write_unwritten(
@@ -246,7 +249,10 @@ impl BlockIO for ReqwestBlockIO {
         _offset: Block,
         _data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        unimplemented!();
+        crucible_bail!(
+            Unsupported,
+            "write_unwritten unsupported for ReqwestBlockIO"
+        )
     }
 
     fn flush(
