@@ -50,7 +50,7 @@ Test import then export for crucible downstairs.
 
 ## test_perf.sh
 A test that creates three downstairs regions of ~100G each and then runs
-the crucible-client perf test using those regions.
+the crutest perf test using those regions.
 A variety of extent size and extent counts are used (always the same total
 region size of ~100G).
 

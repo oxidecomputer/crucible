@@ -26,7 +26,7 @@ function perf_round() {
     fi
     es=$1
     ec=$2
-    # Args for crucible-client.  Using the default IP:port for dsc
+    # Args for crutest.  Using the default IP:port for dsc
     args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 16000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
@@ -35,8 +35,8 @@ function perf_round() {
     sleep 5
     pfiles $dsc_pid > /dev/null
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
-    echo "$cc" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    "$cc" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
+    echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
+    "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
     pkill -f -U "$(id -u)" crucible-downstairs
@@ -56,12 +56,12 @@ if pgrep -fl -U "$(id -u)" crucible-downstairs; then
     exit 1
 fi
 
-cc="$BINDIR/crucible-client"
+ct="$BINDIR/crutest"
 dsc="$BINDIR/dsc"
 downstairs="$BINDIR/crucible-downstairs"
 outfile="/tmp/perfout.txt"
 
-for bin in $dsc $cc $downstairs; do
+for bin in $dsc $ct $downstairs; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1

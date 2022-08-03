@@ -41,7 +41,7 @@ for (( i = 0; i < 30; i += 10 )); do
 done
 
 # Initial seed for verify file
-if ! cargo run -q -p crucible-client -- fill "${args[@]}" -q \
+if ! cargo run -q -p crutest -- fill "${args[@]}" -q \
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     touch /var/tmp/ds_test/stop
@@ -58,7 +58,7 @@ do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    cargo run -q -p crucible-client -- generic "${args[@]}" \
+    cargo run -q -p crutest -- generic "${args[@]}" \
             -q --verify-out alan \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1

@@ -28,8 +28,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
-cc="$BINDIR/crucible-client"
-for bin in $cds $cc; do
+ct="$BINDIR/crutest"
+for bin in $cds $ct; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
@@ -87,7 +87,7 @@ os_name=$(uname)
 if [[ "$os_name" == 'Darwin' ]]; then
     # stupid macos needs this to avoid popup hell.
     codesign -s - -f "$cds"
-    codesign -s - -f "$cc"
+    codesign -s - -f "$ct"
 fi
 
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
