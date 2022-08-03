@@ -857,24 +857,31 @@ where
                             bail!("expected version 1, got {}", version);
                         }
 
-                        // Reject an Upstairs connection if there is a mismatch
-                        // of expectation
+                        // Reject an Upstairs negotiation if there is a mismatch
+                        // of expectation, and terminate the connection - the
+                        // Upstairs will not be able to successfully negotiate.
                         {
                             let ds = ads.lock().await;
                             if ds.read_only != read_only {
                                 let mut fw = fw.lock().await;
+
                                 fw.send(Message::ReadOnlyMismatch {
                                     expected: ds.read_only,
                                 }).await?;
-                                continue;
+
+                                bail!("closing connection due to read-only \
+                                    mismatch");
                             }
 
                             if ds.encrypted != encrypted {
                                 let mut fw = fw.lock().await;
+
                                 fw.send(Message::EncryptedMismatch {
                                     expected: ds.encrypted,
                                 }).await?;
-                                continue;
+
+                                bail!("closing connection due to encryption \
+                                    mismatch");
                             }
                         }
 
