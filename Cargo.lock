@@ -2761,9 +2761,9 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d064ec92a21deb048c440b6461ccf0d0babdb5f2160ea9dfac451bc7b4b556e2"
+checksum = "1815a84fe3d1c632106199f4ba844c109d783e16682df293044bb994537671d8"
 dependencies = [
  "chrono",
  "crossterm 0.23.2",
@@ -3708,10 +3708,11 @@ checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "tokio"
-version = "1.19.2"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51a52ed6686dd62c320f9b89299e9dfb46f730c7a48e635c19f21d116cb1439"
+checksum = "7a8325f63a7d4774dd041e363b2409ed1c5cbbd0f867795e661df066b2b0a581"
 dependencies = [
+ "autocfg 1.1.0",
  "bytes",
  "libc",
  "memchr",

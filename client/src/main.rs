@@ -466,6 +466,7 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
+        read_only: false,
     };
 
     /*
@@ -527,7 +528,7 @@ fn main() -> Result<()> {
     } else {
         pr = None;
     }
-    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
+    runtime.spawn(up_main(crucible_opts, opt.gen, guest.clone(), pr));
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {

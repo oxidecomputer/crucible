@@ -204,6 +204,7 @@ pub struct CrucibleOpts {
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
+    pub read_only: bool,
 }
 
 impl CrucibleOpts {
@@ -377,7 +378,6 @@ async fn io_send<WT>(
     u: &Arc<Upstairs>,
     fw: &mut FramedWrite<WT, CrucibleEncoder>,
     client_id: u8,
-    lossy: bool,
 ) -> Result<bool>
 where
     WT: tokio::io::AsyncWrite
@@ -426,7 +426,7 @@ where
          * Walk the list of work to do, update its status as in progress
          * and send the details to our downstairs.
          */
-        if lossy && random() && random() {
+        if u.lossy && random() && random() {
             continue;
         }
 
@@ -511,7 +511,6 @@ async fn proc_stream(
     stream: WrappedStream,
     connected: &mut bool,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -520,7 +519,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -528,7 +527,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms).await
         }
     }
 }
@@ -548,7 +547,6 @@ async fn proc<RT, WT>(
     mut fw: FramedWrite<WT, CrucibleEncoder>,
     connected: &mut bool,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -599,6 +597,10 @@ where
     let m = Message::HereIAm {
         version: 1,
         upstairs_id: up.uuid,
+        session_id: up.session_id,
+        gen: up.get_generation(),
+        read_only: up.read_only,
+        encrypted: up.encrypted(),
     };
     fw.send(m).await?;
 
@@ -623,8 +625,8 @@ where
      * negotiated variable on the left:
      *
      *          Upstairs             Downstairs
-     * 0:          HereIAm(v)  --->
-     *                         <---  YesItsMe(v)
+     * 0:        HereIAm(...)  --->
+     *                         <---  YesItsMe(...)
      *
      * At this point, a downstairs will wait for a "PromoteToActive" message
      * to be sent to it.  If this is a new upstairs that has not yet
@@ -722,7 +724,11 @@ where
                     up_coms.client_id
                 );
                 self_promotion = true;
-                fw.send(Message::PromoteToActive { upstairs_id: up.uuid }).await?;
+                fw.send(Message::PromoteToActive {
+                    upstairs_id: up.uuid,
+                    session_id: up.session_id,
+                    gen: up.get_generation(),
+                }).await?;
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -731,6 +737,7 @@ where
 
                 match f.transpose()? {
                     None => {
+                        // Downstairs disconnected
                         println!(
                             "[{}] client hung up",
                             up_coms.client_id
@@ -738,6 +745,22 @@ where
                         return Ok(())
                     }
                     Some(Message::Imok) => {}
+                    Some(Message::ReadOnlyMismatch { expected }) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs read_only is {}, ours is {}!",
+                            expected,
+                            up.read_only,
+                        );
+                    }
+                    Some(Message::EncryptedMismatch { expected }) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs encrypted is {}, ours is {}!",
+                            expected,
+                            up.encrypted(),
+                        );
+                    }
                     Some(Message::YesItsMe { version }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
@@ -773,7 +796,11 @@ where
                                 up_coms.client_id
                             );
                             self_promotion = true;
-                            fw.send(Message::PromoteToActive { upstairs_id: up.uuid }).await?;
+                            fw.send(Message::PromoteToActive {
+                                upstairs_id: up.uuid,
+                                session_id: up.session_id,
+                                gen: up.get_generation(),
+                            }).await?;
                         } else {
                             /*
                              * Transition this Downstairs to WaitActive
@@ -804,20 +831,45 @@ where
                                     up_coms.ds_active_rx.borrow_and_update();
                                 }
                                 self_promotion = true;
-                                fw.send(
-                                    Message::PromoteToActive { upstairs_id: up.uuid }
-                                ).await?;
+                                fw.send(Message::PromoteToActive {
+                                    upstairs_id: up.uuid,
+                                    session_id: up.session_id,
+                                    gen: up.get_generation(),
+                                }).await?;
                             }
                         }
                     }
-                    Some(Message::YouAreNowActive { upstairs_id }) => {
-                        if up.uuid != upstairs_id {
+                    Some(Message::YouAreNowActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    }) => {
+                        let match_uuid = up.uuid == upstairs_id;
+                        let match_session = up.session_id == session_id;
+                        let match_gen = up.get_generation() == gen;
+                        let matches_self = match_uuid && match_session && match_gen;
+
+                        if !matches_self {
                             println!(
-                                "[{}] {} client activate with wrong UUID {}",
-                                up.uuid,
-                                upstairs_id,
-                                up_coms.client_id
+                                "[{}] YouAreNowActive didn't match self! {} {} {}",
+                                up_coms.client_id,
+                                if !match_uuid {
+                                    format!("UUID {:?} != {:?}", up.uuid, upstairs_id)
+                                } else {
+                                    String::new()
+                                },
+                                if !match_session {
+                                    format!("session {:?} != {:?}", up.session_id, session_id)
+                                } else {
+                                    String::new()
+                                },
+                                if !match_gen {
+                                    format!("gen {:?} != {:?}", up.get_generation(), gen)
+                                } else {
+                                    String::new()
+                                },
                             );
+
                             up.ds_transition(up_coms.client_id, DsState::New);
                             up.set_inactive();
                             return Err(CrucibleError::UuidMismatch.into());
@@ -833,33 +885,80 @@ where
                         fw.send(Message::RegionInfoPlease).await?;
 
                     }
-                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
-                        /*
-                         * XXX If we get this response, but the new uuid is
-                         * actually our uuid, do we just ignore it?
-                         */
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id,
+                        new_gen,
+                    }) => {
                         println!(
-                            "[{}] {} downstairs self deactivate: new {:?}",
+                            "[{}] {} saw YouAreNoLongerActive {:?} {:?} {}",
                             up_coms.client_id,
                             up.uuid,
                             new_upstairs_id,
+                            new_session_id,
+                            new_gen,
                         );
+
                         up.ds_transition(up_coms.client_id, DsState::New);
                         up.set_inactive();
+
+                        // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
-                            /*
-                             * Now, this is really going off the rails.  Our
-                             * downstairs thinks we have a different UUID
-                             * and is sending us the UUID of the "new"
-                             * downstairs, but that UUID IS our UUID.  So
-                             * clearly the downstairs is confused.
-                             */
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, {:?}!",
-                                up_coms.client_id, up.uuid, new_upstairs_id,
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
+                            );
+                        } else {
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
-                        return Err(CrucibleError::UuidMismatch.into());
+
                     }
                     Some(Message::RegionInfo { region_def }) => {
                         if negotiated != 2 {
@@ -1050,7 +1149,7 @@ where
      * for a downstairs connection.
      */
     assert_eq!(negotiated, 5);
-    cmd_loop(up, fr, fw, up_coms, lossy).await
+    cmd_loop(up, fr, fw, up_coms).await
 }
 
 /*
@@ -1080,7 +1179,6 @@ async fn cmd_loop<RT, WT>(
     mut fr: FramedRead<RT, crucible_protocol::CrucibleDecoder>,
     mut fw: FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1097,7 +1195,7 @@ where
      */
     let mut more_work = up.ds_is_replay(up_coms.client_id);
     if !more_work {
-        do_reconcile_work(up, &mut fr, &mut fw, up_coms, lossy).await?;
+        do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
     }
 
     /*
@@ -1169,25 +1267,72 @@ where
 
                 match f.transpose()? {
                     None => {
+                        // Downstairs disconnected
                         println!("[{}] None response", up_coms.client_id);
                         return Ok(())
                     },
-                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id: _,
+                        new_gen,
+                    }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
                         up.set_inactive();
-                        if up.uuid != new_upstairs_id {
-                            bail!("[{}] received disconnect from downstairs",
-                                up_coms.client_id
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
                             );
                         } else {
-                            /*
-                             * XXX Is this the correct thing to do here?
-                             * The downstairs is telling us to disconnect
-                             * because it believes it has a new UUID, but
-                             * it does not.
-                             */
-                            bail!("[{}] bad disconnect from downstairs",
-                                up_coms.client_id
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
                     }
@@ -1220,7 +1365,7 @@ where
                  * check.
                  */
                 let more =
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                    io_send(up, &mut fw, up_coms.client_id).await?;
 
                 if more && !more_work {
                     println!("[{}] flow control start ", up_coms.client_id);
@@ -1235,9 +1380,7 @@ where
                     up_coms.client_id
                 );
 
-                let more = io_send(
-                                up, &mut fw, up_coms.client_id, lossy
-                            ).await?;
+                let more = io_send(up, &mut fw, up_coms.client_id).await?;
 
                 if more {
                     more_work = true;
@@ -1264,14 +1407,14 @@ where
                  */
                 fw.send(Message::Ruok).await?;
 
-                if lossy {
+                if up.lossy {
                     /*
                      * When lossy is set, we don't always send work to a
                      * downstairs when we should. This means we need to,
                      * every now and then, signal the downstairs task to
                      * check and see if we skipped some work earlier.
                      */
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                    io_send(up, &mut fw, up_coms.client_id).await?;
                 }
 
                 /*
@@ -1314,7 +1457,6 @@ async fn do_reconcile_work<RT, WT>(
     fr: &mut FramedRead<RT, crucible_protocol::CrucibleDecoder>,
     fw: &mut FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
-    _lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1346,15 +1488,67 @@ where
                         bail!("[{}] None response during repair",
                             up_coms.client_id);
                     },
-                    Some(Message::YouAreNoLongerActive { new_upstairs_id }) => {
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id: _,
+                        new_gen,
+                    }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
-                        if up.uuid != new_upstairs_id {
-                            bail!("[{}] received disconnect from downstairs",
-                                up_coms.client_id
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
                             );
                         } else {
-                            bail!("[{}] bad disconnect from downstairs",
-                                up_coms.client_id
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
                     }
@@ -1379,7 +1573,11 @@ where
                     Some(Message::Imok) => {
                         println!("[{}] Received Imok", up_coms.client_id);
                     }
-                    Some(Message::ExtentError { repair_id, extent_id, error }) => {
+                    Some(Message::ExtentError {
+                        repair_id,
+                        extent_id,
+                        error,
+                    }) => {
                         println!(
                             "[{}] Extent {} error on job {}: {}",
                             up_coms.client_id,
@@ -1530,7 +1728,8 @@ where
                  * notify if all other downstairs are also complete.
                  */
                 if let Some(rep_id) = rep_done {
-                    if up.downstairs.lock().unwrap().rep_done(up_coms.client_id, rep_id) {
+                    if up.downstairs.lock().unwrap()
+                        .rep_done(up_coms.client_id, rep_id) {
                         println!("[{}] self notify as src for {}",
                             up_coms.client_id,
                             rep_id
@@ -1640,7 +1839,6 @@ async fn looper(
     >,
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
-    lossy: bool,
 ) {
     let mut firstgo = true;
     let mut connected = false;
@@ -1726,13 +1924,18 @@ async fn looper(
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
          */
-        if let Err(e) =
-            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
-                .await
+        match proc_stream(&target, up, tcp, &mut connected, &mut up_coms).await
         {
-            eprintln!("ERROR: {}: proc: {:?}", target, e);
-            // XXX proc can return fatal and non-fatal errors, figure out what
-            // to do here
+            Ok(()) => {
+                // XXX figure out what to do here
+            }
+
+            Err(e) => {
+                eprintln!("ERROR: {}: proc: {:?}", target, e);
+
+                // XXX proc can return fatal and non-fatal errors, figure out
+                // what to do here
+            }
         }
 
         /*
@@ -3207,6 +3410,9 @@ pub struct Upstairs {
      */
     uuid: Uuid,
 
+    // A unique session ID
+    session_id: Uuid,
+
     /*
      * Upstairs Generation number.
      * Will always increase each time an Upstairs starts.
@@ -3274,6 +3480,16 @@ pub struct Upstairs {
      * Upstairs stats.
      */
     stats: UpStatOuter,
+
+    /*
+     * Does this Upstairs throw random errors?
+     */
+    lossy: bool,
+
+    /*
+     * Operate in read-only mode
+     */
+    read_only: bool,
 }
 
 impl Upstairs {
@@ -3288,9 +3504,11 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
+            read_only: false,
         };
         Self::new(
             &opts,
+            0,
             RegionDefinition::default(),
             Arc::new(Guest::default()),
         )
@@ -3298,6 +3516,7 @@ impl Upstairs {
 
     pub fn new(
         opt: &CrucibleOpts,
+        gen: u64,
         def: RegionDefinition,
         guest: Arc<Guest>,
     ) -> Arc<Upstairs> {
@@ -3341,7 +3560,8 @@ impl Upstairs {
         Arc::new(Upstairs {
             active: Mutex::new(UpstairsState::default()),
             uuid,
-            generation: Mutex::new(0), // XXX Also get from Nexus?
+            session_id: Uuid::new_v4(),
+            generation: Mutex::new(gen),
             guest,
             downstairs: Mutex::new(Downstairs::new(opt.target.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
@@ -3349,7 +3569,13 @@ impl Upstairs {
             encryption_context,
             need_flush: Mutex::new(false),
             stats,
+            lossy: opt.lossy,
+            read_only: opt.read_only,
         })
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.encryption_context.is_some()
     }
 
     /**
@@ -3800,6 +4026,10 @@ impl Upstairs {
     ) -> Result<(), CrucibleError> {
         if !self.guest_io_ready() {
             crucible_bail!(UpstairsInactive);
+        }
+
+        if self.read_only {
+            crucible_bail!(ModifyingReadOnlyRegion);
         }
 
         /*
@@ -7028,6 +7258,7 @@ async fn up_listen(
  */
 pub async fn up_main(
     opt: CrucibleOpts,
+    gen: u64,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<()> {
@@ -7040,13 +7271,11 @@ pub async fn up_main(
         }
     }
 
-    let lossy = opt.lossy;
-
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, RegionDefinition::default(), guest);
+    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest);
 
     /*
      * Use this channel to receive updates on target status from each task
@@ -7137,7 +7366,7 @@ pub async fn up_main(
             };
             let tls_context = tls_context.clone();
             tokio::spawn(async move {
-                looper(t0, tls_context, &up, up_coms, lossy).await;
+                looper(t0, tls_context, &up, up_coms).await;
             });
             client_id += 1;
 

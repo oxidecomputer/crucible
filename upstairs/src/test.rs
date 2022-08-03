@@ -211,7 +211,7 @@ mod test {
             ..Default::default()
         };
 
-        Upstairs::new(&opts, def, Arc::new(Guest::new()))
+        Upstairs::new(&opts, 0, def, Arc::new(Guest::new()))
     }
 
     /*
