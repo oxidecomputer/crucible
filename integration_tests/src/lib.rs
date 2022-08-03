@@ -536,13 +536,13 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(54019, 54020, 54021, false).unwrap();
+        let opts = three_downstairs(54022, 54023, 54024, false).unwrap();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(1)?;
@@ -611,13 +611,13 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(54022, 54023, 54024, false).unwrap();
+        let opts = three_downstairs(54025, 54026, 54027, false).unwrap();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(1)?;
@@ -670,13 +670,13 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(54025, 54026, 54027, false).unwrap();
+        let opts = three_downstairs(54028, 54029, 54030, false).unwrap();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(1)?;
@@ -730,13 +730,13 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(54028, 54029, 54030, false).unwrap();
+        let opts = three_downstairs(54031, 54032, 54033, false).unwrap();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(1)?;
@@ -788,13 +788,13 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(54031, 54032, 54033, false).unwrap();
+        let opts = three_downstairs(54034, 54035, 54036, false).unwrap();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(1)?;
@@ -846,13 +846,13 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(54034, 54035, 54036, false).unwrap();
+        let opts = three_downstairs(54037, 54038, 54039, false).unwrap();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
         tokio::spawn(async move {
-            up_main(opts, gc, None).await.unwrap();
+            up_main(opts, 0, gc, None).await.unwrap();
         });
 
         guest.activate(1)?;
