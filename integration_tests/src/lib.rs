@@ -494,4 +494,32 @@ mod test {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_upstairs_read_only_rejects_write() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin up three read-only downstairs
+        let opts = three_downstairs(54019, 54020, 54021, true).unwrap();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        // Read-only Upstairs should return errors if writes are attempted.
+        tokio::spawn(async move {
+            up_main(opts, 0, gc, None).await.unwrap();
+        });
+
+        guest.activate(0)?;
+
+        // Expect an error attempting to write.
+        let write_result = guest.write(
+            Block::new(0, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+        )?.block_wait();
+        assert!(write_result.is_err());
+        assert!(matches!(write_result.err().unwrap(), CrucibleError::ModifyingReadOnlyRegion));
+
+        Ok(())
+    }
 }
