@@ -513,12 +513,17 @@ mod test {
         guest.activate(0)?;
 
         // Expect an error attempting to write.
-        let write_result = guest.write(
-            Block::new(0, BLOCK_SIZE.trailing_zeros()),
-            Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-        )?.block_wait();
+        let write_result = guest
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait();
         assert!(write_result.is_err());
-        assert!(matches!(write_result.err().unwrap(), CrucibleError::ModifyingReadOnlyRegion));
+        assert!(matches!(
+            write_result.err().unwrap(),
+            CrucibleError::ModifyingReadOnlyRegion
+        ));
 
         Ok(())
     }
