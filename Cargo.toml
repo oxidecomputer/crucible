@@ -2,10 +2,10 @@
 members = [
     "agent",
     "agent-client",
-    "client",
     "common",
     "control-client",
     "crucadm",
+    "crutest",
     "downstairs",
     "dsc",
     "dsc-client",

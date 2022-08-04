@@ -10,13 +10,13 @@ Create a downstairs like normal, but run with new arguments:
         --cert-pem x509/downstairs0.pem \
         --key-pem x509/downstairs0-key.pem \
         --root-cert-pem x509/ca.pem
-        
+
     cargo run --release -q -p crucible-downstairs -- \
         run -p "44101" -d "disks/d1/" \
         --cert-pem x509/downstairs1.pem \
         --key-pem x509/downstairs1-key.pem \
         --root-cert-pem x509/ca.pem
-        
+
     cargo run --release -q -p crucible-downstairs -- \
         run -p "44102" -d "disks/d2/" \
         --cert-pem x509/downstairs2.pem \
@@ -25,7 +25,7 @@ Create a downstairs like normal, but run with new arguments:
 
 Run the upstairs with similar arguments:
 
-    cargo run --bin=crucible-client -- \
+    cargo run --bin=crutest -- \
         -q \
         -t 127.0.0.1:44100 \
         -t 127.0.0.1:44101 \
