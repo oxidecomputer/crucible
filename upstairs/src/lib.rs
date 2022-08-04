@@ -182,40 +182,6 @@ mod cdt {
     fn gw__flush__done(_: u64) {}
 }
 
-/*
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct CrucibleOpts {
-    pub id: Uuid,
-    pub target: Vec<SocketAddr>,
-    pub lossy: bool,
-    pub flush_timeout: Option<u32>,
-    pub key: Option<String>,
-    pub cert_pem: Option<String>,
-    pub key_pem: Option<String>,
-    pub root_cert_pem: Option<String>,
-    pub control: Option<SocketAddr>,
-    pub read_only: bool,
-}
-
-impl CrucibleOpts {
-    pub fn key_bytes(&self) -> Option<Vec<u8>> {
-        if let Some(key) = &self.key {
-            // For xts, key size must be 32 bytes
-            let decoded_key =
-                base64::decode(key).expect("could not base64 decode key!");
-
-            if decoded_key.len() != 32 {
-                panic!("Key length must be 32 bytes!");
-            }
-
-            Some(decoded_key)
-        } else {
-            None
-        }
-    }
-}
-*/
-
 pub fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
         .checked_add(Duration::from_secs(secs))
