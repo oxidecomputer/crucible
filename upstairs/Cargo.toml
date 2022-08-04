@@ -18,7 +18,7 @@ base64 = "0.13.0"
 bytes = "1"
 chrono = { version = "0.4.19", features = [ "serde" ] }
 crucible-common = { path = "../common" }
-crucible-for-clients = { path = "../crucible-for-clients" }
+crucible-client-types = { path = "../crucible-client-types" }
 crucible-protocol = { path = "../protocol" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 futures = "0.3"

@@ -17,8 +17,8 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
+pub use crucible_client_types::{CrucibleOpts, VolumeConstructionRequest};
 pub use crucible_common::*;
-pub use crucible_for_clients::{CrucibleOpts, VolumeConstructionRequest};
 pub use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};

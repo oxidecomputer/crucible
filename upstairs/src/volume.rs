@@ -3,7 +3,7 @@
 use super::*;
 use oximeter::types::ProducerRegistry;
 
-use crucible_for_clients::VolumeConstructionRequest;
+use crucible_client_types::VolumeConstructionRequest;
 
 use std::ops::Range;
 

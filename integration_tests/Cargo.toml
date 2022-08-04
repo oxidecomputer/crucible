@@ -10,7 +10,7 @@ anyhow = "1"
 bytes = "1"
 crucible = { path = "../upstairs" }
 crucible-downstairs = { path = "../downstairs" }
-crucible-for-clients = { path = "../crucible-for-clients" }
+crucible-client-types = { path = "../crucible-client-types" }
 futures = "0.3"
 futures-core = "0.3"
 httptest = "0.15.4"

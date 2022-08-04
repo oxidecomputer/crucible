@@ -2,7 +2,7 @@
 members = [
     "agent",
     "agent-client",
-    "crucible-for-clients",
+    "crucible-client-types",
     "common",
     "control-client",
     "crucadm",
