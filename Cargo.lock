@@ -532,6 +532,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crucible-common",
+ "crucible-for-clients",
  "crucible-protocol",
  "dropshot",
  "expectorate",
@@ -686,6 +687,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-for-clients"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "schemars",
+ "serde",
+ "serde_json",
+ "uuid 1.0.0",
+]
+
+[[package]]
 name = "crucible-hammer"
 version = "0.1.0"
 dependencies = [
@@ -712,6 +724,7 @@ dependencies = [
  "bytes",
  "crucible",
  "crucible-downstairs",
+ "crucible-for-clients",
  "futures",
  "futures-core",
  "httptest",

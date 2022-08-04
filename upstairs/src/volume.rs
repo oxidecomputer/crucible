@@ -3,6 +3,8 @@
 use super::*;
 use oximeter::types::ProducerRegistry;
 
+use crucible_for_clients::VolumeConstructionRequest;
+
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -646,7 +648,7 @@ impl BlockIO for SubVolume {
         self.block_io.show_work()
     }
 }
-
+/*
 #[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -673,7 +675,7 @@ pub enum VolumeConstructionRequest {
         path: String,
     },
 }
-
+*/
 impl Volume {
     pub fn construct(
         request: VolumeConstructionRequest,

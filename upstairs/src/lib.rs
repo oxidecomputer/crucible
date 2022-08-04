@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 pub use crucible_common::*;
+pub use crucible_for_clients::{CrucibleOpts, VolumeConstructionRequest};
 pub use crucible_protocol::*;
 
 use anyhow::{anyhow, bail, Result};
@@ -45,7 +46,7 @@ mod pseudo_file;
 mod test;
 
 pub mod volume;
-pub use volume::{Volume, VolumeConstructionRequest};
+pub use volume::Volume;
 
 pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
@@ -181,6 +182,7 @@ mod cdt {
     fn gw__flush__done(_: u64) {}
 }
 
+/*
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CrucibleOpts {
     pub id: Uuid,
@@ -212,6 +214,7 @@ impl CrucibleOpts {
         }
     }
 }
+*/
 
 pub fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
