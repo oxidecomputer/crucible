@@ -8,8 +8,8 @@ mod test {
     use anyhow::*;
     use base64::encode;
     use crucible::{Bytes, *};
-    use crucible_downstairs::*;
     use crucible_client_types::VolumeConstructionRequest;
+    use crucible_downstairs::*;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
