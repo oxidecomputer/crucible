@@ -192,6 +192,7 @@ pub struct CrucibleOpts {
     pub key_pem: Option<String>,
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
+    pub read_only: bool,
 }
 
 impl CrucibleOpts {
@@ -354,7 +355,6 @@ async fn io_send<WT>(
     u: &Arc<Upstairs>,
     fw: &mut FramedWrite<WT, CrucibleEncoder>,
     client_id: u8,
-    lossy: bool,
 ) -> Result<bool>
 where
     WT: tokio::io::AsyncWrite
@@ -403,7 +403,7 @@ where
          * Walk the list of work to do, update its status as in progress
          * and send the details to our downstairs.
          */
-        if lossy && random() && random() {
+        if u.lossy && random() && random() {
             continue;
         }
 
@@ -478,7 +478,6 @@ async fn proc_stream(
     stream: WrappedStream,
     connected: &mut bool,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -487,7 +486,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -495,7 +494,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms).await
         }
     }
 }
@@ -515,7 +514,6 @@ async fn proc<RT, WT>(
     mut fw: FramedWrite<WT, CrucibleEncoder>,
     connected: &mut bool,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -568,6 +566,8 @@ where
         upstairs_id: up.uuid,
         session_id: up.session_id,
         gen: up.get_generation(),
+        read_only: up.read_only,
+        encrypted: up.encrypted(),
     };
     fw.send(m).await?;
 
@@ -712,6 +712,22 @@ where
                         return Ok(())
                     }
                     Some(Message::Imok) => {}
+                    Some(Message::ReadOnlyMismatch { expected }) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs read_only is {}, ours is {}!",
+                            expected,
+                            up.read_only,
+                        );
+                    }
+                    Some(Message::EncryptedMismatch { expected }) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs encrypted is {}, ours is {}!",
+                            expected,
+                            up.encrypted(),
+                        );
+                    }
                     Some(Message::YesItsMe { version }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
@@ -1100,7 +1116,7 @@ where
      * for a downstairs connection.
      */
     assert_eq!(negotiated, 5);
-    cmd_loop(up, fr, fw, up_coms, lossy).await
+    cmd_loop(up, fr, fw, up_coms).await
 }
 
 /*
@@ -1130,7 +1146,6 @@ async fn cmd_loop<RT, WT>(
     mut fr: FramedRead<RT, crucible_protocol::CrucibleDecoder>,
     mut fw: FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1147,7 +1162,7 @@ where
      */
     let mut more_work = up.ds_is_replay(up_coms.client_id);
     if !more_work {
-        do_reconcile_work(up, &mut fr, &mut fw, up_coms, lossy).await?;
+        do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
     }
 
     /*
@@ -1317,7 +1332,7 @@ where
                  * check.
                  */
                 let more =
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                    io_send(up, &mut fw, up_coms.client_id).await?;
 
                 if more && !more_work {
                     println!("[{}] flow control start ", up_coms.client_id);
@@ -1332,9 +1347,7 @@ where
                     up_coms.client_id
                 );
 
-                let more = io_send(
-                                up, &mut fw, up_coms.client_id, lossy
-                            ).await?;
+                let more = io_send(up, &mut fw, up_coms.client_id).await?;
 
                 if more {
                     more_work = true;
@@ -1361,14 +1374,14 @@ where
                  */
                 fw.send(Message::Ruok).await?;
 
-                if lossy {
+                if up.lossy {
                     /*
                      * When lossy is set, we don't always send work to a
                      * downstairs when we should. This means we need to,
                      * every now and then, signal the downstairs task to
                      * check and see if we skipped some work earlier.
                      */
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                    io_send(up, &mut fw, up_coms.client_id).await?;
                 }
 
                 /*
@@ -1411,7 +1424,6 @@ async fn do_reconcile_work<RT, WT>(
     fr: &mut FramedRead<RT, crucible_protocol::CrucibleDecoder>,
     fw: &mut FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
-    _lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1794,7 +1806,6 @@ async fn looper(
     >,
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
-    lossy: bool,
 ) {
     let mut firstgo = true;
     let mut connected = false;
@@ -1880,8 +1891,7 @@ async fn looper(
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
          */
-        match proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
-            .await
+        match proc_stream(&target, up, tcp, &mut connected, &mut up_coms).await
         {
             Ok(()) => {
                 // XXX figure out what to do here
@@ -3437,6 +3447,16 @@ pub struct Upstairs {
      * Upstairs stats.
      */
     stats: UpStatOuter,
+
+    /*
+     * Does this Upstairs throw random errors?
+     */
+    lossy: bool,
+
+    /*
+     * Operate in read-only mode
+     */
+    read_only: bool,
 }
 
 impl Upstairs {
@@ -3451,6 +3471,7 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
+            read_only: false,
         };
         Self::new(
             &opts,
@@ -3515,7 +3536,13 @@ impl Upstairs {
             encryption_context,
             need_flush: Mutex::new(false),
             stats,
+            lossy: opt.lossy,
+            read_only: opt.read_only,
         })
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.encryption_context.is_some()
     }
 
     /**
@@ -3965,6 +3992,10 @@ impl Upstairs {
     ) -> Result<(), CrucibleError> {
         if !self.guest_io_ready() {
             crucible_bail!(UpstairsInactive);
+        }
+
+        if self.read_only {
+            crucible_bail!(ModifyingReadOnlyRegion);
         }
 
         /*
@@ -7141,8 +7172,6 @@ pub async fn up_main(
         }
     }
 
-    let lossy = opt.lossy;
-
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
@@ -7238,7 +7267,7 @@ pub async fn up_main(
             };
             let tls_context = tls_context.clone();
             tokio::spawn(async move {
-                looper(t0, tls_context, &up, up_coms, lossy).await;
+                looper(t0, tls_context, &up, up_coms).await;
             });
             client_id += 1;
 

@@ -845,14 +845,46 @@ where
                         upstairs_id,
                         session_id,
                         gen,
+                        read_only,
+                        encrypted,
                     }) => {
                         if negotiated != 0 {
                             bail!("Received connect out of order {}",
                                 negotiated);
                         }
+
                         if version != 1 {
                             bail!("expected version 1, got {}", version);
                         }
+
+                        // Reject an Upstairs negotiation if there is a mismatch
+                        // of expectation, and terminate the connection - the
+                        // Upstairs will not be able to successfully negotiate.
+                        {
+                            let ds = ads.lock().await;
+                            if ds.read_only != read_only {
+                                let mut fw = fw.lock().await;
+
+                                fw.send(Message::ReadOnlyMismatch {
+                                    expected: ds.read_only,
+                                }).await?;
+
+                                bail!("closing connection due to read-only \
+                                    mismatch");
+                            }
+
+                            if ds.encrypted != encrypted {
+                                let mut fw = fw.lock().await;
+
+                                fw.send(Message::EncryptedMismatch {
+                                    expected: ds.encrypted,
+                                }).await?;
+
+                                bail!("closing connection due to encryption \
+                                    mismatch");
+                            }
+                        }
+
                         negotiated = 1;
                         upstairs_connection = Some(UpstairsConnection {
                             upstairs_id,
@@ -1085,11 +1117,11 @@ where
     tokio::pin!(pf_task);
     loop {
         tokio::select! {
-            _ = &mut dw_task => {
-                bail!("do_work_task task has ended");
+            e = &mut dw_task => {
+                bail!("do_work_task task has ended: {:?}", e);
             }
-            _ = &mut pf_task => {
-                bail!("pf task ended");
+            e = &mut pf_task => {
+                bail!("pf task ended: {:?}", e);
             }
             /*
              * If we have set "lossy", then we need to check every now and
@@ -1213,10 +1245,18 @@ pub struct Downstairs {
     active_upstairs:
         Option<(UpstairsConnection, Arc<Sender<UpstairsConnection>>)>,
     dss: DsStatOuter,
+    read_only: bool,
+    encrypted: bool,
 }
 
 impl Downstairs {
-    fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
+    fn new(
+        region: Region,
+        lossy: bool,
+        return_errors: bool,
+        read_only: bool,
+        encrypted: bool,
+    ) -> Self {
         let dss = DsStatOuter {
             ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
                 region.def().uuid(),
@@ -1229,6 +1269,8 @@ impl Downstairs {
             return_errors,
             active_upstairs: None,
             dss,
+            read_only,
+            encrypted,
         }
     }
 
@@ -1300,6 +1342,20 @@ impl Downstairs {
         ds_id: u64,
         work: IOop,
     ) -> Result<()> {
+        // The Upstairs will send Flushes periodically, even in read only mode
+        // we have to accept them. But read-only should never accept writes!
+        if self.read_only {
+            let is_write = match work {
+                IOop::Write { .. } | IOop::WriteUnwritten { .. } => true,
+                IOop::Read { .. } | IOop::Flush { .. } => false,
+            };
+
+            if is_write {
+                eprintln!("read-only but received write {:?}", work);
+                bail!(CrucibleError::ModifyingReadOnlyRegion);
+            }
+        }
+
         let dsw = DownstairsWork {
             upstairs_uuid,
             ds_id,
@@ -1902,10 +1958,14 @@ pub fn build_downstairs_for_region(
         region.def().extent_count(),
     );
 
+    let encrypted = region.encrypted();
+
     Ok(Arc::new(Mutex::new(Downstairs::new(
         region,
         lossy,
         return_errors,
+        read_only,
+        encrypted,
     ))))
 }
 

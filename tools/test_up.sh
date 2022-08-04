@@ -26,9 +26,9 @@ if pgrep -fl crucible-downstairs; then
 fi
 
 cds="$BINDIR/crucible-downstairs"
-cc="$BINDIR/crucible-client"
+ct="$BINDIR/crutest"
 ch="$BINDIR/crucible-hammer"
-for bin in $cds $cc $ch; do
+for bin in $cds $ct $ch; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
@@ -97,12 +97,12 @@ res=0
 test_list="span big dep deactivate balloon"
 for tt in ${test_list}; do
     echo "Running test: $tt"
-    echo "$cc" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt"
-    if ! "$cc" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    echo "$ct" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt"
+    if ! "$ct" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
         (( res += 1 ))
         echo ""
-        echo "Failed crucible-client $tt test"
-        echo "Failed crucible-client $tt test" >> "$fail_log"
+        echo "Failed crutest $tt test"
+        echo "Failed crutest $tt test" >> "$fail_log"
         echo ""
     else
         echo "Completed test: $tt"
@@ -121,8 +121,8 @@ fi
 # We also test the --verify-* args here as well.
 echo "Run repair tests"
 args+=( --verify-out "${testdir}/verify_file" )
-echo "$cc" fill -q "${args[@]}"
-if ! "$cc" fill -q "${args[@]}"; then
+echo "$ct" fill -q "${args[@]}"
+if ! "$ct" fill -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed setup repair test"
@@ -137,8 +137,8 @@ echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
 args+=( --verify-in "${testdir}/verify_file" )
-echo "$cc" repair -q "${args[@]}"
-if ! "$cc" repair -q "${args[@]}"; then
+echo "$ct" repair -q "${args[@]}"
+if ! "$ct" repair -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
@@ -189,8 +189,8 @@ fi
 
 echo ""
 echo ""
-echo "$cc" "$tt" -q "${args[@]}"
-if ! "$cc" verify -q "${args[@]}"; then
+echo "$ct" "$tt" -q "${args[@]}"
+if ! "$ct" verify -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
@@ -212,8 +212,8 @@ echo "$cds" dump "${dump_args[@]}"
 if ! "$cds" dump "${dump_args[@]}"; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump test"
-    echo "Failed crucible-client dump test" >> "$fail_log"
+    echo "Failed crutest dump test"
+    echo "Failed crutest dump test" >> "$fail_log"
     echo ""
 else
     echo "dump test passed"
@@ -223,8 +223,8 @@ echo "$cds" dump "${dump_args[@]}" -e 1
 if ! "$cds" dump "${dump_args[@]}" -e 1; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump extent"
-    echo "Failed crucible-client dump extent" >> "$fail_log"
+    echo "Failed crutest dump extent"
+    echo "Failed crutest dump extent" >> "$fail_log"
 
     echo ""
 else
@@ -235,8 +235,8 @@ echo "$cds" dump "${dump_args[@]}" -b 20
 if ! "$cds" dump "${dump_args[@]}" -b 20 ; then
     (( res += 1 ))
     echo ""
-    echo "Failed crucible-client dump block 20"
-    echo "Failed crucible-client dump block 20" >> "$fail_log"
+    echo "Failed crutest dump block 20"
+    echo "Failed crutest dump block 20" >> "$fail_log"
     echo ""
 else
     echo "dump block test passed"

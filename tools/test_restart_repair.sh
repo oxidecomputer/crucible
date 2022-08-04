@@ -33,9 +33,9 @@ echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
 cds="./target/debug/crucible-downstairs"
-cc="./target/debug/crucible-client"
-if [[ ! -f ${cds} ]] || [[ ! -f ${cc} ]]; then
-    echo "Can't find crucible binary at $cds or $cc"
+ct="./target/debug/crutest"
+if [[ ! -f ${cds} ]] || [[ ! -f ${ct} ]]; then
+    echo "Can't find crucible binary at $cds or $ct"
     exit 1
 fi
 
@@ -62,7 +62,7 @@ os_name=$(uname)
 if [[ "$os_name" == 'Darwin' ]]; then
     # stupid macos needs this to avoid popup hell.
     codesign -s - -f "$cds"
-    codesign -s - -f "$cc"
+    codesign -s - -f "$ct"
 fi
 
 args=()
@@ -74,9 +74,9 @@ done
 
 # Initial seed for verify file
 echo "$(date) fill" >> "$test_log"
-echo "$cc" fill "${args[@]}" \
+echo "$ct" fill "${args[@]}" \
       -q --verify-out alan >> "$test_log"
-"$cc" fill "${args[@]}" \
+"$ct" fill "${args[@]}" \
       -q --verify-out alan >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
@@ -122,7 +122,7 @@ do
     rm /var/tmp/ds_test/pause
 
     echo "$(date) do one IO" >> "$test_log"
-    "$cc" one "${args[@]}" \
+    "$ct" one "${args[@]}" \
             -q --verify-out alan \
             --verify-in alan \
             --verify \

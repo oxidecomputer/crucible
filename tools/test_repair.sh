@@ -28,8 +28,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
-cc="$BINDIR/crucible-client"
-for bin in $cds $cc; do
+ct="$BINDIR/crutest"
+for bin in $cds $ct; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
@@ -87,13 +87,13 @@ os_name=$(uname)
 if [[ "$os_name" == 'Darwin' ]]; then
     # stupid macos needs this to avoid popup hell.
     codesign -s - -f "$cds"
-    codesign -s - -f "$cc"
+    codesign -s - -f "$ct"
 fi
 
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
 
 # Do initial volume population.
-if ! ${cc} fill ${target_args} --verify-out "$verify_file" -q
+if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q
 then
     echo "ERROR: Exit on initial fill"
     cleanup
@@ -126,7 +126,7 @@ for (( i = 0; i < 20; i += 1 )); do
         ds2_pid=$!
     fi
 
-    if ! ${cc} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30
+    if ! ${ct} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30
     then
         echo "Exit on repair fail, loop: $i, choice: $choice"
         cleanup
@@ -167,8 +167,8 @@ for (( i = 0; i < 20; i += 1 )); do
     fi
 
     echo "Verifying data now"
-    echo ${cc} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q > "$test_log"
-    if ! ${cc} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q >> "$test_log"
+    echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q > "$test_log"
+    if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q >> "$test_log"
     then
         echo "Exit on verify fail, loop: $i, choice: $choice"
         echo "Check $test_log for details"

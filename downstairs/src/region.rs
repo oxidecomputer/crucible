@@ -24,6 +24,7 @@ use super::*;
 #[derive(Debug)]
 pub struct Extent {
     number: u32,
+    read_only: bool,
     block_size: u64,
     extent_size: Block,
     /// Inner contains information about the actual extent file that holds
@@ -671,6 +672,7 @@ impl Extent {
 
         Ok(Extent {
             number,
+            read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
             inner: Some(Mutex::new(Inner { file, metadb })),
@@ -815,6 +817,7 @@ impl Extent {
          */
         Ok(Extent {
             number,
+            read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
             inner: Some(Mutex::new(Inner { file, metadb })),
@@ -959,6 +962,10 @@ impl Extent {
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
+        if self.read_only {
+            crucible_bail!(ModifyingReadOnlyRegion);
+        }
+
         let mut inner = self.inner();
 
         for write in writes {
@@ -1075,6 +1082,13 @@ impl Extent {
              * we do not need to update the extent on disk
              */
             return Ok(());
+        }
+
+        // Read only extents should never have the dirty bit set. If they do,
+        // bail
+        if self.read_only {
+            eprintln!("read-only extent {} has dirty bit set!", self.number);
+            crucible_bail!(ModifyingReadOnlyRegion);
         }
 
         /*
@@ -1195,6 +1209,10 @@ impl Region {
         region.open_extents(false)?;
 
         Ok(region)
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.def.get_encrypted()
     }
 
     /**
@@ -1974,6 +1992,7 @@ mod test {
          */
         Extent {
             number,
+            read_only: false,
             block_size: 512,
             extent_size: Block::new_512(100),
             inner: Some(Mutex::new(inn)),
