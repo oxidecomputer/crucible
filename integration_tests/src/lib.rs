@@ -9,7 +9,7 @@ mod test {
     use base64::encode;
     use crucible::{Bytes, *};
     use crucible_downstairs::*;
-    use crucible_for_clients::VolumeConstructionRequest;
+    use crucible_client_types::VolumeConstructionRequest;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
