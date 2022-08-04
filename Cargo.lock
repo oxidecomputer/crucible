@@ -602,40 +602,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crucible-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "bytes",
- "clap 3.2.1",
- "crossterm 0.24.0",
- "crucible",
- "crucible-common",
- "crucible-protocol",
- "csv",
- "dropshot",
- "dsc-client",
- "futures",
- "futures-core",
- "indicatif",
- "omicron-common",
- "oximeter",
- "oximeter-producer",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "reedline",
- "ringbuffer",
- "serde",
- "serde_json",
- "statistical",
- "tokio",
- "tokio-util 0.7.3",
- "toml",
- "uuid 1.0.0",
-]
-
-[[package]]
 name = "crucible-common"
 version = "0.0.0"
 dependencies = [
@@ -806,6 +772,40 @@ dependencies = [
  "num-derive",
  "num-traits",
  "thiserror",
+]
+
+[[package]]
+name = "crutest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bytes",
+ "clap 3.2.1",
+ "crossterm 0.24.0",
+ "crucible",
+ "crucible-common",
+ "crucible-protocol",
+ "csv",
+ "dropshot",
+ "dsc-client",
+ "futures",
+ "futures-core",
+ "indicatif",
+ "omicron-common",
+ "oximeter",
+ "oximeter-producer",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "reedline",
+ "ringbuffer",
+ "serde",
+ "serde_json",
+ "statistical",
+ "tokio",
+ "tokio-util 0.7.3",
+ "toml",
+ "uuid 1.0.0",
 ]
 
 [[package]]

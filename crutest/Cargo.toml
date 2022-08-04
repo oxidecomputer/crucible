@@ -1,5 +1,5 @@
 [package]
-name = "crucible-client"
+name = "crutest"
 version = "0.1.0"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 license = "MPL-2.0"
