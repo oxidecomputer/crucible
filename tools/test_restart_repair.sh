@@ -37,9 +37,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
-cc="$BINDIR/crucible-client"
+ct="./target/debug/crutest"
 dsc="$BINDIR/dsc"
-for bin in $cds $cc $dsc; do
+for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
@@ -63,7 +63,7 @@ os_name=$(uname)
 if [[ "$os_name" == 'Darwin' ]]; then
     # stupid macos needs this to avoid popup hell.
     codesign -s - -f "$cds"
-    codesign -s - -f "$cc"
+    codesign -s - -f "$ct"
 fi
 
 args=()
@@ -75,8 +75,8 @@ done
 
 # Send something to the region so our old region files have data.
 echo "$(date) pre-fill" >> "$test_log"
-echo "$cc" fill "${args[@]}" -q >> "$test_log"
-"$cc" fill "${args[@]}" -q >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" -q >> "$test_log"
+"$ct" fill "${args[@]}" -q >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial pre-fill"
     ctrl_c
@@ -101,8 +101,8 @@ touch /var/tmp/ds_test/up
 rm -f /var/tmp/ds_test/pause
 # Now do Initial seed for verify file
 echo "$(date) fill" >> "$test_log"
-echo "$cc" fill "${args[@]}" -q --verify-out alan >> "$test_log"
-"$cc" fill "${args[@]}" -q --verify-out alan >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" -q --verify-out alan >> "$test_log"
+"$ct" fill "${args[@]}" -q --verify-out alan >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
@@ -147,7 +147,7 @@ do
     rm /var/tmp/ds_test/pause
 
     echo "$(date) do one IO" >> "$test_log"
-    "$cc" one "${args[@]}" \
+    "$ct" one "${args[@]}" \
             -q --verify-out alan \
             --verify-in alan \
             --verify \

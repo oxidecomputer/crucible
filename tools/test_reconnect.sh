@@ -24,9 +24,9 @@ test_log=/tmp/reconnect_test.log
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
-crucible_client="$BINDIR/crucible-client"
-if [[ ! -f "$crucible_client" ]]; then
-    echo "Can't find crucible-client binary at $crucible_client"
+crucible_test="$BINDIR/crutest"
+if [[ ! -f "$crucible_test" ]]; then
+    echo "Can't find crucible-test binary at $crucible_test"
     exit 1
 fi
 
@@ -51,7 +51,7 @@ for (( i = 0; i < 30; i += 10 )); do
 done
 
 # Initial seed for verify file
-if ! "$crucible_client" fill "${args[@]}" -q \
+if ! "$crucible_test" fill "${args[@]}" -q \
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     touch /var/tmp/ds_test/stop
@@ -62,13 +62,13 @@ fi
 rm -f /var/tmp/ds_test/up
 sleep 5
 
-# Now run the quick client test in a loop
+# Now run the quick crucible client test in a loop
 for i in {1..10}
 do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    "$crucible_client" generic "${args[@]}" \
+    "$crucible_test" generic "${args[@]}" \
             -q --verify-out alan \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1

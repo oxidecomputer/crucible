@@ -1,5 +1,5 @@
 [package]
-name = "crucible-client"
+name = "crutest"
 version = "0.1.0"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 license = "MPL-2.0"
@@ -10,7 +10,7 @@ anyhow = "1"
 bincode = "1.3.3"
 bytes = "1"
 clap = { version = "3.2", features = ["derive", "env"] }
-crossterm = { version = "0.23.2" }
+crossterm = { version = "0.24.0" }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
@@ -26,11 +26,11 @@ oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 ringbuffer = "0.8"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
-reedline = "0.8.0"
+reedline = "0.9.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 statistical = "1.0.0"
-tokio = { version = "1.19.2", features = ["full"] }
+tokio = { version = "1.20.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.5"
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }

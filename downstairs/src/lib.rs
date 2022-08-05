@@ -239,7 +239,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, 0)?;
+        region.region_write(&writes, 0, false)?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -284,7 +284,7 @@ async fn _show_work(ds: &Downstairs) {
                     dependencies,
                     requests: _,
                 } => {
-                    dsw_type = "Read ".to_string();
+                    dsw_type = "Read".to_string();
                     dep_list = dependencies.to_vec();
                 }
                 IOop::Write {
@@ -303,9 +303,16 @@ async fn _show_work(ds: &Downstairs) {
                     dsw_type = "Flush".to_string();
                     dep_list = dependencies.to_vec();
                 }
+                IOop::WriteUnwritten {
+                    dependencies,
+                    writes: _,
+                } => {
+                    dsw_type = "WriteU".to_string();
+                    dep_list = dependencies.to_vec();
+                }
             };
             println!(
-                "DSW:[{:04}] {} {:?} deps:{:?}",
+                "DSW:[{:04}] {:>05} {:>05} deps:{:?}",
                 id, dsw_type, dsw.state, dep_list,
             );
         }
@@ -321,15 +328,19 @@ async fn _show_work(ds: &Downstairs) {
 pub mod cdt {
     use crate::Arg;
     fn submit__read__start(_: u64) {}
+    fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
     fn os__read__start(_: u64) {}
+    fn os__writeunwritten__start(_: u64) {}
     fn os__write__start(_: u64) {}
     fn os__flush__start(_: u64) {}
     fn os__read__done(_: u64) {}
+    fn os__writeunwritten__done(_: u64) {}
     fn os__write__done(_: u64) {}
     fn os__flush__done(_: u64) {}
     fn submit__read__done(_: u64) {}
+    fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
 }
@@ -339,7 +350,7 @@ pub mod cdt {
  * response. If the message is an IO, then put the new IO the work hashmap.
  */
 async fn proc_frame<WT>(
-    upstairs_uuid: Uuid,
+    upstairs_connection: UpstairsConnection,
     ad: &mut Arc<Mutex<Downstairs>>,
     m: &Message,
     fw: &mut Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
@@ -348,14 +359,23 @@ async fn proc_frame<WT>(
 where
     WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
 {
+    let upstairs_uuid = upstairs_connection.upstairs_id;
     let new_ds_id = match m {
-        Message::Write(uuid, ds_id, dependencies, writes) => {
-            if upstairs_uuid != *uuid {
+        Message::Write {
+            upstairs_id,
+            job_id,
+            dependencies,
+            writes,
+        } => {
+            if upstairs_uuid != *upstairs_id {
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_uuid,
+                })
+                .await?;
                 return Ok(());
             }
-            cdt::submit__write__start!(|| *ds_id);
+            cdt::submit__write__start!(|| *job_id);
 
             let new_write = IOop::Write {
                 dependencies: dependencies.to_vec(),
@@ -363,23 +383,26 @@ where
             };
 
             let d = ad.lock().await;
-            d.add_work(*uuid, *ds_id, new_write).await?;
-            Some(*ds_id)
+            d.add_work(*upstairs_id, *job_id, new_write).await?;
+            Some(*job_id)
         }
-        Message::Flush(
-            uuid,
-            ds_id,
+        Message::Flush {
+            upstairs_id,
+            job_id,
             dependencies,
             flush_number,
             gen_number,
             snapshot_details,
-        ) => {
-            if upstairs_uuid != *uuid {
+        } => {
+            if upstairs_uuid != *upstairs_id {
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_uuid,
+                })
+                .await?;
                 return Ok(());
             }
-            cdt::submit__flush__start!(|| *ds_id);
+            cdt::submit__flush__start!(|| *job_id);
 
             let new_flush = IOop::Flush {
                 dependencies: dependencies.to_vec(),
@@ -389,90 +412,169 @@ where
             };
 
             let d = ad.lock().await;
-            d.add_work(*uuid, *ds_id, new_flush).await?;
-            Some(*ds_id)
+            d.add_work(*upstairs_id, *job_id, new_flush).await?;
+            Some(*job_id)
         }
-        Message::ReadRequest(uuid, ds_id, dependencies, requests) => {
-            if upstairs_uuid != *uuid {
+        Message::WriteUnwritten {
+            upstairs_id,
+            job_id,
+            dependencies,
+            writes,
+        } => {
+            if upstairs_uuid != *upstairs_id {
                 let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch(upstairs_uuid)).await?;
+                fw.send(Message::UuidMismatch {
+                    expected_id: *upstairs_id,
+                })
+                .await?;
                 return Ok(());
             }
 
-            cdt::submit__read__start!(|| *ds_id);
+            cdt::submit__writeunwritten__start!(|| *job_id);
+            let new_write = IOop::WriteUnwritten {
+                dependencies: dependencies.to_vec(),
+                writes: writes.to_vec(),
+            };
+
+            let d = ad.lock().await;
+            d.add_work(*upstairs_id, *job_id, new_write).await?;
+            Some(*job_id)
+        }
+        Message::ReadRequest {
+            upstairs_id,
+            job_id,
+            dependencies,
+            requests,
+        } => {
+            if upstairs_uuid != *upstairs_id {
+                let mut fw = fw.lock().await;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_uuid,
+                })
+                .await?;
+                return Ok(());
+            }
+
+            cdt::submit__read__start!(|| *job_id);
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
                 requests: requests.to_vec(),
             };
 
             let d = ad.lock().await;
-            d.add_work(*uuid, *ds_id, new_read).await?;
-            Some(*ds_id)
+            d.add_work(*upstairs_id, *job_id, new_read).await?;
+            Some(*job_id)
         }
-        Message::ExtentFlush(rep_id, eid, _cid, flush_number, gen_number) => {
+        Message::ExtentFlush {
+            repair_id,
+            extent_id,
+            client_id: _,
+            flush_number,
+            gen_number,
+        } => {
             println!(
                 "{} Flush extent {} with f:{} g:{}",
-                rep_id, eid, flush_number, gen_number
+                repair_id, extent_id, flush_number, gen_number
             );
             let msg = {
                 let d = ad.lock().await;
                 match d.region.region_flush_extent(
-                    *eid,
+                    *extent_id,
                     *flush_number,
                     *gen_number,
-                    *rep_id,
+                    *repair_id,
                 ) {
-                    Ok(()) => Message::RepairAckId(*rep_id),
-                    Err(e) => Message::ExtentError(*rep_id, *eid, e),
+                    Ok(()) => Message::RepairAckId {
+                        repair_id: *repair_id,
+                    },
+                    Err(e) => Message::ExtentError {
+                        repair_id: *repair_id,
+                        extent_id: *extent_id,
+                        error: e,
+                    },
                 }
             };
             let mut fw = fw.lock().await;
             fw.send(msg).await?;
             return Ok(());
         }
-        Message::ExtentClose(rep_id, eid) => {
-            println!("{} Close extent  {}", rep_id, eid);
+        Message::ExtentClose {
+            repair_id,
+            extent_id,
+        } => {
+            println!("{} Close extent {}", repair_id, extent_id);
             let msg = {
                 let mut d = ad.lock().await;
-                match d.region.extents.get_mut(*eid) {
+                match d.region.extents.get_mut(*extent_id) {
                     Some(ext) => {
                         ext.close()?;
-                        Message::RepairAckId(*rep_id)
+                        Message::RepairAckId {
+                            repair_id: *repair_id,
+                        }
                     }
-                    None => Message::ExtentError(
-                        *rep_id,
-                        *eid,
-                        CrucibleError::InvalidExtent,
-                    ),
+                    None => Message::ExtentError {
+                        repair_id: *repair_id,
+                        extent_id: *extent_id,
+                        error: CrucibleError::InvalidExtent,
+                    },
                 }
             };
             let mut fw = fw.lock().await;
             fw.send(msg).await?;
             return Ok(());
         }
-        Message::ExtentRepair(rep_id, eid, sc, repair_addr, dest) => {
+        Message::ExtentRepair {
+            repair_id,
+            extent_id,
+            source_client_id,
+            source_repair_address,
+            dest_clients,
+        } => {
             println!(
                 "{} Repair extent {} source:[{}] {:?} dest:{:?}",
-                rep_id, eid, sc, repair_addr, dest
+                repair_id,
+                extent_id,
+                source_client_id,
+                source_repair_address,
+                dest_clients
             );
             let msg = {
                 let mut d = ad.lock().await;
-                match d.region.repair_extent(*eid, *repair_addr).await {
-                    Ok(()) => Message::RepairAckId(*rep_id),
-                    Err(e) => Message::ExtentError(*rep_id, *eid, e),
+                match d
+                    .region
+                    .repair_extent(*extent_id, *source_repair_address)
+                    .await
+                {
+                    Ok(()) => Message::RepairAckId {
+                        repair_id: *repair_id,
+                    },
+                    Err(e) => Message::ExtentError {
+                        repair_id: *repair_id,
+                        extent_id: *extent_id,
+                        error: e,
+                    },
                 }
             };
             let mut fw = fw.lock().await;
             fw.send(msg).await?;
             return Ok(());
         }
-        Message::ExtentReopen(rep_id, eid) => {
-            println!("{} Reopen extent {}", rep_id, eid);
+        Message::ExtentReopen {
+            repair_id,
+            extent_id,
+        } => {
+            println!("{} Reopen extent {}", repair_id, extent_id);
             let msg = {
                 let mut d = ad.lock().await;
-                match d.region.reopen_extent(*eid) {
-                    Ok(()) => Message::RepairAckId(*rep_id),
-                    Err(e) => Message::ExtentError(*rep_id, *eid, e),
+                match d.region.reopen_extent(*extent_id) {
+                    Ok(()) => Message::RepairAckId {
+                        repair_id: *repair_id,
+                    },
+                    Err(e) => Message::ExtentError {
+                        repair_id: *repair_id,
+                        extent_id: *extent_id,
+                        error: e,
+                    },
                 }
             };
             let mut fw = fw.lock().await;
@@ -602,6 +704,13 @@ async fn proc_stream(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UpstairsConnection {
+    upstairs_id: Uuid,
+    session_id: Uuid,
+    gen: u64,
+}
+
 /*
  * This function handles the initial negotiation steps between the
  * upstairs and the downstairs.  Either we return error, or we call
@@ -621,10 +730,10 @@ where
         + 'static,
 {
     let mut negotiated = 0;
-    let mut upstairs_uuid = None;
+    let mut upstairs_connection: Option<UpstairsConnection> = None;
 
     let (_another_upstairs_active_tx, mut another_upstairs_active_rx) =
-        channel(1);
+        channel::<UpstairsConnection>(1);
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
     /*
@@ -646,6 +755,7 @@ where
             _ = sleep_until(deadline_secs(50)) => {
                 bail!("did not negotiate a protocol");
             }
+
             /*
              * This Upstairs' thread will receive this signal when another
              * Upstairs promotes itself to active. The only way this path is
@@ -657,37 +767,64 @@ where
              * activated, and then another did (in order to send this thread
              * this signal).
              */
-            _ = another_upstairs_active_rx.recv() => {
-                let upstairs_uuid = upstairs_uuid.unwrap();
-                println!("Another upstairs promoted to active, \
-                    shutting down connection for {:?}", upstairs_uuid);
+            new_upstairs_connection = another_upstairs_active_rx.recv() => {
+                match new_upstairs_connection {
+                    None => {
+                        // There shouldn't be a path through the code where we
+                        // close the channel before sending a message through it
+                        // (see [`promote_to_active`]), though [`clear_active`]
+                        // simply drops the active_upstairs tuple - but the only
+                        // place that calls `clear_active` is below when the
+                        // Upstairs disconnects.
+                        //
+                        // We have to bail here though - the Downstairs can't be
+                        // running without the ability for another Upstairs to
+                        // kick out the previous one during activation.
+                        bail!("another_upstairs_active_rx closed during \
+                            negotiation");
+                    }
 
-                let active_upstairs = {
-                    let ds = ads.lock().await;
-                    ds.active_upstairs().unwrap()
-                };
-                let mut fw = fw.lock().await;
-                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
+                    Some(new_upstairs_connection) => {
+                        // another upstairs negotiated and went active after
+                        // this one did (and before this one completed
+                        // negotiation)
+                        let upstairs_connection = upstairs_connection.unwrap();
+                        println!("Another upstairs {:?} promoted to active, \
+                            shutting down connection for {:?}",
+                            new_upstairs_connection, upstairs_connection);
 
-                return Ok(());
+                        let mut fw = fw.lock().await;
+                        fw.send(Message::YouAreNoLongerActive {
+                            new_upstairs_id:
+                                new_upstairs_connection.upstairs_id,
+                            new_session_id:
+                                new_upstairs_connection.session_id,
+                            new_gen: new_upstairs_connection.gen,
+                        }).await?;
+
+                        return Ok(());
+                    }
+                }
             }
+
             new_read = fr.next() => {
                 /*
                  * Negotiate protocol before we take any IO requests.
                  */
                 match new_read.transpose()? {
                     None => {
+                        // Upstairs disconnected
                         let mut ds = ads.lock().await;
 
-                        if let Some(upstairs_uuid) = upstairs_uuid {
+                        if let Some(upstairs_connection) = upstairs_connection {
                             println!(
                                 "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_uuid, ds.jobs().await,
+                                upstairs_connection, ds.jobs().await,
                             );
 
-                            if ds.is_active(upstairs_uuid) {
+                            if ds.is_active(upstairs_connection.upstairs_id) {
                                 println!("upstairs {:?} was previously \
-                                    active, clearing", upstairs_uuid);
+                                    active, clearing", upstairs_connection);
                                 ds.clear_active().await;
                             }
                         } else {
@@ -703,49 +840,126 @@ where
                         let mut fw = fw.lock().await;
                         fw.send(Message::Imok).await?;
                     }
-                    Some(Message::HereIAm(version, uuid)) => {
+                    Some(Message::HereIAm {
+                        version,
+                        upstairs_id,
+                        session_id,
+                        gen,
+                        read_only,
+                        encrypted,
+                    }) => {
                         if negotiated != 0 {
                             bail!("Received connect out of order {}",
                                 negotiated);
                         }
+
                         if version != 1 {
                             bail!("expected version 1, got {}", version);
                         }
+
+                        // Reject an Upstairs negotiation if there is a mismatch
+                        // of expectation, and terminate the connection - the
+                        // Upstairs will not be able to successfully negotiate.
+                        {
+                            let ds = ads.lock().await;
+                            if ds.read_only != read_only {
+                                let mut fw = fw.lock().await;
+
+                                fw.send(Message::ReadOnlyMismatch {
+                                    expected: ds.read_only,
+                                }).await?;
+
+                                bail!("closing connection due to read-only \
+                                    mismatch");
+                            }
+
+                            if ds.encrypted != encrypted {
+                                let mut fw = fw.lock().await;
+
+                                fw.send(Message::EncryptedMismatch {
+                                    expected: ds.encrypted,
+                                }).await?;
+
+                                bail!("closing connection due to encryption \
+                                    mismatch");
+                            }
+                        }
+
                         negotiated = 1;
-                        upstairs_uuid = Some(uuid);
+                        upstairs_connection = Some(UpstairsConnection {
+                            upstairs_id,
+                            session_id,
+                            gen,
+                        });
                         println!("upstairs {:?} connected",
-                            upstairs_uuid.unwrap());
+                            upstairs_connection.unwrap());
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::YesItsMe(1)).await?;
+                        fw.send(Message::YesItsMe { version: 1 }).await?;
                     }
-                    Some(Message::PromoteToActive(uuid)) => {
+                    Some(Message::PromoteToActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    }) => {
                         if negotiated != 1 {
                             bail!("Received activate out of order {}",
                                 negotiated);
                         }
+
                         // Only allowed to promote or demote self
-                        if upstairs_uuid.unwrap() != uuid {
+                        let mut upstairs_connection =
+                            upstairs_connection.unwrap();
+                        let matches_self =
+                            upstairs_connection.upstairs_id == upstairs_id &&
+                            upstairs_connection.session_id == session_id;
+
+                        if !matches_self {
                             let mut fw = fw.lock().await;
                             fw.send(
-                                Message::UuidMismatch(upstairs_uuid.unwrap())
+                                Message::UuidMismatch {
+                                    expected_id:
+                                        upstairs_connection.upstairs_id,
+                                }
                             ).await?;
+
                             /*
                              * At this point, should we just return error?
                              * XXX
                              */
                         } else {
+                            // matches_self above should include a check for
+                            // gen, but gen number may change between
+                            // negotiation and activation (see `XXX because the
+                            // generation number` upstairs). update generation
+                            // number here.
+                            if upstairs_connection.gen != gen {
+                                println!(
+                                    "warning: generation number at \
+                                    negotiation was {} and {} at activation, \
+                                    updating",
+                                    upstairs_connection.gen,
+                                    gen,
+                                );
+
+                                upstairs_connection.gen = gen;
+                            }
+
                             {
                                 let mut ds = ads.lock().await;
                                 ds.promote_to_active(
-                                    uuid,
+                                    upstairs_connection,
                                     another_upstairs_active_tx.clone()
                                 ).await?;
                             }
                             negotiated = 2;
 
                             let mut fw = fw.lock().await;
-                            fw.send(Message::YouAreNowActive(uuid)).await?;
+                            fw.send(Message::YouAreNowActive {
+                                upstairs_id,
+                                session_id,
+                                gen,
+                            }).await?;
                         }
                     }
                     Some(Message::RegionInfoPlease) => {
@@ -754,15 +968,15 @@ where
                                 negotiated);
                         }
                         negotiated = 3;
-                        let rd = {
+                        let region_def = {
                             let ds = ads.lock().await;
                             ds.region.def()
                         };
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::RegionInfo(rd)).await?;
+                        fw.send(Message::RegionInfo { region_def }).await?;
                     }
-                    Some(Message::LastFlush(last_flush)) => {
+                    Some(Message::LastFlush { last_flush_number }) => {
                         if negotiated != 3 {
                             bail!("Received LastFlush out of order {}",
                                 negotiated);
@@ -771,14 +985,17 @@ where
                         {
                             let ds = ads.lock().await;
                             let mut work = ds.work_lock(
-                                upstairs_uuid.unwrap()
+                                upstairs_connection.unwrap().upstairs_id,
                             ).await?;
-                            work.last_flush = last_flush;
-                            println!("Set last flush {}", last_flush);
+                            work.last_flush = last_flush_number;
+                            println!("Set last flush {}", last_flush_number);
                         }
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::LastFlushAck(last_flush)).await?;
+                        fw.send(Message::LastFlushAck {
+                            last_flush_number
+                        }).await?;
+
                         /*
                          * Once this command is sent, we are ready to exit
                          * the loop and move forward with receiving IOs
@@ -792,16 +1009,16 @@ where
                         negotiated = 4;
                         let ds = ads.lock().await;
                         let flush_numbers = ds.region.flush_numbers()?;
-                        let generation_numbers = ds.region.gen_numbers()?;
+                        let gen_numbers = ds.region.gen_numbers()?;
                         let dirty_bits = ds.region.dirty()?;
                         drop(ds);
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::ExtentVersions(
-                            generation_numbers,
+                        fw.send(Message::ExtentVersions {
+                            gen_numbers,
                             flush_numbers,
                             dirty_bits,
-                        ))
+                        })
                         .await?;
 
                         /*
@@ -818,10 +1035,11 @@ where
     }
 
     println!("Downstairs has completed Negotiation");
-    assert!(upstairs_uuid.is_some());
-    let u_uuid = upstairs_uuid.unwrap();
+    assert!(upstairs_connection.is_some());
+    let upstairs_connection = upstairs_connection.unwrap();
 
-    resp_loop(ads, fr, fw, another_upstairs_active_rx, u_uuid).await
+    resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_connection)
+        .await
 }
 
 /*
@@ -833,8 +1051,8 @@ async fn resp_loop<RT, WT>(
     ads: &mut Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
-    mut another_upstairs_active_rx: mpsc::Receiver<u64>,
-    upstairs_uuid: Uuid,
+    mut another_upstairs_active_rx: mpsc::Receiver<UpstairsConnection>,
+    upstairs_connection: UpstairsConnection,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -880,7 +1098,8 @@ where
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
                 if let Err(e) =
-                    proc_frame(upstairs_uuid, &mut adc, &m, &mut fwc, &tx).await
+                    proc_frame(upstairs_connection, &mut adc, &m, &mut fwc, &tx)
+                        .await
                 {
                     bail!("Proc frame returns error: {}", e);
                 }
@@ -898,11 +1117,11 @@ where
     tokio::pin!(pf_task);
     loop {
         tokio::select! {
-            _ = &mut dw_task => {
-                bail!("do_work_task task has ended");
+            e = &mut dw_task => {
+                bail!("do_work_task task has ended: {:?}", e);
             }
-            _ = &mut pf_task => {
-                bail!("pf task ended");
+            e = &mut pf_task => {
+                bail!("pf task ended: {:?}", e);
             }
             /*
              * If we have set "lossy", then we need to check every now and
@@ -923,6 +1142,7 @@ where
             _ = sleep_until(deadline_secs(50)) => {
                 bail!("inactivity timeout");
             }
+
             /*
              * This Upstairs' thread will receive this signal when another
              * Upstairs promotes itself to active. The only way this path is
@@ -934,33 +1154,58 @@ where
              * activated, and then another did (in order to send this thread
              * this signal).
              */
-            _ = another_upstairs_active_rx.recv() => {
-                println!("Another upstairs promoted to active, \
-                    shutting down connection for {:?}", upstairs_uuid);
+            new_upstairs_connection = another_upstairs_active_rx.recv() => {
+                match new_upstairs_connection {
+                    None => {
+                        // There shouldn't be a path through the code where we
+                        // close the channel before sending a message through it
+                        // (see [`promote_to_active`]), though [`clear_active`]
+                        // simply drops the active_upstairs tuple - but the only
+                        // place that calls `clear_active` is below when the
+                        // Upstairs disconnects.
+                        //
+                        // We have to bail here though - the Downstairs can't be
+                        // running without the ability for another Upstairs to
+                        // kick out the previous one during activation.
+                        bail!("another_upstairs_active_rx closed during \
+                            resp_loop");
+                    }
 
-                let active_upstairs = {
-                    let ds = ads.lock().await;
-                    ds.active_upstairs().unwrap()
-                };
+                    Some(new_upstairs_connection) => {
+                        // another upstairs negotiated and went active after
+                        // this one did
+                        println!("Another upstairs promoted to active, \
+                            shutting down connection for {:?}",
+                            upstairs_connection,
+                        );
 
-                let mut fw = fw.lock().await;
-                fw.send(Message::YouAreNoLongerActive(active_upstairs)).await?;
+                        let mut fw = fw.lock().await;
+                        fw.send(Message::YouAreNoLongerActive {
+                            new_upstairs_id:
+                                new_upstairs_connection.upstairs_id,
+                            new_session_id:
+                                new_upstairs_connection.session_id,
+                            new_gen: new_upstairs_connection.gen,
+                        }).await?;
 
-                return Ok(());
+                        return Ok(());
+                    }
+                }
             }
             new_read = fr.next() => {
                 match new_read {
                     None => {
+                        // Upstairs disconnected
                         let mut ds = ads.lock().await;
 
                         println!(
                             "upstairs {:?} disconnected, {} jobs left",
-                            upstairs_uuid, ds.jobs().await,
+                            upstairs_connection, ds.jobs().await,
                         );
 
-                        if ds.is_active(upstairs_uuid) {
+                        if ds.is_active(upstairs_connection.upstairs_id) {
                             println!("upstairs {:?} was previously \
-                                active, clearing", upstairs_uuid);
+                                active, clearing", upstairs_connection);
                             ds.clear_active().await;
                         }
 
@@ -997,12 +1242,21 @@ pub struct Downstairs {
     work: Mutex<Work>,
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
-    active_upstairs: Option<(Uuid, Arc<Sender<u64>>)>,
+    active_upstairs:
+        Option<(UpstairsConnection, Arc<Sender<UpstairsConnection>>)>,
     dss: DsStatOuter,
+    read_only: bool,
+    encrypted: bool,
 }
 
 impl Downstairs {
-    fn new(region: Region, lossy: bool, return_errors: bool) -> Self {
+    fn new(
+        region: Region,
+        lossy: bool,
+        return_errors: bool,
+        read_only: bool,
+        encrypted: bool,
+    ) -> Self {
         let dss = DsStatOuter {
             ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
                 region.def().uuid(),
@@ -1015,6 +1269,8 @@ impl Downstairs {
             return_errors,
             active_upstairs: None,
             dss,
+            read_only,
+            encrypted,
         }
     }
 
@@ -1054,7 +1310,7 @@ impl Downstairs {
         upstairs_uuid: Uuid,
     ) -> Result<MutexGuard<'_, Work>> {
         if let Some(active_upstairs) = &self.active_upstairs {
-            let active_uuid = active_upstairs.0;
+            let active_uuid = active_upstairs.0.upstairs_id;
             if active_uuid != upstairs_uuid {
                 println!(
                     "{:?} cannot grab lock, {:?} is active!",
@@ -1079,12 +1335,27 @@ impl Downstairs {
         Ok(work.new_work(upstairs_uuid))
     }
 
+    // Add work to the Downstairs
     async fn add_work(
         &self,
         upstairs_uuid: Uuid,
         ds_id: u64,
         work: IOop,
     ) -> Result<()> {
+        // The Upstairs will send Flushes periodically, even in read only mode
+        // we have to accept them. But read-only should never accept writes!
+        if self.read_only {
+            let is_write = match work {
+                IOop::Write { .. } | IOop::WriteUnwritten { .. } => true,
+                IOop::Read { .. } | IOop::Flush { .. } => false,
+            };
+
+            if is_write {
+                eprintln!("read-only but received write {:?}", work);
+                bail!(CrucibleError::ModifyingReadOnlyRegion);
+            }
+        }
+
         let dsw = DownstairsWork {
             upstairs_uuid,
             ds_id,
@@ -1098,6 +1369,7 @@ impl Downstairs {
         Ok(())
     }
 
+    // Downstairs, move a job to in_progress, if we can
     async fn in_progress(&self, ds_id: u64) -> Option<u64> {
         let mut work = self.work.lock().await;
         if let Some((job_id, upstairs_uuid)) = work.in_progress(ds_id) {
@@ -1114,7 +1386,7 @@ impl Downstairs {
         }
     }
 
-    /// Given a job ID, do the work for that IO.
+    // Downstairs, given a job ID, do the work for that IO.
     async fn do_work(&self, job_id: u64) -> Result<Option<Message>> {
         let mut work = self.work.lock().await;
         work.do_work(self, job_id).await
@@ -1132,7 +1404,7 @@ impl Downstairs {
         let mut work = self.work.lock().await;
 
         // Complete the job
-        let is_flush = matches!(m, Message::FlushAck(_, _, _));
+        let is_flush = matches!(m, Message::FlushAck { .. });
 
         // _ can be None if promote_to_active ran and cleared out active.
         let _ = work.active.remove(&ds_id);
@@ -1157,15 +1429,19 @@ impl Downstairs {
         ds_id: u64,
     ) -> Result<()> {
         match m {
-            Message::FlushAck(_, _, _) => {
+            Message::FlushAck { .. } => {
                 cdt::submit__flush__done!(|| ds_id);
                 self.dss.add_flush().await;
             }
-            Message::WriteAck(_, _, _) => {
+            Message::WriteAck { .. } => {
                 cdt::submit__write__done!(|| ds_id);
                 self.dss.add_write().await;
             }
-            Message::ReadResponse(_, _, _) => {
+            Message::WriteUnwrittenAck { .. } => {
+                cdt::submit__writeunwritten__done!(|| ds_id);
+                self.dss.add_write().await;
+            }
+            Message::ReadResponse { .. } => {
                 cdt::submit__read__done!(|| ds_id);
                 self.dss.add_read().await;
             }
@@ -1177,8 +1453,8 @@ impl Downstairs {
 
     async fn promote_to_active(
         &mut self,
-        uuid: Uuid,
-        tx: Arc<Sender<u64>>,
+        upstairs_connection: UpstairsConnection,
+        tx: Arc<Sender<UpstairsConnection>>,
     ) -> Result<()> {
         let mut work = self.work.lock().await;
 
@@ -1188,8 +1464,13 @@ impl Downstairs {
          * active Upstairs isn't adding more work.
          */
         if let Some(old_upstairs) = &self.active_upstairs {
-            println!("Signaling to {:?} thread", old_upstairs.0);
-            match futures::executor::block_on(old_upstairs.1.send(0)) {
+            println!(
+                "Signaling to {:?} thread that {:?} is being promoted",
+                old_upstairs.0, upstairs_connection,
+            );
+            match futures::executor::block_on(
+                old_upstairs.1.send(upstairs_connection),
+            ) {
                 Ok(_) => {}
                 Err(e) => {
                     /*
@@ -1206,7 +1487,7 @@ impl Downstairs {
             }
         }
 
-        self.active_upstairs = Some((uuid, tx));
+        self.active_upstairs = Some((upstairs_connection, tx));
 
         /*
          * Note: in the future, differentiate between new upstairs connecting
@@ -1219,9 +1500,9 @@ impl Downstairs {
          */
         if work.active.keys().len() > 0 {
             println!(
-                "Crucible Downstairs promoting {} to active, \
+                "Crucible Downstairs promoting {:?} to active, \
                 discarding {} jobs",
-                uuid,
+                upstairs_connection,
                 work.active.keys().len()
             );
 
@@ -1242,7 +1523,7 @@ impl Downstairs {
          */
         self.region.reopen_all_extents()?;
 
-        println!("{:?} is now active", uuid);
+        println!("{:?} is now active", upstairs_connection);
 
         Ok(())
     }
@@ -1250,12 +1531,16 @@ impl Downstairs {
     fn is_active(&self, uuid: Uuid) -> bool {
         match self.active_upstairs.as_ref() {
             None => false,
-            Some(tuple) => tuple.0 == uuid,
+            Some((upstairs_connection, _tx)) => {
+                upstairs_connection.upstairs_id == uuid
+            }
         }
     }
 
     fn active_upstairs(&self) -> Option<Uuid> {
-        self.active_upstairs.as_ref().map(|e| e.0)
+        self.active_upstairs
+            .as_ref()
+            .map(|(upstairs_connection, _tx)| upstairs_connection.upstairs_id)
     }
 
     async fn clear_active(&mut self) {
@@ -1328,8 +1613,8 @@ impl Work {
 
     /**
      * If the requested job is still new, and the dependencies are all met,
-     * return the DownstairsWork struct and let the caller take action
-     * with it, leaving the state as InProgress.
+     * return the job ID and the upstairs UUID, moving the state of the
+     * job as InProgress.
      *
      * If this job is not new, then just return none.  This can be okay as
      * we build or work list with the new_work fn above, but we drop and
@@ -1389,6 +1674,10 @@ impl Work {
                                     dependencies: _,
                                     writes: _,
                                 } => "Write",
+                                IOop::WriteUnwritten {
+                                    dependencies: _,
+                                    writes: _,
+                                } => "WriteUnwritten",
                                 IOop::Flush {
                                     dependencies: _,
                                     flush_number: _flush_number,
@@ -1506,11 +1795,37 @@ impl Work {
                     ds.region.region_read(requests, job_id)
                 };
 
-                Ok(Some(Message::ReadResponse(
-                    job.upstairs_uuid,
-                    job.ds_id,
+                Ok(Some(Message::ReadResponse {
+                    upstairs_id: job.upstairs_uuid,
+                    job_id: job.ds_id,
                     responses,
-                )))
+                }))
+            }
+            IOop::WriteUnwritten {
+                dependencies: _dependencies,
+                writes,
+            } => {
+                /*
+                 * Any error from an IO should be intercepted here and passed
+                 * back to the upstairs.
+                 */
+                let result = if ds.return_errors && random() && random() {
+                    println!("returning error on writeunwritten!");
+                    Err(CrucibleError::GenericError("test error".to_string()))
+                } else if !ds.is_active(job.upstairs_uuid) {
+                    println!("Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    // The region_write will handle what happens to each block
+                    // based on if they have data or not.
+                    ds.region.region_write(writes, job_id, true)
+                };
+
+                Ok(Some(Message::WriteUnwrittenAck {
+                    upstairs_id: job.upstairs_uuid,
+                    job_id: job.ds_id,
+                    result,
+                }))
             }
             IOop::Write {
                 dependencies: _dependencies,
@@ -1523,14 +1838,14 @@ impl Work {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    ds.region.region_write(writes, job_id)
+                    ds.region.region_write(writes, job_id, false)
                 };
 
-                Ok(Some(Message::WriteAck(
-                    job.upstairs_uuid,
-                    job.ds_id,
+                Ok(Some(Message::WriteAck {
+                    upstairs_id: job.upstairs_uuid,
+                    job_id: job.ds_id,
                     result,
-                )))
+                }))
             }
             IOop::Flush {
                 dependencies: _dependencies,
@@ -1553,11 +1868,11 @@ impl Work {
                     )
                 };
 
-                Ok(Some(Message::FlushAck(
-                    job.upstairs_uuid,
-                    job.ds_id,
+                Ok(Some(Message::FlushAck {
+                    upstairs_id: job.upstairs_uuid,
+                    job_id: job.ds_id,
                     result,
-                )))
+                }))
             }
         }
     }
@@ -1643,10 +1958,14 @@ pub fn build_downstairs_for_region(
         region.def().extent_count(),
     );
 
+    let encrypted = region.encrypted();
+
     Ok(Arc::new(Mutex::new(Downstairs::new(
         region,
         lossy,
         return_errors,
+        read_only,
+        encrypted,
     ))))
 }
 
@@ -1810,6 +2129,21 @@ mod test {
         );
     }
 
+    fn add_work_rf(work: &mut Work, uuid: Uuid, ds_id: u64, deps: Vec<u64>) {
+        work.add_work(
+            ds_id,
+            DownstairsWork {
+                upstairs_uuid: uuid,
+                ds_id: ds_id,
+                work: IOop::WriteUnwritten {
+                    dependencies: deps,
+                    writes: Vec::with_capacity(1),
+                },
+                state: WorkState::New,
+            },
+        );
+    }
+
     fn complete(work: &mut Work, ds_id: u64) {
         let is_flush = {
             let job = work.active.get(&ds_id).unwrap();
@@ -1884,6 +2218,107 @@ mod test {
         let uuid = Uuid::new_v4();
 
         add_work(&mut work, uuid, 1000, vec![], false);
+
+        assert_eq!(work.new_work(uuid), vec![1000]);
+
+        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        assert_eq!(next_jobs, vec![1000]);
+
+        test_do_work(&mut work, next_jobs);
+
+        assert_eq!(work.completed, vec![1000]);
+
+        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_simple_read() -> Result<()> {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+        let upstairs_uuid = upstairs_connection.upstairs_id;
+
+        // For the other_active_upstairs, unused.
+        let (_tx, mut _rx) = channel(1);
+        let tx = Arc::new(_tx);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection, tx.clone())
+            .await?;
+
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_uuid, 1000, rio).await?;
+
+        let deps = vec![1000];
+        let rio = IOop::Read {
+            dependencies: deps,
+            requests: vec![ReadRequest {
+                eid: 1,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_uuid, 1001, rio).await?;
+
+        _show_work(&ds).await;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_uuid).await.unwrap();
+        println!("Got new work: {:?}", new_work);
+        assert_eq!(new_work.len(), 2);
+
+        for id in new_work.iter() {
+            let ip_id = ds.in_progress(*id).await.unwrap();
+            assert_eq!(ip_id, *id);
+            println!("Do IOop {}", *id);
+            let m = ds.do_work(*id).await?.unwrap();
+            println!("Got m: {:?}", m);
+            ds.complete_work(*id, m).await?;
+        }
+        _show_work(&ds).await;
+        Ok(())
+    }
+
+    #[test]
+    fn jobs_write_unwritten() {
+        // Verify WriteUnwritten jobs move through the queue
+        let mut work = Work::default();
+        let uuid = Uuid::new_v4();
+
+        add_work_rf(&mut work, uuid, 1000, vec![]);
 
         assert_eq!(work.new_work(uuid), vec![1000]);
 

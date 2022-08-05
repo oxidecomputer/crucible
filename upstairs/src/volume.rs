@@ -116,7 +116,7 @@ impl Volume {
         let guest_clone = guest.clone();
         tokio::spawn(async move {
             // XXX result eaten here!
-            let _ = up_main(opts, guest_clone, producer_registry).await;
+            let _ = up_main(opts, gen, guest_clone, producer_registry).await;
         });
 
         guest.activate(gen)?;
@@ -179,7 +179,7 @@ impl Volume {
         let guest_clone = guest.clone();
         tokio::spawn(async move {
             // XXX result eaten here!
-            let _ = up_main(opts, guest_clone, producer_registry).await;
+            let _ = up_main(opts, gen, guest_clone, producer_registry).await;
         });
 
         guest.activate(gen)?;

@@ -211,7 +211,7 @@ mod test {
             ..Default::default()
         };
 
-        Upstairs::new(&opts, def, Arc::new(Guest::new()))
+        Upstairs::new(&opts, 0, def, Arc::new(Guest::new()))
     }
 
     /*
@@ -3477,7 +3477,10 @@ mod test {
             // Put a jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
             // A downstairs is not in Repair state
             ds.ds_state[0] = DsState::Repair;
@@ -3514,7 +3517,10 @@ mod test {
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3564,7 +3570,10 @@ mod test {
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3597,7 +3606,10 @@ mod test {
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3621,7 +3633,10 @@ mod test {
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3642,11 +3657,17 @@ mod test {
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id + 1,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3698,11 +3719,17 @@ mod test {
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id + 1,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3738,7 +3765,10 @@ mod test {
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3776,7 +3806,10 @@ mod test {
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3809,7 +3842,10 @@ mod test {
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentClose(rep_id, 1),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: 1,
+                },
             ));
         }
         // Move that job to next to do.
@@ -3853,12 +3889,18 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 0);
         match rio.op {
-            Message::ExtentFlush(rep_id, ext, source, mf, mg) => {
-                assert_eq!(rep_id, 0);
-                assert_eq!(ext, repair_extent);
-                assert_eq!(source, 0);
-                assert_eq!(mf, max_flush);
-                assert_eq!(mg, max_gen);
+            Message::ExtentFlush {
+                repair_id,
+                extent_id,
+                client_id,
+                flush_number,
+                gen_number,
+            } => {
+                assert_eq!(repair_id, 0);
+                assert_eq!(extent_id, repair_extent);
+                assert_eq!(client_id, 0);
+                assert_eq!(flush_number, max_flush);
+                assert_eq!(gen_number, max_gen);
             }
             m => {
                 panic!("{:?} not ExtentFlush()", m);
@@ -3872,9 +3914,12 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 1);
         match rio.op {
-            Message::ExtentClose(rep_id, ext) => {
-                assert_eq!(rep_id, 1);
-                assert_eq!(ext, repair_extent);
+            Message::ExtentClose {
+                repair_id,
+                extent_id,
+            } => {
+                assert_eq!(repair_id, 1);
+                assert_eq!(extent_id, repair_extent);
             }
             m => {
                 panic!("{:?} not ExtentClose()", m);
@@ -3888,12 +3933,18 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 2);
         match rio.op {
-            Message::ExtentRepair(rep_id, ext, source, repair, dest) => {
-                assert_eq!(rep_id, rio.id);
-                assert_eq!(ext, repair_extent);
-                assert_eq!(source, 0);
-                assert_eq!(repair, r0);
-                assert_eq!(dest, vec![1, 2]);
+            Message::ExtentRepair {
+                repair_id,
+                extent_id,
+                source_client_id,
+                source_repair_address,
+                dest_clients,
+            } => {
+                assert_eq!(repair_id, rio.id);
+                assert_eq!(extent_id, repair_extent);
+                assert_eq!(source_client_id, 0);
+                assert_eq!(source_repair_address, r0);
+                assert_eq!(dest_clients, vec![1, 2]);
             }
             m => {
                 panic!("{:?} not ExtentRepair", m);
@@ -3907,9 +3958,12 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 3);
         match rio.op {
-            Message::ExtentReopen(rep_id, ext) => {
-                assert_eq!(rep_id, 3);
-                assert_eq!(ext, repair_extent);
+            Message::ExtentReopen {
+                repair_id,
+                extent_id,
+            } => {
+                assert_eq!(repair_id, 3);
+                assert_eq!(extent_id, repair_extent);
             }
             m => {
                 panic!("{:?} not ExtentClose()", m);
@@ -3952,12 +4006,18 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 0);
         match rio.op {
-            Message::ExtentFlush(rep_id, ext, source, mf, mg) => {
-                assert_eq!(rep_id, 0);
-                assert_eq!(ext, repair_extent);
-                assert_eq!(source, 2);
-                assert_eq!(mf, max_flush);
-                assert_eq!(mg, max_gen);
+            Message::ExtentFlush {
+                repair_id,
+                extent_id,
+                client_id,
+                flush_number,
+                gen_number,
+            } => {
+                assert_eq!(repair_id, 0);
+                assert_eq!(extent_id, repair_extent);
+                assert_eq!(client_id, 2);
+                assert_eq!(flush_number, max_flush);
+                assert_eq!(gen_number, max_gen);
             }
             m => {
                 panic!("{:?} not ExtentFlush()", m);
@@ -3971,9 +4031,12 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 1);
         match rio.op {
-            Message::ExtentClose(rep_id, ext) => {
-                assert_eq!(rep_id, 1);
-                assert_eq!(ext, repair_extent);
+            Message::ExtentClose {
+                repair_id,
+                extent_id,
+            } => {
+                assert_eq!(repair_id, 1);
+                assert_eq!(extent_id, repair_extent);
             }
             m => {
                 panic!("{:?} not ExtentClose()", m);
@@ -3987,12 +4050,18 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 2);
         match rio.op {
-            Message::ExtentRepair(rep_id, ext, source, repair, dest) => {
-                assert_eq!(rep_id, rio.id);
-                assert_eq!(ext, repair_extent);
-                assert_eq!(source, 2);
-                assert_eq!(repair, r2);
-                assert_eq!(dest, vec![0, 1]);
+            Message::ExtentRepair {
+                repair_id,
+                extent_id,
+                source_client_id,
+                source_repair_address,
+                dest_clients,
+            } => {
+                assert_eq!(repair_id, rio.id);
+                assert_eq!(extent_id, repair_extent);
+                assert_eq!(source_client_id, 2);
+                assert_eq!(source_repair_address, r2);
+                assert_eq!(dest_clients, vec![0, 1]);
             }
             m => {
                 panic!("{:?} not ExtentRepair", m);
@@ -4006,9 +4075,12 @@ mod test {
         let rio = ds.reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, 3);
         match rio.op {
-            Message::ExtentReopen(rep_id, ext) => {
-                assert_eq!(rep_id, 3);
-                assert_eq!(ext, repair_extent);
+            Message::ExtentReopen {
+                repair_id,
+                extent_id,
+            } => {
+                assert_eq!(repair_id, 3);
+                assert_eq!(extent_id, repair_extent);
             }
             m => {
                 panic!("{:?} not ExtentClose()", m);

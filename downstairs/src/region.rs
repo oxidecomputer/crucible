@@ -24,6 +24,7 @@ use super::*;
 #[derive(Debug)]
 pub struct Extent {
     number: u32,
+    read_only: bool,
     block_size: u64,
     extent_size: Block,
     /// Inner contains information about the actual extent file that holds
@@ -671,6 +672,7 @@ impl Extent {
 
         Ok(Extent {
             number,
+            read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
             inner: Some(Mutex::new(Inner { file, metadb })),
@@ -815,6 +817,7 @@ impl Extent {
          */
         Ok(Extent {
             number,
+            read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
             inner: Some(Mutex::new(Inner { file, metadb })),
@@ -957,7 +960,12 @@ impl Extent {
     pub fn write(
         &self,
         writes: &[&crucible_protocol::Write],
+        only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
+        if self.read_only {
+            crucible_bail!(ModifyingReadOnlyRegion);
+        }
+
         let mut inner = self.inner();
 
         for write in writes {
@@ -994,11 +1002,46 @@ impl Extent {
          * 1) set the dirty bit
          * 2) gather and write all encryption contexts + hashes
          * 3) write all extent data
+         *
+         * If "only_write_unwritten" is true, then we only issue a write for
+         * a block if that block has not been written to yet.  Note
+         * that we can have a write that is "sparse" if the range of
+         * blocks it contains has a mix of written an unwritten
+         * blocks.
+         *
+         * We define a block being written to or not has if that block has
+         * a checksum or not.  So it is required that a written block has
+         * a checksum.
          */
+
+        let mut writes_to_skip: Vec<u64> = Vec::new();
+        if only_write_unwritten {
+            for write in writes {
+                if !inner.get_hashes(write.offset.value).unwrap().is_empty() {
+                    writes_to_skip.push(write.offset.value);
+                }
+            }
+        }
+        if only_write_unwritten && writes_to_skip.len() == writes.len() {
+            // For read fill, if the list of blocks to skip is the same
+            // length as the number of blocks in the write list, then we
+            // have no work to do here.
+            return Ok(());
+        }
+
+        // We know we have at least one block to write.
         inner.set_dirty()?;
 
         let tx = inner.metadb_transaction()?;
         for write in writes {
+            // Since we only add to writes_to_skip if only_write_unwritten,
+            // this will be empty if only_write_unwritten is false, so we
+            // don't need to check again here for only_write_unwritten
+            // being true.
+            if writes_to_skip.contains(&write.offset.value) {
+                assert!(only_write_unwritten);
+                continue;
+            }
             if let Some(encryption_context) = &write.encryption_context {
                 Inner::tx_set_encryption_context(
                     &tx,
@@ -1011,6 +1054,10 @@ impl Extent {
         tx.commit()?;
 
         for write in writes {
+            if writes_to_skip.contains(&write.offset.value) {
+                assert!(only_write_unwritten);
+                continue;
+            }
             let byte_offset = write.offset.value * self.block_size;
 
             inner.file.seek(SeekFrom::Start(byte_offset))?;
@@ -1035,6 +1082,13 @@ impl Extent {
              * we do not need to update the extent on disk
              */
             return Ok(());
+        }
+
+        // Read only extents should never have the dirty bit set. If they do,
+        // bail
+        if self.read_only {
+            eprintln!("read-only extent {} has dirty bit set!", self.number);
+            crucible_bail!(ModifyingReadOnlyRegion);
         }
 
         /*
@@ -1155,6 +1209,10 @@ impl Region {
         region.open_extents(false)?;
 
         Ok(region)
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.def.get_encrypted()
     }
 
     /**
@@ -1528,6 +1586,7 @@ impl Region {
         &self,
         writes: &[crucible_protocol::Write],
         job_id: u64,
+        only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
@@ -1552,13 +1611,21 @@ impl Region {
             extent_vec.push(write);
         }
 
-        cdt::os__write__start!(|| job_id);
+        if only_write_unwritten {
+            cdt::os__writeunwritten__start!(|| job_id);
+        } else {
+            cdt::os__write__start!(|| job_id);
+        }
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
-            extent.write(&writes[..])?;
+            extent.write(&writes[..], only_write_unwritten)?;
         }
-        cdt::os__write__done!(|| job_id);
+        if only_write_unwritten {
+            cdt::os__writeunwritten__done!(|| job_id);
+        } else {
+            cdt::os__write__done!(|| job_id);
+        }
 
         Ok(())
     }
@@ -1925,6 +1992,7 @@ mod test {
          */
         Extent {
             number,
+            read_only: false,
             block_size: 512,
             extent_size: Block::new_512(100),
             inner: Some(Mutex::new(inn)),
@@ -2936,7 +3004,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0)?;
+        region.region_write(&writes, 0, false)?;
 
         // read data into File, compare what was written to buffer
 
@@ -3003,7 +3071,752 @@ mod test {
                 hash: 5061083712412462836,
             }];
 
-        region.region_write(&writes, 0)?;
+        region.region_write(&writes, 0, false)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_when_empty() -> Result<()> {
+        // Verify that a read fill does write to a block when there is
+        // no data written yet.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        // Fill a buffer with "9"'s (random)
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 4798852240582462654, // Hash for all 9's
+            }];
+
+        region.region_write(&writes, 0, true)?;
+
+        // Verify the dirty bit is now set.
+        // We know our EID, so we can shortcut to getting the actual extent.
+        let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
+        let dirty = inner.lock().unwrap().dirty().unwrap();
+        assert_eq!(dirty, true);
+
+        // Now read back that block, make sure it is updated.
+        let responses = region.region_read(
+            &[crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            }],
+            0,
+        )?;
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].hashes.len(), 1);
+        assert_eq!(responses[0].data[..], [9u8; 512][..]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_when_written() -> Result<()> {
+        // Verify that a read fill does not write to the block when
+        // there is data written already.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        // Fill a buffer with "9"'s (random)
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 4798852240582462654, // Hash for all 9s
+            }];
+
+        region.region_write(&writes, 0, false)?;
+
+        // Same block, now try to write something else to it.
+        let data = BytesMut::from(&[1u8; 512][..]);
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 5061083712412462836, // hash for all 1s
+            }];
+        // Do the write again, but with only_write_unwritten set now.
+        region.region_write(&writes, 1, true)?;
+
+        // Now read back that block, make sure it has the first write
+        let responses = region.region_read(
+            &[crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            }],
+            2,
+        )?;
+
+        // We should still have one response.
+        assert_eq!(responses.len(), 1);
+        // Hash should be just 1
+        assert_eq!(responses[0].hashes.len(), 1);
+        // Data should match first write
+        assert_eq!(responses[0].data[..], [9u8; 512][..]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_when_written_flush() -> Result<()> {
+        // Verify that a read fill does not write to the block when
+        // there is data written already.  This time run a flush after the
+        // first write.  Verify correct state of dirty bit as well.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 4798852240582462654, // Hash for all 9s
+            }];
+
+        region.region_write(&writes, 0, true)?;
+
+        // Verify the dirty bit is now set.
+        let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
+        let dirty = inner.lock().unwrap().dirty().unwrap();
+        assert_eq!(dirty, true);
+        drop(dirty);
+
+        // Flush extent with eid, fn, gen, job_id.
+        region.region_flush_extent(eid as usize, 1, 1, 1)?;
+
+        // Verify the dirty bit is no longer set.
+        let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
+        let dirty = inner.lock().unwrap().dirty().unwrap();
+        assert_eq!(dirty, false);
+        drop(dirty);
+
+        // Create a new write IO with different data.
+        let data = BytesMut::from(&[1u8; 512][..]);
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 5061083712412462836, // hash for all 1s
+            }];
+
+        // Do the write again, but with only_write_unwritten set now.
+        region.region_write(&writes, 1, true)?;
+
+        // Verify the dirty bit is not set.
+        let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
+        let dirty = inner.lock().unwrap().dirty().unwrap();
+        assert_eq!(dirty, false);
+
+        // Read back our block, make sure it has the first write data
+        let responses = region.region_read(
+            &[crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            }],
+            2,
+        )?;
+
+        // We should still have one response.
+        assert_eq!(responses.len(), 1);
+        // Hash should be just 1
+        assert_eq!(responses[0].hashes.len(), 1);
+        // Data should match first write
+        assert_eq!(responses[0].data[..], [9u8; 512][..]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_big_write() -> Result<()> {
+        // Do a multi block write where all blocks start new (unwritten)
+        // Verify only empty blocks have data.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        let ddef = region.def();
+        let total_size: usize = ddef.total_size() as usize;
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // use region_write to fill region
+
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                encryption_context: None,
+                hash,
+            });
+        }
+
+        region.region_write(&writes, 0, true)?;
+
+        // read data into File, compare what was written to buffer
+        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+
+        for i in 0..ddef.extent_count() {
+            let path = extent_path(&dir, i);
+            let mut data = std::fs::read(path).expect("Unable to read file");
+
+            read_from_files.append(&mut data);
+        }
+
+        assert_eq!(buffer, read_from_files);
+
+        // read all using region_read
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests, 0)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+        }
+
+        assert_eq!(buffer, read_from_region);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_big_write_partial_0() -> Result<()> {
+        // Do a write to block zero, then do a multi block write with
+        // only_write_unwritten set. Verify block zero is the first write, and
+        // the remaining blocks have the contents from the multi block fill.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        let ddef = region.def();
+        let total_size: usize = ddef.total_size() as usize;
+        println!("Total size: {}", total_size);
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 4798852240582462654, // Hash for all 9s
+            }];
+
+        // Now write just one block
+        region.region_write(&writes, 0, false)?;
+
+        // Now use region_write to fill entire region
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                encryption_context: None,
+                hash,
+            });
+        }
+
+        region.region_write(&writes, 0, true)?;
+
+        // Because we set only_write_unwritten, the block we already written
+        // should still have the data from the first write.  Update our buffer
+        // for the first block to have that original data.
+        for i in 0..512 {
+            buffer[i] = 9;
+        }
+
+        // read data into File, compare what was written to buffer
+        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+
+        for i in 0..ddef.extent_count() {
+            let path = extent_path(&dir, i);
+            let mut data = std::fs::read(path).expect("Unable to read file");
+
+            read_from_files.append(&mut data);
+        }
+
+        assert_eq!(buffer, read_from_files);
+
+        // read all using region_read
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests, 0)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+        }
+
+        assert_eq!(buffer, read_from_region);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_big_write_partial_1() -> Result<()> {
+        // Write to the second block, then do a multi block fill.
+        // Verify the second block has the original data we wrote, and all
+        // the other blocks have the data from the multi block fill.
+
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(3)?;
+
+        let ddef = region.def();
+        let total_size: usize = ddef.total_size() as usize;
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+
+        // Construct the write for the second block on the first EID.
+        let eid = 0;
+        let offset = Block::new_512(1);
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 4798852240582462654, // Hash for all 9s
+            }];
+
+        // Now write just to the second block.
+        region.region_write(&writes, 0, false)?;
+
+        // Now use region_write to fill entire region
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                encryption_context: None,
+                hash,
+            });
+        }
+
+        // send write_unwritten command.
+        region.region_write(&writes, 0, true)?;
+
+        // Because we set only_write_unwritten, the block we already written
+        // should still have the data from the first write.  Update our buffer
+        // for the first block to have that original data.
+        for i in 512..1024 {
+            buffer[i] = 9;
+        }
+
+        // read data into File, compare what was written to buffer
+        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+
+        for i in 0..ddef.extent_count() {
+            let path = extent_path(&dir, i);
+            let mut data = std::fs::read(path).expect("Unable to read file");
+
+            read_from_files.append(&mut data);
+        }
+
+        assert_eq!(buffer, read_from_files);
+
+        // read all using region_read
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests, 0)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+        }
+
+        assert_eq!(buffer, read_from_region);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_big_write_partial_final() -> Result<()> {
+        // Do a write to the fourth block, then do a multi block read fill
+        // where the last block of the read fill is what we wrote to in
+        // our first write.
+        // verify the fourth block has the original write, and the first
+        // three blocks have the data from the multi block read fill.
+
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(5)?;
+
+        let ddef = region.def();
+        // A bunch of things expect a 512, so let's make it explicit.
+        assert_eq!(ddef.block_size(), 512);
+        let num_blocks: usize = 4;
+        let total_size: usize = ddef.block_size() as usize * num_blocks;
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+
+        // Construct the write for the second block on the first EID.
+        let eid = 0;
+        let offset = Block::new_512(3);
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: vec![1, 2, 3],
+                        tag: vec![4, 5, 6],
+                    },
+                ),
+                hash: 4798852240582462654, // Hash for all 9s
+            }];
+
+        // Now write just to the second block.
+        region.region_write(&writes, 0, false)?;
+
+        // Now use region_write to fill four blocks
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        println!("buffer size:{}", buffer.len());
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                encryption_context: None,
+                hash,
+            });
+        }
+
+        // send only_write_unwritten command.
+        region.region_write(&writes, 0, true)?;
+
+        // Because we set only_write_unwritten, the block we already written
+        // should still have the data from the first write.  Update our
+        // expected buffer for the final block to have that original data.
+        for i in 1536..2048 {
+            buffer[i] = 9;
+        }
+
+        // read all using region_read
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            println!("Read eid: {}, {} offset: {:?}", eid, i, offset);
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests, 0)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+            println!("Read a region, append");
+        }
+
+        assert_eq!(buffer, read_from_region);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_unwritten_big_write_partial_sparse() -> Result<()> {
+        // Do a multi block write_unwritten where a few different blocks have
+        // data. Verify only unwritten blocks get the data.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(4)?;
+
+        let ddef = region.def();
+        let total_size: usize = ddef.total_size() as usize;
+        println!("Total size: {}", total_size);
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // Fill a buffer with "9"s
+        let blocks_to_write = [1, 3, 7, 8, 11, 12, 13];
+        for b in blocks_to_write {
+            let data = BytesMut::from(&[9u8; 512][..]);
+            let eid: u64 = b as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((b as u64) % ddef.extent_size().value);
+
+            // Write a few different blocks
+            let writes: Vec<crucible_protocol::Write> =
+                vec![crucible_protocol::Write {
+                    eid,
+                    offset,
+                    data: data.freeze(),
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                }];
+
+            // Now write just one block
+            region.region_write(&writes, 0, false)?;
+        }
+
+        // Now use region_write to fill entire region
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
+        buffer.resize(total_size, 0u8);
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                encryption_context: None,
+                hash,
+            });
+        }
+
+        region.region_write(&writes, 0, true)?;
+
+        // Because we did write_unwritten, the block we already written should
+        // still have the data from the first write.  Update our buffer
+        // for these blocks to have that original data.
+        for b in blocks_to_write {
+            let b_start = b * 512;
+            let b_end = b_start + 512;
+            for i in b_start..b_end {
+                buffer[i] = 9;
+            }
+        }
+
+        // read all using region_read
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest {
+                eid,
+                offset,
+                num_blocks: 1,
+            });
+        }
+
+        let responses = region.region_read(&requests, 0)?;
+
+        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
+
+        for response in &responses {
+            read_from_region.append(&mut response.data.to_vec());
+        }
+
+        assert_eq!(buffer, read_from_region);
 
         Ok(())
     }
@@ -3030,7 +3843,7 @@ mod test {
                 hash: 2398419238764,
             }];
 
-        let result = region.region_write(&writes, 0);
+        let result = region.region_write(&writes, 0, false);
 
         assert!(result.is_err());
 

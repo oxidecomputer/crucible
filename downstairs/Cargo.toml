@@ -37,7 +37,7 @@ sha2 = "0.10"
 slog = { version = "2.7" }
 slog-term = { version = "2.9" }
 slog-async = { version = "2.7" }
-tokio = { version = "1.19.2", features = ["full"] }
+tokio = { version = "1.20.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 tokio-rustls = { version = "0.23.4" }
 tracing = "0.1"
