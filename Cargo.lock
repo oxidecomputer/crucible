@@ -531,6 +531,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "crucible-client-types",
  "crucible-common",
  "crucible-protocol",
  "dropshot",
@@ -599,6 +600,17 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "crucible-client-types"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "schemars",
+ "serde",
+ "serde_json",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -711,6 +723,7 @@ dependencies = [
  "base64",
  "bytes",
  "crucible",
+ "crucible-client-types",
  "crucible-downstairs",
  "futures",
  "futures-core",
