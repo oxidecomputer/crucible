@@ -84,6 +84,12 @@ pub trait BlockIO {
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError>;
 
+    fn write_unwritten(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError>;
+
     fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
@@ -163,21 +169,27 @@ mod cdt {
     fn up__status(_: String, arg: Arg) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
+    fn gw__write__unwritten__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
+    fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
     fn ds__read__io__start(_: u64, _: u64) {}
     fn ds__write__io__start(_: u64, _: u64) {}
+    fn ds__write__unwritten__io__start(_: u64, _: u64) {}
     fn ds__flush__io__start(_: u64, _: u64) {}
     fn ds__read__io__done(_: u64, _: u64) {}
     fn ds__write__io__done(_: u64, _: u64) {}
+    fn ds__write__unwritten__io__done(_: u64, _: u64) {}
     fn ds__flush__io__done(_: u64, _: u64) {}
     fn up__to__ds__read__done(_: u64) {}
     fn up__to__ds__write__done(_: u64) {}
+    fn up__to__ds__write__unwritten__done(_: u64) {}
     fn up__to__ds__flush__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
+    fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
 }
 
@@ -233,6 +245,17 @@ async fn process_message(
             result,
         } => {
             cdt::ds__write__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
+        }
+        Message::WriteUnwrittenAck {
+            upstairs_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__write__unwritten__io__done!(|| (
+                job_id,
+                up_coms.client_id as u64
+            ));
             (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
         }
         Message::FlushAck {
@@ -432,10 +455,20 @@ where
                 .await?
             }
             IOop::WriteUnwritten {
-                dependencies: _,
-                writes: _,
+                dependencies,
+                writes,
             } => {
-                panic!("WriteUnwritten not supported");
+                cdt::ds__write__unwritten__io__start!(|| (
+                    *new_id,
+                    client_id as u64
+                ));
+                fw.send(Message::WriteUnwritten {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                    writes: writes.clone(),
+                })
+                .await?
             }
             IOop::Flush {
                 dependencies,
@@ -2569,7 +2602,9 @@ impl Downstairs {
                 dependencies: _,
                 writes: _,
             } => {
-                panic!("WriteUnwritten not supported");
+                cdt::gw__write__unwritten__done!(|| (gw_id));
+                // We don't include WriteUnwritten operation in the
+                // metrics for this guest.
             }
             IOop::Flush {
                 dependencies: _,
@@ -2879,6 +2914,10 @@ impl Downstairs {
                             dependencies: _,
                             writes: _,
                         }
+                        | IOop::WriteUnwritten {
+                            dependencies: _,
+                            writes: _,
+                        }
                         | IOop::Flush {
                             dependencies: _,
                             flush_number: _,
@@ -2893,12 +2932,6 @@ impl Downstairs {
 
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
-                        }
-                        IOop::WriteUnwritten {
-                            dependencies: _,
-                            writes: _,
-                        } => {
-                            panic!("WriteUnwritten not supported");
                         }
                         IOop::Read {
                             dependencies: _,
@@ -3051,7 +3084,13 @@ impl Downstairs {
                     writes: _,
                 } => {
                     assert!(read_data.is_empty());
-                    panic!("WriteUnwritten not supported");
+                    if jobs_completed_ok == 2 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__write__unwritten__done!(
+                            || job.guest_id
+                        );
+                    }
                 }
                 IOop::Flush {
                     dependencies: _dependencies,
@@ -3186,12 +3225,6 @@ impl Downstairs {
                 dependencies: _dependencies,
                 requests: _,
             } => Ok(true),
-            IOop::WriteUnwritten {
-                dependencies: _,
-                writes: _,
-            } => {
-                panic!("WriteUnwritten not supported");
-            }
             _ => Ok(false),
         }
     }
@@ -3982,6 +4015,10 @@ impl Upstairs {
      * and build both the upstairs work guest tracking struct as well as the
      * downstairs work struct. Once both are ready, submit them to the
      * required places.
+     *
+     * The is_write_unwritten bool indicates if this write is a regular
+     * write (false) or a write_unwritten write (true) and allows us to
+     * construct the proper IOop to submit to the downstairs.
      */
     #[instrument]
     fn submit_write(
@@ -3989,6 +4026,7 @@ impl Upstairs {
         offset: Block,
         data: Bytes,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
+        is_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if !self.guest_io_ready() {
             crucible_bail!(UpstairsInactive);
@@ -4024,7 +4062,11 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
-        cdt::gw__write__start!(|| (gw_id));
+        if is_write_unwritten {
+            cdt::gw__write__unwritten__start!(|| (gw_id));
+        } else {
+            cdt::gw__write__start!(|| (gw_id));
+        }
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -4082,7 +4124,13 @@ impl Upstairs {
             cur_offset += byte_len;
         }
 
-        let wr = create_write_eob(next_id, dep.clone(), gw_id, writes);
+        let wr = create_write_eob(
+            next_id,
+            dep.clone(),
+            gw_id,
+            writes,
+            is_write_unwritten,
+        );
 
         sub.insert(next_id, 0); // XXX does value here matter?
 
@@ -4095,7 +4143,11 @@ impl Upstairs {
         }
 
         downstairs.enqueue(wr);
-        cdt::up__to__ds__write__start!(|| (gw_id));
+        if is_write_unwritten {
+            cdt::up__to__ds__write__unwritten__start!(|| (gw_id));
+        } else {
+            cdt::up__to__ds__write__start!(|| (gw_id));
+        }
 
         Ok(())
     }
@@ -5669,6 +5721,10 @@ enum BlockOp {
         offset: Block,
         data: Bytes,
     },
+    WriteUnwritten {
+        offset: Block,
+        data: Bytes,
+    },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
     },
@@ -5719,6 +5775,10 @@ impl BlockOp {
      *   A write of 16k is 1 IOP
      *   A write of 16001b is 2 IOPs
      *   A flush isn't an IOP
+     *
+     * We are not counting WriteUnwritten ops as IO toward the users IO
+     * limits.  Though, if too many volumes are created with scrubbers
+     * running, we may have to revisit that.
      */
     pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
@@ -6422,6 +6482,30 @@ impl Guest {
         Ok(self.send(wio))
     }
 
+    // Guest does support write_unwritten
+    pub fn write_unwritten(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        if !self.is_active() {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let bs = self.query_block_size()?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
+
+        let wio = BlockOp::WriteUnwritten { offset, data };
+        Ok(self.send(wio))
+    }
+
     /*
      * `read_from_byte_offset` and `write_to_byte_offset` accept a byte
      * offset, and data must be a multiple of block size.
@@ -6635,6 +6719,14 @@ impl BlockIO for Guest {
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         self.write(offset, data)
+    }
+
+    fn write_unwritten(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.write_unwritten(offset, data)
     }
 
     fn flush(
@@ -6887,7 +6979,17 @@ async fn process_new_io(
         }
         BlockOp::Write { offset, data } => {
             if let Err(e) =
-                up.submit_write(offset, data, Some(req.send.clone()))
+                up.submit_write(offset, data, Some(req.send.clone()), false)
+            {
+                let _ = req.send.send(Err(e));
+                return;
+            }
+            send_work(dst, *lastcast);
+            *lastcast += 1;
+        }
+        BlockOp::WriteUnwritten { offset, data } => {
+            if let Err(e) =
+                up.submit_write(offset, data, Some(req.send.clone()), true)
             {
                 let _ = req.send.send(Err(e));
                 return;
@@ -7313,20 +7415,32 @@ pub async fn up_main(
 /*
  * Create a write DownstairsIO structure from an EID, and offset, and
  * the data buffer
+ *
+ * The is_write_unwritten bool indicates if this write is a regular
+ * write (false) or a write_unwritten write (true) and allows us to
+ * construct the proper IOop to submit to the downstairs.
  */
 fn create_write_eob(
     ds_id: u64,
     dependencies: Vec<u64>,
     gw_id: u64,
     writes: Vec<crucible_protocol::Write>,
+    is_write_unwritten: bool,
 ) -> DownstairsIO {
     /*
      * Note to self:  Should the dependency list cover everything since
      * the last flush, or everything that is currently outstanding?
      */
-    let awrite = IOop::Write {
-        dependencies,
-        writes,
+    let awrite = if is_write_unwritten {
+        IOop::WriteUnwritten {
+            dependencies,
+            writes,
+        }
+    } else {
+        IOop::Write {
+            dependencies,
+            writes,
+        }
     };
 
     let mut state = HashMap::new();

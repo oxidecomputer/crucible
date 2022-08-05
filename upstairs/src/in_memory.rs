@@ -80,6 +80,16 @@ impl BlockIO for InMemoryBlockIO {
         BlockReqWaiter::immediate()
     }
 
+    fn write_unwritten(
+        &self,
+        _offset: Block,
+        _data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        Err(CrucibleError::Unsupported(
+            "write_unwritten unsupported for InMemoryBlockIO".to_string(),
+        ))
+    }
+
     fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
