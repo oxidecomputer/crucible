@@ -1212,10 +1212,9 @@ where
                     Some(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did
-                        println!("Another upstairs promoted to active, \
+                        println!("Another upstairs {:?} promoted to active, \
                             shutting down connection for {:?}",
-                            upstairs_connection,
-                        );
+                            new_upstairs_connection, upstairs_connection);
 
                         let mut fw = fw.lock().await;
                         fw.send(Message::YouAreNoLongerActive {
