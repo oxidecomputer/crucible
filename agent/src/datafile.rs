@@ -241,13 +241,13 @@ impl DataFile {
         /*
          * Look for an existing running snapshot.
          */
-        if inner
+        if let Some(r) = inner
             .running_snapshots
             .entry(request.id.clone())
             .or_insert_with(BTreeMap::default)
-            .contains_key(&request.name)
+            .get(&request.name)
         {
-            bail!("already running snapshot {} {}", request.id.0, request.name);
+            return Ok(r.clone());
         }
 
         /*
