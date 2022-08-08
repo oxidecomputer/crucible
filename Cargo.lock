@@ -488,6 +488,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossterm"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab9f7409c70a38a56216480fba371ee460207dd8926ccf5b4160591759559170"
+dependencies = [
+ "bitflags",
+ "crossterm_winapi",
+ "libc",
+ "mio",
+ "parking_lot",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
 name = "crossterm_winapi"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -515,6 +531,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "crucible-client-types",
  "crucible-common",
  "crucible-protocol",
  "dropshot",
@@ -586,35 +603,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crucible-client"
+name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "bincode",
- "bytes",
- "clap 3.2.1",
- "crossterm",
- "crucible",
- "crucible-common",
- "crucible-protocol",
- "csv",
- "dropshot",
- "futures",
- "futures-core",
- "indicatif",
- "omicron-common",
- "oximeter",
- "oximeter-producer",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "reedline",
- "ringbuffer",
+ "base64",
+ "schemars",
  "serde",
  "serde_json",
- "statistical",
- "tokio",
- "tokio-util 0.7.3",
- "toml",
  "uuid 1.0.0",
 ]
 
@@ -725,12 +720,15 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "crucible",
+ "crucible-client-types",
  "crucible-downstairs",
  "futures",
  "futures-core",
  "httptest",
+ "rand 0.8.5",
  "tempfile",
  "tokio",
  "uuid 1.0.0",
@@ -787,6 +785,40 @@ dependencies = [
  "num-derive",
  "num-traits",
  "thiserror",
+]
+
+[[package]]
+name = "crutest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bytes",
+ "clap 3.2.1",
+ "crossterm 0.24.0",
+ "crucible",
+ "crucible-common",
+ "crucible-protocol",
+ "csv",
+ "dropshot",
+ "dsc-client",
+ "futures",
+ "futures-core",
+ "indicatif",
+ "omicron-common",
+ "oximeter",
+ "oximeter-producer",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "reedline",
+ "ringbuffer",
+ "serde",
+ "serde_json",
+ "statistical",
+ "tokio",
+ "tokio-util 0.7.3",
+ "toml",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -987,6 +1019,19 @@ dependencies = [
  "statistical",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "dsc-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "percent-encoding",
+ "progenitor",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2729,12 +2774,12 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d064ec92a21deb048c440b6461ccf0d0babdb5f2160ea9dfac451bc7b4b556e2"
+checksum = "1815a84fe3d1c632106199f4ba844c109d783e16682df293044bb994537671d8"
 dependencies = [
  "chrono",
- "crossterm",
+ "crossterm 0.23.2",
  "fd-lock",
  "itertools",
  "nu-ansi-term",
@@ -3676,10 +3721,11 @@ checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "tokio"
-version = "1.19.2"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51a52ed6686dd62c320f9b89299e9dfb46f730c7a48e635c19f21d116cb1439"
+checksum = "7a8325f63a7d4774dd041e363b2409ed1c5cbbd0f867795e661df066b2b0a581"
 dependencies = [
+ "autocfg 1.1.0",
  "bytes",
  "libc",
  "memchr",

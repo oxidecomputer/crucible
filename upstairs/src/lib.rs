@@ -17,6 +17,7 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
+pub use crucible_client_types::{CrucibleOpts, VolumeConstructionRequest};
 pub use crucible_common::*;
 pub use crucible_protocol::*;
 
@@ -45,7 +46,7 @@ mod pseudo_file;
 mod test;
 
 pub mod volume;
-pub use volume::{Volume, VolumeConstructionRequest};
+pub use volume::Volume;
 
 pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
@@ -79,6 +80,12 @@ pub trait BlockIO {
     ) -> Result<BlockReqWaiter, CrucibleError>;
 
     fn write(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError>;
+
+    fn write_unwritten(
         &self,
         offset: Block,
         data: Bytes,
@@ -175,58 +182,33 @@ mod cdt {
     fn volume__flush__start(_: u32) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
+    fn gw__write__unwritten__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
+    fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
     fn ds__read__io__start(_: u64, _: u64) {}
     fn ds__write__io__start(_: u64, _: u64) {}
+    fn ds__write__unwritten__io__start(_: u64, _: u64) {}
     fn ds__flush__io__start(_: u64, _: u64) {}
     fn ds__read__io__done(_: u64, _: u64) {}
     fn ds__write__io__done(_: u64, _: u64) {}
+    fn ds__write__unwritten__io__done(_: u64, _: u64) {}
     fn ds__flush__io__done(_: u64, _: u64) {}
     fn up__to__ds__read__done(_: u64) {}
     fn up__to__ds__write__done(_: u64) {}
+    fn up__to__ds__write__unwritten__done(_: u64) {}
     fn up__to__ds__flush__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
+    fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
     fn reqwest__read__start(_: u32) {}
     fn reqwest__read__done(_: u32) {}
     fn volume__read__done(_: u32) {}
     fn volume__write__done(_: u32) {}
     fn volume__flush__done(_: u32) {}
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct CrucibleOpts {
-    pub id: Uuid,
-    pub target: Vec<SocketAddr>,
-    pub lossy: bool,
-    pub flush_timeout: Option<u32>,
-    pub key: Option<String>,
-    pub cert_pem: Option<String>,
-    pub key_pem: Option<String>,
-    pub root_cert_pem: Option<String>,
-    pub control: Option<SocketAddr>,
-}
-
-impl CrucibleOpts {
-    pub fn key_bytes(&self) -> Option<Vec<u8>> {
-        if let Some(key) = &self.key {
-            // For xts, key size must be 32 bytes
-            let decoded_key =
-                base64::decode(key).expect("could not base64 decode key!");
-
-            if decoded_key.len() != 32 {
-                panic!("Key length must be 32 bytes!");
-            }
-
-            Some(decoded_key)
-        } else {
-            None
-        }
-    }
 }
 
 pub fn deadline_secs(secs: u64) -> Instant {
@@ -243,17 +225,40 @@ async fn process_message(
 ) -> Result<()> {
     let (uuid, ds_id, result) = match m {
         Message::Imok => return Ok(()),
-        Message::WriteAck(uuid, ds_id, result) => {
-            cdt::ds__write__io__done!(|| (ds_id, up_coms.client_id as u64));
-            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
+        Message::WriteAck {
+            upstairs_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__write__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
         }
-        Message::FlushAck(uuid, ds_id, result) => {
-            cdt::ds__flush__io__done!(|| (ds_id, up_coms.client_id as u64));
-            (*uuid, *ds_id, result.clone().map(|_| Vec::new()))
+        Message::WriteUnwrittenAck {
+            upstairs_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__write__unwritten__io__done!(|| (
+                job_id,
+                up_coms.client_id as u64
+            ));
+            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
         }
-        Message::ReadResponse(uuid, ds_id, responses) => {
-            cdt::ds__read__io__done!(|| (ds_id, up_coms.client_id as u64));
-            (*uuid, *ds_id, responses.clone())
+        Message::FlushAck {
+            upstairs_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__flush__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
+        }
+        Message::ReadResponse {
+            upstairs_id,
+            job_id,
+            responses,
+        } => {
+            cdt::ds__read__io__done!(|| (job_id, up_coms.client_id as u64));
+            (*upstairs_id, *job_id, responses.clone())
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -359,7 +364,6 @@ async fn io_send<WT>(
     u: &Arc<Upstairs>,
     fw: &mut FramedWrite<WT, CrucibleEncoder>,
     client_id: u8,
-    lossy: bool,
 ) -> Result<bool>
 where
     WT: tokio::io::AsyncWrite
@@ -408,7 +412,7 @@ where
          * Walk the list of work to do, update its status as in progress
          * and send the details to our downstairs.
          */
-        if lossy && random() && random() {
+        if u.lossy && random() && random() {
             continue;
         }
 
@@ -428,12 +432,28 @@ where
                 writes,
             } => {
                 cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
-                fw.send(Message::Write(
-                    u.uuid,
+                fw.send(Message::Write {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                    writes: writes.clone(),
+                })
+                .await?
+            }
+            IOop::WriteUnwritten {
+                dependencies,
+                writes,
+            } => {
+                cdt::ds__write__unwritten__io__start!(|| (
                     *new_id,
-                    dependencies.clone(),
-                    writes.clone(),
-                ))
+                    client_id as u64
+                ));
+                fw.send(Message::WriteUnwritten {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                    writes: writes.clone(),
+                })
                 .await?
             }
             IOop::Flush {
@@ -443,14 +463,14 @@ where
                 snapshot_details,
             } => {
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
-                fw.send(Message::Flush(
-                    u.uuid,
-                    *new_id,
-                    dependencies.clone(),
+                fw.send(Message::Flush {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
                     flush_number,
                     gen_number,
                     snapshot_details,
-                ))
+                })
                 .await?
             }
             IOop::Read {
@@ -458,12 +478,12 @@ where
                 requests,
             } => {
                 cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
-                fw.send(Message::ReadRequest(
-                    u.uuid,
-                    *new_id,
-                    dependencies.clone(),
+                fw.send(Message::ReadRequest {
+                    upstairs_id: u.uuid,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
                     requests,
-                ))
+                })
                 .await?
             }
         }
@@ -477,7 +497,6 @@ async fn proc_stream(
     stream: WrappedStream,
     connected: &mut bool,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -486,7 +505,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -494,7 +513,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            proc(target, up, fr, fw, connected, up_coms, lossy).await
+            proc(target, up, fr, fw, connected, up_coms).await
         }
     }
 }
@@ -514,7 +533,6 @@ async fn proc<RT, WT>(
     mut fw: FramedWrite<WT, CrucibleEncoder>,
     connected: &mut bool,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -562,7 +580,14 @@ where
     /*
      * As the "client", we must begin the negotiation.
      */
-    let m = Message::HereIAm(1, up.uuid);
+    let m = Message::HereIAm {
+        version: 1,
+        upstairs_id: up.uuid,
+        session_id: up.session_id,
+        gen: up.get_generation(),
+        read_only: up.read_only,
+        encrypted: up.encrypted(),
+    };
     fw.send(m).await?;
 
     /*
@@ -586,8 +611,8 @@ where
      * negotiated variable on the left:
      *
      *          Upstairs             Downstairs
-     * 0:          HereIAm(v)  --->
-     *                         <---  YesItsMe(v)
+     * 0:        HereIAm(...)  --->
+     *                         <---  YesItsMe(...)
      *
      * At this point, a downstairs will wait for a "PromoteToActive" message
      * to be sent to it.  If this is a new upstairs that has not yet
@@ -685,7 +710,11 @@ where
                     up_coms.client_id
                 );
                 self_promotion = true;
-                fw.send(Message::PromoteToActive(up.uuid)).await?;
+                fw.send(Message::PromoteToActive {
+                    upstairs_id: up.uuid,
+                    session_id: up.session_id,
+                    gen: up.get_generation(),
+                }).await?;
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -694,6 +723,7 @@ where
 
                 match f.transpose()? {
                     None => {
+                        // Downstairs disconnected
                         println!(
                             "[{}] client hung up",
                             up_coms.client_id
@@ -701,7 +731,23 @@ where
                         return Ok(())
                     }
                     Some(Message::Imok) => {}
-                    Some(Message::YesItsMe(version)) => {
+                    Some(Message::ReadOnlyMismatch { expected }) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs read_only is {}, ours is {}!",
+                            expected,
+                            up.read_only,
+                        );
+                    }
+                    Some(Message::EncryptedMismatch { expected }) => {
+                        // Upstairs will never be able to connect, bail
+                        bail!(
+                            "downstairs encrypted is {}, ours is {}!",
+                            expected,
+                            up.encrypted(),
+                        );
+                    }
+                    Some(Message::YesItsMe { version }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
@@ -736,7 +782,11 @@ where
                                 up_coms.client_id
                             );
                             self_promotion = true;
-                            fw.send(Message::PromoteToActive(up.uuid)).await?;
+                            fw.send(Message::PromoteToActive {
+                                upstairs_id: up.uuid,
+                                session_id: up.session_id,
+                                gen: up.get_generation(),
+                            }).await?;
                         } else {
                             /*
                              * Transition this Downstairs to WaitActive
@@ -767,20 +817,45 @@ where
                                     up_coms.ds_active_rx.borrow_and_update();
                                 }
                                 self_promotion = true;
-                                fw.send(
-                                    Message::PromoteToActive(up.uuid)
-                                ).await?;
+                                fw.send(Message::PromoteToActive {
+                                    upstairs_id: up.uuid,
+                                    session_id: up.session_id,
+                                    gen: up.get_generation(),
+                                }).await?;
                             }
                         }
                     }
-                    Some(Message::YouAreNowActive(uuid)) => {
-                        if up.uuid != uuid {
+                    Some(Message::YouAreNowActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    }) => {
+                        let match_uuid = up.uuid == upstairs_id;
+                        let match_session = up.session_id == session_id;
+                        let match_gen = up.get_generation() == gen;
+                        let matches_self = match_uuid && match_session && match_gen;
+
+                        if !matches_self {
                             println!(
-                                "[{}] {} client activate with wrong UUID {}",
-                                up.uuid,
-                                uuid,
-                                up_coms.client_id
+                                "[{}] YouAreNowActive didn't match self! {} {} {}",
+                                up_coms.client_id,
+                                if !match_uuid {
+                                    format!("UUID {:?} != {:?}", up.uuid, upstairs_id)
+                                } else {
+                                    String::new()
+                                },
+                                if !match_session {
+                                    format!("session {:?} != {:?}", up.session_id, session_id)
+                                } else {
+                                    String::new()
+                                },
+                                if !match_gen {
+                                    format!("gen {:?} != {:?}", up.get_generation(), gen)
+                                } else {
+                                    String::new()
+                                },
                             );
+
                             up.ds_transition(up_coms.client_id, DsState::New);
                             up.set_inactive();
                             return Err(CrucibleError::UuidMismatch.into());
@@ -796,35 +871,82 @@ where
                         fw.send(Message::RegionInfoPlease).await?;
 
                     }
-                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
-                        /*
-                         * XXX If we get this response, but the new uuid is
-                         * actually our uuid, do we just ignore it?
-                         */
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id,
+                        new_gen,
+                    }) => {
                         println!(
-                            "[{}] {} downstairs self deactivate: new {:?}",
+                            "[{}] {} saw YouAreNoLongerActive {:?} {:?} {}",
                             up_coms.client_id,
                             up.uuid,
-                            new_active_uuid,
+                            new_upstairs_id,
+                            new_session_id,
+                            new_gen,
                         );
+
                         up.ds_transition(up_coms.client_id, DsState::New);
                         up.set_inactive();
-                        if up.uuid == new_active_uuid {
-                            /*
-                             * Now, this is really going off the rails.  Our
-                             * downstairs thinks we have a different UUID
-                             * and is sending us the UUID of the "new"
-                             * downstairs, but that UUID IS our UUID.  So
-                             * clearly the downstairs is confused.
-                             */
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, {:?}!",
-                                up_coms.client_id, up.uuid, new_active_uuid,
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
+                            );
+                        } else {
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
-                        return Err(CrucibleError::UuidMismatch.into());
+
                     }
-                    Some(Message::RegionInfo(region_def)) => {
+                    Some(Message::RegionInfo { region_def }) => {
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
                         }
@@ -835,7 +957,6 @@ where
                             state[up_coms.client_id as usize]
                         };
                         if my_state == DsState::Offline {
-
                             /*
                              * If we are coming from state Offline, then it
                              * means the downstairs has departed then came
@@ -851,7 +972,7 @@ where
                             println!("[{}] send last flush ID to this DS: {}",
                                 up_coms.client_id, lf);
                             negotiated = 3;
-                            fw.send(Message::LastFlush(lf)).await?;
+                            fw.send(Message::LastFlush { last_flush_number: lf }).await?;
 
                         } else if my_state == DsState::WaitActive {
                             /*
@@ -880,7 +1001,7 @@ where
                         up.ds_state_show();
 
                     }
-                    Some(Message::LastFlushAck(last_flush)) => {
+                    Some(Message::LastFlushAck { last_flush_number }) => {
                         if negotiated != 3 {
                             bail!("Received LastFlushAck out of order!");
                         }
@@ -891,12 +1012,12 @@ where
                         assert_eq!(my_state, DsState::Offline);
                         println!("[{}] replied this last flush ID: {}",
                             up_coms.client_id,
-                            last_flush,
+                            last_flush_number,
                         );
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            up.last_flush_id(up_coms.client_id), last_flush
+                            up.last_flush_id(up_coms.client_id), last_flush_number
                         );
                         up.ds_transition(
                             up_coms.client_id, DsState::Replay);
@@ -904,7 +1025,7 @@ where
                         *connected = true;
                         negotiated = 5;
                     },
-                    Some(Message::ExtentVersions(gen, flush, dirty)) => {
+                    Some(Message::ExtentVersions { gen_numbers, flush_numbers, dirty_bits }) => {
                         if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
@@ -920,9 +1041,9 @@ where
                          * region set.
                          */
                         let dsr = RegionMetadata {
-                            generation: gen,
-                            flush_numbers: flush.clone(),
-                            dirty,
+                            generation: gen_numbers,
+                            flush_numbers: flush_numbers.clone(),
+                            dirty: dirty_bits,
                         };
 
                         up.downstairs
@@ -939,7 +1060,7 @@ where
 
                         *connected = true;
                     }
-                    Some(Message::UuidMismatch(expected_uuid)) => {
+                    Some(Message::UuidMismatch { expected_id }) => {
                         /*
                          * XXX Our downstairs is returning a different
                          * UUID then we have, can this happen in a case where
@@ -952,13 +1073,13 @@ where
                          */
                         println!(
                             "[{}] {} received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, up.uuid, expected_uuid
+                            up_coms.client_id, up.uuid, expected_id
                         );
                         up.ds_transition(
                             up_coms.client_id, DsState::Disabled
                         );
                         up.set_inactive();
-                        if up.uuid == expected_uuid {
+                        if up.uuid == expected_id {
                             /*
                              * Now, this is really going off the rails.  OUr
                              * downstairs thinks we have a different UUID
@@ -968,12 +1089,12 @@ where
                              */
                             bail!(
                                 "[{}] {} received bad UuidMismatch, {:?}!",
-                                up_coms.client_id, up.uuid, expected_uuid
+                                up_coms.client_id, up.uuid, expected_id
                             );
                         }
                         bail!(
                             "[{}] {} received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, up.uuid, expected_uuid
+                            up_coms.client_id, up.uuid, expected_id
                         );
                     }
                     Some(m) => {
@@ -1014,7 +1135,7 @@ where
      * for a downstairs connection.
      */
     assert_eq!(negotiated, 5);
-    cmd_loop(up, fr, fw, up_coms, lossy).await
+    cmd_loop(up, fr, fw, up_coms).await
 }
 
 /*
@@ -1044,7 +1165,6 @@ async fn cmd_loop<RT, WT>(
     mut fr: FramedRead<RT, crucible_protocol::CrucibleDecoder>,
     mut fw: FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
-    lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1061,7 +1181,7 @@ where
      */
     let mut more_work = up.ds_is_replay(up_coms.client_id);
     if !more_work {
-        do_reconcile_work(up, &mut fr, &mut fw, up_coms, lossy).await?;
+        do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
     }
 
     /*
@@ -1133,29 +1253,76 @@ where
 
                 match f.transpose()? {
                     None => {
+                        // Downstairs disconnected
                         println!("[{}] None response", up_coms.client_id);
                         return Ok(())
                     },
-                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id: _,
+                        new_gen,
+                    }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
                         up.set_inactive();
-                        if up.uuid != new_active_uuid {
-                            bail!("[{}] received disconnect from downstairs",
-                                up_coms.client_id
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
                             );
                         } else {
-                            /*
-                             * XXX Is this the correct thing to do here?
-                             * The downstairs is telling us to disconnect
-                             * because it believes it has a new UUID, but
-                             * it does not.
-                             */
-                            bail!("[{}] bad disconnect from downstairs",
-                                up_coms.client_id
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
                     }
-                    Some(Message::UuidMismatch(expected_uuid)) => {
+                    Some(Message::UuidMismatch { expected_id }) => {
                         /*
                          * For now, when we get the wrong UUID back from
                          * the downstairs, take ourselves out.
@@ -1168,7 +1335,7 @@ where
                         up.set_inactive();
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, expected_uuid
+                            up_coms.client_id, expected_id
                         );
                     }
                     Some(m) => {
@@ -1184,7 +1351,7 @@ where
                  * check.
                  */
                 let more =
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                    io_send(up, &mut fw, up_coms.client_id).await?;
 
                 if more && !more_work {
                     println!("[{}] flow control start ", up_coms.client_id);
@@ -1199,9 +1366,7 @@ where
                     up_coms.client_id
                 );
 
-                let more = io_send(
-                                up, &mut fw, up_coms.client_id, lossy
-                            ).await?;
+                let more = io_send(up, &mut fw, up_coms.client_id).await?;
 
                 if more {
                     more_work = true;
@@ -1228,14 +1393,14 @@ where
                  */
                 fw.send(Message::Ruok).await?;
 
-                if lossy {
+                if up.lossy {
                     /*
                      * When lossy is set, we don't always send work to a
                      * downstairs when we should. This means we need to,
                      * every now and then, signal the downstairs task to
                      * check and see if we skipped some work earlier.
                      */
-                    io_send(up, &mut fw, up_coms.client_id, lossy).await?;
+                    io_send(up, &mut fw, up_coms.client_id).await?;
                 }
 
                 /*
@@ -1278,7 +1443,6 @@ async fn do_reconcile_work<RT, WT>(
     fr: &mut FramedRead<RT, crucible_protocol::CrucibleDecoder>,
     fw: &mut FramedWrite<WT, crucible_protocol::CrucibleEncoder>,
     up_coms: &mut UpComs,
-    _lossy: bool,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1310,32 +1474,84 @@ where
                         bail!("[{}] None response during repair",
                             up_coms.client_id);
                     },
-                    Some(Message::YouAreNoLongerActive(new_active_uuid)) => {
+                    Some(Message::YouAreNoLongerActive {
+                        new_upstairs_id,
+                        new_session_id: _,
+                        new_gen,
+                    }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
-                        if up.uuid != new_active_uuid {
-                            bail!("[{}] received disconnect from downstairs",
-                                up_coms.client_id
+
+                        // What if the newly active upstairs has the same UUID?
+                        if up.uuid == new_upstairs_id {
+                            if new_gen > up.get_generation() {
+                                // The next generation of this Upstairs
+                                // connected, bail - this generation won't be
+                                // able to connect again.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the newly active Upstairs, which shares
+                            // our UUID. We shouldn't have received this
+                            // message. The downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
+                                uuid and our gen {} >= new gen {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                up.get_generation(),
+                                new_gen,
                             );
                         } else {
-                            bail!("[{}] bad disconnect from downstairs",
-                                up_coms.client_id
+                            // A new upstairs connected
+                            if new_gen > up.get_generation() {
+                                // The next generation of another Upstairs
+                                // connected.
+                                bail!(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        format!("saw YouAreNoLongerActive with \
+                                            larger gen {} than ours {}",
+                                            new_gen, up.get_generation())
+                                    )
+                                );
+                            }
+
+                            // Here, our generation number is greater than or
+                            // equal to the old one, and it's a new Upstairs. We
+                            // shouldn't have received this message. The
+                            // downstairs is confused.
+                            bail!(
+                                "[{}] {} bad YouAreNoLongerActive, different \
+                                upstairs uuid {:?} and our gen {} >= new gen \
+                                {}!",
+                                up_coms.client_id,
+                                up.uuid,
+                                new_upstairs_id,
+                                up.get_generation(),
+                                new_gen,
                             );
                         }
                     }
-                    Some(Message::UuidMismatch(expected_uuid)) => {
+                    Some(Message::UuidMismatch { expected_id }) => {
                         up.ds_transition(up_coms.client_id, DsState::Disabled);
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
-                            up_coms.client_id, expected_uuid
+                            up_coms.client_id, expected_id
                         );
                     }
-                    Some(Message::RepairAckId(rep_id)) => {
+                    Some(Message::RepairAckId { repair_id }) => {
                         if up.downstairs.lock().unwrap().rep_done(
-                            up_coms.client_id, rep_id
+                            up_coms.client_id, repair_id
                         ) {
                             up.ds_repair_done_notify(
                                 up_coms.client_id,
-                                rep_id,
+                                repair_id,
                                 &up_coms.ds_reconcile_done_tx,
                             ).await?;
                         }
@@ -1343,19 +1559,23 @@ where
                     Some(Message::Imok) => {
                         println!("[{}] Received Imok", up_coms.client_id);
                     }
-                    Some(Message::ExtentError(rep_id, eid, error)) => {
+                    Some(Message::ExtentError {
+                        repair_id,
+                        extent_id,
+                        error,
+                    }) => {
                         println!(
                             "[{}] Extent {} error on job {}: {}",
                             up_coms.client_id,
-                            eid,
-                            rep_id,
+                            extent_id,
+                            repair_id,
                             error,
                         );
                         bail!(
                             "[{}] Extent {} error on job {}: {}",
                             up_coms.client_id,
-                            eid,
-                            rep_id,
+                            extent_id,
+                            repair_id,
                             error,
                         );
                     }
@@ -1403,9 +1623,15 @@ where
                          * must not get a message.
                          */
                         match op {
-                            Message::ExtentRepair(rep_id, _, _, _, ref dest) => {
+                            Message::ExtentRepair {
+                                repair_id,
+                                extent_id: _,
+                                source_client_id: _,
+                                source_repair_address: _,
+                                ref dest_clients,
+                            } => {
                                 let mut send_repair = false;
-                                for d in dest {
+                                for d in dest_clients {
                                     if *d == up_coms.client_id {
                                         send_repair = true;
                                         break;
@@ -1414,20 +1640,26 @@ where
                                 if send_repair {
                                     println!(
                                         "[{}] Sending repair request {:?}",
-                                        up_coms.client_id, rep_id,
+                                        up_coms.client_id, repair_id,
                                     );
                                     fw.send(op.clone()).await?;
                                 } else {
                                     println!(
                                         "[{}] No action required {:?}",
-                                        up_coms.client_id, rep_id,
+                                        up_coms.client_id, repair_id,
                                     );
-                                    rep_done = Some(rep_id);
+                                    rep_done = Some(repair_id);
                                 }
                             },
-                            Message::ExtentFlush(rep_id, _, src, _, _) => {
-                                if up_coms.client_id != src {
-                                    rep_done = Some(rep_id);
+                            Message::ExtentFlush {
+                                repair_id,
+                                extent_id: _,
+                                client_id,
+                                flush_number: _,
+                                gen_number: _,
+                            } => {
+                                if up_coms.client_id != client_id {
+                                    rep_done = Some(repair_id);
                                 } else {
                                     fw.send(op).await?;
                                 }
@@ -1482,7 +1714,8 @@ where
                  * notify if all other downstairs are also complete.
                  */
                 if let Some(rep_id) = rep_done {
-                    if up.downstairs.lock().unwrap().rep_done(up_coms.client_id, rep_id) {
+                    if up.downstairs.lock().unwrap()
+                        .rep_done(up_coms.client_id, rep_id) {
                         println!("[{}] self notify as src for {}",
                             up_coms.client_id,
                             rep_id
@@ -1592,7 +1825,6 @@ async fn looper(
     >,
     up: &Arc<Upstairs>,
     mut up_coms: UpComs,
-    lossy: bool,
 ) {
     let mut firstgo = true;
     let mut connected = false;
@@ -1678,13 +1910,18 @@ async fn looper(
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
          */
-        if let Err(e) =
-            proc_stream(&target, up, tcp, &mut connected, &mut up_coms, lossy)
-                .await
+        match proc_stream(&target, up, tcp, &mut connected, &mut up_coms).await
         {
-            eprintln!("ERROR: {}: proc: {:?}", target, e);
-            // XXX proc can return fatal and non-fatal errors, figure out what
-            // to do here
+            Ok(()) => {
+                // XXX figure out what to do here
+            }
+
+            Err(e) => {
+                eprintln!("ERROR: {}: proc: {:?}", target, e);
+
+                // XXX proc can return fatal and non-fatal errors, figure out
+                // what to do here
+            }
         }
 
         /*
@@ -2020,26 +2257,44 @@ impl Downstairs {
              */
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentFlush(
-                    rep_id, ext, ef.source, max_flush, max_gen,
-                ),
-            ));
-            rep_id += 1;
-            self.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id,
-                Message::ExtentClose(rep_id, ext),
-            ));
-            rep_id += 1;
-            let repair = self.repair_addr(ef.source);
-            self.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id,
-                Message::ExtentRepair(rep_id, ext, ef.source, repair, ef.dest),
+                Message::ExtentFlush {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                    client_id: ef.source,
+                    flush_number: max_flush,
+                    gen_number: max_gen,
+                },
             ));
             rep_id += 1;
 
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
-                Message::ExtentReopen(rep_id, ext),
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                },
+            ));
+            rep_id += 1;
+
+            let repair = self.repair_addr(ef.source);
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentRepair {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                    source_client_id: ef.source,
+                    source_repair_address: repair,
+                    dest_clients: ef.dest,
+                },
+            ));
+            rep_id += 1;
+
+            self.reconcile_task_list.push_back(ReconcileIO::new(
+                rep_id,
+                Message::ExtentReopen {
+                    repair_id: rep_id,
+                    extent_id: ext,
+                },
             ));
             rep_id += 1;
         }
@@ -2275,6 +2530,10 @@ impl Downstairs {
                 dependencies: _dependencies,
                 writes: _,
             } => wc.error >= 2,
+            IOop::WriteUnwritten {
+                dependencies: _dependencies,
+                writes: _,
+            } => wc.error == 2,
             IOop::Flush {
                 dependencies: _dependencies,
                 flush_number: _flush_number,
@@ -2324,6 +2583,14 @@ impl Downstairs {
             } => {
                 cdt::gw__write__done!(|| (gw_id));
                 stats.add_write(io_size as i64);
+            }
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                cdt::gw__write__unwritten__done!(|| (gw_id));
+                // We don't include WriteUnwritten operation in the
+                // metrics for this guest.
             }
             IOop::Flush {
                 dependencies: _,
@@ -2633,6 +2900,10 @@ impl Downstairs {
                             dependencies: _,
                             writes: _,
                         }
+                        | IOop::WriteUnwritten {
+                            dependencies: _,
+                            writes: _,
+                        }
                         | IOop::Flush {
                             dependencies: _,
                             flush_number: _,
@@ -2732,7 +3003,7 @@ impl Downstairs {
                         }
                     }
                 }
-                _ => { /* Write IOs have no action here */ }
+                _ => { /* Write and WriteUnwritten IOs have no action here */ }
             }
         } else {
             assert_eq!(newstate, IOState::Done);
@@ -2792,6 +3063,19 @@ impl Downstairs {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
                         cdt::up__to__ds__write__done!(|| job.guest_id);
+                    }
+                }
+                IOop::WriteUnwritten {
+                    dependencies: _,
+                    writes: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 2 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        cdt::up__to__ds__write__unwritten__done!(
+                            || job.guest_id
+                        );
                     }
                 }
                 IOop::Flush {
@@ -3112,6 +3396,9 @@ pub struct Upstairs {
      */
     uuid: Uuid,
 
+    // A unique session ID
+    session_id: Uuid,
+
     /*
      * Upstairs Generation number.
      * Will always increase each time an Upstairs starts.
@@ -3179,6 +3466,16 @@ pub struct Upstairs {
      * Upstairs stats.
      */
     stats: UpStatOuter,
+
+    /*
+     * Does this Upstairs throw random errors?
+     */
+    lossy: bool,
+
+    /*
+     * Operate in read-only mode
+     */
+    read_only: bool,
 }
 
 impl Upstairs {
@@ -3193,9 +3490,11 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
+            read_only: false,
         };
         Self::new(
             &opts,
+            0,
             RegionDefinition::default(),
             Arc::new(Guest::default()),
         )
@@ -3203,6 +3502,7 @@ impl Upstairs {
 
     pub fn new(
         opt: &CrucibleOpts,
+        gen: u64,
         def: RegionDefinition,
         guest: Arc<Guest>,
     ) -> Arc<Upstairs> {
@@ -3246,7 +3546,8 @@ impl Upstairs {
         Arc::new(Upstairs {
             active: Mutex::new(UpstairsState::default()),
             uuid,
-            generation: Mutex::new(0), // XXX Also get from Nexus?
+            session_id: Uuid::new_v4(),
+            generation: Mutex::new(gen),
             guest,
             downstairs: Mutex::new(Downstairs::new(opt.target.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
@@ -3254,7 +3555,13 @@ impl Upstairs {
             encryption_context,
             need_flush: Mutex::new(false),
             stats,
+            lossy: opt.lossy,
+            read_only: opt.read_only,
         })
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.encryption_context.is_some()
     }
 
     /**
@@ -3279,6 +3586,7 @@ impl Upstairs {
         *gen = new_gen;
         println!("Set generation to :{}", *gen);
     }
+
     fn get_generation(&self) -> u64 {
         *self.generation.lock().unwrap()
     }
@@ -3693,6 +4001,10 @@ impl Upstairs {
      * and build both the upstairs work guest tracking struct as well as the
      * downstairs work struct. Once both are ready, submit them to the
      * required places.
+     *
+     * The is_write_unwritten bool indicates if this write is a regular
+     * write (false) or a write_unwritten write (true) and allows us to
+     * construct the proper IOop to submit to the downstairs.
      */
     #[instrument]
     fn submit_write(
@@ -3700,9 +4012,14 @@ impl Upstairs {
         offset: Block,
         data: Bytes,
         sender: Option<std_mpsc::Sender<Result<(), CrucibleError>>>,
+        is_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if !self.guest_io_ready() {
             crucible_bail!(UpstairsInactive);
+        }
+
+        if self.read_only {
+            crucible_bail!(ModifyingReadOnlyRegion);
         }
 
         /*
@@ -3731,7 +4048,11 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let gw_id: u64 = gw.next_gw_id();
-        cdt::gw__write__start!(|| (gw_id));
+        if is_write_unwritten {
+            cdt::gw__write__unwritten__start!(|| (gw_id));
+        } else {
+            cdt::gw__write__start!(|| (gw_id));
+        }
 
         /*
          * Now create a downstairs work job for each (eid, bi, len) returned
@@ -3789,7 +4110,13 @@ impl Upstairs {
             cur_offset += byte_len;
         }
 
-        let wr = create_write_eob(next_id, dep.clone(), gw_id, writes);
+        let wr = create_write_eob(
+            next_id,
+            dep.clone(),
+            gw_id,
+            writes,
+            is_write_unwritten,
+        );
 
         sub.insert(next_id, 0); // XXX does value here matter?
 
@@ -3802,7 +4129,11 @@ impl Upstairs {
         }
 
         downstairs.enqueue(wr);
-        cdt::up__to__ds__write__start!(|| (gw_id));
+        if is_write_unwritten {
+            cdt::up__to__ds__write__unwritten__start!(|| (gw_id));
+        } else {
+            cdt::up__to__ds__write__start!(|| (gw_id));
+        }
 
         Ok(())
     }
@@ -4829,6 +5160,9 @@ impl Upstairs {
                         flush_number: _,
                         gen_number: _,
                         snapshot_details: _,
+                    } | IOop::WriteUnwritten {
+                        dependencies: _,
+                        writes: _,
                     }
                 ) {
                     self.ds_transition(client_id, DsState::Failed);
@@ -5016,6 +5350,10 @@ impl DownstairsIO {
                 dependencies: _,
                 writes,
             } => writes.iter().map(|w| w.data.len()).sum(),
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes,
+            } => writes.iter().map(|w| w.data.len()).sum(),
             IOop::Flush {
                 dependencies: _,
                 flush_number: _flush_number,
@@ -5062,6 +5400,10 @@ pub enum IOop {
         dependencies: Vec<u64>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
+    WriteUnwritten {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        writes: Vec<crucible_protocol::Write>,
+    },
     Read {
         dependencies: Vec<u64>, // Jobs that must finish before this
         requests: Vec<ReadRequest>,
@@ -5090,6 +5432,10 @@ impl IOop {
             IOop::Read {
                 dependencies,
                 requests: _,
+            } => dependencies,
+            IOop::WriteUnwritten {
+                dependencies,
+                writes: _,
             } => dependencies,
         }
     }
@@ -5361,6 +5707,10 @@ enum BlockOp {
         offset: Block,
         data: Bytes,
     },
+    WriteUnwritten {
+        offset: Block,
+        data: Bytes,
+    },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
     },
@@ -5411,6 +5761,10 @@ impl BlockOp {
      *   A write of 16k is 1 IOP
      *   A write of 16001b is 2 IOPs
      *   A flush isn't an IOP
+     *
+     * We are not counting WriteUnwritten ops as IO toward the users IO
+     * limits.  Though, if too many volumes are created with scrubbers
+     * running, we may have to revisit that.
      */
     pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
@@ -6114,6 +6468,30 @@ impl Guest {
         Ok(self.send(wio))
     }
 
+    // Guest does support write_unwritten
+    pub fn write_unwritten(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        if !self.is_active() {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let bs = self.query_block_size()?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
+
+        let wio = BlockOp::WriteUnwritten { offset, data };
+        Ok(self.send(wio))
+    }
+
     /*
      * `read_from_byte_offset` and `write_to_byte_offset` accept a byte
      * offset, and data must be a multiple of block size.
@@ -6327,6 +6705,14 @@ impl BlockIO for Guest {
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         self.write(offset, data)
+    }
+
+    fn write_unwritten(
+        &self,
+        offset: Block,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        self.write_unwritten(offset, data)
     }
 
     fn flush(
@@ -6579,7 +6965,17 @@ async fn process_new_io(
         }
         BlockOp::Write { offset, data } => {
             if let Err(e) =
-                up.submit_write(offset, data, Some(req.send.clone()))
+                up.submit_write(offset, data, Some(req.send.clone()), false)
+            {
+                let _ = req.send.send(Err(e));
+                return;
+            }
+            send_work(dst, *lastcast);
+            *lastcast += 1;
+        }
+        BlockOp::WriteUnwritten { offset, data } => {
+            if let Err(e) =
+                up.submit_write(offset, data, Some(req.send.clone()), true)
             {
                 let _ = req.send.send(Err(e));
                 return;
@@ -6850,6 +7246,7 @@ async fn up_listen(
  */
 pub async fn up_main(
     opt: CrucibleOpts,
+    gen: u64,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<()> {
@@ -6862,13 +7259,11 @@ pub async fn up_main(
         }
     }
 
-    let lossy = opt.lossy;
-
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, RegionDefinition::default(), guest);
+    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest);
 
     /*
      * Use this channel to receive updates on target status from each task
@@ -6959,7 +7354,7 @@ pub async fn up_main(
             };
             let tls_context = tls_context.clone();
             tokio::spawn(async move {
-                looper(t0, tls_context, &up, up_coms, lossy).await;
+                looper(t0, tls_context, &up, up_coms).await;
             });
             client_id += 1;
 
@@ -7006,20 +7401,32 @@ pub async fn up_main(
 /*
  * Create a write DownstairsIO structure from an EID, and offset, and
  * the data buffer
+ *
+ * The is_write_unwritten bool indicates if this write is a regular
+ * write (false) or a write_unwritten write (true) and allows us to
+ * construct the proper IOop to submit to the downstairs.
  */
 fn create_write_eob(
     ds_id: u64,
     dependencies: Vec<u64>,
     gw_id: u64,
     writes: Vec<crucible_protocol::Write>,
+    is_write_unwritten: bool,
 ) -> DownstairsIO {
     /*
      * Note to self:  Should the dependency list cover everything since
      * the last flush, or everything that is currently outstanding?
      */
-    let awrite = IOop::Write {
-        dependencies,
-        writes,
+    let awrite = if is_write_unwritten {
+        IOop::WriteUnwritten {
+            dependencies,
+            writes,
+        }
+    } else {
+        IOop::Write {
+            dependencies,
+            writes,
+        }
     };
 
     let mut state = HashMap::new();
@@ -7179,6 +7586,20 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
                     (job_type, num_blocks)
                 }
+                IOop::WriteUnwritten {
+                    dependencies: _dependencies,
+                    writes,
+                } => {
+                    let job_type = "WriteU".to_string();
+                    let mut num_blocks = 0;
+
+                    for write in writes {
+                        let block_size = write.offset.block_size_in_bytes();
+                        num_blocks += write.data.len() / block_size as usize;
+                    }
+
+                    (job_type, num_blocks)
+                }
                 IOop::Flush {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
@@ -7191,7 +7612,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             };
 
             print!(
-                "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7}",
+                "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7}",
                 job.guest_id, ack, id, job_type, num_blocks
             );
 

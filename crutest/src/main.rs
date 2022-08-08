@@ -466,6 +466,7 @@ fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
+        read_only: false,
     };
 
     /*
@@ -527,7 +528,7 @@ fn main() -> Result<()> {
     } else {
         pr = None;
     }
-    runtime.spawn(up_main(crucible_opts, guest.clone(), pr));
+    runtime.spawn(up_main(crucible_opts, opt.gen, guest.clone(), pr));
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
@@ -743,21 +744,7 @@ fn main() -> Result<()> {
             }
 
             // The header for all perf tests
-            println!(
-                "{:>8} {:7} {:5} {:4} {:>7} {:>7} {:>7} \
-                {:>7} {:>8} {:>5} {:>5}",
-                "TEST",
-                "SECONDS",
-                "COUNT",
-                "DPTH",
-                "IOPS",
-                "MEAN",
-                "P95",
-                "P99",
-                "MAX",
-                "ES",
-                "EC",
-            );
+            perf_header();
             runtime.block_on(perf_workload(
                 &guest,
                 &mut region_info,
@@ -1375,6 +1362,26 @@ async fn dirty_workload(
         wa.block_wait()?;
     }
     Ok(())
+}
+
+/*
+ * Print the perf header.
+ */
+pub fn perf_header() {
+    println!(
+        "{:>8} {:7} {:5} {:4} {:>7} {:>7} {:>7} {:>7} {:>8} {:>5} {:>5}",
+        "TEST",
+        "SECONDS",
+        "COUNT",
+        "DPTH",
+        "IOPS",
+        "MEAN",
+        "P95",
+        "P99",
+        "MAX",
+        "ES",
+        "EC",
+    );
 }
 
 /*

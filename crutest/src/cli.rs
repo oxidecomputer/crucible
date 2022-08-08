@@ -2,7 +2,7 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 
-use crossterm::style::Color;
+use dsc_client::Client;
 use futures::{SinkExt, StreamExt};
 use reedline::{
     FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
@@ -20,6 +20,47 @@ use protocol::*;
 pub struct CliAction {
     #[clap(subcommand)]
     cmd: CliCommand,
+}
+
+#[derive(Debug, Parser, PartialEq)]
+pub enum DscCommand {
+    /// Connect to the default DSC server (http://127.0.0.1:9998)
+    Connect,
+    /// Disable auto restart on the given downstairs client ID
+    DisableRestart {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Disable auto restart on all downstairs
+    DisableRestartAll,
+    /// Disable restart on the given client ID
+    EnableRestart {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Enable auto restart on all downstairs
+    EnableRestartAll,
+    /// Start the downstairs at the given client ID
+    Start {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Start all downstairs
+    StartAll,
+    /// Get the state of the given client ID
+    State {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Stop the downstairs at the given client ID
+    Stop {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Stop all the downstairs
+    StopAll,
+    /// Stop a random downstairs
+    StopRand,
 }
 /*
  * Commands supported by the crucible CLI.  Most of these translate into
@@ -40,6 +81,12 @@ enum CliCommand {
     Commit,
     /// Deactivate the upstairs
     Deactivate,
+    /// DSC
+    Dsc {
+        /// Subcommand please
+        #[clap(subcommand)]
+        dsc_cmd: DscCommand,
+    },
     /// Report the expected read count for an offset.
     Expected {
         /// The desired offset to see the expected value for.
@@ -109,6 +156,15 @@ enum CliCommand {
         /// The number of blocks to write.
         #[clap(long, short, default_value = "1", action)]
         len: usize,
+    },
+    /// WriteUnwritten to a given block offset.
+    /// Note that the cli will decide if a block is written to based on
+    /// the cli's internal write log.  This log may not match if the block
+    /// actually has or has not been written to.
+    WriteUnwritten {
+        /// The desired offset in blocks to write to.
+        #[clap(short, action)]
+        offset: usize,
     },
     /// Get the upstairs UUID
     Uuid,
@@ -225,17 +281,134 @@ fn cli_write(
 }
 
 /*
+ * Issue a write_unwritten to the guest at the given offset.
+ * We first check our internal write counter.
+ * If we believe the block has not been written to, then we update our
+ * internal counter and we will expect the write to change the block.
+ * If we do believe the block is written to, then we don't update our
+ * internal counter and we don't expect our write to change the contents.
+ */
+fn cli_write_unwritten(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    block_index: usize,
+) -> Result<(), CrucibleError> {
+    /*
+     * Convert offset to its byte value.
+     */
+    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+    // To determine what we put into our write buffer, look to see if
+    // we believe we have written to this block or not.
+    let data = if ri.write_log.get_seed(block_index) == 0 {
+        // We have not written to this block, so we create our write buffer
+        // like normal and update our internal counter to reflect that.
+
+        ri.write_log.update_wc(block_index);
+        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
+        Bytes::from(vec)
+    } else {
+        println!("This block has been written");
+        // Fill the write buffer with random data.  We don't expect this
+        // to actually make it to disk.
+
+        let mut vec = Vec::with_capacity(ri.block_size as usize);
+        for _ in 0..ri.block_size {
+            vec.push(rand::thread_rng().gen::<u8>());
+        }
+        Bytes::from(vec)
+    };
+
+    println!(
+        "WriteUnwritten at block {:5}, len:{:7}",
+        offset.value,
+        data.len(),
+    );
+
+    let mut waiter = guest.write_unwritten(offset, data)?;
+    waiter.block_wait()?;
+
+    Ok(())
+}
+
+// Handle dsc commands
+async fn handle_dsc(
+    dsc_client: &mut Option<dsc_client::Client>,
+    dsc_cmd: DscCommand,
+) {
+    if let Some(dsc_client) = dsc_client {
+        match dsc_cmd {
+            DscCommand::Connect => {
+                println!("Already connected");
+            }
+            DscCommand::DisableRestart { cid } => {
+                let res = dsc_client.dsc_disable_restart(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::DisableRestartAll => {
+                let res = dsc_client.dsc_disable_restart_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::EnableRestart { cid } => {
+                let res = dsc_client.dsc_enable_restart(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::EnableRestartAll => {
+                let res = dsc_client.dsc_enable_restart_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::Start { cid } => {
+                let res = dsc_client.dsc_start(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::StartAll => {
+                let res = dsc_client.dsc_start_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::Stop { cid } => {
+                let res = dsc_client.dsc_stop(cid).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::StopAll => {
+                let res = dsc_client.dsc_stop_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::StopRand => {
+                let res = dsc_client.dsc_stop_rand().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::State { cid } => {
+                let res = dsc_client.dsc_get_state(cid).await;
+                println!("Got res: {:?}", res);
+            }
+        }
+    } else if dsc_cmd == DscCommand::Connect {
+        let url = "http://127.0.0.1:9998".to_string();
+        println!("Connect to {:?}", url);
+        let rs = Client::new(&url);
+        *dsc_client = Some(rs);
+    } else {
+        println!("dsc: Need to be connected first");
+    }
+}
+/*
  * Take a CLI cmd coming from our client program and translate it into
  * an actual CliMessage to send to the cli server.
  *
  * At the moment, we ping pong here, where we send a command to the
  * cli_server, then we wait for the response.
  * Eventually we could make this async, but, yeah, I got things to do.
+ *
+ * Also, some commands (dsc for example) don't talk to the cliserver, so
+ * those and commands like them should return status directly instead of
+ * falling through the match and then entering the "wait for a response"
+ * side where they will never get a response.
  */
 async fn cmd_to_msg(
     cmd: CliCommand,
     fr: &mut FramedRead<tokio::net::tcp::ReadHalf<'_>, CliDecoder>,
     fw: &mut FramedWrite<WriteHalf<'_>, CliEncoder>,
+    dsc_client: &mut Option<dsc_client::Client>,
 ) -> Result<()> {
     match cmd {
         CliCommand::Activate { gen } => {
@@ -246,6 +419,10 @@ async fn cmd_to_msg(
         }
         CliCommand::Deactivate => {
             fw.send(CliMessage::Deactivate).await?;
+        }
+        CliCommand::Dsc { dsc_cmd } => {
+            handle_dsc(dsc_client, dsc_cmd).await;
+            return Ok(());
         }
         CliCommand::Expected { offset } => {
             fw.send(CliMessage::Expected(offset)).await?;
@@ -313,6 +490,9 @@ async fn cmd_to_msg(
         CliCommand::Write { offset, len } => {
             fw.send(CliMessage::Write(offset, len)).await?;
         }
+        CliCommand::WriteUnwritten { offset } => {
+            fw.send(CliMessage::WriteUnwritten(offset)).await?;
+        }
     }
     /*
      * Now, wait for our response
@@ -377,9 +557,6 @@ impl Prompt for CliPrompt {
         _history_search: PromptHistorySearch,
     ) -> Cow<str> {
         Cow::Owned(String::from(""))
-    }
-    fn get_prompt_color(&self) -> Color {
-        Color::White
     }
 }
 
@@ -451,6 +628,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         );
         let mut line_editor = Reedline::create().with_history(history);
         let prompt = CliPrompt::new();
+        let mut dsc_client = None;
 
         loop {
             let sig = line_editor.read_line(&prompt)?;
@@ -467,7 +645,8 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                             break;
                         }
                         Ok(vc) => {
-                            cmd_to_msg(vc, &mut fr, &mut fw).await?;
+                            cmd_to_msg(vc, &mut fr, &mut fw, &mut dsc_client)
+                                .await?;
                             // TODO: Handle this error
                         }
                         Err(e) => {
@@ -644,6 +823,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
+                perf_header();
                 match perf_workload(
                     guest,
                     ri,
@@ -717,6 +897,19 @@ async fn process_cli_command(
                 .await
             } else {
                 match cli_write(guest, ri, offset, len) {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
+                }
+            }
+        }
+        CliMessage::WriteUnwritten(offset) => {
+            if ri.write_log.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match cli_write_unwritten(guest, ri, offset) {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
