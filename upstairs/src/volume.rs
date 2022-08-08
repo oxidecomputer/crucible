@@ -440,47 +440,19 @@ impl BlockIO for Volume {
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        // In the case that this volume only has a read only parent, return an
-        // error.
-        if self.sub_volumes.is_empty() {
-            crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
-        }
-
-        let affected_sub_volumes = self.sub_volumes_for_lba_range(
-            offset.value,
-            data.len() as u64 / self.block_size,
-        );
-
-        // TODO parallel dispatch!
-        let mut data_index = 0;
-        for (coverage, sub_volume) in affected_sub_volumes {
-            let sub_offset = Block::new(
-                sub_volume.compute_sub_volume_lba(coverage.start),
-                offset.shift,
-            );
-            let sz = (coverage.end - coverage.start) as usize
-                * self.block_size as usize;
-            let slice_range = Range::<usize> {
-                start: data_index,
-                end: data_index + sz,
-            };
-            let slice = data.slice(slice_range);
-
-            let mut waiter = sub_volume.write(sub_offset, slice.clone())?;
-            waiter.block_wait()?;
-
-            data_index += sz;
-        }
-
-        BlockReqWaiter::immediate()
+        // Make use of the volume specific write_op method to avoid
+        // code duplication with volume.write_unwritten.
+        self.volume_write_op(offset, data, false)
     }
 
     fn write_unwritten(
         &self,
-        _offset: Block,
-        _data: Bytes,
+        offset: Block,
+        data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        crucible_bail!(Unsupported, "write_unwritten not supported for volumes")
+        // Make use of the volume specific write_op method to avoid
+        // code duplication with volume.write.
+        self.volume_write_op(offset, data, true)
     }
 
     fn flush(
@@ -730,6 +702,55 @@ impl Volume {
                 Ok(vol)
             }
         }
+    }
+
+    // This method is called by both write and write_unwritten and
+    // provides a single place so both can share common code.
+    fn volume_write_op(
+        &self,
+        offset: Block,
+        data: Bytes,
+        is_write_unwritten: bool,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        // In the case that this volume only has a read only parent,
+        // return an error.
+        if self.sub_volumes.is_empty() {
+            crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
+        }
+
+        let affected_sub_volumes = self.sub_volumes_for_lba_range(
+            offset.value,
+            data.len() as u64 / self.block_size,
+        );
+
+        // TODO parallel dispatch!
+        let mut data_index = 0;
+        for (coverage, sub_volume) in affected_sub_volumes {
+            let sub_offset = Block::new(
+                sub_volume.compute_sub_volume_lba(coverage.start),
+                offset.shift,
+            );
+            let sz = (coverage.end - coverage.start) as usize
+                * self.block_size as usize;
+            let slice_range = Range::<usize> {
+                start: data_index,
+                end: data_index + sz,
+            };
+            let slice = data.slice(slice_range);
+
+            // Take the write or write_unwritten path here.
+            let mut waiter = if is_write_unwritten {
+                sub_volume.write_unwritten(sub_offset, slice.clone())?
+            } else {
+                sub_volume.write(sub_offset, slice.clone())?
+            };
+
+            waiter.block_wait()?;
+
+            data_index += sz;
+        }
+
+        BlockReqWaiter::immediate()
     }
 }
 
@@ -1370,7 +1391,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn test_writing_to_volume_with_only_read_only_parent() {
         const BLOCK_SIZE: u64 = 512;
 
@@ -1392,15 +1412,43 @@ mod test {
 
         volume.activate(0).unwrap();
 
-        // Write 0x80 into volume - this will panic!
-        volume
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![128; 2048]),
-            )
-            .unwrap()
-            .block_wait()
-            .unwrap();
+        // Write 0x80 into volume - this will error
+        let res = volume.write(
+            Block::new(0, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![128; 2048]),
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_write_unwritten_to_volume_with_only_read_only_parent() {
+        const BLOCK_SIZE: u64 = 512;
+
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+
+        let volume = Volume {
+            uuid: Uuid::new_v4(),
+            sub_volumes: vec![],
+            read_only_parent: Some(SubVolume {
+                lba_range: Range {
+                    start: 0,
+                    end: parent.total_size().unwrap() / BLOCK_SIZE as u64,
+                },
+                block_io: parent.clone(),
+            }),
+            block_size: BLOCK_SIZE,
+        };
+
+        volume.activate(0).unwrap();
+
+        // Write 0x80 into volume - this will error
+        let res = volume.write_unwritten(
+            Block::new(0, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![128; 2048]),
+        );
+
+        assert!(res.is_err());
     }
 
     #[test]
