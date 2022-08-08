@@ -48,7 +48,7 @@ done
 banner nightly
 mkdir -p out
 tar cavf out/crucible-nightly.tar.gz \
-    target/release/crucible-client \
+    target/release/crutest \
     target/release/crucible-downstairs \
     target/release/crucible-hammer \
     target/release/dsc \
