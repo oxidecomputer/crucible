@@ -90,6 +90,17 @@ impl BlockIO for FileBlockIO {
         BlockReqWaiter::immediate()
     }
 
+    fn write_unwritten(
+        &self,
+        _offset: Block,
+        _data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        crucible_bail!(
+            Unsupported,
+            "write_unwritten unsupported for FileBlockIO"
+        )
+    }
+
     fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
@@ -230,7 +241,18 @@ impl BlockIO for ReqwestBlockIO {
         _offset: Block,
         _data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        unimplemented!();
+        crucible_bail!(Unsupported, "write unsupported for ReqwestBlockIO")
+    }
+
+    fn write_unwritten(
+        &self,
+        _offset: Block,
+        _data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        crucible_bail!(
+            Unsupported,
+            "write_unwritten unsupported for ReqwestBlockIO"
+        )
     }
 
     fn flush(

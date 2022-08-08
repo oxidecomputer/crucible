@@ -157,6 +157,15 @@ enum CliCommand {
         #[clap(long, short, default_value = "1", action)]
         len: usize,
     },
+    /// WriteUnwritten to a given block offset.
+    /// Note that the cli will decide if a block is written to based on
+    /// the cli's internal write log.  This log may not match if the block
+    /// actually has or has not been written to.
+    WriteUnwritten {
+        /// The desired offset in blocks to write to.
+        #[clap(short, action)]
+        offset: usize,
+    },
     /// Get the upstairs UUID
     Uuid,
 }
@@ -266,6 +275,57 @@ fn cli_write(
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
     let mut waiter = guest.write(offset, data)?;
+    waiter.block_wait()?;
+
+    Ok(())
+}
+
+/*
+ * Issue a write_unwritten to the guest at the given offset.
+ * We first check our internal write counter.
+ * If we believe the block has not been written to, then we update our
+ * internal counter and we will expect the write to change the block.
+ * If we do believe the block is written to, then we don't update our
+ * internal counter and we don't expect our write to change the contents.
+ */
+fn cli_write_unwritten(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    block_index: usize,
+) -> Result<(), CrucibleError> {
+    /*
+     * Convert offset to its byte value.
+     */
+    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+    // To determine what we put into our write buffer, look to see if
+    // we believe we have written to this block or not.
+    let data = if ri.write_log.get_seed(block_index) == 0 {
+        // We have not written to this block, so we create our write buffer
+        // like normal and update our internal counter to reflect that.
+
+        ri.write_log.update_wc(block_index);
+        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
+        Bytes::from(vec)
+    } else {
+        println!("This block has been written");
+        // Fill the write buffer with random data.  We don't expect this
+        // to actually make it to disk.
+
+        let mut vec = Vec::with_capacity(ri.block_size as usize);
+        for _ in 0..ri.block_size {
+            vec.push(rand::thread_rng().gen::<u8>());
+        }
+        Bytes::from(vec)
+    };
+
+    println!(
+        "WriteUnwritten at block {:5}, len:{:7}",
+        offset.value,
+        data.len(),
+    );
+
+    let mut waiter = guest.write_unwritten(offset, data)?;
     waiter.block_wait()?;
 
     Ok(())
@@ -429,6 +489,9 @@ async fn cmd_to_msg(
         }
         CliCommand::Write { offset, len } => {
             fw.send(CliMessage::Write(offset, len)).await?;
+        }
+        CliCommand::WriteUnwritten { offset } => {
+            fw.send(CliMessage::WriteUnwritten(offset)).await?;
         }
     }
     /*
@@ -834,6 +897,19 @@ async fn process_cli_command(
                 .await
             } else {
                 match cli_write(guest, ri, offset, len) {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
+                }
+            }
+        }
+        CliMessage::WriteUnwritten(offset) => {
+            if ri.write_log.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match cli_write_unwritten(guest, ri, offset) {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
