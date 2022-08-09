@@ -303,11 +303,14 @@ impl DataFile {
             inner.running_snapshots.get_mut(&request.id).unwrap();
 
         if running_snapshots.get(&request.name).is_none() {
-            bail!(
-                "not running for region {} snapshot {}",
+            info!(
+                self.log,
+                "not running for region {} snapshot {}, returning Ok",
                 request.id.0,
                 request.name
             );
+
+            return Ok(());
         }
 
         info!(
