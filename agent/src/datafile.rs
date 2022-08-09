@@ -352,7 +352,6 @@ impl DataFile {
             }
         }
 
-        // zfs delete snapshot
         let mut path = self.base_path.to_path_buf();
         path.push("regions");
         path.push(request.id.0.clone());
@@ -362,6 +361,33 @@ impl DataFile {
 
         let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 
+        // If the snapshot doesn't exist, return Ok - this call should be
+        // idempotent
+        let cmd = Command::new("zfs")
+            .arg("list")
+            .arg(snapshot_name.clone())
+            .output()?;
+
+        if !cmd.status.success() {
+            let out = String::from_utf8_lossy(&cmd.stdout);
+            let err = String::from_utf8_lossy(&cmd.stderr);
+
+            if err.trim_end().ends_with("dataset does not exist") {
+                return Ok(());
+            }
+
+            error!(
+                self.log,
+                "zfs snapshot {:?} list failed: out {:?} err {:?}",
+                snapshot_name,
+                out,
+                err,
+            );
+
+            bail!("zfs snapshot list failure");
+        }
+
+        // Delete it if it exists
         let cmd = Command::new("zfs")
             .arg("destroy")
             .arg(snapshot_name.clone())
@@ -606,33 +632,24 @@ impl DataFile {
                     })?
                     .to_string();
 
-                // Creation time of a .zfs/snapshot/<folder> as retrieved by
-                // stat doesn't make sense. Use `zfs get`:
-                //
-                //   # zfs get -pH -o value creation \
-                //     data/crucible/regions/
-                // 0d052762-10dd-4481-9a1a-1d36b9799f51@before_sync
-                //   1644441276
-
-                let dataset_name = {
+                let dataset = {
                     let mut path = self.base_path.clone().to_path_buf();
                     path.push("regions");
                     path.push(region_id.0.clone());
 
-                    let path = path.to_str().unwrap().to_string();
-
-                    // Get dataset name from path
-                    let output = std::process::Command::new("zfs")
-                        .args(["list", "-pH", "-o", "name", &path])
-                        .output()?;
-
-                    let output = String::from_utf8_lossy(&output.stdout);
-
-                    // remove '\n' from end
-                    output.trim_end().to_string()
+                    ZFSDataset::new(
+                        path.into_os_string().into_string().unwrap(),
+                    )?
                 };
 
-                let snapshot_name = format!("{}@{}", dataset_name, dir_name);
+                let snapshot_name =
+                    format!("{}@{}", dataset.dataset(), dir_name);
+
+                // Creation time of a .zfs/snapshot/<folder> as retrieved by
+                // stat doesn't make sense. Use `zfs get`:
+                //
+                //   # zfs get -pH -o value creation <snapshot_name>
+                //   1644441276
 
                 let mut cmd = Command::new("zfs");
                 cmd.arg("get");
