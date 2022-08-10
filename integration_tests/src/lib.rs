@@ -983,6 +983,81 @@ mod test {
         Ok(())
     }
 
+    // Test that multiple upstairs can connect to a single read-only downstairs
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_multi_read_only() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let mut opts = three_downstairs(54046, 54047, 54048, true).unwrap();
+
+        let vcr_1: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Region {
+                        block_size: BLOCK_SIZE as u64,
+                        opts: opts.clone(),
+                        gen: 0,
+                    },
+                )),
+            };
+
+        // Second volume should have a unique UUID
+        opts.id = Uuid::new_v4();
+
+        let vcr_2: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Region {
+                        block_size: BLOCK_SIZE as u64,
+                        opts,
+                        gen: 0,
+                    },
+                )),
+            };
+
+        // XXX Crucible uses std::sync::mpsc::Receiver, not
+        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
+        // Remove that when Crucible changes over to the tokio mpsc.
+        let volume1 =
+            tokio::task::block_in_place(|| Volume::construct(vcr_1, None))?;
+        volume1.activate(0)?;
+
+        let volume2 =
+            tokio::task::block_in_place(|| Volume::construct(vcr_2, None))?;
+        volume2.activate(0)?;
+
+        // Read one block: should be all 0x00
+        let buffer = Buffer::new(BLOCK_SIZE);
+        tokio::task::block_in_place(|| {
+            volume1.read(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                buffer.clone(),
+            )
+        })?
+        .block_wait()?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+
+        let buffer = Buffer::new(BLOCK_SIZE);
+        tokio::task::block_in_place(|| {
+            volume2.read(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                buffer.clone(),
+            )
+        })?
+        .block_wait()?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+
+        Ok(())
+    }
+
     // The following tests work at the "guest" layer.  The volume
     // layers above (in general) will eventually call a BlockIO trait
     // on a guest layer.  Port numbers from this point below should
@@ -1433,77 +1508,66 @@ mod test {
         Ok(())
     }
 
-    // Test that multiple upstairs can connect to a single read-only downstairs
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn integration_test_multi_read_only() -> Result<()> {
+    async fn integration_test_two_layers_parent_smaller() -> Result<()> {
+        // Test a RO parent that is smaller than the SubVolume.
+        let opts = three_downstairs(54052, 54053, 54054, false).unwrap();
+
         const BLOCK_SIZE: usize = 512;
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 5,
+        ));
 
-        let mut opts = three_downstairs(54040, 54041, 54042, true).unwrap();
-
-        let vcr_1: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
-                        block_size: BLOCK_SIZE as u64,
-                        opts: opts.clone(),
-                        gen: 0,
-                    },
-                )),
-            };
-
-        // Second volume should have a unique UUID
-        opts.id = Uuid::new_v4();
-
-        let vcr_2: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
-                        block_size: BLOCK_SIZE as u64,
-                        opts,
-                        gen: 0,
-                    },
-                )),
-            };
-
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume1 =
-            tokio::task::block_in_place(|| Volume::construct(vcr_1, None))?;
-        volume1.activate(0)?;
-
-        let volume2 =
-            tokio::task::block_in_place(|| Volume::construct(vcr_2, None))?;
-        volume2.activate(0)?;
-
-        // Read one block: should be all 0x00
-        let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume1.read(
+        // Fill the in_memory block_io with 1s
+        in_memory_data
+            .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+            )?
+            .block_wait()?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+        // Read back in_memory, verify 1s
+        let buffer = Buffer::new(BLOCK_SIZE * 5);
+        in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
 
-        let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume2.read(
+        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // Verify parent contents in one read
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        let mut expected = vec![11; BLOCK_SIZE * 5];
+        expected.extend(vec![0x00; BLOCK_SIZE * 5]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        // One big write!
+        volume
+            .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+        // Verify volume contents in one read
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
 
         Ok(())
     }
