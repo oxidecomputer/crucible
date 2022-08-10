@@ -223,18 +223,25 @@ async fn process_message(
     m: &Message,
     up_coms: UpComs,
 ) -> Result<()> {
-    let (uuid, ds_id, result) = match m {
+    let (upstairs_id, session_id, ds_id, result) = match m {
         Message::Imok => return Ok(()),
         Message::WriteAck {
             upstairs_id,
+            session_id,
             job_id,
             result,
         } => {
             cdt::ds__write__io__done!(|| (job_id, up_coms.client_id as u64));
-            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
+            (
+                *upstairs_id,
+                *session_id,
+                *job_id,
+                result.clone().map(|_| Vec::new()),
+            )
         }
         Message::WriteUnwrittenAck {
             upstairs_id,
+            session_id,
             job_id,
             result,
         } => {
@@ -242,23 +249,35 @@ async fn process_message(
                 job_id,
                 up_coms.client_id as u64
             ));
-            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
+            (
+                *upstairs_id,
+                *session_id,
+                *job_id,
+                result.clone().map(|_| Vec::new()),
+            )
         }
         Message::FlushAck {
             upstairs_id,
+            session_id,
             job_id,
             result,
         } => {
             cdt::ds__flush__io__done!(|| (job_id, up_coms.client_id as u64));
-            (*upstairs_id, *job_id, result.clone().map(|_| Vec::new()))
+            (
+                *upstairs_id,
+                *session_id,
+                *job_id,
+                result.clone().map(|_| Vec::new()),
+            )
         }
         Message::ReadResponse {
             upstairs_id,
+            session_id,
             job_id,
             responses,
         } => {
             cdt::ds__read__io__done!(|| (job_id, up_coms.client_id as u64));
-            (*upstairs_id, *job_id, responses.clone())
+            (*upstairs_id, *session_id, *job_id, responses.clone())
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -270,11 +289,21 @@ async fn process_message(
         }
     };
 
-    if u.uuid != uuid {
+    if u.uuid != upstairs_id {
         println!(
-            "[{}] u.uuid {:?} != job {} uuid {:?}!",
-            up_coms.client_id, u.uuid, ds_id, uuid
+            "[{}] u.uuid {:?} != job {} upstairs_id {:?}!",
+            up_coms.client_id, u.uuid, ds_id, upstairs_id,
         );
+
+        return Err(CrucibleError::UuidMismatch.into());
+    }
+
+    if u.session_id != session_id {
+        println!(
+            "[{}] u.session_id {:?} != job {} session_id {:?}!",
+            up_coms.client_id, u.session_id, ds_id, session_id,
+        );
+
         return Err(CrucibleError::UuidMismatch.into());
     }
 
@@ -434,6 +463,7 @@ where
                 cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
+                    session_id: u.session_id,
                     job_id: *new_id,
                     dependencies: dependencies.clone(),
                     writes: writes.clone(),
@@ -450,6 +480,7 @@ where
                 ));
                 fw.send(Message::WriteUnwritten {
                     upstairs_id: u.uuid,
+                    session_id: u.session_id,
                     job_id: *new_id,
                     dependencies: dependencies.clone(),
                     writes: writes.clone(),
@@ -465,6 +496,7 @@ where
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
+                    session_id: u.session_id,
                     job_id: *new_id,
                     dependencies: dependencies.clone(),
                     flush_number,
@@ -480,6 +512,7 @@ where
                 cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
+                    session_id: u.session_id,
                     job_id: *new_id,
                     dependencies: dependencies.clone(),
                     requests,
