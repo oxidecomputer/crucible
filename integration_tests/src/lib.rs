@@ -1434,7 +1434,7 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn integration_test_two_layers_small_common() -> Result<()> {
+    async fn integration_test_two_layers_parent_smaller() -> Result<()> {
         // Test a RO parent that is smaller than the SubVolume.
         let opts = three_downstairs(54052, 54053, 54054, false).unwrap();
 
