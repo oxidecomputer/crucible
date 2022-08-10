@@ -247,18 +247,21 @@ pub enum Message {
      */
     Write {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         dependencies: Vec<u64>,
         writes: Vec<Write>,
     },
     WriteAck {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         result: Result<(), CrucibleError>,
     },
 
     Flush {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         dependencies: Vec<u64>,
         flush_number: u64,
@@ -267,30 +270,35 @@ pub enum Message {
     },
     FlushAck {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         result: Result<(), CrucibleError>,
     },
 
     ReadRequest {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         dependencies: Vec<u64>,
         requests: Vec<ReadRequest>,
     },
     ReadResponse {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         responses: Result<Vec<ReadResponse>, CrucibleError>,
     },
 
     WriteUnwritten {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         dependencies: Vec<u64>,
         writes: Vec<Write>,
     },
     WriteUnwrittenAck {
         upstairs_id: Uuid,
+        session_id: Uuid,
         job_id: u64,
         result: Result<(), CrucibleError>,
     },
@@ -352,6 +360,7 @@ impl CrucibleEncoder {
         // bound.
         let lower_size_write_message = Message::Write {
             upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
             job_id: 1,
             dependencies: vec![1],
             writes: (0..(MAX_FRM_LEN / size_of_write_message))
@@ -368,6 +377,7 @@ impl CrucibleEncoder {
         // size.
         let upper_size_write_message = Message::Write {
             upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
             job_id: 1,
             dependencies: vec![1],
             writes: (0..(MAX_FRM_LEN / bs))
@@ -386,6 +396,7 @@ impl CrucibleEncoder {
         let mut lower = match lower_size_write_message {
             Message::Write {
                 upstairs_id: _,
+                session_id: _,
                 job_id: _,
                 dependencies: _,
                 writes,
@@ -398,6 +409,7 @@ impl CrucibleEncoder {
         let mut upper = match upper_size_write_message {
             Message::Write {
                 upstairs_id: _,
+                session_id: _,
                 job_id: _,
                 dependencies: _,
                 writes,
@@ -416,6 +428,7 @@ impl CrucibleEncoder {
 
             let mid_size_write_message = Message::Write {
                 upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
                 job_id: 1,
                 dependencies: vec![1],
                 writes: (0..mid)

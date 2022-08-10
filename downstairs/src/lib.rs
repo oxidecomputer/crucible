@@ -359,18 +359,26 @@ async fn proc_frame<WT>(
 where
     WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
 {
-    let upstairs_uuid = upstairs_connection.upstairs_id;
     let new_ds_id = match m {
         Message::Write {
             upstairs_id,
+            session_id,
             job_id,
             dependencies,
             writes,
         } => {
-            if upstairs_uuid != *upstairs_id {
+            if upstairs_connection.upstairs_id != *upstairs_id {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_uuid,
+                    expected_id: upstairs_connection.upstairs_id,
+                })
+                .await?;
+                return Ok(());
+            }
+            if upstairs_connection.session_id != *session_id {
+                let mut fw = fw.lock().await;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_connection.session_id,
                 })
                 .await?;
                 return Ok(());
@@ -383,21 +391,30 @@ where
             };
 
             let d = ad.lock().await;
-            d.add_work(*upstairs_id, *job_id, new_write).await?;
+            d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
         Message::Flush {
             upstairs_id,
+            session_id,
             job_id,
             dependencies,
             flush_number,
             gen_number,
             snapshot_details,
         } => {
-            if upstairs_uuid != *upstairs_id {
+            if upstairs_connection.upstairs_id != *upstairs_id {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_uuid,
+                    expected_id: upstairs_connection.upstairs_id,
+                })
+                .await?;
+                return Ok(());
+            }
+            if upstairs_connection.session_id != *session_id {
+                let mut fw = fw.lock().await;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_connection.session_id,
                 })
                 .await?;
                 return Ok(());
@@ -412,57 +429,75 @@ where
             };
 
             let d = ad.lock().await;
-            d.add_work(*upstairs_id, *job_id, new_flush).await?;
+            d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
         Message::WriteUnwritten {
             upstairs_id,
+            session_id,
             job_id,
             dependencies,
             writes,
         } => {
-            if upstairs_uuid != *upstairs_id {
+            if upstairs_connection.upstairs_id != *upstairs_id {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch {
-                    expected_id: *upstairs_id,
+                    expected_id: upstairs_connection.upstairs_id,
                 })
                 .await?;
                 return Ok(());
             }
-
+            if upstairs_connection.session_id != *session_id {
+                let mut fw = fw.lock().await;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_connection.session_id,
+                })
+                .await?;
+                return Ok(());
+            }
             cdt::submit__writeunwritten__start!(|| *job_id);
+
             let new_write = IOop::WriteUnwritten {
                 dependencies: dependencies.to_vec(),
                 writes: writes.to_vec(),
             };
 
             let d = ad.lock().await;
-            d.add_work(*upstairs_id, *job_id, new_write).await?;
+            d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
         Message::ReadRequest {
             upstairs_id,
+            session_id,
             job_id,
             dependencies,
             requests,
         } => {
-            if upstairs_uuid != *upstairs_id {
+            if upstairs_connection.upstairs_id != *upstairs_id {
                 let mut fw = fw.lock().await;
                 fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_uuid,
+                    expected_id: upstairs_connection.upstairs_id,
                 })
                 .await?;
                 return Ok(());
             }
-
+            if upstairs_connection.session_id != *session_id {
+                let mut fw = fw.lock().await;
+                fw.send(Message::UuidMismatch {
+                    expected_id: upstairs_connection.session_id,
+                })
+                .await?;
+                return Ok(());
+            }
             cdt::submit__read__start!(|| *job_id);
+
             let new_read = IOop::Read {
                 dependencies: dependencies.to_vec(),
                 requests: requests.to_vec(),
             };
 
             let d = ad.lock().await;
-            d.add_work(*upstairs_id, *job_id, new_read).await?;
+            d.add_work(upstairs_connection, *job_id, new_read).await?;
             Some(*job_id)
         }
         Message::ExtentFlush {
@@ -611,9 +646,11 @@ where
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let upstairs_uuid = {
-            if let Some(upstairs_uuid) = ads.lock().await.active_upstairs() {
-                upstairs_uuid
+        let upstairs_connection = {
+            if let Some(upstairs_connection) =
+                ads.lock().await.active_upstairs()
+            {
+                upstairs_connection
             } else {
                 // We are not an active downstairs, wait until we are
                 continue;
@@ -625,7 +662,8 @@ where
          * are New or DepWait.
          */
         let mut new_work = {
-            if let Ok(new_work) = ads.lock().await.new_work(upstairs_uuid).await
+            if let Ok(new_work) =
+                ads.lock().await.new_work(upstairs_connection).await
             {
                 new_work
             } else {
@@ -822,10 +860,10 @@ where
                                 upstairs_connection, ds.jobs().await,
                             );
 
-                            if ds.is_active(upstairs_connection.upstairs_id) {
+                            if ds.is_active(upstairs_connection) {
                                 println!("upstairs {:?} was previously \
                                     active, clearing", upstairs_connection);
-                                ds.clear_active().await;
+                                ds.clear_active(upstairs_connection).await;
                             }
                         } else {
                             println!(
@@ -985,7 +1023,7 @@ where
                         {
                             let ds = ads.lock().await;
                             let mut work = ds.work_lock(
-                                upstairs_connection.unwrap().upstairs_id,
+                                upstairs_connection.unwrap(),
                             ).await?;
                             work.last_flush = last_flush_number;
                             println!("Set last flush {}", last_flush_number);
@@ -1174,10 +1212,9 @@ where
                     Some(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did
-                        println!("Another upstairs promoted to active, \
+                        println!("Another upstairs {:?} promoted to active, \
                             shutting down connection for {:?}",
-                            upstairs_connection,
-                        );
+                            new_upstairs_connection, upstairs_connection);
 
                         let mut fw = fw.lock().await;
                         fw.send(Message::YouAreNoLongerActive {
@@ -1203,10 +1240,10 @@ where
                             upstairs_connection, ds.jobs().await,
                         );
 
-                        if ds.is_active(upstairs_connection.upstairs_id) {
+                        if ds.is_active(upstairs_connection) {
                             println!("upstairs {:?} was previously \
                                 active, clearing", upstairs_connection);
-                            ds.clear_active().await;
+                            ds.clear_active(upstairs_connection).await;
                         }
 
                         return Ok(());
@@ -1275,7 +1312,7 @@ impl Downstairs {
     }
 
     /*
-     * Only grab the lock if the Upstairs UUID matches.
+     * Only grab the lock if the UpstairsConnection matches.
      *
      * Multiple Upstairs connecting to this Downstairs will spawn multiple
      * threads that all can potentially add work to the same `active` hash
@@ -1288,18 +1325,21 @@ impl Downstairs {
      * function. Let's say `promote_to_active` and `add_work` are racing for
      * the work lock. If `add_work` wins the race it will put work into
      * `active`, then `promote_to_active` will clear it out. If
-     * `promote_to_active` wins the race, it will change the UUID and
-     * signal to the previously active Upstairs that it should close this
-     * connection. If `add_work` does fire, it will fail to grab the lock
-     * because the UUID is no longer active, and the connection thread
-     * should close.
+     * `promote_to_active` wins the race, it will change the Downstairs'
+     * active UpstairsConnection, and send the terminate signal to the
+     * tasks that are communicating to the previously active Upstairs
+     * (along with terminating the Downstairs tasks). If `add_work` for
+     * the previous Upstairs then does fire, it will fail to
+     * grab the lock because the UpstairsConnection is no longer active, and
+     * that `add_work` thread should close.
      *
      * Let's say `new_work` and `promote_to_active` are racing. If `new_work`
      * wins, then it will return and run those jobs in `do_work_task`.
      * However, `promote_to_active` will grab the lock and change the
-     * UUID, causing `do_work` to return UpstairsInactive for the jobs
-     * that were just returned. If `promote_to_active` wins, it will
-     * clear out the jobs of the old UUID.
+     * active UpstairsConnection, causing `do_work` to return
+     * UpstairsInactive for the jobs that were just returned. If
+     * `promote_to_active` wins, it will clear out the jobs of the old
+     * Upstairs.
      *
      * Grabbing the lock in this way should properly clear out the previously
      * active Upstairs without causing jobs to be incorrectly sent to the
@@ -1307,14 +1347,14 @@ impl Downstairs {
      */
     async fn work_lock(
         &self,
-        upstairs_uuid: Uuid,
+        upstairs_connection: UpstairsConnection,
     ) -> Result<MutexGuard<'_, Work>> {
         if let Some(active_upstairs) = &self.active_upstairs {
-            let active_uuid = active_upstairs.0.upstairs_id;
-            if active_uuid != upstairs_uuid {
+            let (active_connection, ..) = active_upstairs;
+            if *active_connection != upstairs_connection {
                 println!(
                     "{:?} cannot grab lock, {:?} is active!",
-                    upstairs_uuid, active_uuid
+                    upstairs_connection, active_connection,
                 );
                 bail!(CrucibleError::UpstairsInactive)
             } else {
@@ -1330,15 +1370,18 @@ impl Downstairs {
         work.jobs()
     }
 
-    async fn new_work(&self, upstairs_uuid: Uuid) -> Result<Vec<u64>> {
-        let work = self.work_lock(upstairs_uuid).await?;
-        Ok(work.new_work(upstairs_uuid))
+    async fn new_work(
+        &self,
+        upstairs_connection: UpstairsConnection,
+    ) -> Result<Vec<u64>> {
+        let work = self.work_lock(upstairs_connection).await?;
+        Ok(work.new_work(upstairs_connection))
     }
 
     // Add work to the Downstairs
     async fn add_work(
         &self,
-        upstairs_uuid: Uuid,
+        upstairs_connection: UpstairsConnection,
         ds_id: u64,
         work: IOop,
     ) -> Result<()> {
@@ -1357,13 +1400,13 @@ impl Downstairs {
         }
 
         let dsw = DownstairsWork {
-            upstairs_uuid,
+            upstairs_connection,
             ds_id,
             work,
             state: WorkState::New,
         };
 
-        let mut work = self.work_lock(upstairs_uuid).await?;
+        let mut work = self.work_lock(upstairs_connection).await?;
         work.add_work(ds_id, dsw);
 
         Ok(())
@@ -1372,8 +1415,8 @@ impl Downstairs {
     // Downstairs, move a job to in_progress, if we can
     async fn in_progress(&self, ds_id: u64) -> Option<u64> {
         let mut work = self.work.lock().await;
-        if let Some((job_id, upstairs_uuid)) = work.in_progress(ds_id) {
-            if !self.is_active(upstairs_uuid) {
+        if let Some((job_id, upstairs_connection)) = work.in_progress(ds_id) {
+            if !self.is_active(upstairs_connection) {
                 // Don't return a job with the wrong uuid! `promote_to_active`
                 // should have removed any active jobs, and
                 // `work.new_work` should have filtered on the correct UUID.
@@ -1528,22 +1571,27 @@ impl Downstairs {
         Ok(())
     }
 
-    fn is_active(&self, uuid: Uuid) -> bool {
+    fn is_active(&self, connection: UpstairsConnection) -> bool {
         match self.active_upstairs.as_ref() {
             None => false,
             Some((upstairs_connection, _tx)) => {
-                upstairs_connection.upstairs_id == uuid
+                *upstairs_connection == connection
             }
         }
     }
 
-    fn active_upstairs(&self) -> Option<Uuid> {
+    fn active_upstairs(&self) -> Option<UpstairsConnection> {
         self.active_upstairs
             .as_ref()
-            .map(|(upstairs_connection, _tx)| upstairs_connection.upstairs_id)
+            .map(|(upstairs_connection, _tx)| *upstairs_connection)
     }
 
-    async fn clear_active(&mut self) {
+    async fn clear_active(&mut self, upstairs_connection: UpstairsConnection) {
+        // Don't allow another connection to clear us
+        if !self.is_active(upstairs_connection) {
+            return;
+        }
+
         let mut work = self.work.lock().await;
 
         self.active_upstairs = None;
@@ -1574,7 +1622,7 @@ pub struct Work {
 
 #[derive(Debug, Clone)]
 struct DownstairsWork {
-    upstairs_uuid: Uuid,
+    upstairs_connection: UpstairsConnection,
     ds_id: u64,
     work: IOop,
     state: WorkState,
@@ -1589,11 +1637,11 @@ impl Work {
      * Return a list of downstairs request IDs that are new or have
      * been waiting for other dependencies to finish.
      */
-    fn new_work(&self, upstairs_uuid: Uuid) -> Vec<u64> {
+    fn new_work(&self, upstairs_connection: UpstairsConnection) -> Vec<u64> {
         let mut result = Vec::with_capacity(self.active.len());
 
         for job in self.active.values() {
-            if job.upstairs_uuid != upstairs_uuid {
+            if job.upstairs_connection != upstairs_connection {
                 panic!("Old Upstairs Job in new_work!");
             }
 
@@ -1620,7 +1668,7 @@ impl Work {
      * we build or work list with the new_work fn above, but we drop and
      * re-aquire the Work mutex and things can change.
      */
-    fn in_progress(&mut self, ds_id: u64) -> Option<(u64, Uuid)> {
+    fn in_progress(&mut self, ds_id: u64) -> Option<(u64, UpstairsConnection)> {
         /*
          * Once we support multiple threads, we can obtain a ds_id that
          * looked valid when we made a list of jobs, but something
@@ -1667,7 +1715,7 @@ impl Work {
 
                     if print {
                         println!(
-                            "{} job {} for uuid {:?} waiting on {} deps",
+                            "{} job {} for connection {:?} waiting on {} deps",
                             ds_id,
                             match &job.work {
                                 IOop::Write {
@@ -1689,7 +1737,7 @@ impl Work {
                                     requests: _,
                                 } => "Read",
                             },
-                            job.upstairs_uuid,
+                            job.upstairs_connection,
                             deps_outstanding.len(),
                         );
                     }
@@ -1715,7 +1763,7 @@ impl Work {
                  */
                 job.state = WorkState::InProgress;
 
-                Some((job.ds_id, job.upstairs_uuid))
+                Some((job.ds_id, job.upstairs_connection))
             } else {
                 /*
                  * job id is not new, we can't run it.
@@ -1788,7 +1836,7 @@ impl Work {
                 let responses = if ds.return_errors && random() && random() {
                     println!("returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_uuid) {
+                } else if !ds.is_active(job.upstairs_connection) {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
@@ -1796,7 +1844,8 @@ impl Work {
                 };
 
                 Ok(Some(Message::ReadResponse {
-                    upstairs_id: job.upstairs_uuid,
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
                     job_id: job.ds_id,
                     responses,
                 }))
@@ -1812,7 +1861,7 @@ impl Work {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_uuid) {
+                } else if !ds.is_active(job.upstairs_connection) {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
@@ -1822,7 +1871,8 @@ impl Work {
                 };
 
                 Ok(Some(Message::WriteUnwrittenAck {
-                    upstairs_id: job.upstairs_uuid,
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
                     job_id: job.ds_id,
                     result,
                 }))
@@ -1834,7 +1884,7 @@ impl Work {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_uuid) {
+                } else if !ds.is_active(job.upstairs_connection) {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
@@ -1842,7 +1892,8 @@ impl Work {
                 };
 
                 Ok(Some(Message::WriteAck {
-                    upstairs_id: job.upstairs_uuid,
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
                     job_id: job.ds_id,
                     result,
                 }))
@@ -1856,7 +1907,7 @@ impl Work {
                 let result = if ds.return_errors && random() && random() {
                     println!("returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_uuid) {
+                } else if !ds.is_active(job.upstairs_connection) {
                     println!("Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
@@ -1869,7 +1920,8 @@ impl Work {
                 };
 
                 Ok(Some(Message::FlushAck {
-                    upstairs_id: job.upstairs_uuid,
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
                     job_id: job.ds_id,
                     result,
                 }))
@@ -2097,7 +2149,7 @@ mod test {
 
     fn add_work(
         work: &mut Work,
-        uuid: Uuid,
+        upstairs_connection: UpstairsConnection,
         ds_id: u64,
         deps: Vec<u64>,
         is_flush: bool,
@@ -2105,7 +2157,7 @@ mod test {
         work.add_work(
             ds_id,
             DownstairsWork {
-                upstairs_uuid: uuid,
+                upstairs_connection,
                 ds_id: ds_id,
                 work: if is_flush {
                     IOop::Flush {
@@ -2129,11 +2181,16 @@ mod test {
         );
     }
 
-    fn add_work_rf(work: &mut Work, uuid: Uuid, ds_id: u64, deps: Vec<u64>) {
+    fn add_work_rf(
+        work: &mut Work,
+        upstairs_connection: UpstairsConnection,
+        ds_id: u64,
+        deps: Vec<u64>,
+    ) {
         work.add_work(
             ds_id,
             DownstairsWork {
-                upstairs_uuid: uuid,
+                upstairs_connection,
                 ds_id: ds_id,
                 work: IOop::WriteUnwritten {
                     dependencies: deps,
@@ -2178,9 +2235,12 @@ mod test {
         }
     }
 
-    fn test_push_next_jobs(work: &mut Work, uuid: Uuid) -> Vec<u64> {
+    fn test_push_next_jobs(
+        work: &mut Work,
+        upstairs_connection: UpstairsConnection,
+    ) -> Vec<u64> {
         let mut jobs = vec![];
-        let mut new_work = work.new_work(uuid);
+        let mut new_work = work.new_work(upstairs_connection);
 
         new_work.sort_unstable();
 
@@ -2215,20 +2275,24 @@ mod test {
     #[test]
     fn you_had_one_job() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
-        add_work(&mut work, uuid, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
 
-        assert_eq!(work.new_work(uuid), vec![1000]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
 
-        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+        assert!(test_push_next_jobs(&mut work, upstairs_connection).is_empty());
     }
 
     #[tokio::test]
@@ -2262,7 +2326,6 @@ mod test {
             session_id: Uuid::new_v4(),
             gen: 10,
         };
-        let upstairs_uuid = upstairs_connection.upstairs_id;
 
         // For the other_active_upstairs, unused.
         let (_tx, mut _rx) = channel(1);
@@ -2280,7 +2343,7 @@ mod test {
                 num_blocks: 1,
             }],
         };
-        ds.add_work(upstairs_uuid, 1000, rio).await?;
+        ds.add_work(upstairs_connection, 1000, rio).await?;
 
         let deps = vec![1000];
         let rio = IOop::Read {
@@ -2291,12 +2354,12 @@ mod test {
                 num_blocks: 1,
             }],
         };
-        ds.add_work(upstairs_uuid, 1001, rio).await?;
+        ds.add_work(upstairs_connection, 1001, rio).await?;
 
         _show_work(&ds).await;
 
         // Now we mimic what happens in the do_work_task()
-        let new_work = ds.new_work(upstairs_uuid).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).await.unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 2);
 
@@ -2316,109 +2379,131 @@ mod test {
     fn jobs_write_unwritten() {
         // Verify WriteUnwritten jobs move through the queue
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
-        add_work_rf(&mut work, uuid, 1000, vec![]);
+        add_work_rf(&mut work, upstairs_connection, 1000, vec![]);
 
-        assert_eq!(work.new_work(uuid), vec![1000]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
 
-        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+        assert!(test_push_next_jobs(&mut work, upstairs_connection).is_empty());
     }
 
     #[test]
     fn jobs_independent() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add two independent jobs
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![], false);
 
         // new_work returns all new jobs
-        assert_eq!(work.new_work(uuid), vec![1000, 1001]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000, 1001]);
 
         // should push both, they're independent
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000, 1001]);
 
         // new work returns only jobs in new or dep wait
-        assert!(work.new_work(uuid).is_empty());
+        assert!(work.new_work(upstairs_connection).is_empty());
 
         // do work
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000, 1001]);
 
-        assert!(test_push_next_jobs(&mut work, uuid).is_empty());
+        assert!(test_push_next_jobs(&mut work, upstairs_connection).is_empty());
     }
 
     #[test]
     fn unblock_job() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add two jobs, one blocked on another
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
 
         // new_work returns all new or dep wait jobs
-        assert_eq!(work.new_work(uuid), vec![1000, 1001]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000, 1001]);
 
         // only one is ready to run
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
 
         // new_work returns all new or dep wait jobs
-        assert_eq!(work.new_work(uuid), vec![1001]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1001]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
     }
 
     #[test]
     fn unblock_job_chain() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other in a chain
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
         // new_work returns all new or dep wait jobs
-        assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000, 1001, 1002]);
 
         // only one is ready to run at a time
 
         assert!(work.completed.is_empty());
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1001, 1002]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
-        assert_eq!(work.new_work(uuid), vec![1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1002]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000, 1001]);
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
-        assert!(work.new_work(uuid).is_empty());
+        assert!(work.new_work(upstairs_connection).is_empty());
 
         test_do_work(&mut work, next_jobs);
 
@@ -2428,38 +2513,48 @@ mod test {
     #[test]
     fn unblock_job_chain_first_is_flush() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other in a chain, first is flush
-        add_work(&mut work, uuid, 1000, vec![], true);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], true);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
         // new_work returns all new or dep wait jobs
-        assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000, 1001, 1002]);
 
         // only one is ready to run at a time
 
         assert!(work.completed.is_empty());
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1001, 1002]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, 1000);
         assert!(work.completed.is_empty());
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
-        assert_eq!(work.new_work(uuid), vec![1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1002]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, 1000);
         assert_eq!(work.completed, vec![1001]);
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
-        assert!(work.new_work(uuid).is_empty());
+        assert!(work.new_work(upstairs_connection).is_empty());
 
         test_do_work(&mut work, next_jobs);
 
@@ -2470,37 +2565,47 @@ mod test {
     #[test]
     fn unblock_job_chain_second_is_flush() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other in a chain, second is flush
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], true);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], true);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
         // new_work returns all new or dep wait jobs
-        assert_eq!(work.new_work(uuid), vec![1000, 1001, 1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1000, 1001, 1002]);
 
         // only one is ready to run at a time
 
         assert!(work.completed.is_empty());
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
-        assert_eq!(work.new_work(uuid), vec![1001, 1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1001, 1002]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
-        assert_eq!(work.new_work(uuid), vec![1002]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1002]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, 1001);
         assert!(work.completed.is_empty());
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
-        assert!(work.new_work(uuid).is_empty());
+        assert!(work.new_work(upstairs_connection).is_empty());
 
         test_do_work(&mut work, next_jobs);
 
@@ -2511,23 +2616,27 @@ mod test {
     #[test]
     fn unblock_job_upstairs_sends_big_deps() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(&mut work, upstairs_connection, 1002, vec![1000, 1001], true);
 
         // Downstairs is really fast!
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
         test_do_work(&mut work, next_jobs);
 
@@ -2536,14 +2645,26 @@ mod test {
 
         // Upstairs sends a job with these three in deps, not knowing Downstairs
         // has done the jobs already
-        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
-        add_work(&mut work, uuid, 1004, vec![1000, 1001, 1002, 1003], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1003,
+            vec![1000, 1001, 1002],
+            false,
+        );
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1004,
+            vec![1000, 1001, 1002, 1003],
+            false,
+        );
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1003]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1004]);
         test_do_work(&mut work, next_jobs);
 
@@ -2554,62 +2675,76 @@ mod test {
     #[test]
     fn job_dep_not_satisfied() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], true);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(&mut work, upstairs_connection, 1002, vec![1000, 1001], true);
 
         // Add one that can't run yet
-        add_work(&mut work, uuid, 1003, vec![2000], false);
+        add_work(&mut work, upstairs_connection, 1003, vec![2000], false);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, 1002);
         assert!(work.completed.is_empty());
 
-        assert_eq!(work.new_work(uuid), vec![1003]);
+        assert_eq!(work.new_work(upstairs_connection), vec![1003]);
         assert_eq!(work.active.get(&1003).unwrap().state, WorkState::DepWait);
     }
 
     #[test]
     fn two_job_chains() {
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
         // Add another set of jobs blocked on each other
-        add_work(&mut work, uuid, 2000, vec![], false);
-        add_work(&mut work, uuid, 2001, vec![2000], false);
-        add_work(&mut work, uuid, 2002, vec![2000, 2001], true);
+        add_work(&mut work, upstairs_connection, 2000, vec![], false);
+        add_work(&mut work, upstairs_connection, 2001, vec![2000], false);
+        add_work(&mut work, upstairs_connection, 2002, vec![2000, 2001], true);
 
         // should do each chain in sequence
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000, 2000]);
         test_do_work(&mut work, next_jobs);
         assert_eq!(work.completed, vec![1000, 2000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001, 2001]);
         test_do_work(&mut work, next_jobs);
         assert_eq!(work.completed, vec![1000, 2000, 1001, 2001]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002, 2002]);
         test_do_work(&mut work, next_jobs);
 
@@ -2623,31 +2758,47 @@ mod test {
          * Test that jobs arriving out of order still complete.
          */
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other (missing 1002)
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1003,
+            vec![1000, 1001, 1002],
+            false,
+        );
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
 
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1003]);
         test_do_work(&mut work, next_jobs);
 
@@ -2660,31 +2811,47 @@ mod test {
          * Test that jobs arriving out of order still complete.
          */
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other (missing 1002)
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1003,
+            vec![1000, 1001, 1002],
+            false,
+        );
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
 
         test_do_work(&mut work, next_jobs);
 
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
         assert_eq!(work.completed, vec![1000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1003]);
         test_do_work(&mut work, next_jobs);
 
@@ -2697,36 +2864,52 @@ mod test {
          * Test that jobs arriving out of order still complete.
          */
         let mut work = Work::default();
-        let uuid = Uuid::new_v4();
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
+        };
 
         // Add three jobs all blocked on each other (missing 1002)
-        add_work(&mut work, uuid, 1000, vec![], false);
-        add_work(&mut work, uuid, 1001, vec![1000], false);
-        add_work(&mut work, uuid, 1003, vec![1000, 1001, 1002], false);
+        add_work(&mut work, upstairs_connection, 1000, vec![], false);
+        add_work(&mut work, upstairs_connection, 1001, vec![1000], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1003,
+            vec![1000, 1001, 1002],
+            false,
+        );
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1000]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![1000]);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1001]);
         test_do_work(&mut work, next_jobs);
 
         // can't run anything, dep not satisfied
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert!(next_jobs.is_empty());
         test_do_work(&mut work, next_jobs);
 
-        add_work(&mut work, uuid, 1002, vec![1000, 1001], false);
+        add_work(
+            &mut work,
+            upstairs_connection,
+            1002,
+            vec![1000, 1001],
+            false,
+        );
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1002]);
         test_do_work(&mut work, next_jobs);
 
-        let next_jobs = test_push_next_jobs(&mut work, uuid);
+        let next_jobs = test_push_next_jobs(&mut work, upstairs_connection);
         assert_eq!(next_jobs, vec![1003]);
         test_do_work(&mut work, next_jobs);
 
