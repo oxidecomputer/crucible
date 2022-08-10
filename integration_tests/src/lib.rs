@@ -1432,4 +1432,68 @@ mod test {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_two_layers_parent_smaller() -> Result<()> {
+        // Test a RO parent that is smaller than the SubVolume.
+        let opts = three_downstairs(54052, 54053, 54054, false).unwrap();
+
+        const BLOCK_SIZE: usize = 512;
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 5,
+        ));
+
+        // Fill the in_memory block_io with 1s
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+            )?
+            .block_wait()?;
+
+        // Read back in_memory, verify 1s
+        let buffer = Buffer::new(BLOCK_SIZE * 5);
+        in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // Verify parent contents in one read
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        let mut expected = vec![11; BLOCK_SIZE * 5];
+        expected.extend(vec![0x00; BLOCK_SIZE * 5]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        // One big write!
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Verify volume contents in one read
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
 }
