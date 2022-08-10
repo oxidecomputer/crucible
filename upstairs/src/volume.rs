@@ -1121,6 +1121,8 @@ mod test {
         read_only_parent_init_value: u8,
     ) -> Result<()> {
         volume.activate(0)?;
+        assert_eq!(volume.block_size()?, 512);
+        assert_eq!(block_size, 512);
         assert_eq!(volume.total_size()?, 4096);
 
         // Volume is set up like this:
