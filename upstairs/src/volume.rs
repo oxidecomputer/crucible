@@ -1121,7 +1121,7 @@ mod test {
         read_only_parent_init_value: u8,
     ) -> Result<()> {
         volume.activate(0)?;
-        assert_eq!(volume.block_size()?, 512);
+        assert_eq!(volume.get_block_size()?, 512);
         assert_eq!(block_size, 512);
         assert_eq!(volume.total_size()?, 4096);
 
@@ -1906,7 +1906,7 @@ mod test {
 
     // Test that blocks are correctly returned during read-only parent +
     // subvolume overlap.
-    async fn test_draw_the_owl(
+    async fn test_correct_blocks_returned(
         block_size: usize,
         subvolumes: &[Arc<dyn BlockIO + Send + Sync>],
     ) -> Result<()> {
@@ -1976,7 +1976,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_draw_the_owl_one_subvolume() -> Result<()> {
+    async fn test_correct_blocks_returned_one_subvolume() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // this layout has one volume that the parent lba range overlaps:
@@ -1989,11 +1989,12 @@ mod test {
             BLOCK_SIZE * 10,
         ));
 
-        test_draw_the_owl(BLOCK_SIZE, &[subvolume]).await
+        test_correct_blocks_returned(BLOCK_SIZE, &[subvolume]).await
     }
 
     #[tokio::test]
-    async fn test_draw_the_owl_multiple_subvolumes_1() -> Result<()> {
+    async fn test_correct_blocks_returned_multiple_subvolumes_1() -> Result<()>
+    {
         const BLOCK_SIZE: usize = 512;
 
         // this layout has two volumes that the parent lba range overlaps:
@@ -2012,11 +2013,13 @@ mod test {
             BLOCK_SIZE * 8,
         ));
 
-        test_draw_the_owl(BLOCK_SIZE, &[subvolume_1, subvolume_2]).await
+        test_correct_blocks_returned(BLOCK_SIZE, &[subvolume_1, subvolume_2])
+            .await
     }
 
     #[tokio::test]
-    async fn test_draw_the_owl_multiple_subvolumes_2() -> Result<()> {
+    async fn test_correct_blocks_returned_multiple_subvolumes_2() -> Result<()>
+    {
         const BLOCK_SIZE: usize = 512;
 
         // this layout has two volumes that the parent lba range overlaps:
@@ -2035,11 +2038,13 @@ mod test {
             BLOCK_SIZE * 5,
         ));
 
-        test_draw_the_owl(BLOCK_SIZE, &[subvolume_1, subvolume_2]).await
+        test_correct_blocks_returned(BLOCK_SIZE, &[subvolume_1, subvolume_2])
+            .await
     }
 
     #[tokio::test]
-    async fn test_draw_the_owl_multiple_subvolumes_3() -> Result<()> {
+    async fn test_correct_blocks_returned_multiple_subvolumes_3() -> Result<()>
+    {
         const BLOCK_SIZE: usize = 512;
 
         // this layout has two volumes that the parent lba range overlaps:
@@ -2058,11 +2063,12 @@ mod test {
             BLOCK_SIZE * 3,
         ));
 
-        test_draw_the_owl(BLOCK_SIZE, &[subvolume_1, subvolume_2]).await
+        test_correct_blocks_returned(BLOCK_SIZE, &[subvolume_1, subvolume_2])
+            .await
     }
 
     #[tokio::test]
-    async fn test_draw_the_owl_three_subvolumes() -> Result<()> {
+    async fn test_correct_blocks_returned_three_subvolumes() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // this layout has three volumes that the parent lba range overlaps:
@@ -2087,7 +2093,10 @@ mod test {
             BLOCK_SIZE * 4,
         ));
 
-        test_draw_the_owl(BLOCK_SIZE, &[subvolume_1, subvolume_2, subvolume_3])
-            .await
+        test_correct_blocks_returned(
+            BLOCK_SIZE,
+            &[subvolume_1, subvolume_2, subvolume_3],
+        )
+        .await
     }
 }
