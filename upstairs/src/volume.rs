@@ -1467,6 +1467,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         volume.activate(0).unwrap();
