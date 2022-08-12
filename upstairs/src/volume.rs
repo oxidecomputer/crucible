@@ -12,7 +12,7 @@ pub struct Volume {
     uuid: Uuid,
 
     sub_volumes: Vec<SubVolume>,
-    read_only_parent: Mutex<Option<SubVolume>>,
+    read_only_parent: Option<SubVolume>,
 
     /*
      * Each sub volume should be the same block size (unit is bytes)
@@ -38,7 +38,7 @@ impl Volume {
         Self {
             uuid,
             sub_volumes: vec![],
-            read_only_parent: Mutex::new(None),
+            read_only_parent: None,
             block_size,
         }
     }
@@ -63,7 +63,7 @@ impl Volume {
         Ok(Self {
             uuid,
             sub_volumes: vec![sub_volume],
-            read_only_parent: Mutex::new(None),
+            read_only_parent: None,
             block_size,
         })
     }
@@ -156,14 +156,14 @@ impl Volume {
         // None when done - read block by block, don't overwrite if owned by sub
         // volume
 
-        self.read_only_parent = Mutex::new(Some(SubVolume {
+        self.read_only_parent = Some(SubVolume {
             // Read only parent LBA range always starts from 0
             lba_range: Range {
                 start: 0,
                 end: number_of_blocks,
             },
             block_io,
-        }));
+        });
 
         Ok(())
     }
@@ -237,8 +237,7 @@ impl Volume {
         length: u64,
     ) -> Option<Range<u64>> {
         // Does the read only parent apply for this range
-        let read_only_parent = self.read_only_parent.lock().unwrap();
-        if let Some(ref read_only_parent) = *read_only_parent {
+        if let Some(ref read_only_parent) = self.read_only_parent {
             read_only_parent.lba_range_coverage(start, length)
         } else {
             None
@@ -251,11 +250,7 @@ impl Volume {
         println!("Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
-        let read_only_parent = self.read_only_parent.lock().unwrap();
-        // TODO: Before we can use the scrubber live, we have to
-        // come up with a more granular locking, as this current lock
-        // will just prevent any reads while the scrubber is working.
-        if let Some(ref read_only_parent) = *read_only_parent {
+        if let Some(ref read_only_parent) = self.read_only_parent {
             let ts = read_only_parent.total_size()?;
             let bs = read_only_parent.get_block_size()? as usize;
 
@@ -346,8 +341,7 @@ impl BlockIO for Volume {
             }
         }
 
-        let read_only_parent = self.read_only_parent.lock().unwrap();
-        if let Some(ref read_only_parent) = *read_only_parent {
+        if let Some(ref read_only_parent) = &self.read_only_parent {
             read_only_parent.conditional_activate(gen)?;
             // TODO: Scrubber starts here?  Maybe?
         }
@@ -362,8 +356,7 @@ impl BlockIO for Volume {
             }
         }
 
-        let read_only_parent = self.read_only_parent.lock().unwrap();
-        if let Some(ref read_only_parent) = *read_only_parent {
+        if let Some(ref read_only_parent) = &self.read_only_parent {
             if !read_only_parent.query_is_active()? {
                 return Ok(false);
             }
@@ -373,7 +366,6 @@ impl BlockIO for Volume {
     }
 
     fn total_size(&self) -> Result<u64, CrucibleError> {
-        let read_only_parent = self.read_only_parent.lock().unwrap();
         if !self.sub_volumes.is_empty() {
             // If this volume has sub volumes, compute total size based on those
             let mut total_blocks = 0;
@@ -386,7 +378,7 @@ impl BlockIO for Volume {
             }
 
             Ok(total_blocks * self.block_size)
-        } else if let Some(ref read_only_parent) = *read_only_parent {
+        } else if let Some(ref read_only_parent) = &self.read_only_parent {
             // If this volume only has a read only parent, report that size for
             // total size
             let total_blocks = read_only_parent.lba_range.end
@@ -414,8 +406,7 @@ impl BlockIO for Volume {
         // In the case that this volume only has a read only parent, serve
         // reads directly from that
         if self.sub_volumes.is_empty() {
-            let read_only_parent = self.read_only_parent.lock().unwrap();
-            if let Some(ref read_only_parent) = *read_only_parent {
+            if let Some(ref read_only_parent) = &self.read_only_parent {
                 return read_only_parent.read(offset, data);
             } else {
                 crucible_bail!(
@@ -455,22 +446,16 @@ impl BlockIO for Volume {
                 coverage.end - coverage.start,
             );
 
-            // We have to check both for parent_coverage, and get and unlock
-            // the read_only_parent.  It's possible that after we checked
-            // for an parent coverage in the lba_range above, the scrubber
-            // finished and removed the read_only_parent. In that case, we
-            // can just take data straight from the subvolume.
-            let read_only_parent = self.read_only_parent.lock().unwrap();
-            if let (Some(read_only_parent), Some(parent_coverage)) =
-                (read_only_parent.as_ref(), parent_coverage)
-            {
+            if let Some(parent_coverage) = parent_coverage {
                 let parent_offset = Block::new(coverage.start, offset.shift);
                 let sub_sz = self.block_size as usize
                     * (parent_coverage.end - parent_coverage.start) as usize;
 
                 let parent_buffer = Buffer::new(sub_sz);
-
-                let mut waiter = read_only_parent
+                let mut waiter = self
+                    .read_only_parent
+                    .as_ref()
+                    .unwrap()
                     .read(parent_offset, parent_buffer.clone())?;
                 waiter.block_wait()?;
 
@@ -612,8 +597,7 @@ impl BlockIO for Volume {
             wq_counts.ds_count += sub_wq_counts.ds_count;
         }
 
-        let read_only_parent = self.read_only_parent.lock().unwrap();
-        if let Some(ref read_only_parent) = *read_only_parent {
+        if let Some(ref read_only_parent) = &self.read_only_parent {
             let sub_wq_counts = read_only_parent.show_work()?;
 
             wq_counts.up_count += sub_wq_counts.up_count;
@@ -929,7 +913,7 @@ mod test {
                     )),
                 },
             ],
-            read_only_parent: Mutex::new(None),
+            read_only_parent: None,
             block_size: 512,
         };
 
@@ -978,7 +962,7 @@ mod test {
                     )),
                 },
             ],
-            read_only_parent: Mutex::new(None),
+            read_only_parent: None,
             block_size: 512,
         };
 
@@ -1044,7 +1028,7 @@ mod test {
                     512 * 512,
                 )),
             }],
-            read_only_parent: Mutex::new(None),
+            read_only_parent: None,
             block_size: 512,
         };
 
@@ -1067,14 +1051,14 @@ mod test {
                     512 * 512,
                 )),
             }],
-            read_only_parent: Mutex::new(Some(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range { start: 0, end: 256 },
                 block_io: Arc::new(InMemoryBlockIO::new(
                     Uuid::new_v4(),
                     512,
                     256 * 512,
                 )),
-            })),
+            }),
             block_size: 512,
         };
 
@@ -1334,7 +1318,7 @@ mod test {
 
         // If the parent goes away, then the sub volume data should still be
         // readable.
-        volume.read_only_parent = Mutex::new(None);
+        volume.read_only_parent = None;
 
         // Read whole volume and verify
         let buffer = Buffer::new(4096);
@@ -1616,13 +1600,13 @@ mod test {
         let volume = Volume {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Mutex::new(Some(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size()? / BLOCK_SIZE as u64,
                 },
                 block_io: parent.clone(),
-            })),
+            }),
             block_size: BLOCK_SIZE,
         };
 
@@ -1653,13 +1637,13 @@ mod test {
         let volume = Volume {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Mutex::new(Some(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().unwrap() / BLOCK_SIZE as u64,
                 },
                 block_io: parent.clone(),
-            })),
+            }),
             block_size: BLOCK_SIZE,
         };
 
@@ -1683,13 +1667,13 @@ mod test {
         let volume = Volume {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Mutex::new(Some(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().unwrap() / BLOCK_SIZE as u64,
                 },
                 block_io: parent.clone(),
-            })),
+            }),
             block_size: BLOCK_SIZE,
         };
 
