@@ -1508,14 +1508,21 @@ impl Downstairs {
         // Complete the job
         let is_flush = matches!(m, Message::FlushAck { .. });
 
-        // _ can be None if promote_to_active ran and cleared out active.
-        let _ = work.active.remove(&ds_id);
-
-        if is_flush {
-            work.last_flush = ds_id;
-            work.completed = Vec::with_capacity(32);
-        } else {
-            work.completed.push(ds_id);
+        // If upstairs_connection grabs the work lock, it is the active
+        // connection for this Upstairs UUID. The job should exist in the Work
+        // struct. If it does not, then we're in the case where the same
+        // Upstairs has reconnected and been promoted to active, meaning
+        // `work.clear()` was run. If that's the case, then do not alter the
+        // Work struct, because there's now two tasks running for the same
+        // UpstairsConnection, and we're the one that should be on the way out
+        // due to a message on the terminate_sender channel.
+        if work.active.remove(&ds_id).is_some() {
+            if is_flush {
+                work.last_flush = ds_id;
+                work.completed = Vec::with_capacity(32);
+            } else {
+                work.completed.push(ds_id);
+            }
         }
 
         Ok(())
@@ -3748,6 +3755,266 @@ mod test {
         assert_eq!(job_2.ds_id, 1000);
         assert_eq!(job_2.work, read_2);
         assert_eq!(job_2.state, WorkState::New);
+
+        Ok(())
+    }
+
+    // Validate that `complete_work` cannot see None if the same Upstairs ID
+    // (but a different session) goes active.
+    #[tokio::test]
+    async fn test_complete_work_cannot_see_none_same_upstairs_id() -> Result<()>
+    {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+
+        // For the other_active_upstairs, unused.
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        // Add one job, id 1000
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, rio).await?;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        assert_eq!(new_work.len(), 1);
+
+        let ip_id = ds.in_progress(upstairs_connection_1, 1000).await?.unwrap();
+        assert_eq!(ip_id, 1000);
+        let m = ds.do_work(upstairs_connection_1, 1000).await?.unwrap();
+
+        // Before complete_work, say promote_to_active runs again for another
+        // connection - same UUID, different session
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: upstairs_connection_1.upstairs_id,
+            session_id: Uuid::new_v4(),
+            gen: 11,
+        };
+
+        let (_tx2, mut _rx2) = channel(1);
+        let tx2 = Arc::new(_tx2);
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+
+        // This should error with UpstairsInactive - upstairs_connection_1 isn't
+        // active anymore and can't grab the work lock.
+        let result = ds.complete_work(upstairs_connection_1, 1000, m).await;
+        assert!(matches!(
+            result.unwrap_err().downcast::<CrucibleError>().unwrap(),
+            CrucibleError::UpstairsInactive,
+        ));
+
+        Ok(())
+    }
+
+    // Validate that `complete_work` cannot see None if a different Upstairs ID
+    // goes active.
+    #[tokio::test]
+    async fn test_complete_work_cannot_see_none_different_upstairs_id(
+    ) -> Result<()> {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+
+        // For the other_active_upstairs, unused.
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        // Add one job, id 1000
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, rio).await?;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        assert_eq!(new_work.len(), 1);
+
+        let ip_id = ds.in_progress(upstairs_connection_1, 1000).await?.unwrap();
+        assert_eq!(ip_id, 1000);
+        let m = ds.do_work(upstairs_connection_1, 1000).await?.unwrap();
+
+        // Before complete_work, say promote_to_active runs again for another
+        // connection
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 11,
+        };
+
+        let (_tx2, mut _rx2) = channel(1);
+        let tx2 = Arc::new(_tx2);
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+
+        // This should error with UpstairsInactive - upstairs_connection_1 isn't
+        // active anymore and can't grab the work lock.
+        let result = ds.complete_work(upstairs_connection_1, 1000, m).await;
+        assert!(matches!(
+            result.unwrap_err().downcast::<CrucibleError>().unwrap(),
+            CrucibleError::UpstairsInactive,
+        ));
+
+        Ok(())
+    }
+
+    // Validate that `complete_work` can see None if the same Upstairs
+    // reconnects
+    #[tokio::test]
+    async fn test_complete_work_can_see_none() -> Result<()> {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+
+        // For the other_active_upstairs, unused.
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        // Add one job, id 1000
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, rio).await?;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        assert_eq!(new_work.len(), 1);
+
+        let ip_id = ds.in_progress(upstairs_connection_1, 1000).await?.unwrap();
+        assert_eq!(ip_id, 1000);
+        let m = ds.do_work(upstairs_connection_1, 1000).await?.unwrap();
+
+        // Before complete_work, the same Upstairs reconnects and goes active
+        let (_tx2, mut _rx2) = channel(1);
+        let tx2 = Arc::new(_tx2);
+
+        ds.promote_to_active(upstairs_connection_1, tx2).await?;
+
+        // In the real downstairs, there would be two tasks now that both
+        // correspond to upstairs_connection_1.
+
+        // Validate that the original set of tasks were sent the termination
+        // signal.
+
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_1);
+
+        // If the original set of tasks don't end right away, they'll try to run
+        // complete_work:
+
+        let result = ds.complete_work(upstairs_connection_1, 1000, m).await;
+
+        // `complete_work` will return Ok(()) despite not doing anything to the
+        // Work struct.
+        assert_eq!(result.unwrap(), ());
 
         Ok(())
     }
