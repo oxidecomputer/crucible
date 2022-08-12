@@ -1376,7 +1376,12 @@ impl Downstairs {
     ) -> Result<MutexGuard<'_, Work>> {
         let upstairs_uuid = upstairs_connection.upstairs_id;
         if !self.active_upstairs.contains_key(&upstairs_uuid) {
-            bail!("cannot grab work lock, {} is not active!", upstairs_uuid);
+            println!(
+                "{:?} cannot grab work lock, {} is not active!",
+                upstairs_connection, upstairs_uuid,
+            );
+
+            bail!(CrucibleError::UpstairsInactive);
         }
 
         let active_upstairs = self.active_upstairs.get(&upstairs_uuid).unwrap();
