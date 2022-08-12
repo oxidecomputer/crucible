@@ -3555,6 +3555,9 @@ mod test {
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
+        assert!(!ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
+
         Ok(())
     }
 
@@ -3595,6 +3598,9 @@ mod test {
         assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
 
         assert_eq!(ds.active_upstairs().len(), 1);
+
+        assert!(!ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
 
         Ok(())
     }
@@ -3637,6 +3643,9 @@ mod test {
 
         assert_eq!(ds.active_upstairs().len(), 2);
 
+        assert!(ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
+
         Ok(())
     }
 
@@ -3676,6 +3685,9 @@ mod test {
         assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
 
         assert_eq!(ds.active_upstairs().len(), 1);
+
+        assert!(!ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
 
         Ok(())
     }
