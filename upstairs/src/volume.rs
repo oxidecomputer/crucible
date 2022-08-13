@@ -269,7 +269,7 @@ impl Volume {
 
                 let mut waiter = self.write_unwritten(
                     Block::new(offset, bs.trailing_zeros()),
-                    Bytes::from(buffer.data.lock().unwrap().clone()),
+                    Bytes::from(buffer.as_vec().clone()),
                 )?;
                 waiter.block_wait()?;
             }
