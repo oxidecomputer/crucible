@@ -983,12 +983,663 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_two_layers_parent_smaller() -> Result<()> {
+        let opts = three_downstairs(54046, 54047, 54048, false).unwrap();
+        integration_test_two_layers_small_common(opts, false).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
+    {
+        let opts = three_downstairs(54049, 54050, 54051, false).unwrap();
+        integration_test_two_layers_small_common(opts, true).await
+    }
+
+    async fn integration_test_two_layers_small_common(
+        opts: CrucibleOpts,
+        is_write_unwritten: bool,
+    ) -> Result<()> {
+        // Test a RO parent that is smaller than the SubVolume.
+
+        const BLOCK_SIZE: usize = 512;
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 5,
+        ));
+
+        // Fill the in_memory block_io with 1s
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+            )?
+            .block_wait()?;
+
+        // Read back in_memory, verify 1s
+        let buffer = Buffer::new(BLOCK_SIZE * 5);
+        in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // Verify parent contents in one read
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        let mut expected = vec![11; BLOCK_SIZE * 5];
+        expected.extend(vec![0x00; BLOCK_SIZE * 5]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        // One big write!
+        let write_offset = Block::new(0, BLOCK_SIZE.trailing_zeros());
+        let write_data = Bytes::from(vec![55; BLOCK_SIZE * 10]);
+        if is_write_unwritten {
+            volume.write(write_offset, write_data)?.block_wait()?;
+        } else {
+            volume
+                .write_unwritten(write_offset, write_data)?
+                .block_wait()?;
+        }
+
+        // Verify volume contents in one read
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_scrub() -> Result<()> {
+        // Volume with a subvolume and a RO parent:
+        // SV: |----------|
+        // RO: |1111111111|
+        //
+        // Read volume, expect 1's
+        // Run scrubber on volume.
+        // Write unwritten 5's:
+        //     |5555555555|
+        //
+        // Because the scrubber, we should expect the original 1's:
+        //     |1111111111|
+
+        const BLOCK_SIZE: usize = 512;
+        let opts = three_downstairs(54052, 54053, 54054, false).unwrap();
+
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
+
+        // Fill in_memory (which will become RO parent)
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // Verify contents are 11 at startup
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Call the scrubber.  This should replace all data from the
+        // RO parent into the main volume.
+        volume.scrub().unwrap();
+
+        // Now, try a write_unwritten, this should not change our
+        // data as the scrubber has finished.
+        volume
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_scrub_short() -> Result<()> {
+        // Volume with a subvolume and a smaller RO parent:
+        // SV: |----------|
+        // RO: |11111|
+        //
+        // Read volume, expect 1's
+        // Run scrubber on volume.
+        // Write unwritten 5's:
+        //     |5555555555|
+        //
+        // Because the scrubber, we should expect the original 1's
+        // for the start, then 5's at the end
+        //     |1111155555|
+
+        const BLOCK_SIZE: usize = 512;
+        let opts = three_downstairs(54055, 54056, 54057, false).unwrap();
+
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 5,
+        ));
+
+        // Fill in_memory (which will become RO parent)
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+            )?
+            .block_wait()?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // Verify contents of RO parent are 1s at startup
+        let buffer = Buffer::new(BLOCK_SIZE * 5);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
+
+        // Verify contents of blocks 5-10 are zero.
+        let buffer = Buffer::new(BLOCK_SIZE * 5);
+        volume
+            .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![00; BLOCK_SIZE * 5], *buffer.as_vec());
+
+        // Call the scrubber.  This should replace all data from the
+        // RO parent into the main volume.
+        volume.scrub().unwrap();
+
+        // Now, try a write_unwritten, this should not change our
+        // unwritten data as the scrubber has finished.
+        volume
+            .write_unwritten(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Get the data into a vec we can take slices of.
+        let dl = buffer.as_vec().to_vec();
+
+        // Verify data in the first half is from the RO parent
+        assert_eq!(vec![11; BLOCK_SIZE * 5], dl[0..BLOCK_SIZE * 5]);
+        // Verify data in the second half is from the write unwritten
+        assert_eq!(
+            vec![55; BLOCK_SIZE * 5],
+            dl[BLOCK_SIZE * 5..BLOCK_SIZE * 10]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_scrub_short_sparse() -> Result<()> {
+        // Volume with a subvolume and a smaller RO parent:
+        // SV: |----------|
+        // RO: |11111|
+        //
+        // Read first half of volume, expect 1's
+        // Write to lower half of volume:
+        // SV: |--2-------|
+        //
+        // Write to upper half of volume:
+        // SV: |-------3--|
+        //
+        // Run scrubber on volume.
+        //
+        // Because the scrubber, we should expect the original 1's
+        // where unwritten, and new data where writes came before scrubber.
+        //     |1121100300|
+
+        const BLOCK_SIZE: usize = 512;
+        let opts = three_downstairs(54058, 54059, 54060, false).unwrap();
+
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 5,
+        ));
+
+        // Fill in_memory (which will become RO parent)
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+            )?
+            .block_wait()?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // SV: |--2-------|
+        volume
+            .write(
+                Block::new(2, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![22; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        // SV: |-------3--|
+        volume
+            .write(
+                Block::new(7, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![33; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        // Call the scrubber.  This should replace all data from the
+        // RO parent into the main volume except where new writes have
+        // landed
+        volume.scrub().unwrap();
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // First blocks are 1s   |11--------|
+        let mut expected = vec![11; BLOCK_SIZE * 2];
+        // Our write of 2        |112-------|
+        expected.extend(vec![22; BLOCK_SIZE]);
+        // Two more blocks of 2  |11211-----|
+        expected.extend(vec![11; BLOCK_SIZE * 2]);
+        // Two blocks of 0s      |1121100---|
+        expected.extend(vec![0; BLOCK_SIZE * 2]);
+        // Our write of 3        |11211003--|
+        expected.extend(vec![33; BLOCK_SIZE]);
+        // Two final blocks of 0 |1121100300|
+        expected.extend(vec![0; BLOCK_SIZE * 2]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_scrub_useless() -> Result<()> {
+        // Volume with a subvolume and a RO parent:
+        // SV: |----------|
+        // RO: |1111111111|
+        //
+        // Read volume, expect 1's
+        // Write to entire volume.
+        // SV  |5555555555|
+        //
+        // Run scrubber on volume.
+        //
+        // Scrubber should do nothing:
+        // SV  |5555555555|
+
+        const BLOCK_SIZE: usize = 512;
+        let opts = three_downstairs(54061, 54062, 54063, false).unwrap();
+
+        // Create in_memory block_io
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
+
+        // Fill in_memory (which will become RO parent)
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_read_only_parent(in_memory_data.clone())?;
+
+        volume.activate(0)?;
+
+        // Verify contents are 11 at startup
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Write to the whole volume
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        // Call the scrubber.  This should do nothing
+        volume.scrub().unwrap();
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_volume_subvols_parent_scrub_sparse() -> Result<()>
+    {
+        // Test a volume with two sub volumes, and RO parent
+        // verify two writes, one that crosses the subvolume boundary
+        // are persisted and data from the RO parent fills in
+        // any holes.
+        //
+        // Two subvolumes:
+        //     |----------||----------|
+        // RO: |1111111111|
+        //
+        // Write A:
+        //     |---------2||2---------|
+        // Write B:
+        //     |33--------||----------|
+        //
+        //  Scrub
+        //  Read should result in
+        //     |3311111112||2000000000|
+        const BLOCK_SIZE: usize = 512;
+
+        // Create in memory block io full of 11
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 10,
+        ));
+
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+            )?
+            .block_wait()?;
+
+        let mut sv = Vec::new();
+        let opts = three_downstairs(54064, 54065, 54066, false).unwrap();
+        sv.push(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            opts,
+            gen: 0,
+        });
+        let opts = three_downstairs(54067, 54068, 54069, false).unwrap();
+        sv.push(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            opts,
+            gen: 0,
+        });
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: sv,
+                read_only_parent: None,
+            };
+
+        // XXX Crucible uses std::sync::mpsc::Receiver, not
+        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
+        // Remove that when Crucible changes over to the tokio mpsc.
+        let mut volume =
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+
+        volume.add_read_only_parent({
+            let mut volume = Volume::new(BLOCK_SIZE as u64);
+            volume.add_subvolume(in_memory_data.clone())?;
+            Arc::new(volume)
+        })?;
+
+        volume.activate(0)?;
+
+        // Write data to last block of first vol, and first block of
+        // second vol.
+        volume
+            .write(
+                Block::new(9, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![22; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 2);
+        volume
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec());
+
+        // A second write
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![33; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Call the scrubber
+        volume.scrub().unwrap();
+
+        // Read full volume
+        let buffer = Buffer::new(BLOCK_SIZE * 20);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Build the expected vec to compare our read with.
+        // First two blocks are 3s     |33--------||----------|
+        let mut expected = vec![33; BLOCK_SIZE * 2];
+        // Original 1s from RO parent  |331111111-||----------|
+        expected.extend(vec![11; BLOCK_SIZE * 7]);
+        // Two blocks of 2             |3311111112||2---------|
+        expected.extend(vec![22; BLOCK_SIZE * 2]);
+        // remaining final blocks of 0 |3311111112||2000000000|
+        expected.extend(vec![0; BLOCK_SIZE * 9]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_volume_subvols_parent_scrub_sparse_2(
+    ) -> Result<()> {
+        // Test a volume with two sub volumes, and 3/4th RO parent
+        // Write a few spots, one spanning the sub vols.
+        // Verify scrubber and everything works as expected.
+        //
+        // Two subvolumes:
+        //     |----------||----------|
+        // RO: |1111111111  11111|
+        //
+        // Write A:
+        //     |---------2||2---------|
+        // Write B:
+        //     |33--------||----------|
+        // Write C:
+        //     |----------||----44----|
+        //
+        //  Scrub
+        //  Read should result in
+        //     |3311111112||2111440000|
+        const BLOCK_SIZE: usize = 512;
+
+        // Create in memory block io full of 11
+        let in_memory_data = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            BLOCK_SIZE * 15,
+        ));
+
+        in_memory_data
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![11; BLOCK_SIZE * 15]),
+            )?
+            .block_wait()?;
+
+        let mut sv = Vec::new();
+        let opts = three_downstairs(54070, 54071, 54072, false).unwrap();
+        sv.push(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            opts,
+            gen: 0,
+        });
+        let opts = three_downstairs(54073, 54074, 54075, false).unwrap();
+        sv.push(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            opts,
+            gen: 0,
+        });
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: sv,
+                read_only_parent: None,
+            };
+
+        // XXX Crucible uses std::sync::mpsc::Receiver, not
+        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
+        // Remove that when Crucible changes over to the tokio mpsc.
+        let mut volume =
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+
+        volume.add_read_only_parent({
+            let mut volume = Volume::new(BLOCK_SIZE as u64);
+            volume.add_subvolume(in_memory_data.clone())?;
+            Arc::new(volume)
+        })?;
+
+        volume.activate(0)?;
+
+        // Write data to last block of first vol, and first block of
+        // second vol, AKA write A.
+        //     |---------2||2---------|
+        volume
+            .write(
+                Block::new(9, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![22; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 2);
+        volume
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec());
+
+        // Write B
+        //     |33--------||----------|
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![33; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Write C
+        //     |----------||----44----|
+        volume
+            .write(
+                Block::new(14, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![44; BLOCK_SIZE * 2]),
+            )?
+            .block_wait()?;
+
+        // Call the scrubber
+        volume.scrub().unwrap();
+
+        // Read full volume
+        let buffer = Buffer::new(BLOCK_SIZE * 20);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Build the expected vec to compare our read with.
+        // First two blocks are 3s     |33--------||----------|
+        let mut expected = vec![33; BLOCK_SIZE * 2];
+        // Original 1s from RO parent  |331111111-||----------|
+        expected.extend(vec![11; BLOCK_SIZE * 7]);
+        // Two blocks of 2             |3311111112||2---------|
+        expected.extend(vec![22; BLOCK_SIZE * 2]);
+        // More 1s from RO parent      |3311111112||2111000000|
+        expected.extend(vec![11; BLOCK_SIZE * 3]);
+        // Two blocks of 4             |3311111112||211144----|
+        expected.extend(vec![44; BLOCK_SIZE * 2]);
+        // remaining final blocks of 0 |3311111112||2111440000|
+        expected.extend(vec![0; BLOCK_SIZE * 4]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        Ok(())
+    }
+
     // Test that multiple upstairs can connect to a single read-only downstairs
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_multi_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let mut opts = three_downstairs(54046, 54047, 54048, true).unwrap();
+        let mut opts = three_downstairs(54076, 54077, 54078, true).unwrap();
 
         let vcr_1: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -1021,9 +1672,6 @@ mod test {
                 )),
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
         let volume1 =
             tokio::task::block_in_place(|| Volume::construct(vcr_1, None))?;
         volume1.activate(0)?;
@@ -1062,6 +1710,7 @@ mod test {
     // layers above (in general) will eventually call a BlockIO trait
     // on a guest layer.  Port numbers from this point below should
     // start at 55001 and go up from there.
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_guest_downstairs() -> Result<()> {
         // Test using the guest layer to verify a new region is
@@ -1504,70 +2153,6 @@ mod test {
             vec![0x99_u8; BLOCK_SIZE],
             dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
         );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn integration_test_two_layers_parent_smaller() -> Result<()> {
-        // Test a RO parent that is smaller than the SubVolume.
-        let opts = three_downstairs(54052, 54053, 54054, false).unwrap();
-
-        const BLOCK_SIZE: usize = 512;
-        // Create in_memory block_io
-        let in_memory_data = Arc::new(InMemoryBlockIO::new(
-            Uuid::new_v4(),
-            BLOCK_SIZE as u64,
-            BLOCK_SIZE * 5,
-        ));
-
-        // Fill the in_memory block_io with 1s
-        in_memory_data
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
-            )?
-            .block_wait()?;
-
-        // Read back in_memory, verify 1s
-        let buffer = Buffer::new(BLOCK_SIZE * 5);
-        in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
-
-        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
-
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
-
-        volume.activate(0)?;
-
-        // Verify parent contents in one read
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
-
-        let mut expected = vec![11; BLOCK_SIZE * 5];
-        expected.extend(vec![0x00; BLOCK_SIZE * 5]);
-        assert_eq!(expected, *buffer.as_vec());
-
-        // One big write!
-        volume
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
-
-        // Verify volume contents in one read
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
-
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
 
         Ok(())
     }

@@ -961,7 +961,7 @@ where
 
                         // Only allowed to promote or demote self
                         let mut upstairs_connection =
-                            upstairs_connection.unwrap();
+                            upstairs_connection.as_mut().unwrap();
                         let matches_self =
                             upstairs_connection.upstairs_id == upstairs_id &&
                             upstairs_connection.session_id == session_id;
@@ -1000,7 +1000,7 @@ where
                             {
                                 let mut ds = ads.lock().await;
                                 ds.promote_to_active(
-                                    upstairs_connection,
+                                    *upstairs_connection,
                                     another_upstairs_active_tx.clone()
                                 ).await?;
                             }
