@@ -5,11 +5,8 @@ use std::fs;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-//use std::process::{Child, Command, Stdio};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-//use std::thread;
-// use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use byte_unit::Byte;
@@ -25,7 +22,9 @@ use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep_until;
 
+pub mod client;
 pub mod control;
+use client::{client_main, ClientCommand};
 
 // How far apart the ports are for a default region set.
 // Note that this value is sprinkled all over the tests scripts,
@@ -36,39 +35,40 @@ const DEFAULT_PORT_STEP: u32 = 10;
 #[derive(Debug, Parser)]
 #[clap(name = "dsc", term_width = 80)]
 #[clap(about = "A downstairs controller", long_about = None)]
-struct Cli {
-    /// Delete all existing test and region directories
-    #[clap(long, global = true, action)]
-    cleanup: bool,
-
+struct Args {
     #[clap(subcommand)]
-    command: Commands,
-
-    /// Downstairs binary location
-    #[clap(
-        long,
-        global = true,
-        default_value = "target/release/crucible-downstairs",
-        action
-    )]
-    ds_bin: String,
-
-    /// default output directory
-    #[clap(long, global = true, default_value = "/tmp/dsc", action)]
-    output_dir: PathBuf,
-
-    /// default region directory
-    #[clap(long, global = true, default_value = "/var/tmp/dsc/region", action)]
-    region_dir: PathBuf,
+    action: Action,
 }
 
 #[derive(Debug, Subcommand)]
-enum Commands {
+enum Action {
+    /// Send a command to a running dsc server
+    Cmd {
+        #[clap(subcommand)]
+        client_command: ClientCommand,
+
+        /// URL location of the Crucible control server
+        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
+        server: String,
+    },
     /// Create a downstairs region then exit.
     Create {
         /// The block size for the region
         #[clap(long, default_value = "4096", action)]
         block_size: u32,
+
+        /// Delete all existing test and region directories
+        #[clap(long, action)]
+        cleanup: bool,
+
+        /// Downstairs binary location
+        #[clap(
+            long,
+            global = true,
+            default_value = "target/release/crucible-downstairs",
+            action
+        )]
+        ds_bin: String,
 
         /// The extent size for the region
         #[clap(long, default_value = "100", action)]
@@ -77,30 +77,83 @@ enum Commands {
         /// The extent count for the region
         #[clap(long, default_value = "15", action)]
         extent_count: u64,
+
+        /// default output directory
+        #[clap(long, global = true, default_value = "/tmp/dsc", action)]
+        output_dir: PathBuf,
+
+        /// default region directory
+        #[clap(
+            long,
+            global = true,
+            default_value = "/var/tmp/dsc/region",
+            action
+        )]
+        region_dir: PathBuf,
     },
     /// Test creation of downstairs regions
     RegionPerf {
-        /// Run a longer test, do 10 loops for each region size combo
-        /// and report mean min max and stddev.
-        #[clap(long, action)]
-        long: bool,
         /// If supplied, also write create performance numbers in .csv
         /// format to the provided file name.
         #[clap(long, name = "CSV", action)]
         csv_out: Option<PathBuf>,
+
+        /// Downstairs binary location
+        #[clap(
+            long,
+            global = true,
+            default_value = "target/release/crucible-downstairs",
+            action
+        )]
+        ds_bin: String,
+
+        /// Run a longer test, do 10 loops for each region size combo
+        /// and report mean min max and stddev.
+        #[clap(long, action)]
+        long: bool,
+
+        /// default output directory
+        #[clap(long, global = true, default_value = "/tmp/dsc", action)]
+        output_dir: PathBuf,
+
+        /// default region directory
+        #[clap(
+            long,
+            global = true,
+            default_value = "/var/tmp/dsc/region",
+            action
+        )]
+        region_dir: PathBuf,
     },
     /// Start a downstairs region set
     /// This requires the region is already created, unless you include
     /// the --create option.
     Start {
+        /// If creating, the block size for the region
+        #[clap(long, default_value = "4096", action)]
+        block_size: u32,
+
+        /// Delete all existing test and region directories
+        #[clap(long, action)]
+        cleanup: bool,
+
+        /// The IP/Port where the control server will listen
+        #[clap(long, default_value = "127.0.0.1:9998", action)]
+        control: SocketAddr,
+
         /// Delete any existing region and create a new one using the
         /// default or provided block-size, extent-size, and extent-count.
         #[clap(long, action)]
         create: bool,
 
-        /// If creating, the block size for the region
-        #[clap(long, default_value = "4096", action)]
-        block_size: u32,
+        /// Downstairs binary location
+        #[clap(
+            long,
+            global = true,
+            default_value = "target/release/crucible-downstairs",
+            action
+        )]
+        ds_bin: String,
 
         /// If creating, the extent size for the region
         #[clap(long, default_value = "100", action)]
@@ -110,9 +163,18 @@ enum Commands {
         #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
-        /// The IP/Port where the control server will listen
-        #[clap(long, default_value = "127.0.0.1:9998", action)]
-        control: SocketAddr,
+        /// default output directory
+        #[clap(long, global = true, default_value = "/tmp/dsc", action)]
+        output_dir: PathBuf,
+
+        /// default region directory
+        #[clap(
+            long,
+            global = true,
+            default_value = "/var/tmp/dsc/region",
+            action
+        )]
+        region_dir: PathBuf,
     },
 }
 
@@ -192,12 +254,6 @@ impl RegionSet {
     }
 }
 
-// Used to return state or info to the main dsc task loop for commands
-// handled my the do_dsc_work task.
-// TODO: an update for enable/disable "loop restart random downstairs"
-pub enum DscMainUpdate {
-    Shutdown,
-}
 // This holds the overall info for the regions we have created.
 #[derive(Debug)]
 pub struct DscInfo {
@@ -482,84 +538,87 @@ pub fn deadline_secs(secs: u64) -> tokio::time::Instant {
         .unwrap()
 }
 
-// This is where the main task has received notification that there is new
-// work on the work queue.  Take the oldest item on the list and then
-// send a message to one (or possibly all) downstairs tasks with the
-// piece of work they next need to do.
+// Perform the work requested of us.  Some work is handled in the main
+// loop. Work here are things that don't require modification of state in
+// the main loop.
 async fn do_dsc_work(
-    dsci: &DscInfo,
-    action_tx_list: &[mpsc::Sender<Action>],
-) -> Option<DscMainUpdate> {
-    let mut dsc_work = dsci.work.lock().unwrap();
+    work: DscCmd,
+    action_tx_list: &[mpsc::Sender<DownstairsAction>],
+) {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    let mut main_update = None;
-
-    while let Some(work) = dsc_work.get_cmd() {
-        println!("got dsc {:?}", work);
-        match work {
-            DscCmd::Start(cid) => {
-                println!("start {}", cid);
-                action_tx_list[cid].send(Action::Start).await.unwrap();
-            }
-            DscCmd::StartAll => {
-                println!("start all downstairs: {}", action_tx_list.len());
-                for action_tx in action_tx_list {
-                    action_tx.send(Action::Start).await.unwrap();
-                }
-            }
-            DscCmd::Stop(cid) => {
-                println!("stop {}", cid);
-                action_tx_list[cid].send(Action::Stop).await.unwrap();
-            }
-            DscCmd::StopRand => {
-                let cid = rng.gen_range(0..3) as usize;
-                println!("stop rand {}", cid);
-                action_tx_list[cid].send(Action::Stop).await.unwrap();
-            }
-            DscCmd::StopAll => {
-                println!("Stop all downstairs: {}", action_tx_list.len());
-                for action_tx in action_tx_list {
-                    action_tx.send(Action::Stop).await.unwrap();
-                }
-            }
-            DscCmd::DisableRestart(cid) => {
-                println!("disable restart {}", cid);
-                action_tx_list[cid]
-                    .send(Action::DisableRestart)
-                    .await
-                    .unwrap();
-            }
-            DscCmd::DisableRestartAll => {
-                println!("disable restart on all: {}", action_tx_list.len());
-                for action_tx in action_tx_list {
-                    action_tx.send(Action::DisableRestart).await.unwrap();
-                }
-            }
-            DscCmd::EnableRestart(cid) => {
-                println!("enable restart {}", cid);
-                action_tx_list[cid]
-                    .send(Action::EnableRestart)
-                    .await
-                    .unwrap();
-            }
-            DscCmd::EnableRestartAll => {
-                println!("enable restart on all: {}", action_tx_list.len());
-                for action_tx in action_tx_list {
-                    action_tx.send(Action::EnableRestart).await.unwrap();
-                }
-            }
-            DscCmd::Shutdown => {
-                println!("Shutdown");
-                for action_tx in action_tx_list {
-                    action_tx.send(Action::DisableRestart).await.unwrap();
-                    action_tx.send(Action::Stop).await.unwrap();
-                }
-                main_update = Some(DscMainUpdate::Shutdown);
+    match work {
+        DscCmd::Start(cid) => {
+            println!("start {}", cid);
+            action_tx_list[cid]
+                .send(DownstairsAction::Start)
+                .await
+                .unwrap();
+        }
+        DscCmd::StartAll => {
+            println!("start all downstairs: {}", action_tx_list.len());
+            for action_tx in action_tx_list {
+                action_tx.send(DownstairsAction::Start).await.unwrap();
             }
         }
+        DscCmd::Stop(cid) => {
+            println!("stop {}", cid);
+            action_tx_list[cid]
+                .send(DownstairsAction::Stop)
+                .await
+                .unwrap();
+        }
+        DscCmd::StopRand => {
+            let cid = rng.gen_range(0..3) as usize;
+            println!("stop rand {}", cid);
+            action_tx_list[cid]
+                .send(DownstairsAction::Stop)
+                .await
+                .unwrap();
+        }
+        DscCmd::StopAll => {
+            println!("Stop all downstairs: {}", action_tx_list.len());
+            for action_tx in action_tx_list {
+                action_tx.send(DownstairsAction::Stop).await.unwrap();
+            }
+        }
+        DscCmd::DisableRestart(cid) => {
+            println!("disable restart {}", cid);
+            action_tx_list[cid]
+                .send(DownstairsAction::DisableRestart)
+                .await
+                .unwrap();
+        }
+        DscCmd::DisableRestartAll => {
+            println!("disable restart on all: {}", action_tx_list.len());
+            for action_tx in action_tx_list {
+                action_tx
+                    .send(DownstairsAction::DisableRestart)
+                    .await
+                    .unwrap();
+            }
+        }
+        DscCmd::EnableRestart(cid) => {
+            println!("enable restart {}", cid);
+            action_tx_list[cid]
+                .send(DownstairsAction::EnableRestart)
+                .await
+                .unwrap();
+        }
+        DscCmd::EnableRestartAll => {
+            println!("enable restart on all: {}", action_tx_list.len());
+            for action_tx in action_tx_list {
+                action_tx
+                    .send(DownstairsAction::EnableRestart)
+                    .await
+                    .unwrap();
+            }
+        }
+        // Any other commands should not arrive here.
+        _ => {
+            panic!("Command {:?} not handled here", work);
+        }
     }
-    main_update
 }
 
 /// Start the DownStairs Controller (dsc).
@@ -573,7 +632,7 @@ async fn do_dsc_work(
 /// is called.
 ///
 ///                                       +-------------+
-///  Http or API requests from outside -> |  Dropshot   |   Async
+///              Http or API requests --> |  Dropshot   |   Async
 ///                                       |   server    |   task
 ///                                       +-------------+
 ///                                              |
@@ -629,8 +688,12 @@ async fn start_dsc(
     drop(tx);
     drop(rs);
 
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut timeout_deadline = deadline_secs(5);
     let mut shutdown_sent = false;
+    let mut random_restart = false;
+    let mut restart_min = 9;
+    let mut restart_max = 10;
     loop {
         tokio::select! {
             _ = sleep_until(timeout_deadline) => {
@@ -660,21 +723,65 @@ async fn start_dsc(
                     } else {
                         break;
                     }
+                } else if random_restart {
+                    println!("Random restart");
+                    let cid = rng.gen_range(0..3) as usize;
+                    println!("stop rand {}", cid);
+                    action_tx_list[cid].send(DownstairsAction::Stop).await.unwrap();
+                    let timeout = rng.gen_range(restart_min..restart_max);
+                    timeout_deadline = deadline_secs(timeout);
                 } else {
-                    timeout_deadline = deadline_secs(65);
+                    // Set the timeout to be a random value between our
+                    // min and max.
+                    let timeout = rng.gen_range(restart_min..restart_max);
+                    timeout_deadline = deadline_secs(timeout);
                 }
             },
             _ = notify_rx.changed() => {
                 println!("Main task has work to do, go find it");
-                if let Some(update) = do_dsc_work(dsci, &action_tx_list).await {
-                    match update {
-                        DscMainUpdate::Shutdown => {
+                // We have to walk our job list here, as there are some
+                // jobs that require local changes.
+
+                let mut dsc_work = dsci.work.lock().unwrap();
+                while let Some(work) = dsc_work.get_cmd() {
+                    println!("got dsc {:?}", work);
+
+                    match work {
+                        // Commands we handle here
+                        DscCmd::EnableRandomStop => {
+                            random_restart = true;
+                        },
+                        DscCmd::DisableRandomStop => {
+                            random_restart = false;
+                        },
+                        DscCmd::RandomStopMin(min) => {
+                            restart_min = min;
+                        },
+                        DscCmd::RandomStopMax(max) => {
+                            restart_max = max;
+                        },
+                        DscCmd::Shutdown => {
+                            println!("Shutdown");
+                            for action_tx in action_tx_list.clone() {
+                                action_tx.send(
+                                    DownstairsAction::DisableRestart
+                                ).await.unwrap();
+                                action_tx.send(DownstairsAction::Stop).await.unwrap();
+                            }
                             println!("Shut it down");
                             timeout_deadline = deadline_secs(1);
                             shutdown_sent = true;
-                        },
+                        }
+
+                        // Commands handled in dsc_do_work
+                        _ => {
+                            do_dsc_work(work, &action_tx_list.clone()).await;
+                        }
                     }
                 }
+
+
+
             },
             res = rx.recv() => {
                 if let Some(mi) = res {
@@ -729,12 +836,12 @@ enum DownstairsState {
     Error,
 }
 
-/// Downstairs action commands.
+/// Downstairs actions.
 ///
-/// This is used to send commands between the main task and a task that
+/// This is used to send actions between the main task and a task that
 /// is responsible stopping/starting/restarting a downstairs process.
 #[derive(Debug, PartialEq)]
-enum Action {
+enum DownstairsAction {
     // Stop the downstairs
     Stop,
     // Start the downstairs
@@ -772,6 +879,14 @@ enum DscCmd {
     EnableRestartAll,
     /// Stop all downstairs, then stop ourselves (exit).
     Shutdown,
+    /// Enable the random stopping of a downstairs at interval (min, max)
+    EnableRandomStop,
+    /// Disable the random stop of a downstairs
+    DisableRandomStop,
+    /// Set the minimum wait time between random stops
+    RandomStopMin(u64),
+    /// Set the maximum wait time between random stops
+    RandomStopMax(u64),
 }
 
 /// Start a process for a downstairs.
@@ -812,7 +927,7 @@ async fn start_ds(
 async fn ds_start_monitor(
     ds: Arc<DownstairsInfo>,
     tx: mpsc::Sender<MonitorInfo>,
-    mut action_rx: mpsc::Receiver<Action>,
+    mut action_rx: mpsc::Receiver<DownstairsAction>,
 ) {
     // Start by starting.
     let mut cmd = start_ds(&ds, &tx).await;
@@ -825,14 +940,14 @@ async fn ds_start_monitor(
             a = action_rx.recv() => {
                 if let Some(act) = a {
                     match act {
-                        Action::Start => {
+                        DownstairsAction::Start => {
                             println!("[{}] got start action", ds.port);
                             // This does nothing if we are already
                             // running. If we are not running, then this
                             // will start the downstairs.
                             start_once = true;
                         },
-                        Action::Stop => {
+                        DownstairsAction::Stop => {
                             println!(
                                 "[{}] Got stop action so:{} kr:{}",
                                 ds.port,
@@ -846,12 +961,12 @@ async fn ds_start_monitor(
                                 );
                             }
                         },
-                        Action::DisableRestart => {
+                        DownstairsAction::DisableRestart => {
                             keep_running = false;
                             start_once = false;
                             println!("[{}] Disable keep_running", ds.port);
                         },
-                        Action::EnableRestart => {
+                        DownstairsAction::EnableRestart => {
                             keep_running = true;
                             println!("[{}] Enable  keep_running", ds.port);
                         }
@@ -1111,8 +1226,21 @@ async fn region_create_test(
     Ok(())
 }
 
+// Remove any existing dsc files/regions
+fn cleanup_region(output_dir: PathBuf, region_dir: PathBuf) -> Result<()> {
+    if Path::new(&output_dir).exists() {
+        println!("Removing existing dsc directory {:?}", output_dir);
+        std::fs::remove_dir_all(&output_dir)?;
+    }
+    if Path::new(&region_dir).exists() {
+        println!("Removing existing region {:?}", region_dir);
+        std::fs::remove_dir_all(&region_dir)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
-    let args = Cli::parse();
+    let args = Args::parse();
     // If any of our async tasks in our runtime panic, then we should
     // exit the program right away.
     let default_panic = std::panic::take_hook();
@@ -1120,18 +1248,6 @@ fn main() -> Result<()> {
         default_panic(info);
         std::process::exit(1);
     }));
-
-    // If requested, remove any existing dsc files/regions
-    if args.cleanup {
-        if Path::new(&args.output_dir).exists() {
-            println!("Removing existing dsc directory {:?}", args.output_dir);
-            std::fs::remove_dir_all(&args.output_dir)?;
-        }
-        if Path::new(&args.region_dir).exists() {
-            println!("Removing existing region {:?}", args.region_dir);
-            std::fs::remove_dir_all(&args.region_dir)?;
-        }
-    }
 
     let runtime = Builder::new_multi_thread()
         .worker_threads(10)
@@ -1144,19 +1260,28 @@ fn main() -> Result<()> {
     // and the dsc main thread.
     let (notify_tx, notify_rx) = watch::channel(0);
 
-    match args.command {
-        Commands::Create {
+    match args.action {
+        Action::Cmd {
+            client_command,
+            server,
+        } => {
+            client_main(server, client_command)?;
+            Ok(())
+        }
+        Action::Create {
             block_size,
+            cleanup,
+            ds_bin,
             extent_size,
             extent_count,
+            output_dir,
+            region_dir,
         } => {
-            let dsci = DscInfo::new(
-                args.ds_bin,
-                args.output_dir,
-                args.region_dir.clone(),
-                notify_tx,
-                true,
-            )?;
+            if cleanup {
+                cleanup_region(output_dir.clone(), region_dir.clone())?;
+            }
+            let dsci =
+                DscInfo::new(ds_bin, output_dir, region_dir, notify_tx, true)?;
 
             runtime.block_on(create_region_set(
                 &dsci,
@@ -1166,35 +1291,38 @@ fn main() -> Result<()> {
                 8810,
             ))
         }
-        Commands::RegionPerf { long, csv_out } => {
-            let dsci = DscInfo::new(
-                args.ds_bin,
-                args.output_dir,
-                args.region_dir.clone(),
-                notify_tx,
-                true,
-            )?;
+        Action::RegionPerf {
+            csv_out,
+            ds_bin,
+            long,
+            output_dir,
+            region_dir,
+        } => {
+            let dsci =
+                DscInfo::new(ds_bin, output_dir, region_dir, notify_tx, true)?;
             runtime.block_on(region_create_test(&dsci, long, csv_out))
         }
-        Commands::Start {
-            create,
+        Action::Start {
             block_size,
+            cleanup,
+            control,
+            create,
+            ds_bin,
             extent_size,
             extent_count,
-            control,
+            output_dir,
+            region_dir,
         } => {
             // Delete any existing region if requested
-            if create && Path::new(&args.region_dir).exists() {
-                println!("Removing existing region {:?}", args.region_dir);
-                std::fs::remove_dir_all(&args.region_dir)?;
+            if cleanup {
+                cleanup_region(output_dir.clone(), region_dir.clone())?;
+            } else if create && Path::new(&region_dir).exists() {
+                println!("Removing existing region {:?}", region_dir);
+                std::fs::remove_dir_all(&region_dir)?;
             }
 
             let dsci = DscInfo::new(
-                args.ds_bin,
-                args.output_dir,
-                args.region_dir.clone(),
-                notify_tx,
-                create,
+                ds_bin, output_dir, region_dir, notify_tx, create,
             )?;
 
             if create {
@@ -1221,14 +1349,22 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, NamedTempFile};
+
+    // Create a temporary file.  Close the file but return the path
+    // so it won't delete be deleted.
+    fn temp_file_path() -> (String, tempfile::TempPath) {
+        let ds_file = NamedTempFile::new().unwrap();
+        let ds_path = ds_file.into_temp_path();
+        let ds_bin = ds_path.to_str().unwrap().to_string();
+
+        (ds_bin, ds_path)
+    }
 
     #[test]
     fn new_ti() {
         // Test a typical creation
-        // The empty file ds_bin is good enough for our test here.
-        let ds_bin = "./dsbin".to_string();
-        File::create(ds_bin.clone()).unwrap();
+        let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
@@ -1253,8 +1389,7 @@ mod test {
     fn existing_ti() {
         // Try to create the same directories twice, which should
         // return error on the second try.
-        let ds_bin = "./dsbin".to_string();
-        File::create(ds_bin.clone()).unwrap();
+        let (ds_bin, _ds_path) = temp_file_path();
 
         let output_dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_dir = tempdir().unwrap().as_ref().to_path_buf();
@@ -1277,8 +1412,7 @@ mod test {
     #[test]
     fn delete_bad_region() {
         // Test deletion of a region that does not exist, should report error.
-        let ds_bin = "./dsbin".to_string();
-        File::create(ds_bin.clone()).unwrap();
+        let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
@@ -1297,8 +1431,7 @@ mod test {
     #[test]
     fn delete_region() {
         // Test creation then deletion of a region
-        let ds_bin = "./dsbin".to_string();
-        File::create(ds_bin.clone()).unwrap();
+        let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
@@ -1322,9 +1455,7 @@ mod test {
     #[test]
     fn restart_region() {
         // Test a typical creation
-        // The empty file ds_bin is good enough for our test here.
-        let ds_bin = "./dsbin".to_string();
-        File::create(ds_bin.clone()).unwrap();
+        let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
@@ -1353,8 +1484,7 @@ mod test {
     fn restart_region_bad() {
         // Test region restart when a region directory is not present.
         // This should return error.
-        let ds_bin = "./dsbin".to_string();
-        File::create(ds_bin.clone()).unwrap();
+        let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
