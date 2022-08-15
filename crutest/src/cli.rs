@@ -26,6 +26,8 @@ pub struct CliAction {
 pub enum DscCommand {
     /// Connect to the default DSC server (http://127.0.0.1:9998)
     Connect,
+    /// Disable random stopping of downstairs
+    DisableRandomStop,
     /// Disable auto restart on the given downstairs client ID
     DisableRestart {
         #[clap(long, short, action)]
@@ -38,8 +40,22 @@ pub enum DscCommand {
         #[clap(long, short, action)]
         cid: u32,
     },
+    /// Enable random stopping of downstairs
+    EnableRandomStop,
+    /// Set the minimum random stop time (in seconds)
+    EnableRandomMin {
+        #[clap(long, short, action)]
+        min: u64,
+    },
+    /// Set the maximum random stop time (in seconds)
+    EnableRandomMax {
+        #[clap(long, short, action)]
+        max: u64,
+    },
     /// Enable auto restart on all downstairs
     EnableRestartAll,
+    /// Shutdown all downstairs, then shutdown dsc itself.
+    Shutdown,
     /// Start the downstairs at the given client ID
     Start {
         #[clap(long, short, action)]
@@ -341,6 +357,10 @@ async fn handle_dsc(
             DscCommand::Connect => {
                 println!("Already connected");
             }
+            DscCommand::DisableRandomStop => {
+                let res = dsc_client.dsc_disable_random_stop().await;
+                println!("Got res: {:?}", res);
+            }
             DscCommand::DisableRestart { cid } => {
                 let res = dsc_client.dsc_disable_restart(cid).await;
                 println!("Got res: {:?}", res);
@@ -349,12 +369,28 @@ async fn handle_dsc(
                 let res = dsc_client.dsc_disable_restart_all().await;
                 println!("Got res: {:?}", res);
             }
+            DscCommand::EnableRandomStop => {
+                let res = dsc_client.dsc_enable_random_stop().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::EnableRandomMin { min } => {
+                let res = dsc_client.dsc_enable_random_min(min).await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::EnableRandomMax { max } => {
+                let res = dsc_client.dsc_enable_random_max(max).await;
+                println!("Got res: {:?}", res);
+            }
             DscCommand::EnableRestart { cid } => {
                 let res = dsc_client.dsc_enable_restart(cid).await;
                 println!("Got res: {:?}", res);
             }
             DscCommand::EnableRestartAll => {
                 let res = dsc_client.dsc_enable_restart_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::Shutdown => {
+                let res = dsc_client.dsc_shutdown().await;
                 println!("Got res: {:?}", res);
             }
             DscCommand::Start { cid } => {
@@ -378,7 +414,7 @@ async fn handle_dsc(
                 println!("Got res: {:?}", res);
             }
             DscCommand::State { cid } => {
-                let res = dsc_client.dsc_get_state(cid).await;
+                let res = dsc_client.dsc_get_ds_state(cid).await;
                 println!("Got res: {:?}", res);
             }
         }

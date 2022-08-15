@@ -9,6 +9,7 @@ anyhow = "1"
 byte-unit = "4.0.14"
 clap = { version = "3.2", features = ["derive", "env"] }
 csv = "1.1.6"
+dsc-client = { path = "../dsc-client" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 rand = "0.8.5"
 rand_chacha = "0.3.1"
