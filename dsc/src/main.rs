@@ -1227,7 +1227,7 @@ async fn region_create_test(
 }
 
 // Remove any existing dsc files/regions
-fn cleanup_region(output_dir: PathBuf, region_dir: PathBuf) -> Result<()> {
+fn cleanup(output_dir: PathBuf, region_dir: PathBuf) -> Result<()> {
     if Path::new(&output_dir).exists() {
         println!("Removing existing dsc directory {:?}", output_dir);
         std::fs::remove_dir_all(&output_dir)?;
@@ -1278,7 +1278,7 @@ fn main() -> Result<()> {
             region_dir,
         } => {
             if cleanup {
-                cleanup_region(output_dir.clone(), region_dir.clone())?;
+                crate::cleanup(output_dir.clone(), region_dir.clone())?;
             }
             let dsci =
                 DscInfo::new(ds_bin, output_dir, region_dir, notify_tx, true)?;
@@ -1315,7 +1315,7 @@ fn main() -> Result<()> {
         } => {
             // Delete any existing region if requested
             if cleanup {
-                cleanup_region(output_dir.clone(), region_dir.clone())?;
+                crate::cleanup(output_dir.clone(), region_dir.clone())?;
             } else if create && Path::new(&region_dir).exists() {
                 println!("Removing existing region {:?}", region_dir);
                 std::fs::remove_dir_all(&region_dir)?;
@@ -1352,7 +1352,7 @@ mod test {
     use tempfile::{tempdir, NamedTempFile};
 
     // Create a temporary file.  Close the file but return the path
-    // so it won't delete be deleted.
+    // so it won't be deleted.
     fn temp_file_path() -> (String, tempfile::TempPath) {
         let ds_file = NamedTempFile::new().unwrap();
         let ds_path = ds_file.into_temp_path();
