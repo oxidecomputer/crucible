@@ -44,6 +44,7 @@ pub struct CrucibleOpts {
     pub control: Option<SocketAddr>,
     pub read_only: bool,
 }
+
 impl CrucibleOpts {
     pub fn key_bytes(&self) -> Option<Vec<u8>> {
         if let Some(key) = &self.key {
