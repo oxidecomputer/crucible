@@ -1008,6 +1008,7 @@ dependencies = [
  "clap 3.2.1",
  "csv",
  "dropshot",
+ "dsc-client",
  "expectorate",
  "openapi-lint",
  "openapiv3",
