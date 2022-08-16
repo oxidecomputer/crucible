@@ -301,6 +301,8 @@ impl Volume {
         if self.sub_volumes.is_empty() {
             crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
         }
+        let cc = self.next_count();
+        cdt::volume__write__start!(|| (cc));
 
         let affected_sub_volumes = self.sub_volumes_for_lba_range(
             offset.value,
@@ -334,6 +336,7 @@ impl Volume {
             data_index += sz;
         }
 
+        cdt::volume__write__done!(|| (cc));
         BlockReqWaiter::immediate()
     }
 }
@@ -832,61 +835,6 @@ impl Volume {
             }
         }
     }
-<<<<<<< HEAD
-
-    // This method is called by both write and write_unwritten and
-    // provides a single place so both can share common code.
-    fn volume_write_op(
-        &self,
-        offset: Block,
-        data: Bytes,
-        is_write_unwritten: bool,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        // In the case that this volume only has a read only parent,
-        // return an error.
-        if self.sub_volumes.is_empty() {
-            crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
-        }
-        let cc = self.next_count();
-        cdt::volume__write__start!(|| (cc));
-
-        let affected_sub_volumes = self.sub_volumes_for_lba_range(
-            offset.value,
-            data.len() as u64 / self.block_size,
-        );
-
-        // TODO parallel dispatch!
-        let mut data_index = 0;
-        for (coverage, sub_volume) in affected_sub_volumes {
-            let sub_offset = Block::new(
-                sub_volume.compute_sub_volume_lba(coverage.start),
-                offset.shift,
-            );
-            let sz = (coverage.end - coverage.start) as usize
-                * self.block_size as usize;
-            let slice_range = Range::<usize> {
-                start: data_index,
-                end: data_index + sz,
-            };
-            let slice = data.slice(slice_range);
-
-            // Take the write or write_unwritten path here.
-            let mut waiter = if is_write_unwritten {
-                sub_volume.write_unwritten(sub_offset, slice.clone())?
-            } else {
-                sub_volume.write(sub_offset, slice.clone())?
-            };
-
-            waiter.block_wait()?;
-
-            data_index += sz;
-        }
-
-        cdt::volume__write__done!(|| (cc));
-        BlockReqWaiter::immediate()
-    }
-=======
->>>>>>> main
 }
 
 #[cfg(test)]
@@ -1488,27 +1436,6 @@ mod test {
         //
         // the total volume size is 4096b
 
-<<<<<<< HEAD
-        let volume = Volume {
-            uuid: Uuid::new_v4(),
-            sub_volumes: vec![SubVolume {
-                lba_range: Range {
-                    start: 0,
-                    end: disk.total_size()? / BLOCK_SIZE as u64,
-                },
-                block_io: Arc::new(disk),
-            }],
-            read_only_parent: Some(SubVolume {
-                lba_range: Range {
-                    start: 0,
-                    end: parent.total_size()? / BLOCK_SIZE as u64,
-                },
-                block_io: parent.clone(),
-            }),
-            block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
-        };
-=======
         let mut volume = Volume::new(BLOCK_SIZE);
         volume.add_subvolume(disk)?;
         volume.add_read_only_parent(parent.clone())?;
@@ -1560,7 +1487,6 @@ mod test {
             volume.add_subvolume(subdisk1)?;
             volume.add_subvolume(subdisk2)?;
             volume.add_read_only_parent(parent.clone())?;
->>>>>>> main
 
             test_parent_read_only_region(BLOCK_SIZE, parent, volume, i).await?;
         }
@@ -1588,41 +1514,10 @@ mod test {
         //
         // the total volume size is the same as the previous test: 4096b
 
-<<<<<<< HEAD
-        let volume = Volume {
-            uuid: Uuid::new_v4(),
-            sub_volumes: vec![
-                SubVolume {
-                    lba_range: Range {
-                        start: 0,
-                        end: 1024 / BLOCK_SIZE as u64,
-                    },
-                    block_io: Arc::new(subdisk1),
-                },
-                SubVolume {
-                    lba_range: Range {
-                        start: 1024 / BLOCK_SIZE as u64,
-                        end: 4096 / BLOCK_SIZE as u64,
-                    },
-                    block_io: Arc::new(subdisk2),
-                },
-            ],
-            read_only_parent: Some(SubVolume {
-                lba_range: Range {
-                    start: 0,
-                    end: parent.total_size()? / BLOCK_SIZE as u64,
-                },
-                block_io: parent.clone(),
-            }),
-            block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
-        };
-=======
         let mut volume = Volume::new(BLOCK_SIZE);
         volume.add_subvolume(subdisk1)?;
         volume.add_subvolume(subdisk2)?;
         volume.add_read_only_parent(parent.clone())?;
->>>>>>> main
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume, 0x00).await?;
 
