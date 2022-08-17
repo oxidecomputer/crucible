@@ -1517,8 +1517,8 @@ where
                             // our UUID. We shouldn't have received this
                             // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
-                                uuid and our gen {} >= new gen {}!",
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
                                 up.get_generation(),
@@ -1562,6 +1562,7 @@ where
                         );
                     }
                     Some(Message::RepairAckId { repair_id }) => {
+                        // ZZZ repair done side for repair_id
                         if up.downstairs.lock().unwrap().rep_done(
                             up_coms.client_id, repair_id
                         ) {
@@ -4486,6 +4487,8 @@ impl Upstairs {
         if let Some(rio) = ds.reconcile_task_list.pop_front() {
             println!("Pop front: {:?}", rio);
 
+// ZZZ
+// This can be start, sort of..
             // Assert if not None, then job is all done.
             if let Some(job) = &mut ds.reconcile_current_work {
                 let mut done = 0;
@@ -4652,6 +4655,8 @@ impl Upstairs {
         repair_commands: usize,
     ) -> Result<()> {
         let mut completed = 0;
+        println!("Begin repair with {} commands", repair_commands);
+        let repair_start = Instant::now();
         loop {
             /*
              * If we get an error here, all Downstairs have to reset and
@@ -4742,7 +4747,15 @@ impl Upstairs {
                 }
             }
         }
-        println!("All repair completed, clear queue and notify");
+        let repair_total = repair_start.elapsed();
+        let time_f =
+            repair_total.as_secs() as f32
+            + (repair_total.subsec_nanos() as f32 / 1e9);
+
+        println!(
+            "{} repair commands completed in {:7.5}, clear queue and notify",
+            repair_commands, time_f,
+        );
         self.downstairs.lock().unwrap().reconcile_current_work = None;
         Ok(())
     }
