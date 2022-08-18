@@ -4752,9 +4752,11 @@ impl Upstairs {
             repair_total.as_secs() as f32
             + (repair_total.subsec_nanos() as f32 / 1e9);
 
+        // An extent repair takes four commands.  To get the number of
+        // extents repaired, divide repair_commands by 4
         println!(
-            "{} repair commands completed in {:7.5}, clear queue and notify",
-            repair_commands, time_f,
+            "{} extents repaired in {:7.5}",
+            repair_commands / 4, time_f,
         );
         self.downstairs.lock().unwrap().reconcile_current_work = None;
         Ok(())
