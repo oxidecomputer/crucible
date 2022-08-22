@@ -4754,9 +4754,11 @@ impl Upstairs {
 
         // An extent repair takes four commands.  To get the number of
         // extents repaired, divide repair_commands by 4
+        let repaired = repair_commands / 4;
+        let ave = time_f / repaired as f32;
         println!(
-            "{} extents repaired in {:7.5}",
-            repair_commands / 4, time_f,
+            "{} extents repaired in {:5.3} ave:{:6.4}",
+            repaired, time_f, ave,
         );
         self.downstairs.lock().unwrap().reconcile_current_work = None;
         Ok(())

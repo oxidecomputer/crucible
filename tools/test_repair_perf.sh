@@ -50,6 +50,7 @@ if [[ "$os_name" == 'Darwin' ]]; then
 fi
 
 region_dir="/var/tmp/dsc/region"
+block_size=4096
 
 function repair_round() {
     es=$1
@@ -59,13 +60,13 @@ function repair_round() {
     pass_total=0
     SECONDS=0
 
-    (( bytes = es * 4096 ))
+    (( bytes = es * block_size ))
     (( size = bytes / 1024 / 1024 ))
 
     echo "    ES  EC  Extent Size: $size MiB" | tee -a ${loop_log}
     echo "Create region with ES:$es and EC:$ec to test" >> "${test_log}"
     ulimit -n 65536
-    if ! "$dsc" create --cleanup --ds-bin "$cds" --block-size 4096 \
+    if ! "$dsc" create --cleanup --ds-bin "$cds" --block-size "$block_size" \
             --extent-count "$ec" --extent-size "$es" >> "$test_log" ; then
         echo "Failed to create new region"
         exit 1
@@ -188,14 +189,16 @@ function repair_round() {
 }
 
 ### extent size loop starts here
+# 40, 50, and 100 for EC were pretty consistent in the values they
+# returned for average times, so why not use the smallest to make the test
+# run faster..
 #               ES   EC
-repair_round     10 40
-repair_round    512 40
-repair_round   4096 40
-repair_round   8192 40
-repair_round  16384 40
-repair_round  32768 40
-repair_round  65536 40
-repair_round 131072 40
+repair_round     10  10  # This one just for sanity and to detect problems
+repair_round   4096 100  #  16 MiB @ 4k block size
+repair_round   8192 100  #  32 MiB
+repair_round  16384 100  #  64 MiB
+repair_round  32768 100  # 128 MiB
+repair_round  49152 100  #  64 MiB
+repair_round  65536 100  # 256 MiB
 
 echo "Test done"
