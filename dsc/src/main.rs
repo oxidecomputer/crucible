@@ -26,11 +26,6 @@ pub mod client;
 pub mod control;
 use client::{client_main, ClientCommand};
 
-// How far apart the ports are for a default region set.
-// Note that this value is sprinkled all over the tests scripts,
-// so when you change it here, go forth and search.
-const DEFAULT_PORT_STEP: u32 = 10;
-
 /// dsc  DownStairs Controller
 #[derive(Debug, Parser)]
 #[clap(name = "dsc", term_width = 80)]
@@ -89,7 +84,7 @@ enum Action {
             default_value = "/var/tmp/dsc/region",
             action
         )]
-        region_dir: PathBuf,
+        region_dir: Vec<PathBuf>,
     },
     /// Test creation of downstairs regions
     RegionPerf {
@@ -123,7 +118,7 @@ enum Action {
             default_value = "/var/tmp/dsc/region",
             action
         )]
-        region_dir: PathBuf,
+        region_dir: Vec<PathBuf>,
     },
     /// Start a downstairs region set
     /// This requires the region is already created, unless you include
@@ -174,7 +169,7 @@ enum Action {
             default_value = "/var/tmp/dsc/region",
             action
         )]
-        region_dir: PathBuf,
+        region_dir: Vec<PathBuf>,
     },
 }
 
@@ -239,19 +234,12 @@ impl DownstairsInfo {
 struct RegionSet {
     ds: Vec<Arc<DownstairsInfo>>,
     ds_bin: String,
-    region_dir: String,
-    next_id: usize,
+    // Each downstairs will append the port to the region dir here.
+    region_dir: Vec<String>,
     ds_state: Vec<DownstairsState>,
     ds_pid: Vec<Option<u32>>,
-}
-
-impl RegionSet {
-    // The next unused client ID.
-    fn next_client_id(&mut self) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
+    port_base: u32,
+    port_step: u32,
 }
 
 // This holds the overall info for the regions we have created.
@@ -269,9 +257,10 @@ impl DscInfo {
     fn new(
         downstairs_bin: String,
         output_dir: PathBuf,
-        region_dir: PathBuf,
+        region_dir: Vec<PathBuf>,
         notify_tx: watch::Sender<u64>,
         create: bool,
+        port_base: u32,
     ) -> Result<Arc<Self>> {
         // Verify the downstairs binary exists as is a file
         if !Path::new(&downstairs_bin).exists() {
@@ -282,18 +271,27 @@ impl DscInfo {
             bail!("{} is not a file", downstairs_bin);
         }
 
+        // There should either be one region dir in the vec, or three
+        // unique directories.  If there is one, the downstairs will
+        // all share it.  If there are three, then each will get it's own.
+        if region_dir.len() != 1 && region_dir.len() != 3 {
+            bail!("Region directory needs one or three elements");
+        }
+
         if create {
-            // If the caller has requested to create a region, then
-            // we expect it not to be present.
-            if Path::new(&region_dir).exists() {
-                bail!("Remove region {:?} before running", region_dir);
+            for rd in region_dir.iter() {
+                // If the caller has requested to create a region, then
+                // we expect it not to be present.
+                if Path::new(&rd).exists() {
+                    bail!("Remove region {:?} before running", rd);
+                }
+                println!(
+                    "Creating region directory at: {}",
+                    rd.clone().into_os_string().into_string().unwrap()
+                );
+                fs::create_dir_all(&rd)
+                    .context("Failed to create region directory")?;
             }
-            println!(
-                "Creating region directory at: {}",
-                region_dir.clone().into_os_string().into_string().unwrap()
-            );
-            fs::create_dir_all(&region_dir)
-                .context("Failed to create region directory")?;
 
             // We only create the output directory if we need it.
             if !Path::new(&output_dir).exists() {
@@ -306,8 +304,10 @@ impl DscInfo {
             }
         } else {
             // Everything should already exist
-            if !Path::new(&region_dir).exists() {
-                bail!("Failed to find region {:?}", region_dir);
+            for rd in region_dir.iter() {
+                if !Path::new(&rd).exists() {
+                    bail!("Failed to find region {:?}", rd);
+                }
             }
 
             if Path::new(&output_dir).exists() {
@@ -329,13 +329,58 @@ impl DscInfo {
         ];
         let ds_pid = vec![None, None, None];
 
+        // If we only have one region directory, then use that for all
+        // three downstairs.  If we have three, then each downstairs can
+        // have its own.
+        let rv;
+        if region_dir.len() == 1 {
+            rv = vec![
+                region_dir[0]
+                    .clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap(),
+                region_dir[0]
+                    .clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap(),
+                region_dir[0]
+                    .clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap(),
+            ];
+        } else {
+            assert_eq!(region_dir.len(), 3);
+            rv = vec![
+                region_dir[0]
+                    .clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap(),
+                region_dir[1]
+                    .clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap(),
+                region_dir[2]
+                    .clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap(),
+            ];
+        }
+
+        assert_eq!(rv.len(), 3);
         let rs = RegionSet {
             ds: Vec::new(),
             ds_bin: downstairs_bin,
-            region_dir: region_dir.into_os_string().into_string().unwrap(),
-            next_id: 0,
+            region_dir: rv,
             ds_state,
             ds_pid,
+            port_base,
+            port_step: 10,
         };
 
         let mrs = Mutex::new(rs);
@@ -350,6 +395,31 @@ impl DscInfo {
         }))
     }
 
+    /*
+     * Create a default region set.  Attach it to our dsc info struct
+     */
+    async fn create_region_set(
+        &self,
+        extent_size: u64,
+        extent_count: u64,
+        block_size: u32,
+    ) -> Result<()> {
+        for ds_id in 0..3 {
+            let _ = self
+                .create_ds_region(
+                    ds_id,
+                    extent_size,
+                    extent_count,
+                    block_size,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        println!("Region set was created");
+        Ok(())
+    }
+
     /**
      * Create a region as part of the region set at the given port with
      * the provided extent size and count.
@@ -358,7 +428,7 @@ impl DscInfo {
      */
     async fn create_ds_region(
         &self,
-        port: u32,
+        ds_id: u32,
         extent_size: u64,
         extent_count: u64,
         block_size: u32,
@@ -367,7 +437,10 @@ impl DscInfo {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
         let mut rs = self.rs.lock().unwrap();
-        let new_region_dir = port_to_region(rs.region_dir.clone(), port)?;
+        // use port to do this, or make a client ID that is port base, etc
+        let port = rs.port_base + (ds_id * rs.port_step);
+        let rd = &rs.region_dir[ds_id as usize];
+        let new_region_dir = port_to_region(rd.clone(), port)?;
         let extent_size = format!("{}", extent_size);
         let extent_count = format!("{}", extent_count);
         let block_size = format!("{}", block_size);
@@ -395,10 +468,7 @@ impl DscInfo {
         let time_f = end.as_secs() as f32 + (end.subsec_nanos() as f32 / 1e9);
 
         if !output.status.success() {
-            println!(
-                "Create failed for {:?} {:?}",
-                rs.region_dir, output.status
-            );
+            println!("Create failed for {:?} {:?}", rd, output.status);
             println!(
                 "dir:{} uuid: {} es:{} ec:{}",
                 new_region_dir, uuid, extent_size, extent_count,
@@ -408,11 +478,10 @@ impl DscInfo {
             bail!("Creating region failed");
         }
 
-        let client_id = rs.next_client_id();
         if !quiet {
             println!(
                 "Downstairs region {} created at {} in {:04}",
-                client_id, new_region_dir, time_f,
+                ds_id, new_region_dir, time_f,
             );
         }
 
@@ -429,24 +498,25 @@ impl DscInfo {
             port,
             String::from_utf8(output.stdout).unwrap(),
             output_path,
-            client_id,
+            ds_id as usize,
         );
         rs.ds.push(Arc::new(dsi));
         Ok(time_f)
     }
 
     /**
-     * Delete a region directory at the given port.
+     * Delete a region directory at the given ds_id.
      */
-    fn delete_ds_region(&self, port: u32) -> Result<()> {
-        // Create the path for this region by combining the region
-        // directory and the port this downstairs will use.
-        let mut rs = self.rs.lock().unwrap();
-        let region_dir = port_to_region(rs.region_dir.clone(), port)?;
-        std::fs::remove_dir_all(&region_dir)?;
-
-        // If this region was part of the ds vec, remove it.
-        rs.ds.retain(|ds| ds.port != port);
+    fn delete_ds_region(&self, ds_id: usize) -> Result<()> {
+        let rs = self.rs.lock().unwrap();
+        if rs.region_dir.len() < ds_id {
+            bail!("Invalid index {} for downstairs regions", ds_id);
+        }
+        let rd = rs.region_dir[ds_id].clone();
+        let port = rs.port_base + (ds_id as u32 * rs.port_step);
+        let full_region_dir = port_to_region(rd, port)?;
+        println!("remove_dir_all of {:?}", full_region_dir);
+        std::fs::remove_dir_all(&full_region_dir)?;
         Ok(())
     }
 
@@ -456,12 +526,13 @@ impl DscInfo {
      * TODO: This is assuming a fair amount of stuff.
      * Make fewer assumptions...
      */
-    fn generate_region_set(&self, port_base: u32) -> Result<()> {
-        let mut port = port_base;
+    fn generate_region_set(&self) -> Result<()> {
         let mut rs = self.rs.lock().unwrap();
+        let mut port = rs.port_base;
 
-        for _ in 0..3 {
-            let new_region_dir = port_to_region(rs.region_dir.clone(), port)?;
+        for ds_id in 0..3 {
+            let rd = rs.region_dir[ds_id].clone();
+            let new_region_dir = port_to_region(rd.clone(), port)?;
             let output_file = format!("downstairs-{}.txt", port);
             let output_path = {
                 let mut t = self.output_dir.clone();
@@ -478,10 +549,10 @@ impl DscInfo {
                 port,
                 "/dev/null".to_string(),
                 output_path,
-                rs.next_client_id(),
+                ds_id,
             );
             rs.ds.push(Arc::new(dsi));
-            port += DEFAULT_PORT_STEP;
+            port += rs.port_step;
         }
 
         Ok(())
@@ -1022,35 +1093,6 @@ async fn ds_start_monitor(
 }
 
 /*
- * Create a default region set.  Attach it to our dsc info struct
- */
-async fn create_region_set(
-    dsci: &DscInfo,
-    extent_size: u64,
-    extent_count: u64,
-    block_size: u32,
-    port_base: u32,
-) -> Result<()> {
-    let mut port = port_base;
-
-    for _ in 0..3 {
-        let _ = dsci
-            .create_ds_region(
-                port,
-                extent_size,
-                extent_count,
-                block_size,
-                false,
-            )
-            .await
-            .unwrap();
-        port += DEFAULT_PORT_STEP;
-    }
-    println!("Region set was created");
-    Ok(())
-}
-
-/*
  * Create a region with the given values in a loop.  Report the mean,
  * standard deviation, min, and max for the creation.
  * The region is created and deleted each time.
@@ -1064,10 +1106,10 @@ async fn loop_create_test(
     let mut times = Vec::new();
     for _ in 0..5 {
         let ct = dsci
-            .create_ds_region(3810, extent_size, extent_count, block_size, true)
+            .create_ds_region(0, extent_size, extent_count, block_size, true)
             .await?;
         times.push(ct);
-        dsci.delete_ds_region(3810)?;
+        dsci.delete_ds_region(0)?;
     }
 
     let size = region_si(extent_size, extent_count, block_size);
@@ -1129,7 +1171,7 @@ async fn single_create_test(
         "{:>9.3} {}  {} {:>6} {:>6} {:>4}",
         ct, size, extent_file_size, extent_size, extent_count, block_size,
     );
-    dsci.delete_ds_region(3810)?;
+    dsci.delete_ds_region(0)?;
 
     // If requested, also write out the results to the csv file
     if let Some(csv) = csv {
@@ -1227,14 +1269,16 @@ async fn region_create_test(
 }
 
 // Remove any existing dsc files/regions
-fn cleanup(output_dir: PathBuf, region_dir: PathBuf) -> Result<()> {
+fn cleanup(output_dir: PathBuf, region_dir: Vec<PathBuf>) -> Result<()> {
     if Path::new(&output_dir).exists() {
         println!("Removing existing dsc directory {:?}", output_dir);
         std::fs::remove_dir_all(&output_dir)?;
     }
-    if Path::new(&region_dir).exists() {
-        println!("Removing existing region {:?}", region_dir);
-        std::fs::remove_dir_all(&region_dir)?;
+    for rd in region_dir.iter() {
+        if Path::new(&rd).exists() {
+            println!("Removing existing region {:?}", rd);
+            std::fs::remove_dir_all(&rd)?;
+        }
     }
     Ok(())
 }
@@ -1280,15 +1324,14 @@ fn main() -> Result<()> {
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             }
-            let dsci =
-                DscInfo::new(ds_bin, output_dir, region_dir, notify_tx, true)?;
+            let dsci = DscInfo::new(
+                ds_bin, output_dir, region_dir, notify_tx, true, 8810,
+            )?;
 
-            runtime.block_on(create_region_set(
-                &dsci,
+            runtime.block_on(dsci.create_region_set(
                 extent_size,
                 extent_count,
                 block_size,
-                8810,
             ))
         }
         Action::RegionPerf {
@@ -1298,8 +1341,9 @@ fn main() -> Result<()> {
             output_dir,
             region_dir,
         } => {
-            let dsci =
-                DscInfo::new(ds_bin, output_dir, region_dir, notify_tx, true)?;
+            let dsci = DscInfo::new(
+                ds_bin, output_dir, region_dir, notify_tx, true, 8810,
+            )?;
             runtime.block_on(region_create_test(&dsci, long, csv_out))
         }
         Action::Start {
@@ -1316,25 +1360,27 @@ fn main() -> Result<()> {
             // Delete any existing region if requested
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
-            } else if create && Path::new(&region_dir).exists() {
-                println!("Removing existing region {:?}", region_dir);
-                std::fs::remove_dir_all(&region_dir)?;
+            } else if create {
+                for rd in region_dir.iter() {
+                    if Path::new(&rd).exists() {
+                        println!("Removing existing region {:?}", rd);
+                        std::fs::remove_dir_all(&rd)?;
+                    }
+                }
             }
 
             let dsci = DscInfo::new(
-                ds_bin, output_dir, region_dir, notify_tx, create,
+                ds_bin, output_dir, region_dir, notify_tx, create, 8810,
             )?;
 
             if create {
-                runtime.block_on(create_region_set(
-                    &dsci,
+                runtime.block_on(dsci.create_region_set(
                     extent_size,
                     extent_count,
                     block_size,
-                    8810,
                 ))?;
             } else {
-                dsci.generate_region_set(8810)?;
+                dsci.generate_region_set()?;
             }
 
             let dsci_c = Arc::clone(&dsci);
@@ -1368,9 +1414,57 @@ mod test {
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
-        let res = DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true);
+        let region_vec = vec![dir.clone()];
+        let res = DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810);
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
+    }
+
+    #[test]
+    fn new_ti_three() {
+        // Test a typical creation but with three region directories.
+        let (ds_bin, _ds_path) = temp_file_path();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let r1 = tempdir().unwrap().as_ref().to_path_buf();
+        let r2 = tempdir().unwrap().as_ref().to_path_buf();
+        let r3 = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![r1.clone(), r2.clone(), r3.clone()];
+        let (tx, _) = watch::channel(0);
+        let res = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec.clone(),
+            tx,
+            true,
+            8810,
+        );
+        assert!(res.is_ok());
+        assert!(Path::new(&dir).exists());
+        for rd in region_vec.iter() {
+            assert!(Path::new(&rd).exists());
+        }
+    }
+
+    #[test]
+    fn new_ti_two() {
+        // Test a invalid configuration with two region directories
+        let (ds_bin, _ds_path) = temp_file_path();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let r1 = tempdir().unwrap().as_ref().to_path_buf();
+        let r2 = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![r1.clone(), r2.clone()];
+        let (tx, _) = watch::channel(0);
+        let res = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec.clone(),
+            tx,
+            true,
+            8810,
+        );
+        assert!(res.is_err());
     }
 
     #[test]
@@ -1378,9 +1472,16 @@ mod test {
         // Send a directory instead of a file for downstairs_bin, should
         // return error.
         let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let res =
-            DscInfo::new("/dev/null".to_string(), dir.clone(), dir, tx, true);
+        let res = DscInfo::new(
+            "/dev/null".to_string(),
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+        );
 
         assert!(res.is_err());
     }
@@ -1393,19 +1494,21 @@ mod test {
 
         let output_dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![region_dir.clone()];
         // First create the new directories.
         let (tx, _) = watch::channel(0);
         DscInfo::new(
             ds_bin.clone(),
             output_dir.clone(),
-            region_dir.clone(),
+            region_vec.clone(),
             tx,
             true,
+            8810,
         )
         .unwrap();
         // Now, create them again and expect an error.
         let (tx, _) = watch::channel(0);
-        let res = DscInfo::new(ds_bin, output_dir, region_dir, tx, true);
+        let res = DscInfo::new(ds_bin, output_dir, region_vec, tx, true, 8810);
         assert!(res.is_err());
     }
 
@@ -1415,10 +1518,40 @@ mod test {
         let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci = DscInfo::new(ds_bin, dir.clone(), dir, tx, true).unwrap();
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
+                .unwrap();
 
-        let res = dsci.delete_ds_region(8810);
+        let res = dsci.delete_ds_region(0);
+        println!("res is {:?}", res);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn delete_bad_second_region() {
+        // Test deletion of a region that does not exist, should report error.
+        let (ds_bin, _ds_path) = temp_file_path();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let r1 = tempdir().unwrap().as_ref().to_path_buf();
+        let r2 = tempdir().unwrap().as_ref().to_path_buf();
+        let r3 = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![r1.clone(), r2, r3];
+        let (tx, _) = watch::channel(0);
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
+                .unwrap();
+
+        // Manually create the first region directory.
+        let ds_region_dir = port_to_region(
+            r1.clone().into_os_string().into_string().unwrap(),
+            8810,
+        )
+        .unwrap();
+        fs::create_dir_all(&ds_region_dir).unwrap();
+        let res = dsci.delete_ds_region(1);
         assert!(res.is_err());
     }
 
@@ -1434,9 +1567,17 @@ mod test {
         let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true).unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec.clone(),
+            tx,
+            true,
+            8810,
+        )
+        .unwrap();
 
         // Manually create the region directory.  We have to convert the
         // PathBuf back into a string.
@@ -1447,7 +1588,7 @@ mod test {
         .unwrap();
         fs::create_dir_all(&ds_region_dir).unwrap();
 
-        let res = dsci.delete_ds_region(8810);
+        let res = dsci.delete_ds_region(0);
         assert!(res.is_ok());
         assert!(!Path::new(&ds_region_dir).exists());
     }
@@ -1458,9 +1599,17 @@ mod test {
         let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true).unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec.clone(),
+            tx,
+            true,
+            8810,
+        )
+        .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the region set.  We have to convert the
@@ -1475,9 +1624,8 @@ mod test {
         }
 
         // Verify that we can find the existing region directories.
-        dsci.generate_region_set(8810).unwrap();
-        let mut rs = dsci.rs.lock().unwrap();
-        assert_eq!(rs.next_client_id(), 3);
+        dsci.generate_region_set().unwrap();
+        let _rs = dsci.rs.lock().unwrap();
     }
 
     #[test]
@@ -1487,9 +1635,17 @@ mod test {
         let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), dir.clone(), tx, true).unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec.clone(),
+            tx,
+            true,
+            8810,
+        )
+        .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the 2/3 of the region set.
@@ -1504,7 +1660,7 @@ mod test {
         }
 
         // Verify that the missing region will return error.
-        let res = dsci.generate_region_set(8810);
+        let res = dsci.generate_region_set();
         assert!(res.is_err());
     }
 }

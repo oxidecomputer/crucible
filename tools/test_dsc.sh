@@ -69,6 +69,49 @@ res=0
 outfile="/tmp/test_dsc.txt"
 echo "" > $outfile
 
+r1="/var/tmp/test_dsc_r1"
+if [[ -d ${r1} ]]; then
+    rm -rf ${r1}
+fi
+r2="/var/tmp/test_dsc_r2"
+if [[ -d ${r2} ]]; then
+    rm -rf ${r2}
+fi
+r3="/var/tmp/test_dsc_r3"
+if [[ -d ${r3} ]]; then
+    rm -rf ${r3}
+fi
+# test with three different directories
+echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
+    --extent-size 5 --output-dir "$testdir" \
+    --region-dir "$r1" \
+    --region-dir "$r2" \
+    --region-dir "$r3" | tee "$outfile"
+
+"$dsc" create --ds-bin "$downstairs" --extent-count 5 \
+    --extent-size 5 --output-dir "$testdir" \
+    --region-dir "$r1" \
+    --region-dir "$r2" \
+    --region-dir "$r3" \
+    | tee "$outfile"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to create multi dir region" | tee -a "$fail_log"
+    (( res += 1 ))
+fi
+
+# Assuming the default port of 8810 here
+for rdirs in "$r1"/8810 "$r2"/8820 "$r3"/8830
+do
+    if [[ ! -d "$rdirs" ]]; then
+        echo "Failed to create $rdirs region" | tee -a "$fail_log"
+        (( res += 1 ))
+
+    fi
+done
+
+# Cleanup after above test
+rm -rf ${testdir} ${r1} ${r2} ${r3}
+
 echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
     --region-dir "$testdir" | tee "$outfile"
@@ -76,7 +119,6 @@ echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
 ${dsc} create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
     --region-dir "$testdir" | tee -a "$outfile"
-
 
 echo "Running dsc:"
 echo "${dsc}" start --ds-bin "$downstairs" \
@@ -175,7 +217,7 @@ if [[ "$hc" -ne 204 ]]; then
 fi
 
 # After disabling restart, then stopping all, none of the
-# downstairs should restart.
+# downstairs should automatically restart.
 sleep 4
 echo "Verify all ds are stopped"
 for cid in {0..2}; do
@@ -199,10 +241,10 @@ for cid in {0..2}; do
 	done
 done
 
-echo "Start up ds 1"
+echo "Start up ds 1 manually"
 hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"start/cid/1)
 if [[ "$hc" -ne 204 ]]; then
-    echo "Failed to start cid:1 after stop/all" | tee -a "$fail_log"
+    echo "Failed to signal start to cid:1 after stop/all" | tee -a "$fail_log"
     (( res += 1 ))
 fi
 

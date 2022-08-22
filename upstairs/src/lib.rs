@@ -4487,8 +4487,8 @@ impl Upstairs {
         if let Some(rio) = ds.reconcile_task_list.pop_front() {
             println!("Pop front: {:?}", rio);
 
-// ZZZ
-// This can be start, sort of..
+            // ZZZ
+            // This can be start, sort of..
             // Assert if not None, then job is all done.
             if let Some(job) = &mut ds.reconcile_current_work {
                 let mut done = 0;
@@ -4748,8 +4748,7 @@ impl Upstairs {
             }
         }
         let repair_total = repair_start.elapsed();
-        let time_f =
-            repair_total.as_secs() as f32
+        let time_f = repair_total.as_secs() as f32
             + (repair_total.subsec_nanos() as f32 / 1e9);
 
         // An extent repair takes four commands.  To get the number of
