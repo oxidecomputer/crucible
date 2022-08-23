@@ -1562,7 +1562,6 @@ where
                         );
                     }
                     Some(Message::RepairAckId { repair_id }) => {
-                        // ZZZ repair done side for repair_id
                         if up.downstairs.lock().unwrap().rep_done(
                             up_coms.client_id, repair_id
                         ) {
@@ -4487,8 +4486,6 @@ impl Upstairs {
         if let Some(rio) = ds.reconcile_task_list.pop_front() {
             println!("Pop front: {:?}", rio);
 
-            // ZZZ
-            // This can be start, sort of..
             // Assert if not None, then job is all done.
             if let Some(job) = &mut ds.reconcile_current_work {
                 let mut done = 0;

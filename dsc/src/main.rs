@@ -234,7 +234,6 @@ impl DownstairsInfo {
 struct RegionSet {
     ds: Vec<Arc<DownstairsInfo>>,
     ds_bin: String,
-    // Each downstairs will append the port to the region dir here.
     region_dir: Vec<String>,
     ds_state: Vec<DownstairsState>,
     ds_pid: Vec<Option<u32>>,
@@ -271,9 +270,10 @@ impl DscInfo {
             bail!("{} is not a file", downstairs_bin);
         }
 
-        // There should either be one region dir in the vec, or three
-        // unique directories.  If there is one, the downstairs will
-        // all share it.  If there are three, then each will get it's own.
+        // There should either be one region dir in the vec, or three.
+        // If there is one directory, then the downstairs will all share it.
+        // If there are three, then each downstairs will get its own
+        // directory.
         if region_dir.len() != 1 && region_dir.len() != 3 {
             bail!("Region directory needs one or three elements");
         }
@@ -521,7 +521,7 @@ impl DscInfo {
     }
 
     /*
-     * Generate a region set given the starting port and expected region
+     * Generate a region set using the starting port and region
      * directories.  Return error if any of them don't already exist.
      * TODO: This is assuming a fair amount of stuff.
      * Make fewer assumptions...
@@ -1455,6 +1455,29 @@ mod test {
         let r1 = tempdir().unwrap().as_ref().to_path_buf();
         let r2 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1.clone(), r2.clone()];
+        let (tx, _) = watch::channel(0);
+        let res = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec.clone(),
+            tx,
+            true,
+            8810,
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn new_ti_four() {
+        // Test a invalid configuration with four region directories
+        let (ds_bin, _ds_path) = temp_file_path();
+
+        let dir = tempdir().unwrap().as_ref().to_path_buf();
+        let r1 = tempdir().unwrap().as_ref().to_path_buf();
+        let r2 = tempdir().unwrap().as_ref().to_path_buf();
+        let r3 = tempdir().unwrap().as_ref().to_path_buf();
+        let r4 = tempdir().unwrap().as_ref().to_path_buf();
+        let region_vec = vec![r1, r2, r3, r4];
         let (tx, _) = watch::channel(0);
         let res = DscInfo::new(
             ds_bin,
