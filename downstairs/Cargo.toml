@@ -29,7 +29,7 @@ rand = "0.8.5"
 repair-client = { path = "../repair-client" }
 reqwest = { version = "0.11", features = ["json"] }
 ringbuffer = "0.8"
-rusqlite = { version = "0.27" }
+rusqlite = { version = "0.28" }
 schemars = { version = "0.8.10", features = [ "uuid1" ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.82"
