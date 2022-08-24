@@ -177,9 +177,10 @@ pub trait BlockIO {
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
-    fn volume__read__start(_: u32) {}
-    fn volume__write__start(_: u32) {}
-    fn volume__flush__start(_: u32) {}
+    fn volume__read__start(_: u32, _: Uuid) {}
+    fn volume__write__start(_: u32, _: Uuid) {}
+    fn volume__writeunwritten__start(_: u32, _: Uuid) {}
+    fn volume__flush__start(_: u32, _: Uuid) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__write__unwritten__start(_: u64) {}
@@ -206,9 +207,10 @@ mod cdt {
     fn gw__flush__done(_: u64) {}
     fn reqwest__read__start(_: u32) {}
     fn reqwest__read__done(_: u32) {}
-    fn volume__read__done(_: u32) {}
-    fn volume__write__done(_: u32) {}
-    fn volume__flush__done(_: u32) {}
+    fn volume__read__done(_: u32, _: Uuid) {}
+    fn volume__write__done(_: u32, _: Uuid) {}
+    fn volume__writeunwritten__done(_: u32, _: Uuid) {}
+    fn volume__flush__done(_: u32, _: Uuid) {}
 }
 
 pub fn deadline_secs(secs: u64) -> Instant {

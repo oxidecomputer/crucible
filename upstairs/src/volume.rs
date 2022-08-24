@@ -2,11 +2,10 @@
 
 use super::*;
 use oximeter::types::ProducerRegistry;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
-
-use std::ops::Range;
 
 #[derive(Debug)]
 pub struct Volume {
@@ -302,7 +301,11 @@ impl Volume {
             crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
         }
         let cc = self.next_count();
-        cdt::volume__write__start!(|| (cc));
+        if is_write_unwritten {
+            cdt::volume__writeunwritten__start!(|| (cc, self.uuid));
+        } else {
+            cdt::volume__write__start!(|| (cc, self.uuid));
+        }
 
         let affected_sub_volumes = self.sub_volumes_for_lba_range(
             offset.value,
@@ -336,7 +339,11 @@ impl Volume {
             data_index += sz;
         }
 
-        cdt::volume__write__done!(|| (cc));
+        if is_write_unwritten {
+            cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
+        } else {
+            cdt::volume__write__done!(|| (cc, self.uuid));
+        }
         BlockReqWaiter::immediate()
     }
 }
@@ -419,11 +426,12 @@ impl BlockIO for Volume {
         // In the case that this volume only has a read only parent, serve
         // reads directly from that
         let cc = self.next_count();
-        cdt::volume__read__start!(|| (cc));
+        cdt::volume__read__start!(|| (cc, self.uuid));
         if self.sub_volumes.is_empty() {
             if let Some(ref read_only_parent) = &self.read_only_parent {
-                cdt::volume__read__done!(|| (cc));
-                return read_only_parent.read(offset, data);
+                let res = read_only_parent.read(offset, data);
+                cdt::volume__read__done!(|| (cc, self.uuid));
+                return res;
             } else {
                 crucible_bail!(
                     CannotServeBlocks,
@@ -560,7 +568,7 @@ impl BlockIO for Volume {
 
         assert_eq!(data.len(), data_index);
 
-        cdt::volume__read__done!(|| (cc));
+        cdt::volume__read__done!(|| (cc, self.uuid));
         BlockReqWaiter::immediate()
     }
 
@@ -589,7 +597,7 @@ impl BlockIO for Volume {
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         let cc = self.next_count();
-        cdt::volume__flush__start!(|| (cc));
+        cdt::volume__flush__start!(|| (cc, self.uuid));
         for sub_volume in &self.sub_volumes {
             let mut waiter = sub_volume.flush(snapshot_details.clone())?;
             waiter.block_wait()?;
@@ -600,7 +608,7 @@ impl BlockIO for Volume {
         // served out of a ZFS snapshot and be read only at the filesystem
         // level)
 
-        cdt::volume__flush__done!(|| (cc));
+        cdt::volume__flush__done!(|| (cc, self.uuid));
         BlockReqWaiter::immediate()
     }
 
