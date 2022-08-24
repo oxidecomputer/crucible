@@ -1,8 +1,15 @@
 #!/bin/bash
 
 # Test the performance of repair
-
-# The actual repair is pretty straightforward, one DS is all old.
+# The test does the following:
+# - Create a region set with three downstairs.
+# - Make an entire downstairs set of extents require repair.
+# - Run the regular upstairs and let it perform the repair.
+# - Use output from the upstairs to determine how long that repair takes,
+#   and divide by the number of extents to get an average.
+#
+# The actual repair is pretty straightforward, one complete downstairs
+# region # is replaced with an older version.
 
 # Control-C to cleanup.
 trap stop_test INT
@@ -19,7 +26,6 @@ function stop_test() {
 # This is the main perf loop.
 # It expects $1 to be Extent Size (blocks in an extent).
 # It expects $2 to be Extent Count (number of extent files in the region).
-
 function repair_round() {
     es=$1
     ec=$2
@@ -31,8 +37,8 @@ function repair_round() {
     (( bytes = es * block_size ))
     (( size = bytes / 1024 / 1024 ))
 
-    echo "    ES  EC  Extent Size: $size MiB" | tee -a ${loop_log}
-    echo "Create region with ES:$es and EC:$ec to test" >> "${test_log}"
+    echo "    ES  EC  Extent Size: $size MiB" | tee -a "$loop_log"
+    echo "Create region with ES:$es and EC:$ec to test" >> "$test_log"
     ulimit -n 65536
     if ! "$dsc" create --cleanup --ds-bin "$cds" --block-size "$block_size" \
             --region-dir "$region_one" \
@@ -78,13 +84,13 @@ function repair_round() {
     printf "%6d %3d Create, fill, and verify took: %d:%02d \n" \
             "$es" "$ec" \
             $((duration / 60)) \
-            $((duration % 60)) | tee -a ${loop_log}
+            $((duration % 60)) | tee -a "$loop_log"
 
     # We do this down here because we want to be sure all the downstairs
     # have started (meaning dsc has also started) and because our fill has
     # completed, we know dsc should be ready to receive commands.
-    echo "Disable auto restart of downstairs" >> "${loop_log}"
-    "$dsc" cmd disable-restart-all >> "${loop_log}"
+    echo "Disable auto restart of downstairs" >> "$loop_log"
+    "$dsc" cmd disable-restart-all >> "$loop_log"
     if [[ $? -ne 0 ]]; then
         echo "Error on disable restart"
         stop_test
@@ -137,14 +143,14 @@ function repair_round() {
             result=$?
 
             if [[ $result -ne 0 ]]; then
-                printf "Error $result in test\n" "$i" | tee -a ${loop_log}
+                printf "Error %d in test\n" "$result" | tee -a "$loop_log"
                 mv "$test_log" "$test_log".lastfail
                 return 1
             fi
             printf "%6d %3d [%d][%d] " \
                     "$es" "$ec" "$i" "$ds" | tee -a "${loop_log}"
 
-            grep "extents repaired" "$test_log" | tail -1 | tee -a ${loop_log}
+            grep "extents repaired" "$test_log" | tail -1 | tee -a "$loop_log"
             (( pass_total += 1 ))
             duration=$SECONDS
             (( total += duration ))
@@ -157,8 +163,8 @@ function repair_round() {
 
     ave=$(( total / pass_total ))
     printf "%6d %3d Loop ave:%d:%02d  total loop time:%d:%02d\n" \
-        $es $ec $((ave / 60)) $((ave % 60)) \
-        $((total / 60)) $((total % 60)) | tee -a ${loop_log}
+        "$es" "$ec" $((ave / 60)) $((ave % 60)) \
+        $((total / 60)) $((total % 60)) | tee -a "$loop_log"
 
     return 0
 }
@@ -166,10 +172,16 @@ function repair_round() {
 # The locations for each of the three regions that make up
 # the region set.
 
-# These values correspond to the zpools on Folgers.
-region_one=/oxp_d462a7f7-b628-40fe-80ff-4e4189e2d62b/repair_perf
-region_two=/oxp_e4b4dc87-ab46-49fb-a4b4-d361ae214c03/repair_perf
-region_three=/oxp_f4b4dc87-ab46-49fb-a4b4-d361ae214c03/repair_perf
+# These hard coded values correspond to the zpools on Folgers.
+# region_one=/oxp_d462a7f7-b628-40fe-80ff-4e4189e2d62b/repair_perf
+# region_two=/oxp_e4b4dc87-ab46-49fb-a4b4-d361ae214c03/repair_perf
+# region_three=/oxp_f4b4dc87-ab46-49fb-a4b4-d361ae214c03/repair_perf
+
+# This is the default for dsc, and should work on most systems, but
+# will not give the best performance.
+region_one=/var/tmp/dsc/region1
+region_two=/var/tmp/dsc/region2
+region_three=/var/tmp/dsc/region3
 
 block_size=4096
 loop_log=/tmp/repair_perf.log
@@ -204,6 +216,7 @@ if [[ "$os_name" == 'Darwin' ]]; then
     # stupid macos needs this to avoid popup hell.
     codesign -s - -f "$cds"
     codesign -s - -f "$ct"
+    codesign -s - -f "$dsc"
 fi
 
 echo "Begin $0 on system $(hostname) $(date)"
