@@ -1099,6 +1099,14 @@ mod test {
         )?
         .block_wait()?;
 
+        // Write unwritten should not change the block we just wrote:
+        // Write unwritten twos to the second block
+        disk.write_unwritten(
+            Block::new(1, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![2; 512]),
+        )?
+        .block_wait()?;
+
         // Read and verify
         let buffer = Buffer::new(4096);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
@@ -1133,6 +1141,13 @@ mod test {
         )?
         .block_wait()?;
 
+        // Write_unwritten eights to fifth and six block
+        disk.write_unwritten(
+            Block::new(4, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![8; 1024]),
+        )?
+        .block_wait()?;
+
         // Read and verify
         let buffer = Buffer::new(4096);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
@@ -1141,7 +1156,8 @@ mod test {
         let mut expected = vec![2; 512];
         expected.extend(vec![1; 512]);
         expected.extend(vec![7; 1024]);
-        expected.extend(vec![0; 4096 - 2048]);
+        expected.extend(vec![8; 1024]);
+        expected.extend(vec![0; 1024]);
         assert_eq!(*buffer.as_vec(), expected);
 
         Ok(())
