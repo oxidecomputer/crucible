@@ -201,7 +201,7 @@ impl BlockIO for ReqwestBlockIO {
         data: Buffer,
     ) -> Result<BlockReqWaiter, CrucibleError> {
         let cc = self.next_count();
-        cdt::reqwest__read__start!(|| (cc));
+        cdt::reqwest__read__start!(|| (cc, self.uuid));
 
         let mut data_vec = data.as_vec();
         let mut owned_vec = data.owned_vec();
@@ -245,7 +245,7 @@ impl BlockIO for ReqwestBlockIO {
             owned_vec[i] = true;
         }
 
-        cdt::reqwest__read__done!(|| (cc));
+        cdt::reqwest__read__done!(|| (cc, self.uuid));
         BlockReqWaiter::immediate()
     }
 

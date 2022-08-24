@@ -3,18 +3,17 @@
  */
 crucible_upstairs*:::reqwest-read-start
 {
-    start[arg0] = timestamp;
+    start[arg0, json(copyinstr(arg1), "ok")] = timestamp;
 }
 
 crucible_upstairs*:::reqwest-read-done
-/start[arg0]/
+/start[arg0, json(copyinstr(arg1), "ok")]/
 {
-    strtok(probename, "-");
+    this->uuid = json(copyinstr(arg1), "ok");
     this->cmd = strtok(NULL, "-");
-    @time[this->cmd] = quantize(timestamp - start[arg0]);
-    start[arg0] = 0;
+    @time[this->uuid, probename] = quantize(timestamp - start[arg0, this->uuid]);
+    start[arg0, this->uuid] = 0;
 }
-
 
 tick-5s
 {
