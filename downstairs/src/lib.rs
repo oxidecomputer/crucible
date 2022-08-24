@@ -264,63 +264,71 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 /*
  * Debug function to dump the work list.
  */
-async fn _show_work(ds: &Downstairs) {
-    println!("Active Upstairs UUID: {:?}", ds.active_upstairs());
-    let work = ds.work.lock().await;
+pub async fn show_work(ds: &mut Downstairs) {
+    let active_upstairs_connections = ds.active_upstairs();
+    println!(
+        "Active Upstairs connections: {:?}",
+        active_upstairs_connections
+    );
 
-    let mut kvec: Vec<u64> = work.active.keys().cloned().collect::<Vec<u64>>();
+    for upstairs_connection in active_upstairs_connections {
+        let work = ds.work_lock(upstairs_connection).await.unwrap();
 
-    if kvec.is_empty() {
-        println!("Crucible Downstairs work queue:  Empty");
-    } else {
-        println!("Crucible Downstairs work queue:");
-        kvec.sort_unstable();
-        for id in kvec.iter() {
-            let dsw = work.active.get(id).unwrap();
-            let dsw_type;
-            let dep_list;
-            match &dsw.work {
-                IOop::Read {
-                    dependencies,
-                    requests: _,
-                } => {
-                    dsw_type = "Read".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-                IOop::Write {
-                    dependencies,
-                    writes: _,
-                } => {
-                    dsw_type = "Write".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-                IOop::Flush {
-                    dependencies,
-                    flush_number: _flush_number,
-                    gen_number: _gen_number,
-                    snapshot_details: _,
-                } => {
-                    dsw_type = "Flush".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-                IOop::WriteUnwritten {
-                    dependencies,
-                    writes: _,
-                } => {
-                    dsw_type = "WriteU".to_string();
-                    dep_list = dependencies.to_vec();
-                }
-            };
-            println!(
-                "DSW:[{:04}] {:>05} {:>05} deps:{:?}",
-                id, dsw_type, dsw.state, dep_list,
-            );
+        let mut kvec: Vec<u64> =
+            work.active.keys().cloned().collect::<Vec<u64>>();
+
+        if kvec.is_empty() {
+            println!("Crucible Downstairs work queue:  Empty");
+        } else {
+            println!("Crucible Downstairs work queue:");
+            kvec.sort_unstable();
+            for id in kvec.iter() {
+                let dsw = work.active.get(id).unwrap();
+                let dsw_type;
+                let dep_list;
+                match &dsw.work {
+                    IOop::Read {
+                        dependencies,
+                        requests: _,
+                    } => {
+                        dsw_type = "Read".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                    IOop::Write {
+                        dependencies,
+                        writes: _,
+                    } => {
+                        dsw_type = "Write".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                    IOop::Flush {
+                        dependencies,
+                        flush_number: _flush_number,
+                        gen_number: _gen_number,
+                        snapshot_details: _,
+                    } => {
+                        dsw_type = "Flush".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                    IOop::WriteUnwritten {
+                        dependencies,
+                        writes: _,
+                    } => {
+                        dsw_type = "WriteU".to_string();
+                        dep_list = dependencies.to_vec();
+                    }
+                };
+                println!(
+                    "DSW:[{:04}] {:>05} {:>05} deps:{:?}",
+                    id, dsw_type, dsw.state, dep_list,
+                );
+            }
         }
-    }
 
-    println!("Done tasks {:?}", work.completed);
-    println!("last_flush: {:?}", work.last_flush);
-    println!("--------------------------------------");
+        println!("Done tasks {:?}", work.completed);
+        println!("last_flush: {:?}", work.last_flush);
+        println!("--------------------------------------");
+    }
 }
 
 // DTrace probes for the downstairs
@@ -390,7 +398,7 @@ where
                 writes: writes.to_vec(),
             };
 
-            let d = ad.lock().await;
+            let mut d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
@@ -428,7 +436,7 @@ where
                 snapshot_details: snapshot_details.clone(),
             };
 
-            let d = ad.lock().await;
+            let mut d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
@@ -462,7 +470,7 @@ where
                 writes: writes.to_vec(),
             };
 
-            let d = ad.lock().await;
+            let mut d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
@@ -496,7 +504,7 @@ where
                 requests: requests.to_vec(),
             };
 
-            let d = ad.lock().await;
+            let mut d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_read).await?;
             Some(*job_id)
         }
@@ -631,6 +639,7 @@ where
 
 async fn do_work_task<T>(
     ads: &mut Arc<Mutex<Downstairs>>,
+    upstairs_connection: UpstairsConnection,
     mut job_channel_rx: Receiver<u64>,
     fw: &mut Arc<Mutex<FramedWrite<T, CrucibleEncoder>>>,
 ) -> Result<()>
@@ -646,16 +655,10 @@ where
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let upstairs_connection = {
-            if let Some(upstairs_connection) =
-                ads.lock().await.active_upstairs()
-            {
-                upstairs_connection
-            } else {
-                // We are not an active downstairs, wait until we are
-                continue;
-            }
-        };
+        if !ads.lock().await.is_active(upstairs_connection) {
+            // We are not an active downstairs, wait until we are
+            continue;
+        }
 
         /*
          * Build ourselves a list of all the jobs on the work hashmap that
@@ -691,18 +694,32 @@ where
              * in_progress method will only return a job if all
              * dependencies are met.
              */
-            let job_id = ads.lock().await.in_progress(*new_id).await;
+            let job_id = ads
+                .lock()
+                .await
+                .in_progress(upstairs_connection, *new_id)
+                .await?;
             if let Some(job_id) = job_id {
-                let m = ads.lock().await.do_work(job_id).await?;
+                let m = ads
+                    .lock()
+                    .await
+                    .do_work(upstairs_connection, job_id)
+                    .await?;
 
                 if let Some(m) = m {
-                    ads.lock().await.complete_work_stat(&m, job_id).await?;
+                    ads.lock()
+                        .await
+                        .complete_work_stat(upstairs_connection, &m, job_id)
+                        .await?;
                     // Notify the upstairs before completing work
                     let mut fw = fw.lock().await;
                     fw.send(&m).await?;
                     drop(fw);
 
-                    ads.lock().await.complete_work(job_id, m).await?;
+                    ads.lock()
+                        .await
+                        .complete_work(upstairs_connection, job_id, m)
+                        .await?;
                 }
             }
         }
@@ -857,19 +874,16 @@ where
                         if let Some(upstairs_connection) = upstairs_connection {
                             println!(
                                 "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_connection, ds.jobs().await,
+                                upstairs_connection, ds.jobs(upstairs_connection).await?,
                             );
 
                             if ds.is_active(upstairs_connection) {
                                 println!("upstairs {:?} was previously \
                                     active, clearing", upstairs_connection);
-                                ds.clear_active(upstairs_connection).await;
+                                ds.clear_active(upstairs_connection).await?;
                             }
                         } else {
-                            println!(
-                                "upstairs disconnected, {} jobs left",
-                                ds.jobs().await,
-                            );
+                            println!("unknown upstairs disconnected");
                         }
 
                         return Ok(());
@@ -1019,9 +1033,11 @@ where
                             bail!("Received LastFlush out of order {}",
                                 negotiated);
                         }
+
                         negotiated = 4;
+
                         {
-                            let ds = ads.lock().await;
+                            let mut ds = ads.lock().await;
                             let mut work = ds.work_lock(
                                 upstairs_connection.unwrap(),
                             ).await?;
@@ -1124,7 +1140,13 @@ where
         let mut adc = ads.clone();
         let mut fwc = fw.clone();
         tokio::spawn(async move {
-            do_work_task(&mut adc, job_channel_rx, &mut fwc).await
+            do_work_task(
+                &mut adc,
+                upstairs_connection,
+                job_channel_rx,
+                &mut fwc,
+            )
+            .await
         })
     };
 
@@ -1168,7 +1190,8 @@ where
              * trigger once then never again.
              */
             _ = sleep_until(lossy_interval), if lossy => {
-                //_show_work(&ds).await;
+                //let ds = ads.lock().await;
+                //show_work(&ds).await;
                 job_channel_tx.lock().await.send(0).await?;
                 lossy_interval = deadline_secs(5);
             }
@@ -1237,13 +1260,13 @@ where
 
                         println!(
                             "upstairs {:?} disconnected, {} jobs left",
-                            upstairs_connection, ds.jobs().await,
+                            upstairs_connection, ds.jobs(upstairs_connection).await?,
                         );
 
                         if ds.is_active(upstairs_connection) {
                             println!("upstairs {:?} was previously \
                                 active, clearing", upstairs_connection);
-                            ds.clear_active(upstairs_connection).await;
+                            ds.clear_active(upstairs_connection).await?;
                         }
 
                         return Ok(());
@@ -1268,6 +1291,13 @@ where
     }
 }
 
+#[derive(Debug)]
+pub struct ActiveUpstairs {
+    pub upstairs_connection: UpstairsConnection,
+    pub work: Mutex<Work>,
+    pub terminate_sender: Arc<Sender<UpstairsConnection>>,
+}
+
 /*
  * Overall structure for things the downstairs is tracking.
  * This includes the extents and their status as well as the
@@ -1276,11 +1306,9 @@ where
 #[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
-    work: Mutex<Work>,
     lossy: bool,         // Test flag, enables pauses and skipped jobs
     return_errors: bool, // Test flag
-    active_upstairs:
-        Option<(UpstairsConnection, Arc<Sender<UpstairsConnection>>)>,
+    active_upstairs: HashMap<Uuid, ActiveUpstairs>,
     dss: DsStatOuter,
     read_only: bool,
     encrypted: bool,
@@ -1301,10 +1329,9 @@ impl Downstairs {
         };
         Downstairs {
             region,
-            work: Mutex::new(Work::default()),
             lossy,
             return_errors,
-            active_upstairs: None,
+            active_upstairs: HashMap::new(),
             dss,
             read_only,
             encrypted,
@@ -1346,32 +1373,43 @@ impl Downstairs {
      * newly active Upstairs.
      */
     async fn work_lock(
-        &self,
+        &mut self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<MutexGuard<'_, Work>> {
-        if let Some(active_upstairs) = &self.active_upstairs {
-            let (active_connection, ..) = active_upstairs;
-            if *active_connection != upstairs_connection {
-                println!(
-                    "{:?} cannot grab lock, {:?} is active!",
-                    upstairs_connection, active_connection,
-                );
-                bail!(CrucibleError::UpstairsInactive)
-            } else {
-                Ok(self.work.lock().await)
-            }
-        } else {
-            bail!("cannot grab work lock, nothing is active!");
+        let upstairs_uuid = upstairs_connection.upstairs_id;
+        if !self.active_upstairs.contains_key(&upstairs_uuid) {
+            println!(
+                "{:?} cannot grab work lock, {} is not active!",
+                upstairs_connection, upstairs_uuid,
+            );
+
+            bail!(CrucibleError::UpstairsInactive);
         }
+
+        let active_upstairs = self.active_upstairs.get(&upstairs_uuid).unwrap();
+
+        if active_upstairs.upstairs_connection != upstairs_connection {
+            println!(
+                "{:?} cannot grab lock, does not match {:?}!",
+                upstairs_connection, active_upstairs.upstairs_connection,
+            );
+
+            bail!(CrucibleError::UpstairsInactive)
+        }
+
+        Ok(active_upstairs.work.lock().await)
     }
 
-    async fn jobs(&self) -> usize {
-        let work = self.work.lock().await;
-        work.jobs()
+    async fn jobs(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+    ) -> Result<usize> {
+        let work = self.work_lock(upstairs_connection).await?;
+        Ok(work.jobs())
     }
 
     async fn new_work(
-        &self,
+        &mut self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<Vec<u64>> {
         let work = self.work_lock(upstairs_connection).await?;
@@ -1380,7 +1418,7 @@ impl Downstairs {
 
     // Add work to the Downstairs
     async fn add_work(
-        &self,
+        &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
         work: IOop,
@@ -1412,27 +1450,168 @@ impl Downstairs {
         Ok(())
     }
 
+    #[cfg(test)]
+    async fn get_job(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+        ds_id: u64,
+    ) -> Result<DownstairsWork> {
+        let mut work = self.work_lock(upstairs_connection).await?;
+        Ok(work.get_job(ds_id))
+    }
+
     // Downstairs, move a job to in_progress, if we can
-    async fn in_progress(&self, ds_id: u64) -> Option<u64> {
-        let mut work = self.work.lock().await;
-        if let Some((job_id, upstairs_connection)) = work.in_progress(ds_id) {
+    async fn in_progress(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+        ds_id: u64,
+    ) -> Result<Option<u64>> {
+        let job = {
+            let mut work = self.work_lock(upstairs_connection).await?;
+            work.in_progress(ds_id)
+        };
+
+        if let Some((job_id, upstairs_connection)) = job {
             if !self.is_active(upstairs_connection) {
                 // Don't return a job with the wrong uuid! `promote_to_active`
                 // should have removed any active jobs, and
                 // `work.new_work` should have filtered on the correct UUID.
-                panic!("Don't return a job with the wrong uuid!");
+                panic!("Don't return a job for a non-active connection!");
             }
 
-            Some(job_id)
+            Ok(Some(job_id))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    // Downstairs, given a job ID, do the work for that IO.
-    async fn do_work(&self, job_id: u64) -> Result<Option<Message>> {
-        let mut work = self.work.lock().await;
-        work.do_work(self, job_id).await
+    // Given a job ID, do the work for that IO.
+    //
+    // This method calls into the Downstair's region and performs the read /
+    // write / flush action.
+    async fn do_work(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+        job_id: u64,
+    ) -> Result<Option<Message>> {
+        let job = {
+            let mut work = self.work_lock(upstairs_connection).await?;
+            let job = work.get_ready_job(job_id).await;
+
+            // `promote_to_active` can clear out the Work struct for this
+            // UpstairsConnection, but the tasks can still be working on
+            // outdated job IDs. If that happens, `get_ready_job` will return a
+            // None, so bail early here.
+            if job.is_none() {
+                return Ok(None);
+            }
+
+            job.unwrap()
+        };
+
+        match &job.work {
+            IOop::Read {
+                dependencies: _dependencies,
+                requests,
+            } => {
+                /*
+                 * Any error from an IO should be intercepted here and passed
+                 * back to the upstairs.
+                 */
+                let responses = if self.return_errors && random() && random() {
+                    println!("returning error on read!");
+                    Err(CrucibleError::GenericError("test error".to_string()))
+                } else if !self.is_active(job.upstairs_connection) {
+                    println!("Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    self.region.region_read(requests, job_id)
+                };
+
+                Ok(Some(Message::ReadResponse {
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
+                    job_id: job.ds_id,
+                    responses,
+                }))
+            }
+            IOop::WriteUnwritten {
+                dependencies: _dependencies,
+                writes,
+            } => {
+                /*
+                 * Any error from an IO should be intercepted here and passed
+                 * back to the upstairs.
+                 */
+                let result = if self.return_errors && random() && random() {
+                    println!("returning error on writeunwritten!");
+                    Err(CrucibleError::GenericError("test error".to_string()))
+                } else if !self.is_active(job.upstairs_connection) {
+                    println!("Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    // The region_write will handle what happens to each block
+                    // based on if they have data or not.
+                    self.region.region_write(writes, job_id, true)
+                };
+
+                Ok(Some(Message::WriteUnwrittenAck {
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
+                    job_id: job.ds_id,
+                    result,
+                }))
+            }
+            IOop::Write {
+                dependencies: _dependencies,
+                writes,
+            } => {
+                let result = if self.return_errors && random() && random() {
+                    println!("returning error on write!");
+                    Err(CrucibleError::GenericError("test error".to_string()))
+                } else if !self.is_active(job.upstairs_connection) {
+                    println!("Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    self.region.region_write(writes, job_id, false)
+                };
+
+                Ok(Some(Message::WriteAck {
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
+                    job_id: job.ds_id,
+                    result,
+                }))
+            }
+            IOop::Flush {
+                dependencies: _dependencies,
+                flush_number,
+                gen_number,
+                snapshot_details,
+            } => {
+                let result = if self.return_errors && random() && random() {
+                    println!("returning error on flush!");
+                    Err(CrucibleError::GenericError("test error".to_string()))
+                } else if !self.is_active(job.upstairs_connection) {
+                    println!("Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    self.region.region_flush(
+                        *flush_number,
+                        *gen_number,
+                        snapshot_details,
+                        job_id,
+                    )
+                };
+
+                Ok(Some(Message::FlushAck {
+                    upstairs_id: job.upstairs_connection.upstairs_id,
+                    session_id: job.upstairs_connection.session_id,
+                    job_id: job.ds_id,
+                    result,
+                }))
+            }
+        }
     }
 
     /*
@@ -1443,20 +1622,32 @@ impl Downstairs {
      * - removing the response
      * - putting the id on the completed list.
      */
-    async fn complete_work(&mut self, ds_id: u64, m: Message) -> Result<()> {
-        let mut work = self.work.lock().await;
+    async fn complete_work(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+        ds_id: u64,
+        m: Message,
+    ) -> Result<()> {
+        let mut work = self.work_lock(upstairs_connection).await?;
 
         // Complete the job
         let is_flush = matches!(m, Message::FlushAck { .. });
 
-        // _ can be None if promote_to_active ran and cleared out active.
-        let _ = work.active.remove(&ds_id);
-
-        if is_flush {
-            work.last_flush = ds_id;
-            work.completed = Vec::with_capacity(32);
-        } else {
-            work.completed.push(ds_id);
+        // If upstairs_connection grabs the work lock, it is the active
+        // connection for this Upstairs UUID. The job should exist in the Work
+        // struct. If it does not, then we're in the case where the same
+        // Upstairs has reconnected and been promoted to active, meaning
+        // `work.clear()` was run. If that's the case, then do not alter the
+        // Work struct, because there's now two tasks running for the same
+        // UpstairsConnection, and we're the one that should be on the way out
+        // due to a message on the terminate_sender channel.
+        if work.active.remove(&ds_id).is_some() {
+            if is_flush {
+                work.last_flush = ds_id;
+                work.completed = Vec::with_capacity(32);
+            } else {
+                work.completed.push(ds_id);
+            }
         }
 
         Ok(())
@@ -1468,9 +1659,11 @@ impl Downstairs {
      */
     async fn complete_work_stat(
         &mut self,
+        _upstairs_connection: UpstairsConnection,
         m: &Message,
         ds_id: u64,
     ) -> Result<()> {
+        // XXX dss per upstairs connection?
         match m {
             Message::FlushAck { .. } => {
                 cdt::submit__flush__done!(|| ds_id);
@@ -1499,106 +1692,231 @@ impl Downstairs {
         upstairs_connection: UpstairsConnection,
         tx: Arc<Sender<UpstairsConnection>>,
     ) -> Result<()> {
-        let mut work = self.work.lock().await;
+        if self.read_only {
+            // Multiple active read-only sessions are allowed, but multiple
+            // sessions for the same Upstairs UUID are not. Kick out a
+            // previously active session for this UUID if one exists. Do this
+            // while holding the work lock so the previously active Upstairs
+            // isn't adding more work.
+            if let Some(active_upstairs) =
+                self.active_upstairs.get(&upstairs_connection.upstairs_id)
+            {
+                let mut work = active_upstairs.work.lock().await;
 
-        /*
-         * If there's an existing Upstairs connection, signal to terminate
-         * it. Do this while holding the work lock so the previously
-         * active Upstairs isn't adding more work.
-         */
-        if let Some(old_upstairs) = &self.active_upstairs {
-            println!(
-                "Signaling to {:?} thread that {:?} is being promoted",
-                old_upstairs.0, upstairs_connection,
-            );
-            match futures::executor::block_on(
-                old_upstairs.1.send(upstairs_connection),
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    /*
-                     * It's possible the old thread died due to some
-                     * connection error. In that case the
-                     * receiver will have closed and
-                     * the above send will fail.
-                     */
+                println!(
+                    "Signaling to {:?} thread that {:?} is being \
+                    promoted (read-only)",
+                    active_upstairs.upstairs_connection, upstairs_connection,
+                );
+
+                match futures::executor::block_on(
+                    active_upstairs.terminate_sender.send(upstairs_connection),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        /*
+                         * It's possible the old thread died due to some
+                         * connection error. In that case the
+                         * receiver will have closed and
+                         * the above send will fail.
+                         */
+                        println!(
+                            "Error while signaling to {:?} thread: {:?}",
+                            active_upstairs.upstairs_connection, e,
+                        );
+                    }
+                }
+
+                // Note: in the future, differentiate between new upstairs
+                // connecting vs same upstairs reconnecting here.
+                //
+                // Clear out active jobs, the last flush, and completed
+                // information, as that will not be valid any longer.
+                //
+                // TODO: Really work through this error case
+                if work.active.keys().len() > 0 {
                     println!(
-                        "Error while signaling to {:?} thread: {:?}",
-                        old_upstairs.0, e,
+                        "Crucible Downstairs promoting {:?} to active, \
+                        discarding {} jobs",
+                        upstairs_connection,
+                        work.active.keys().len()
+                    );
+                }
+
+                // In the future, we may decide there is some way to continue
+                // working on outstanding jobs, or a way to merge. But for now,
+                // we just throw out what we have and let the upstairs resend
+                // anything to us that it did not get an ACK for.
+                work.clear();
+            } else {
+                // There is no current session for this Upstairs UUID.
+            }
+
+            // Insert a new session, overwritting the previous entry if the
+            // Upstairs UUID has an entry already.
+            self.active_upstairs.insert(
+                upstairs_connection.upstairs_id,
+                ActiveUpstairs {
+                    upstairs_connection,
+                    work: Mutex::new(Work::new()),
+                    terminate_sender: tx,
+                },
+            );
+
+            Ok(())
+        } else {
+            // Only one active read-write session is allowed. Kick out the
+            // currently active Upstairs session if one exists.
+            let currently_active_upstairs_uuids: Vec<Uuid> =
+                self.active_upstairs.keys().copied().collect();
+
+            match currently_active_upstairs_uuids.len() {
+                0 => {
+                    // No currently active Upstairs sessions
+                    self.active_upstairs.insert(
+                        upstairs_connection.upstairs_id,
+                        ActiveUpstairs {
+                            upstairs_connection,
+                            work: Mutex::new(Work::new()),
+                            terminate_sender: tx,
+                        },
+                    );
+
+                    assert_eq!(self.active_upstairs.len(), 1);
+
+                    // Re-open any closed extents
+                    self.region.reopen_all_extents()?;
+
+                    println!(
+                        "{:?} is now active (read-write)",
+                        upstairs_connection,
+                    );
+
+                    Ok(())
+                }
+
+                1 => {
+                    // Kick out this session. Do this while holding the work
+                    // lock.
+                    let active_upstairs = self
+                        .active_upstairs
+                        .remove(&currently_active_upstairs_uuids[0])
+                        .unwrap();
+                    let mut work = active_upstairs.work.lock().await;
+
+                    println!(
+                        "Signaling to {:?} thread that {:?} is being \
+                        promoted (read-write)",
+                        active_upstairs.upstairs_connection,
+                        upstairs_connection,
+                    );
+
+                    match futures::executor::block_on(
+                        active_upstairs
+                            .terminate_sender
+                            .send(upstairs_connection),
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            /*
+                             * It's possible the old thread died due to some
+                             * connection error. In that case the
+                             * receiver will have closed and
+                             * the above send will fail.
+                             */
+                            println!(
+                                "Error while signaling to {:?} thread: {:?}",
+                                active_upstairs.upstairs_connection, e,
+                            );
+                        }
+                    }
+
+                    // Note: in the future, differentiate between new upstairs
+                    // connecting vs same upstairs reconnecting here.
+                    //
+                    // Clear out active jobs, the last flush, and completed
+                    // information, as that will not be valid any longer.
+                    //
+                    // TODO: Really work through this error case
+                    if work.active.keys().len() > 0 {
+                        println!(
+                            "Crucible Downstairs promoting {:?} to active, \
+                            discarding {} jobs",
+                            upstairs_connection,
+                            work.active.keys().len()
+                        );
+                    }
+
+                    // In the future, we may decide there is some way to
+                    // continue working on outstanding jobs, or a way to merge.
+                    // But for now, we just throw out what we have and let the
+                    // upstairs resend anything to us that it did not get an ACK
+                    // for.
+                    work.clear();
+
+                    // Insert a new session
+                    self.active_upstairs.insert(
+                        upstairs_connection.upstairs_id,
+                        ActiveUpstairs {
+                            upstairs_connection,
+                            work: Mutex::new(Work::new()),
+                            terminate_sender: tx,
+                        },
+                    );
+
+                    assert_eq!(self.active_upstairs.len(), 1);
+
+                    // Re-open any closed extents
+                    self.region.reopen_all_extents()?;
+
+                    println!(
+                        "{:?} is now active (read-write)",
+                        upstairs_connection,
+                    );
+
+                    Ok(())
+                }
+
+                _ => {
+                    // Panic - we shouldn't be running with more than one
+                    // active read-write Upstairs
+                    panic!(
+                        "More than one currently active upstairs! {:?}",
+                        currently_active_upstairs_uuids,
                     );
                 }
             }
         }
+    }
 
-        self.active_upstairs = Some((upstairs_connection, tx));
-
-        /*
-         * Note: in the future, differentiate between new upstairs connecting
-         * vs same upstairs reconnecting here.
-         *
-         * Clear out active jobs, the last flush, and completed information,
-         * as that will not be valid any longer.
-         *
-         * TODO: Really work through this error case
-         */
-        if work.active.keys().len() > 0 {
-            println!(
-                "Crucible Downstairs promoting {:?} to active, \
-                discarding {} jobs",
-                upstairs_connection,
-                work.active.keys().len()
-            );
-
-            /*
-             * In the future, we may decide there is some way to continue
-             * working on outstanding jobs, or a way to merge. But for now,
-             * we just throw out what we have and let the upstairs resend
-             * anything to us that it did not get an ACK for.
-             */
-            work.active = HashMap::new();
+    fn is_active(&mut self, connection: UpstairsConnection) -> bool {
+        let uuid = connection.upstairs_id;
+        if let Some(active_upstairs) = self.active_upstairs.get(&uuid) {
+            active_upstairs.upstairs_connection == connection
+        } else {
+            false
         }
+    }
 
-        work.completed = Vec::with_capacity(32);
-        work.last_flush = 0;
+    fn active_upstairs(&mut self) -> Vec<UpstairsConnection> {
+        self.active_upstairs
+            .values()
+            .map(|x| x.upstairs_connection)
+            .collect()
+    }
 
-        /*
-         * Re-open any closed extents
-         */
-        self.region.reopen_all_extents()?;
+    async fn clear_active(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+    ) -> Result<()> {
+        let mut work = self.work_lock(upstairs_connection).await?;
+        work.clear();
+        drop(work);
 
-        println!("{:?} is now active", upstairs_connection);
+        self.active_upstairs
+            .remove(&upstairs_connection.upstairs_id);
 
         Ok(())
-    }
-
-    fn is_active(&self, connection: UpstairsConnection) -> bool {
-        match self.active_upstairs.as_ref() {
-            None => false,
-            Some((upstairs_connection, _tx)) => {
-                *upstairs_connection == connection
-            }
-        }
-    }
-
-    fn active_upstairs(&self) -> Option<UpstairsConnection> {
-        self.active_upstairs
-            .as_ref()
-            .map(|(upstairs_connection, _tx)| *upstairs_connection)
-    }
-
-    async fn clear_active(&mut self, upstairs_connection: UpstairsConnection) {
-        // Don't allow another connection to clear us
-        if !self.is_active(upstairs_connection) {
-            return;
-        }
-
-        let mut work = self.work.lock().await;
-
-        self.active_upstairs = None;
-
-        work.active = HashMap::new();
-        work.completed = Vec::with_capacity(32);
-        work.last_flush = 0;
     }
 }
 
@@ -1629,6 +1947,22 @@ struct DownstairsWork {
 }
 
 impl Work {
+    fn new() -> Self {
+        Work {
+            active: HashMap::new(),
+            outstanding_deps: HashMap::new(),
+            last_flush: 0,
+            completed: Vec::with_capacity(32),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.active = HashMap::new();
+        self.outstanding_deps = HashMap::new();
+        self.last_flush = 0;
+        self.completed = Vec::with_capacity(32);
+    }
+
     fn jobs(&self) -> usize {
         self.active.len()
     }
@@ -1657,6 +1991,11 @@ impl Work {
 
     fn add_work(&mut self, ds_id: u64, dsw: DownstairsWork) {
         self.active.insert(ds_id, dsw);
+    }
+
+    #[cfg(test)]
+    fn get_job(&mut self, ds_id: u64) -> DownstairsWork {
+        self.active.get(&ds_id).unwrap().clone()
     }
 
     /**
@@ -1781,22 +2120,25 @@ impl Work {
         }
     }
 
-    /*
-     * This method calls into the Downstair's region and performs the read /
-     * write / flush action. A reference to Downstairs is required to do this
-     * so that the job can continue to be owned by Work.
-     *
-     * If by the time this job_id is processed here the job is no longer on
-     * the active work queue, return None. If this happens no response
-     * will have been put onto the response queue.
-     */
-    async fn do_work(
-        &mut self,
-        ds: &Downstairs,
-        job_id: u64,
-    ) -> Result<Option<Message>> {
-        let job = match self.active.get(&job_id) {
-            Some(job) => job,
+    // Return a job that's ready to have the work done
+    async fn get_ready_job(&mut self, job_id: u64) -> Option<DownstairsWork> {
+        match self.active.get(&job_id) {
+            Some(job) => {
+                assert_eq!(job.state, WorkState::InProgress);
+                assert_eq!(job_id, job.ds_id);
+
+                // validate that deps are done
+                let dep_list = job.work.deps();
+                for dep in dep_list {
+                    let last_flush_satisfied = dep <= &self.last_flush;
+                    let complete_satisfied = self.completed.contains(dep);
+
+                    assert!(last_flush_satisfied || complete_satisfied);
+                }
+
+                Some(job.clone())
+            }
+
             None => {
                 /*
                  * This branch occurs when another Upstairs has promoted
@@ -1808,123 +2150,7 @@ impl Work {
                  * especially since the Upstairs has already
                  * been notified.
                  */
-                return Ok(None);
-            }
-        };
-
-        assert_eq!(job.state, WorkState::InProgress);
-        assert_eq!(job_id, job.ds_id);
-
-        // validate that deps are done
-        let dep_list = job.work.deps();
-        for dep in dep_list {
-            let last_flush_satisfied = dep <= &self.last_flush;
-            let complete_satisfied = self.completed.contains(dep);
-
-            assert!(last_flush_satisfied || complete_satisfied);
-        }
-
-        match &job.work {
-            IOop::Read {
-                dependencies: _dependencies,
-                requests,
-            } => {
-                /*
-                 * Any error from an IO should be intercepted here and passed
-                 * back to the upstairs.
-                 */
-                let responses = if ds.return_errors && random() && random() {
-                    println!("returning error on read!");
-                    Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
-                    Err(CrucibleError::UpstairsInactive)
-                } else {
-                    ds.region.region_read(requests, job_id)
-                };
-
-                Ok(Some(Message::ReadResponse {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id: job.ds_id,
-                    responses,
-                }))
-            }
-            IOop::WriteUnwritten {
-                dependencies: _dependencies,
-                writes,
-            } => {
-                /*
-                 * Any error from an IO should be intercepted here and passed
-                 * back to the upstairs.
-                 */
-                let result = if ds.return_errors && random() && random() {
-                    println!("returning error on writeunwritten!");
-                    Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
-                    Err(CrucibleError::UpstairsInactive)
-                } else {
-                    // The region_write will handle what happens to each block
-                    // based on if they have data or not.
-                    ds.region.region_write(writes, job_id, true)
-                };
-
-                Ok(Some(Message::WriteUnwrittenAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id: job.ds_id,
-                    result,
-                }))
-            }
-            IOop::Write {
-                dependencies: _dependencies,
-                writes,
-            } => {
-                let result = if ds.return_errors && random() && random() {
-                    println!("returning error on write!");
-                    Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
-                    Err(CrucibleError::UpstairsInactive)
-                } else {
-                    ds.region.region_write(writes, job_id, false)
-                };
-
-                Ok(Some(Message::WriteAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id: job.ds_id,
-                    result,
-                }))
-            }
-            IOop::Flush {
-                dependencies: _dependencies,
-                flush_number,
-                gen_number,
-                snapshot_details,
-            } => {
-                let result = if ds.return_errors && random() && random() {
-                    println!("returning error on flush!");
-                    Err(CrucibleError::GenericError("test error".to_string()))
-                } else if !ds.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
-                    Err(CrucibleError::UpstairsInactive)
-                } else {
-                    ds.region.region_flush(
-                        *flush_number,
-                        *gen_number,
-                        snapshot_details,
-                        job_id,
-                    )
-                };
-
-                Ok(Some(Message::FlushAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id: job.ds_id,
-                    result,
-                }))
+                None
             }
         }
     }
@@ -2146,6 +2372,7 @@ mod test {
     use super::*;
     use rand_chacha::ChaCha20Rng;
     use tempfile::tempdir;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     fn add_work(
         work: &mut Work,
@@ -2356,7 +2583,7 @@ mod test {
         };
         ds.add_work(upstairs_connection, 1001, rio).await?;
 
-        _show_work(&ds).await;
+        show_work(&mut ds).await;
 
         // Now we mimic what happens in the do_work_task()
         let new_work = ds.new_work(upstairs_connection).await.unwrap();
@@ -2364,14 +2591,15 @@ mod test {
         assert_eq!(new_work.len(), 2);
 
         for id in new_work.iter() {
-            let ip_id = ds.in_progress(*id).await.unwrap();
+            let ip_id =
+                ds.in_progress(upstairs_connection, *id).await?.unwrap();
             assert_eq!(ip_id, *id);
             println!("Do IOop {}", *id);
-            let m = ds.do_work(*id).await?.unwrap();
+            let m = ds.do_work(upstairs_connection, *id).await?.unwrap();
             println!("Got m: {:?}", m);
-            ds.complete_work(*id, m).await?;
+            ds.complete_work(upstairs_connection, *id, m).await?;
         }
-        _show_work(&ds).await;
+        show_work(&mut ds).await;
         Ok(())
     }
 
@@ -3225,6 +3453,592 @@ mod test {
         }
 
         assert_eq!(random_data, read_data);
+
+        Ok(())
+    }
+
+    fn build_test_downstairs(
+        read_only: bool,
+    ) -> Result<Arc<Mutex<Downstairs>>> {
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+
+        build_downstairs_for_region(
+            &path_dir, false, // lossy
+            false, // return_errors
+            read_only,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_one_read_write() -> Result<()> {
+        let ads = build_test_downstairs(false)?;
+
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (_tx, mut _rx) = channel(1);
+        let tx = Arc::new(_tx);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection, tx).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_one_read_only() -> Result<()> {
+        let ads = build_test_downstairs(true)?;
+
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (_tx, mut _rx) = channel(1);
+        let tx = Arc::new(_tx);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection, tx).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_multi_read_write_different_uuid(
+    ) -> Result<()> {
+        // Attempting to activate multiple read-write (where it's different
+        // Upstairs) should kick out the other connection
+        let ads = build_test_downstairs(false)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        assert!(!ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_multi_read_write_same_uuid() -> Result<()> {
+        // Attempting to activate multiple read-write (where it's the same
+        // Upstairs but a different session) should kick out the other
+        // connection
+        let ads = build_test_downstairs(false)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: upstairs_connection_1.upstairs_id,
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        assert!(!ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_multi_read_only_different_uuid(
+    ) -> Result<()> {
+        // Activating multiple read-only with different Upstairs UUIDs should
+        // work.
+        let ads = build_test_downstairs(true)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        assert_eq!(ds.active_upstairs().len(), 2);
+
+        assert!(ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_multi_read_only_same_uuid() -> Result<()> {
+        // Activating multiple read-only with the same Upstairs UUID should
+        // kick out the other active one.
+        let ads = build_test_downstairs(true)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: upstairs_connection_1.upstairs_id,
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        assert!(!ds.is_active(upstairs_connection_1));
+        assert!(ds.is_active(upstairs_connection_2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multiple_read_only_no_job_id_collision() -> Result<()> {
+        // Two read-only Upstairs shouldn't see each other's jobs
+        let ads = build_test_downstairs(true)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
+
+        assert_eq!(ds.active_upstairs().len(), 2);
+
+        let read_1 = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, read_1.clone())
+            .await?;
+
+        let read_2 = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 1,
+                offset: Block::new_512(2),
+                num_blocks: 2,
+            }],
+        };
+        ds.add_work(upstairs_connection_2, 1000, read_2.clone())
+            .await?;
+
+        let work_1 = ds.new_work(upstairs_connection_1).await?;
+        let work_2 = ds.new_work(upstairs_connection_2).await?;
+
+        assert_eq!(work_1, work_2);
+
+        let job_1 = ds.get_job(upstairs_connection_1, 1000).await?;
+        let job_2 = ds.get_job(upstairs_connection_2, 1000).await?;
+
+        assert_eq!(job_1.upstairs_connection, upstairs_connection_1);
+        assert_eq!(job_1.ds_id, 1000);
+        assert_eq!(job_1.work, read_1);
+        assert_eq!(job_1.state, WorkState::New);
+
+        assert_eq!(job_2.upstairs_connection, upstairs_connection_2);
+        assert_eq!(job_2.ds_id, 1000);
+        assert_eq!(job_2.work, read_2);
+        assert_eq!(job_2.state, WorkState::New);
+
+        Ok(())
+    }
+
+    // Validate that `complete_work` cannot see None if the same Upstairs ID
+    // (but a different session) goes active.
+    #[tokio::test]
+    async fn test_complete_work_cannot_see_none_same_upstairs_id() -> Result<()>
+    {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+
+        // For the other_active_upstairs, unused.
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        // Add one job, id 1000
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, rio).await?;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        assert_eq!(new_work.len(), 1);
+
+        let ip_id = ds.in_progress(upstairs_connection_1, 1000).await?.unwrap();
+        assert_eq!(ip_id, 1000);
+        let m = ds.do_work(upstairs_connection_1, 1000).await?.unwrap();
+
+        // Before complete_work, say promote_to_active runs again for another
+        // connection - same UUID, different session
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: upstairs_connection_1.upstairs_id,
+            session_id: Uuid::new_v4(),
+            gen: 11,
+        };
+
+        let (_tx2, mut _rx2) = channel(1);
+        let tx2 = Arc::new(_tx2);
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+
+        // This should error with UpstairsInactive - upstairs_connection_1 isn't
+        // active anymore and can't grab the work lock.
+        let result = ds.complete_work(upstairs_connection_1, 1000, m).await;
+        assert!(matches!(
+            result.unwrap_err().downcast::<CrucibleError>().unwrap(),
+            CrucibleError::UpstairsInactive,
+        ));
+
+        Ok(())
+    }
+
+    // Validate that `complete_work` cannot see None if a different Upstairs ID
+    // goes active.
+    #[tokio::test]
+    async fn test_complete_work_cannot_see_none_different_upstairs_id(
+    ) -> Result<()> {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+
+        // For the other_active_upstairs, unused.
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        // Add one job, id 1000
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, rio).await?;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        assert_eq!(new_work.len(), 1);
+
+        let ip_id = ds.in_progress(upstairs_connection_1, 1000).await?.unwrap();
+        assert_eq!(ip_id, 1000);
+        let m = ds.do_work(upstairs_connection_1, 1000).await?.unwrap();
+
+        // Before complete_work, say promote_to_active runs again for another
+        // connection
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 11,
+        };
+
+        let (_tx2, mut _rx2) = channel(1);
+        let tx2 = Arc::new(_tx2);
+
+        ds.promote_to_active(upstairs_connection_2, tx2).await?;
+
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
+
+        // This should error with UpstairsInactive - upstairs_connection_1 isn't
+        // active anymore and can't grab the work lock.
+        let result = ds.complete_work(upstairs_connection_1, 1000, m).await;
+        assert!(matches!(
+            result.unwrap_err().downcast::<CrucibleError>().unwrap(),
+            CrucibleError::UpstairsInactive,
+        ));
+
+        Ok(())
+    }
+
+    // Validate that `complete_work` can see None if the same Upstairs
+    // reconnects
+    #[tokio::test]
+    async fn test_complete_work_can_see_none() -> Result<()> {
+        // Test region create and a read of one block.
+        let block_size: u64 = 512;
+        let extent_size = 4;
+
+        // create region
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(block_size);
+        region_options.set_extent_size(Block::new(
+            extent_size,
+            block_size.trailing_zeros(),
+        ));
+        region_options.set_uuid(Uuid::new_v4());
+
+        let dir = tempdir()?;
+        mkdir_for_file(dir.path())?;
+
+        let mut region = Region::create(&dir, region_options)?;
+        region.extend(2)?;
+
+        let path_dir = dir.as_ref().to_path_buf();
+        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+
+        // This happens in proc() function.
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 10,
+        };
+
+        // For the other_active_upstairs, unused.
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        // Add one job, id 1000
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+                num_blocks: 1,
+            }],
+        };
+        ds.add_work(upstairs_connection_1, 1000, rio).await?;
+
+        // Now we mimic what happens in the do_work_task()
+        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        assert_eq!(new_work.len(), 1);
+
+        let ip_id = ds.in_progress(upstairs_connection_1, 1000).await?.unwrap();
+        assert_eq!(ip_id, 1000);
+        let m = ds.do_work(upstairs_connection_1, 1000).await?.unwrap();
+
+        // Before complete_work, the same Upstairs reconnects and goes active
+        let (_tx2, mut _rx2) = channel(1);
+        let tx2 = Arc::new(_tx2);
+
+        ds.promote_to_active(upstairs_connection_1, tx2).await?;
+
+        // In the real downstairs, there would be two tasks now that both
+        // correspond to upstairs_connection_1.
+
+        // Validate that the original set of tasks were sent the termination
+        // signal.
+
+        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_1);
+
+        // If the original set of tasks don't end right away, they'll try to run
+        // complete_work:
+
+        let result = ds.complete_work(upstairs_connection_1, 1000, m).await;
+
+        // `complete_work` will return Ok(()) despite not doing anything to the
+        // Work struct.
+        assert_eq!(result.unwrap(), ());
 
         Ok(())
     }

@@ -5410,7 +5410,7 @@ impl ReconcileIO {
 /*
  * Crucible to storage IO operations.
  */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IOop {
     Write {
         dependencies: Vec<u64>, // Jobs that must finish before this

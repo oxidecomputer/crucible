@@ -18,7 +18,7 @@ use super::*;
 
 pub(crate) fn build_api() -> ApiDescription<DownstairsControl> {
     let mut api = ApiDescription::new();
-    api.register(dsc_get_state).unwrap();
+    api.register(dsc_get_ds_state).unwrap();
     api.register(dsc_get_pid).unwrap();
     api.register(dsc_stop).unwrap();
     api.register(dsc_stop_all).unwrap();
@@ -30,6 +30,10 @@ pub(crate) fn build_api() -> ApiDescription<DownstairsControl> {
     api.register(dsc_enable_restart).unwrap();
     api.register(dsc_enable_restart_all).unwrap();
     api.register(dsc_shutdown).unwrap();
+    api.register(dsc_enable_random_stop).unwrap();
+    api.register(dsc_disable_random_stop).unwrap();
+    api.register(dsc_enable_random_min).unwrap();
+    api.register(dsc_enable_random_max).unwrap();
 
     api
 }
@@ -101,6 +105,16 @@ impl DownstairsControl {
 pub struct Cid {
     cid: usize,
 }
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Min {
+    min: u64,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Max {
+    max: u64,
+}
 
 fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
     let rs = dsci.rs.lock().unwrap();
@@ -145,7 +159,7 @@ async fn dsc_get_pid(
     method = GET,
     path = "/state/cid/{cid}",
 }]
-async fn dsc_get_state(
+async fn dsc_get_ds_state(
     rqctx: Arc<RequestContext<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseOk<DownstairsState>, HttpError> {
@@ -371,6 +385,80 @@ async fn dsc_shutdown(
 
     let mut dsc_work = api_context.dsci.work.lock().unwrap();
     dsc_work.add_cmd(DscCmd::Shutdown);
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Enable stopping a random downstairs every [min-max] seconds
+ */
+#[endpoint {
+    method = POST,
+    path = "/randomstop/enable",
+}]
+async fn dsc_enable_random_stop(
+    rqctx: Arc<RequestContext<DownstairsControl>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let api_context = rqctx.context();
+
+    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    dsc_work.add_cmd(DscCmd::EnableRandomStop);
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Disable the random stopping of a downstairs
+ */
+#[endpoint {
+    method = POST,
+    path = "/randomstop/disable",
+}]
+async fn dsc_disable_random_stop(
+    rqctx: Arc<RequestContext<DownstairsControl>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let api_context = rqctx.context();
+
+    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    dsc_work.add_cmd(DscCmd::DisableRandomStop);
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Set the minimum time between random stopping requests
+ */
+#[endpoint {
+    method = POST,
+    path = "/randomstop/min/{min}",
+}]
+async fn dsc_enable_random_min(
+    rqctx: Arc<RequestContext<DownstairsControl>>,
+    path: Path<Min>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let min = path.min;
+    let api_context = rqctx.context();
+
+    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    dsc_work.add_cmd(DscCmd::RandomStopMin(min));
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Set the maximum time between random stopping requests
+ */
+#[endpoint {
+    method = POST,
+    path = "/randomstop/max/{max}",
+}]
+async fn dsc_enable_random_max(
+    rqctx: Arc<RequestContext<DownstairsControl>>,
+    path: Path<Max>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let max = path.max;
+    let api_context = rqctx.context();
+
+    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    dsc_work.add_cmd(DscCmd::RandomStopMax(max));
     Ok(HttpResponseUpdatedNoContent())
 }
 

@@ -988,6 +988,7 @@ mod test {
         let opts = three_downstairs(54046, 54047, 54048, false).unwrap();
         integration_test_two_layers_small_common(opts, false).await
     }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
     {
@@ -1629,6 +1630,78 @@ mod test {
         // remaining final blocks of 0 |3311111112||2111440000|
         expected.extend(vec![0; BLOCK_SIZE * 4]);
         assert_eq!(expected, *buffer.as_vec());
+
+        Ok(())
+    }
+
+    // Test that multiple upstairs can connect to a single read-only downstairs
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_multi_read_only() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let mut opts = three_downstairs(54076, 54077, 54078, true).unwrap();
+
+        let vcr_1: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Region {
+                        block_size: BLOCK_SIZE as u64,
+                        opts: opts.clone(),
+                        gen: 0,
+                    },
+                )),
+            };
+
+        // Second volume should have a unique UUID
+        opts.id = Uuid::new_v4();
+
+        let vcr_2: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Region {
+                        block_size: BLOCK_SIZE as u64,
+                        opts,
+                        gen: 0,
+                    },
+                )),
+            };
+
+        let volume1 =
+            tokio::task::block_in_place(|| Volume::construct(vcr_1, None))?;
+        volume1.activate(0)?;
+
+        let volume2 =
+            tokio::task::block_in_place(|| Volume::construct(vcr_2, None))?;
+        volume2.activate(0)?;
+
+        // Read one block: should be all 0x00
+        let buffer = Buffer::new(BLOCK_SIZE);
+        tokio::task::block_in_place(|| {
+            volume1.read(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                buffer.clone(),
+            )
+        })?
+        .block_wait()?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+
+        let buffer = Buffer::new(BLOCK_SIZE);
+        tokio::task::block_in_place(|| {
+            volume2.read(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                buffer.clone(),
+            )
+        })?
+        .block_wait()?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
 
         Ok(())
     }

@@ -140,6 +140,100 @@
         }
       }
     },
+    "/randomstop/disable": {
+      "post": {
+        "summary": "Disable the random stopping of a downstairs",
+        "operationId": "dsc_disable_random_stop",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/randomstop/enable": {
+      "post": {
+        "summary": "Enable stopping a random downstairs every [min-max] seconds",
+        "operationId": "dsc_enable_random_stop",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/randomstop/max/{max}": {
+      "post": {
+        "summary": "Set the maximum time between random stopping requests",
+        "operationId": "dsc_enable_random_max",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "max",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/randomstop/min/{min}": {
+      "post": {
+        "summary": "Set the minimum time between random stopping requests",
+        "operationId": "dsc_enable_random_min",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "min",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/shutdown": {
       "post": {
         "summary": "Stop all downstairs, then stop ourselves.",
@@ -207,7 +301,7 @@
     "/state/cid/{cid}": {
       "get": {
         "summary": "Fetch the current state for the requested client_id",
-        "operationId": "dsc_get_state",
+        "operationId": "dsc_get_ds_state",
         "parameters": [
           {
             "in": "path",
