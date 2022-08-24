@@ -77,7 +77,11 @@ enum Action {
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
         output_dir: PathBuf,
 
-        /// default region directory
+        /// The directory where the downstairs regions will be created.
+        /// Either provide once, or three times.  One means all downstairs
+        /// share the same top level directory (each downstairs has its own
+        /// subdirectory).  Three means each downstairs will get its own
+        /// region directory.
         #[clap(
             long,
             global = true,
@@ -111,7 +115,11 @@ enum Action {
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
         output_dir: PathBuf,
 
-        /// default region directory
+        /// The directory where the downstairs regions will be created.
+        /// Either provide once, or three times.  One means all downstairs
+        /// share the same top level directory (each downstairs has its own
+        /// subdirectory).  Three means each downstairs will get its own
+        /// region directory.
         #[clap(
             long,
             global = true,
@@ -162,7 +170,11 @@ enum Action {
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
         output_dir: PathBuf,
 
-        /// default region directory
+        /// The directory where the downstairs regions will be created.
+        /// Either provide once, or three times.  One means all downstairs
+        /// share the same top level directory (each downstairs has its own
+        /// subdirectory).  Three means each downstairs will get its own
+        /// region directory.
         #[clap(
             long,
             global = true,
@@ -1162,7 +1174,7 @@ async fn single_create_test(
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
     let ct = dsci
-        .create_ds_region(3810, extent_size, extent_count, block_size, true)
+        .create_ds_region(0, extent_size, extent_count, block_size, true)
         .await?;
 
     let size = region_si(extent_size, extent_count, block_size);
