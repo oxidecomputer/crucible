@@ -1099,15 +1099,15 @@ mod test {
         )?
         .block_wait()?;
 
-        // Write unwritten should not change the block we just wrote:
-        // Write unwritten twos to the second block
+        // Write unwritten twos to the second block.
+        // This should not change the block.
         disk.write_unwritten(
             Block::new(1, BLOCK_SIZE.trailing_zeros()),
             Bytes::from(vec![2; 512]),
         )?
         .block_wait()?;
 
-        // Read and verify
+        // Read and verify the data is from the first write
         let buffer = Buffer::new(4096);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
             .block_wait()?;
@@ -1134,14 +1134,14 @@ mod test {
         expected.extend(vec![0; 4096 - 1024]);
         assert_eq!(*buffer.as_vec(), expected);
 
-        // Write sevens to third and fourth block
+        // Write sevens to third and fourth blocks
         disk.write(
             Block::new(2, BLOCK_SIZE.trailing_zeros()),
             Bytes::from(vec![7; 1024]),
         )?
         .block_wait()?;
 
-        // Write_unwritten eights to fifth and six block
+        // Write_unwritten eights to fifth and six blocks
         disk.write_unwritten(
             Block::new(4, BLOCK_SIZE.trailing_zeros()),
             Bytes::from(vec![8; 1024]),
