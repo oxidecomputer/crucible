@@ -4,6 +4,7 @@ use super::*;
 
 use std::fs::{File, OpenOptions};
 use std::io::SeekFrom;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // Implement BlockIO for a file
 
@@ -129,6 +130,7 @@ pub struct ReqwestBlockIO {
     total_size: u64,
     client: Client,
     url: String,
+    count: AtomicU32, // Used for dtrace probes
 }
 
 impl ReqwestBlockIO {
@@ -161,7 +163,14 @@ impl ReqwestBlockIO {
             total_size: total_size as u64,
             client,
             url,
+            count: AtomicU32::new(0),
         })
+    }
+
+    // Increment the counter to allow all IOs to have a unique number
+    // for dtrace probes.
+    pub fn next_count(&self) -> u32 {
+        self.count.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -191,6 +200,9 @@ impl BlockIO for ReqwestBlockIO {
         offset: Block,
         data: Buffer,
     ) -> Result<BlockReqWaiter, CrucibleError> {
+        let cc = self.next_count();
+        cdt::reqwest__read__start!(|| (cc, self.uuid));
+
         let mut data_vec = data.as_vec();
         let mut owned_vec = data.owned_vec();
 
@@ -233,6 +245,7 @@ impl BlockIO for ReqwestBlockIO {
             owned_vec[i] = true;
         }
 
+        cdt::reqwest__read__done!(|| (cc, self.uuid));
         BlockReqWaiter::immediate()
     }
 

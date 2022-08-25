@@ -191,6 +191,61 @@ dtrace: script 'perfgw.d' matched 6 probes
        134217728 |
 ```
 
+## perfreqwest.d
+This is a simple dtrace script that measures latency times for reads
+to a volume having a read only parent.  The time is from when the
+volume read only parent (ReqwestBlockIO) layer receives a read to when
+that read has been completed.
+```
+pfexec dtrace -s perfreqwest.d
+```
+
+## perfvol.d
+This dtrace script measures latency times for IOs at the volume layer.
+This is essentially where an IO first lands in crucible and is measured
+to when that IO is completed by the volume layer. IO is grouped by UUID and: read,
+write, or flush.
+```
+pfexec dtrace -s perfvol.d
+```
+Example output:
+```
+dtrace: script 'tools/dtrace/perfvol.d' matched 19 probes
+CPU     ID                    FUNCTION:NAME
+ 12  84104                         :tick-5s
+
+ 12  84104                         :tick-5s
+  a416a597-5ec5-417f-a913-e2ee78bff1dc                volume-write-done
+           value  ------------- Distribution ------------- count
+          524288 |                                         0
+         1048576 |@@@                                      2
+         2097152 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     27
+         4194304 |@                                        1
+         8388608 |                                         0
+
+  a416a597-5ec5-417f-a913-e2ee78bff1dc                volume-flush-done
+           value  ------------- Distribution ------------- count
+          131072 |                                         0
+          262144 |@@@                                      1
+          524288 |@@@@@@@@@@@                              4
+         1048576 |@@@                                      1
+         2097152 |                                         0
+         4194304 |@@@@@@@@@                                3
+         8388608 |@@@@@@@@@                                3
+        16777216 |@@@@@@                                   2
+        33554432 |                                         0
+
+  a416a597-5ec5-417f-a913-e2ee78bff1dc                volume-read-done
+           value  ------------- Distribution ------------- count
+          262144 |                                         0
+          524288 |@                                        2
+         1048576 |@@@@@@                                   9
+         2097152 |@@@@@@@@@@@@@@@                          21
+         4194304 |@@@@@@@@@@@@@@                           20
+         8388608 |@@@                                      4
+        16777216 |                                         0
+```
+
 ## perf-downstairs-d
 Trace all IOs from when the downstairs received them to when the downstairs
 has completed them and is about to ack to the upstairs.  Grouped by IO
@@ -250,3 +305,20 @@ dtrace: system integrity protection is on, some features will not be available
  write_start:1000   write_end:1000
  flush_start:1000   flush_end:1000
 ```
+
+## trace-vol.d
+This is a dtrace script that will count and report the volume IOs of each type
+and group by UUID.  Run the script then hit Control-C to see the results.
+ An example of running it would look like this:
+```
+alan@atrium:prescrub$ pfexec dtrace -Z -s tools/dtrace/trace-vol.d
+^C
+
+5d8b2d34-40e3-4166-84c6-6094ec201d19      volume-flush-done        12
+5d8b2d34-40e3-4166-84c6-6094ec201d19      volume-flush-start       12
+5d8b2d34-40e3-4166-84c6-6094ec201d19      volume-write-done        39
+5d8b2d34-40e3-4166-84c6-6094ec201d19      volume-write-start       39
+5d8b2d34-40e3-4166-84c6-6094ec201d19      volume-read-done         49
+5d8b2d34-40e3-4166-84c6-6094ec201d19      volume-read-start        49
+```
+
