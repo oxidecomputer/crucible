@@ -82,12 +82,22 @@ impl BlockIO for InMemoryBlockIO {
 
     fn write_unwritten(
         &self,
-        _offset: Block,
-        _data: Bytes,
+        offset: Block,
+        data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        Err(CrucibleError::Unsupported(
-            "write_unwritten unsupported for InMemoryBlockIO".to_string(),
-        ))
+        let mut bytes = self.bytes.lock().unwrap();
+        let mut owned = self.owned.lock().unwrap();
+
+        let start = offset.value as usize * self.block_size as usize;
+
+        for i in 0..data.len() {
+            if !owned[start + i] {
+                bytes[start + i] = data[i];
+                owned[start + i] = true;
+            }
+        }
+
+        BlockReqWaiter::immediate()
     }
 
     fn flush(
