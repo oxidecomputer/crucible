@@ -2,10 +2,10 @@
 
 use super::*;
 use oximeter::types::ProducerRegistry;
+use std::ops::Range;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
-
-use std::ops::Range;
 
 #[derive(Debug)]
 pub struct Volume {
@@ -18,6 +18,7 @@ pub struct Volume {
      * Each sub volume should be the same block size (unit is bytes)
      */
     block_size: u64,
+    count: AtomicU32,
 }
 
 pub struct SubVolume {
@@ -40,11 +41,18 @@ impl Volume {
             sub_volumes: vec![],
             read_only_parent: None,
             block_size,
+            count: AtomicU32::new(0),
         }
     }
 
     pub fn new(block_size: u64) -> Volume {
         Volume::new_with_id(block_size, Uuid::new_v4())
+    }
+
+    // Increment the counter to allow all IOs to have a unique number
+    // for dtrace probes.
+    pub fn next_count(&self) -> u32 {
+        self.count.fetch_add(1, Ordering::Relaxed)
     }
 
     // Create a simple Volume from a single guest
@@ -65,6 +73,7 @@ impl Volume {
             sub_volumes: vec![sub_volume],
             read_only_parent: None,
             block_size,
+            count: AtomicU32::new(0),
         })
     }
 
@@ -291,6 +300,12 @@ impl Volume {
         if self.sub_volumes.is_empty() {
             crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
         }
+        let cc = self.next_count();
+        if is_write_unwritten {
+            cdt::volume__writeunwritten__start!(|| (cc, self.uuid));
+        } else {
+            cdt::volume__write__start!(|| (cc, self.uuid));
+        }
 
         let affected_sub_volumes = self.sub_volumes_for_lba_range(
             offset.value,
@@ -324,6 +339,11 @@ impl Volume {
             data_index += sz;
         }
 
+        if is_write_unwritten {
+            cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
+        } else {
+            cdt::volume__write__done!(|| (cc, self.uuid));
+        }
         BlockReqWaiter::immediate()
     }
 }
@@ -405,9 +425,13 @@ impl BlockIO for Volume {
     ) -> Result<BlockReqWaiter, CrucibleError> {
         // In the case that this volume only has a read only parent, serve
         // reads directly from that
+        let cc = self.next_count();
+        cdt::volume__read__start!(|| (cc, self.uuid));
         if self.sub_volumes.is_empty() {
             if let Some(ref read_only_parent) = &self.read_only_parent {
-                return read_only_parent.read(offset, data);
+                let res = read_only_parent.read(offset, data);
+                cdt::volume__read__done!(|| (cc, self.uuid));
+                return res;
             } else {
                 crucible_bail!(
                     CannotServeBlocks,
@@ -544,6 +568,7 @@ impl BlockIO for Volume {
 
         assert_eq!(data.len(), data_index);
 
+        cdt::volume__read__done!(|| (cc, self.uuid));
         BlockReqWaiter::immediate()
     }
 
@@ -571,6 +596,8 @@ impl BlockIO for Volume {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
+        let cc = self.next_count();
+        cdt::volume__flush__start!(|| (cc, self.uuid));
         for sub_volume in &self.sub_volumes {
             let mut waiter = sub_volume.flush(snapshot_details.clone())?;
             waiter.block_wait()?;
@@ -581,6 +608,7 @@ impl BlockIO for Volume {
         // served out of a ZFS snapshot and be read only at the filesystem
         // level)
 
+        cdt::volume__flush__done!(|| (cc, self.uuid));
         BlockReqWaiter::immediate()
     }
 
@@ -915,6 +943,7 @@ mod test {
             ],
             read_only_parent: None,
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         assert_eq!(volume.total_size()?, 512 * 1024);
@@ -964,6 +993,7 @@ mod test {
             ],
             read_only_parent: None,
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         // volume:       |--------|--------|--------|
@@ -1030,6 +1060,7 @@ mod test {
             }],
             read_only_parent: None,
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_none());
@@ -1060,6 +1091,7 @@ mod test {
                 )),
             }),
             block_size: 512,
+            count: AtomicU32::new(0),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_some());
@@ -1099,7 +1131,15 @@ mod test {
         )?
         .block_wait()?;
 
-        // Read and verify
+        // Write unwritten twos to the second block.
+        // This should not change the block.
+        disk.write_unwritten(
+            Block::new(1, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![2; 512]),
+        )?
+        .block_wait()?;
+
+        // Read and verify the data is from the first write
         let buffer = Buffer::new(4096);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
             .block_wait()?;
@@ -1126,10 +1166,17 @@ mod test {
         expected.extend(vec![0; 4096 - 1024]);
         assert_eq!(*buffer.as_vec(), expected);
 
-        // Write sevens to third and fourth block
+        // Write sevens to third and fourth blocks
         disk.write(
             Block::new(2, BLOCK_SIZE.trailing_zeros()),
             Bytes::from(vec![7; 1024]),
+        )?
+        .block_wait()?;
+
+        // Write_unwritten eights to fifth and six blocks
+        disk.write_unwritten(
+            Block::new(4, BLOCK_SIZE.trailing_zeros()),
+            Bytes::from(vec![8; 1024]),
         )?
         .block_wait()?;
 
@@ -1141,7 +1188,8 @@ mod test {
         let mut expected = vec![2; 512];
         expected.extend(vec![1; 512]);
         expected.extend(vec![7; 1024]);
-        expected.extend(vec![0; 4096 - 2048]);
+        expected.extend(vec![8; 1024]);
+        expected.extend(vec![0; 1024]);
         assert_eq!(*buffer.as_vec(), expected);
 
         Ok(())
@@ -1608,6 +1656,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         volume.activate(0)?;
@@ -1645,6 +1694,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         volume.activate(0).unwrap();
@@ -1675,6 +1725,7 @@ mod test {
                 block_io: parent.clone(),
             }),
             block_size: BLOCK_SIZE,
+            count: AtomicU32::new(0),
         };
 
         volume.activate(0).unwrap();

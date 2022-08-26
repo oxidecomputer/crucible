@@ -97,14 +97,14 @@ crucible_downstairs*:::submit-read-done
 }
 
 /*
- * Now the same, but for readfill
+ * Now the same, but for write unwritten
  */
-crucible_downstairs*:::submit-readfill-start
+crucible_downstairs*:::submit-writeunwritten-start
 {
     wstart[pid,arg0] = timestamp;
 }
 
-crucible_downstairs*:::os-readfill-start
+crucible_downstairs*:::os-writeunwritten-start
 /wstart[pid,arg0]/
 {
     @wtimeone[pid,"read submit-OS"] = quantize(timestamp - wstart[pid,arg0]);
@@ -112,7 +112,7 @@ crucible_downstairs*:::os-readfill-start
     wsubstart[pid,arg0] = timestamp;
 }
 
-crucible_downstairs*:::os-readfill-done
+crucible_downstairs*:::os-writeunwritten-done
 /wsubstart[pid,arg0]/
 {
     @wtimetwo[pid,"read OS"] = quantize(timestamp - wsubstart[pid,arg0]);
@@ -120,7 +120,7 @@ crucible_downstairs*:::os-readfill-done
     wfinal[pid,arg0] = timestamp;
 }
 
-crucible_downstairs*:::submit-readfill-done
+crucible_downstairs*:::submit-writeunwritten-done
 /wfinal[pid,arg0]/
 {
     @wtimethree[pid,"read OS-done"] = quantize(timestamp - wfinal[pid,arg0]);
