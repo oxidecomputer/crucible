@@ -142,6 +142,21 @@ impl CreateRegion {
                 "encrypted {} instead of requested {}",
                 self.encrypted, r.encrypted
             ))
+        } else if self.cert_pem != r.cert_pem {
+            Some(format!(
+                "cert_pem {:?} instead of requested {:?}",
+                self.cert_pem, r.cert_pem
+            ))
+        } else if self.key_pem != r.key_pem {
+            Some(format!(
+                "key_pem {:?} instead of requested {:?}",
+                self.key_pem, r.key_pem
+            ))
+        } else if self.root_pem != r.root_pem {
+            Some(format!(
+                "root_pem {:?} instead of requested {:?}",
+                self.root_pem, r.root_pem
+            ))
         } else {
             None
         }
