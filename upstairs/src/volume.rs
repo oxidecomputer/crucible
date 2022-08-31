@@ -2419,7 +2419,6 @@ mod test {
         parent_blocks: usize,
         subvol_sizes: &[usize],
     ) -> Result<()> {
-
         // Create a volume
         let mut volume = Volume::new(block_size as u64);
 
