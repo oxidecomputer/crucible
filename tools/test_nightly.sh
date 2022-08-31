@@ -7,6 +7,9 @@ err=0
 output_file="/tmp/nightly_results"
 rm -f "$output_file"
 
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export BINDIR=${BINDIR:-$ROOT/target/release}
+
 echo "Nightly starts at $(date)" | tee "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer

@@ -37,7 +37,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
-ct="./target/debug/crutest"
+ct="$BINDIR/crutest"
 dsc="$BINDIR/dsc"
 for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then

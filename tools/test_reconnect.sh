@@ -93,6 +93,7 @@ $((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
 
 done
 touch /var/tmp/ds_test/stop
+sleep 4
 echo "Final results:" | tee -a ${loop_log}
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
 echo "$(date) Test ends with $err" >> "$test_log" 2>&1

@@ -12,7 +12,7 @@ SECONDS=0
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
-export BINDIR=${BINDIR:-$ROOT/debug}
+export BINDIR=${BINDIR:-$ROOT/target/debug}
 hammer="$BINDIR/crucible-hammer"
 cds="$BINDIR/crucible-downstairs"
 dsc="$BINDIR/dsc"
