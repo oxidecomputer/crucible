@@ -256,24 +256,8 @@ impl Volume {
             // Check if the scrubber has passed this offset
             let scrub_point = self.scrub_point.load(Ordering::SeqCst);
             if start + length <= scrub_point {
-                /*
-                println!(
-                    "start: {}+{} <= {:?}, Already scrubbed",
-                    start,
-                    length,
-                    scrub_point,
-                );
-                */
                 None
             } else {
-                /*
-                println!(
-                    "start: {}[{}] > {:?} Not scrubbed, check ROP",
-                    start,
-                    length,
-                    scrub_point,
-                );
-                */
                 read_only_parent.lba_range_coverage(start, length)
             }
         } else {
