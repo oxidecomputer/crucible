@@ -309,6 +309,10 @@ async fn process_message(
         return Err(CrucibleError::UuidMismatch.into());
     }
 
+    // Process this operation.  If the processing results in the
+    // job being ready to ACK, then send a message on the ds_done
+    // channel.  Note that a failed IO still needs to ACK that failure
+    // back to the guest.
     if u.process_ds_operation(ds_id, up_coms.client_id, result)? {
         up_coms.ds_done_tx.send(ds_id).await?;
     }
@@ -1252,8 +1256,14 @@ where
                  * about it.  If we fail in process_message, we should
                  * handle it.
                  */
-                let _result =
-                    process_message(&up_c, &m, up_coms_c.clone()).await;
+                if let Err(e) =
+                    process_message(&up_c, &m, up_coms_c.clone()).await
+                {
+                    println!(
+                        "[{}] Error processing message: {}",
+                        up_coms_c.client_id, e
+                    );
+                }
 
                 if up_c.ds_deactivate(up_coms_c.client_id) {
                     bail!("[{}] exits after deactivation", up_coms_c.client_id);
@@ -1269,8 +1279,8 @@ where
             /*
              * We set biased so the loop will:
              * First make sure the pm task is still running.
-             * Second, get and look at messages received from the downstiars.
-             *   Some messages we can handle right here, but ACK's from
+             * Second, get and look at messages received from the downstairs.
+             *   Some messages we can handle right here, but ACKs from
              *   messages we sent are passed on to the pm task.
              *
              * By handling messages from the downstairs before sending
@@ -2910,7 +2920,7 @@ impl Downstairs {
          */
         if oldstate != IOState::InProgress {
             bail!(
-                "[{}] job completed while not InProgress: {}",
+                "[{}] job completed while not InProgress: {:?}",
                 client_id,
                 oldstate
             );
@@ -3154,7 +3164,7 @@ impl Downstairs {
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
-            // hasn't acked back yet. We check for NotAcked so we  don't
+            // hasn't acked back yet. We check for NotAcked so we don't
             // double count three done and return true if we already have
             // AckReady set.
             let wc = job.state_count();
@@ -5176,7 +5186,7 @@ impl Upstairs {
                 // Downstairs anymore? One could imagine setting that untrusted
                 // here:
                 //
-                // self.ds_transition(client_id, DsState::Untrusted);
+                // ds_transition_with_lock( ...  DsState::Untrusted);
             } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
                 // skip
             }
@@ -5200,7 +5210,12 @@ impl Upstairs {
                         writes: _,
                     }
                 ) {
-                    self.ds_transition(client_id, DsState::Failed);
+                    self.ds_transition_with_lock(
+                        ds,
+                        up_state,
+                        client_id,
+                        DsState::Failed,
+                    );
                 }
             }
         }
@@ -5512,8 +5527,8 @@ impl fmt::Display for IOState {
             IOState::Skipped => {
                 write!(f, "Skip")
             }
-            IOState::Error(e) => {
-                write!(f, " Err: {:?}", e)
+            IOState::Error(_) => {
+                write!(f, " Err")
             }
         }
     }
@@ -7266,7 +7281,7 @@ async fn up_listen(
                 flush_check = deadline_secs(flush_timeout.into());
             }
             _ = sleep_until(show_work_interval) => {
-                //show_all_work(up);
+                // show_all_work(up);
                 show_work_interval = deadline_secs(5);
             }
         }
@@ -7576,7 +7591,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     } else {
         println!(
-            "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7} {5:>5} {6:>5} {7:>5} {8:>6}",
+            "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7} {5:>5} {6:>5} {7:>5} {8:>7}",
             "GW_ID",
             "ACK",
             "DSID",
@@ -7665,7 +7680,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     }
                 }
             }
-            print!(" {0:>5}", job.replay);
+            print!(" {0:>6}", job.replay);
 
             println!();
         }
