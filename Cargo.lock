@@ -788,6 +788,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "crudd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap 3.2.1",
+ "crucible",
+ "crucible-common",
+ "crucible-protocol",
+ "futures",
+ "futures-core",
+ "ringbuffer",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util 0.7.3",
+ "toml",
+]
+
+[[package]]
 name = "crutest"
 version = "0.1.0"
 dependencies = [
