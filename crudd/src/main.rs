@@ -1,11 +1,12 @@
+// Copyright 2022 Oxide Computer Company
+
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::{cmp, io};
-// Copyright 2021 Oxide Computer Company
 use std::net::SocketAddr;
 use std::os::unix::io::FromRawFd;
 use std::sync::Arc;
+use std::{cmp, io};
 
 use anyhow::{bail, Result};
 use clap::Parser;
