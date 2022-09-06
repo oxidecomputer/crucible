@@ -46,9 +46,9 @@ pub struct Inner {
 
 impl Inner {
     pub fn gen_number(&self) -> Result<u64> {
-        let mut stmt = self
-            .metadb
-            .prepare("SELECT value FROM metadata where name='gen_number'")?;
+        let mut stmt = self.metadb.prepare_cached(
+            "SELECT value FROM metadata where name='gen_number'",
+        )?;
         let gen_number_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut gen_number_values: Vec<u64> = vec![];
@@ -62,9 +62,9 @@ impl Inner {
     }
 
     pub fn flush_number(&self) -> Result<u64> {
-        let mut stmt = self
-            .metadb
-            .prepare("SELECT value FROM metadata where name='flush_number'")?;
+        let mut stmt = self.metadb.prepare_cached(
+            "SELECT value FROM metadata where name='flush_number'",
+        )?;
         let flush_number_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut flush_number_values: Vec<u64> = vec![];
@@ -81,25 +81,26 @@ impl Inner {
      * The flush and generation numbers will be updated at the same time.
      */
     fn set_flush_number(&self, new_flush: u64, new_gen: u64) -> Result<()> {
-        let mut stmt = self.metadb.prepare(
+        let mut stmt = self.metadb.prepare_cached(
             "UPDATE metadata SET value=?1 WHERE name='flush_number'",
         )?;
 
-        let _rows_affected = stmt.execute(params![new_flush])?;
+        let _rows_affected = stmt.execute([new_flush])?;
 
-        let mut stmt = self
-            .metadb
-            .prepare("UPDATE metadata SET value=?1 WHERE name='gen_number'")?;
+        let mut stmt = self.metadb.prepare_cached(
+            "UPDATE metadata SET value=?1 WHERE name='gen_number'",
+        )?;
 
-        let _rows_affected = stmt.execute(params![new_gen])?;
+        let _rows_affected = stmt.execute([new_gen])?;
 
         /*
          * When we write out the new flush number, the dirty bit should be
          * set back to false.
          */
-        let _rows_affected = self
+        let mut stmt = self
             .metadb
-            .execute("UPDATE metadata SET value=0 WHERE name='dirty'", [])?;
+            .prepare_cached("UPDATE metadata SET value=0 WHERE name='dirty'")?;
+        let _rows_affected = stmt.execute([])?;
 
         Ok(())
     }
@@ -107,7 +108,7 @@ impl Inner {
     pub fn dirty(&self) -> Result<bool> {
         let mut stmt = self
             .metadb
-            .prepare("SELECT value FROM metadata where name='dirty'")?;
+            .prepare_cached("SELECT value FROM metadata where name='dirty'")?;
         let dirty_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut dirty_values: Vec<bool> = vec![];
@@ -121,9 +122,10 @@ impl Inner {
     }
 
     fn set_dirty(&self) -> Result<()> {
-        let _rows_affected = self
+        let _ = self
             .metadb
-            .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])?;
+            .prepare_cached("UPDATE metadata SET value=1 WHERE name='dirty'")?
+            .execute([])?;
         Ok(())
     }
 
@@ -136,13 +138,9 @@ impl Inner {
         block: u64,
     ) -> Result<Vec<EncryptionContext>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = vec![
-            "SELECT nonce, tag FROM encryption_context where block=?1",
-            "ORDER BY counter ASC",
-        ]
-        .join(" ");
-
-        let mut stmt = self.metadb.prepare(&stmt)?;
+        let stmt = "SELECT nonce, tag FROM encryption_context where block=?1 \
+             ORDER BY counter ASC";
+        let mut stmt = self.metadb.prepare_cached(stmt)?;
 
         let stmt_iter = stmt
             .query_map(params![block], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -163,13 +161,9 @@ impl Inner {
      */
     pub fn get_hashes(&self, block: u64) -> Result<Vec<u64>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = vec![
-            "SELECT hash FROM integrity_hashes where block=?1",
-            "ORDER BY counter ASC",
-        ]
-        .join(" ");
-
-        let mut stmt = self.metadb.prepare(&stmt)?;
+        let stmt = "SELECT hash FROM integrity_hashes where block=?1 \
+             ORDER BY counter ASC";
+        let mut stmt = self.metadb.prepare_cached(stmt)?;
 
         let stmt_iter = stmt.query_map(params![block], |row| row.get(0))?;
 
@@ -197,27 +191,18 @@ impl Inner {
     ) -> Result<()> {
         let (block, encryption_context) = encryption_context_params;
 
-        let stmt: String = vec![
-            "INSERT INTO encryption_context".to_string(),
-            "(counter, block, nonce, tag) values".to_string(),
-            format!(
-                "({}, {}, X'{}', X'{}')",
-                /*
-                 * Auto-increment counter based on what's in the db
-                 */
-                vec![
-                    "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
-                    format!("from encryption_context WHERE block={})", block),
-                ]
-                .join(" "),
-                block,
-                hex::encode(&encryption_context.nonce),
-                hex::encode(&encryption_context.tag),
-            ),
-        ]
-        .join(" ");
+        let stmt =
+            "INSERT INTO encryption_context (counter, block, nonce, tag) \
+             VALUES ( \
+                 (SELECT IFNULL(MAX(counter), 0) + 1 FROM encryption_context WHERE block=?1), \
+                 ?1, ?2, ?3 \
+             )";
 
-        let rows_affected = tx.execute(&stmt, [])?;
+        let rows_affected = tx.prepare_cached(stmt)?.execute(params![
+            block,
+            &encryption_context.nonce,
+            &encryption_context.tag
+        ])?;
         assert_eq!(rows_affected, 1);
 
         Ok(())
@@ -252,26 +237,16 @@ impl Inner {
     ) -> Result<()> {
         let (block, hash) = hash_params;
 
-        let stmt: String = vec![
-            "INSERT INTO integrity_hashes".to_string(),
-            "(counter, block, hash) values".to_string(),
-            format!(
-                "({}, {}, X'{}')",
-                /*
-                 * Auto-increment counter based on what's in the db
-                 */
-                vec![
-                    "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
-                    format!("from integrity_hashes WHERE block={})", block),
-                ]
-                .join(" "),
-                block,
-                hex::encode(&hash.to_le_bytes())
-            ),
-        ]
-        .join(" ");
+        let stmt =
+            "INSERT INTO integrity_hashes (counter, block, hash) \
+             VALUES ( \
+                 (SELECT IFNULL(MAX(counter), 0) + 1 FROM integrity_hashes WHERE block=?1), \
+                 ?1, ?2 \
+             )";
 
-        let rows_affected = tx.execute(&stmt, [])?;
+        let rows_affected = tx
+            .prepare_cached(stmt)?
+            .execute(params![block, &hash.to_le_bytes()])?;
         assert_eq!(rows_affected, 1);
 
         Ok(())
@@ -298,34 +273,32 @@ impl Inner {
         let tx = self.metadb.transaction()?;
 
         // Clear encryption context
-        let stmt: String = vec![
-            "DELETE FROM encryption_context WHERE ROWID not in",
-            "(select ROWID from",
-            "(select ROWID,block,MAX(counter)",
-            "from encryption_context group by block)",
-            ");",
-        ]
-        .join(" ");
+        let stmt = "DELETE FROM encryption_context WHERE ROWID not in \
+             (select ROWID from \
+                 (select ROWID,block,MAX(counter) \
+                  from encryption_context group by block\
+                 ) \
+             )";
 
-        let _rows_affected = tx.execute(&stmt, [])?;
+        let _rows_affected = tx.prepare_cached(stmt)?.execute([])?;
 
-        let _rows_affected =
-            tx.execute("UPDATE encryption_context SET counter = 0", [])?;
+        let _rows_affected = tx
+            .prepare_cached("UPDATE encryption_context SET counter = 0")?
+            .execute([])?;
 
         // Clear integrity hash
-        let stmt: String = vec![
-            "DELETE FROM integrity_hashes WHERE ROWID not in",
-            "(select ROWID from",
-            "(select ROWID,block,MAX(counter)",
-            "from integrity_hashes group by block)",
-            ");",
-        ]
-        .join(" ");
+        let stmt = "DELETE FROM integrity_hashes WHERE ROWID not in \
+             (select ROWID from \
+                 (select ROWID,block,MAX(counter) \
+                  from integrity_hashes group by block \
+                 ) \
+             )";
 
-        let _rows_affected = tx.execute(&stmt, [])?;
+        let _rows_affected = tx.prepare_cached(stmt)?.execute([])?;
 
-        let _rows_affected =
-            tx.execute("UPDATE integrity_hashes SET counter = 0", [])?;
+        let _rows_affected = tx
+            .prepare_cached("UPDATE integrity_hashes SET counter = 0")?
+            .execute([])?;
 
         tx.commit()?;
 
@@ -342,7 +315,7 @@ impl Inner {
     ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
-            .prepare(&"SELECT block, counter FROM encryption_context")?;
+            .prepare_cached("SELECT block, counter FROM encryption_context")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -362,7 +335,7 @@ impl Inner {
     ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
-            .prepare(&"SELECT block, counter FROM integrity_hashes")?;
+            .prepare_cached("SELECT block, counter FROM integrity_hashes")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -580,6 +553,37 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
     assert!(metadb.is_autocommit());
     metadb.pragma_update(None, "journal_mode", &"WAL")?;
     metadb.pragma_update(None, "synchronous", &"FULL")?;
+
+    // rusqlite provides an LRU Cache (a cache which, when full, evicts the
+    // least-recently-used value). This caches prepared statements, allowing
+    // us to nullify the cost of parsing and compiling frequently used
+    // statements.  I've changed all sqlite queries in Inner to use
+    // `prepare_cached` to take advantage of this cache. I have not done this
+    // for `prepare_cached` region creation,
+    // since it wouldn't be relevant there.
+
+    // The result is a dramatic reduction in CPU time spent parsing queries.
+    // Prior to this change, sqlite3Prepare was taking 60% of CPU time
+    // during reads and 50% during writes based on dtrace flamegraphs.
+    // Afterwards, they don't even show up on the graph. I'm seeing a minimum
+    // doubling of actual throughput with `crudd` after this change on my
+    // local hardware.
+
+    // However, this does cost some amount of memory per-extent and thus will
+    // scale linearly . This cache size I'm setting now (64 statements) is
+    // chosen somewhat arbitrarily. If this becomes a significant consumer
+    // of memory, we should reduce the size of the LRU, and stop caching the
+    // statements in the coldest paths. At present, it doesn't seem to have any
+    // meaningful impact on memory usage.
+
+    // We could instead try to pre-generate and hold onto all the statements we
+    // need to use ourselves, but I looked into doing that, and basically
+    // the code required would be a mess due to lifetimes. We shouldn't do
+    // that except as a last resort.
+
+    // Also, if you're curious, the hashing function used is
+    // https://docs.rs/ahash/latest/ahash/index.html
+    metadb.set_prepared_statement_cache_capacity(64);
 
     Ok(metadb)
 }
