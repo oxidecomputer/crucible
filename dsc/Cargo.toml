@@ -16,7 +16,7 @@ rand_chacha = "0.3.1"
 schemars = { version = "0.8.10", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
 statistical = "1.0.0"
-tokio = { version = "1.20.1", features = ["full"] }
+tokio = { version = "1.21.0", features = ["full"] }
 
 [dev-dependencies]
 expectorate = "1.0.5"
