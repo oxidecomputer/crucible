@@ -432,7 +432,7 @@ mod test {
         let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
 
-        tag[2] += 1;
+        tag[2] = tag[2].wrapping_add(1);
 
         let block_before_failing_decrypt_in_place = block.clone();
 
