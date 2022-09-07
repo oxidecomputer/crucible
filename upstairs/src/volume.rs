@@ -277,12 +277,11 @@ impl Volume {
         println!("Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
-        // Do I need ROP to be ARC?
         if let Some(ref read_only_parent) = self.read_only_parent {
             let scrub_start = Instant::now();
             println!("Scrub for {} begins", self.uuid);
 
-            let bs = read_only_parent.get_block_size().unwrap() as usize;
+            let bs = read_only_parent.get_block_size()? as usize;
             println!(
                 "Scrub with total_size:{:?} block_size:{:?}",
                 read_only_parent.total_size().unwrap(),
@@ -292,7 +291,8 @@ impl Volume {
             let end = read_only_parent.lba_range.end;
 
             // Based on some seat of the pants measurements, we are doing
-            // 256 KiB IOs during the scrub. Select how many blocks this is.
+            // 256 KiB IOs during the scrub. Here we select how many blocks
+            // this is.
             // TODO: Determine if this value should be adjusted.
             let mut block_count = 262144 / bs;
             println!(
@@ -303,7 +303,6 @@ impl Volume {
                 block_count * bs,
             );
 
-            let mut errors = 0;
             let mut retries = 0;
             let showstep = (end - start) / 25;
             let mut showat = start + showstep;
@@ -331,7 +330,7 @@ impl Volume {
                         Ok(mut waiter) => {
                             // Once we have our waiter, we can wait on it
                             // to answer or read.
-                            waiter.block_wait().unwrap();
+                            waiter.block_wait()?;
                             retry_needed = false;
                             if retry_count > 0 {
                                 // This counter indicates a retry was
@@ -345,33 +344,25 @@ impl Volume {
                         }
                     }
                     if retry_count > 5 {
-                        break;
+                        // TODO: Nexus needs to know the scrub had problems.
+                        crucible_bail!(
+                            IoError,
+                            "Scrub failed to read at offset {}",
+                            offset
+                        );
                     }
                 }
-                if retry_needed {
-                    println!("Scrub failed to read {}", offset);
-                    // TODO: Nexus needs to know the scrub had problems.
-                    // TODO: Should we exit with error here, or keep going?
-                    // Either way, this scrub will have to try again.
-                    errors += 1;
-                } else {
-                    // TODO: if we get an error writing, should we
-                    // keep going and scrub the rest? Abort now?
-                    // Nexus needs to know about this failure.
-                    let mut waiter = self
-                        .write_unwritten(
-                            Block::new(offset, bs.trailing_zeros()),
-                            Bytes::from(buffer.as_vec().clone()),
-                        )
-                        .unwrap();
-                    waiter.block_wait().unwrap();
-                }
+                // TODO: Nexus needs to know about this failure.
+                let mut waiter = self.write_unwritten(
+                    Block::new(offset, bs.trailing_zeros()),
+                    Bytes::from(buffer.as_vec().clone()),
+                )?;
+                waiter.block_wait()?;
+
                 offset += block_count as u64;
 
-                // If no errors, set the scrub high water mark
-                if errors == 0 {
-                    self.scrub_point.store(offset, Ordering::SeqCst);
-                }
+                // Set the scrub high water mark
+                self.scrub_point.store(offset, Ordering::SeqCst);
 
                 if offset > showat {
                     println!(
@@ -384,10 +375,9 @@ impl Volume {
 
             let total_time = scrub_start.elapsed();
             println!(
-                "Scrub {} done in {} seconds.  Errors:{} Retries:{}",
+                "Scrub {} done in {} seconds.  Retries:{}",
                 self.uuid,
                 total_time.as_secs(),
-                errors,
                 retries,
             );
             self.flush(None)?;
