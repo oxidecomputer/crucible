@@ -4244,11 +4244,7 @@ impl Upstairs {
         let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
 
         for (eid, bo) in nwo {
-            requests.push(ReadRequest {
-                eid,
-                offset: bo,
-                num_blocks: 1,
-            });
+            requests.push(ReadRequest { eid, offset: bo });
         }
 
         sub.insert(next_id, 0); // XXX does this value matter?
@@ -7614,12 +7610,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     requests,
                 } => {
                     let job_type = "Read".to_string();
-                    let mut num_blocks = 0;
-
-                    for request in requests {
-                        num_blocks += request.num_blocks as usize;
-                    }
-
+                    let num_blocks = requests.len();
                     (job_type, num_blocks)
                 }
                 IOop::Write {

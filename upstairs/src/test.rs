@@ -649,7 +649,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -733,7 +732,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -813,7 +811,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -888,7 +885,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -954,7 +950,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let next_id = {
@@ -1033,7 +1028,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1083,7 +1077,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1131,7 +1124,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1185,7 +1177,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1239,7 +1230,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1284,7 +1274,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1328,7 +1317,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1454,7 +1442,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1505,7 +1492,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1581,7 +1567,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1661,7 +1646,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -2373,7 +2357,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2430,7 +2413,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2525,7 +2507,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2629,7 +2610,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2728,7 +2708,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -4187,7 +4166,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
@@ -4223,12 +4201,11 @@ mod test {
 
         // compute integrity hash after alteration above! It should still
         // validate
-        let hash = crucible_common::integrity_hash(&[&nonce, &tag, &data]);
+        let hash = integrity_hash(&[&nonce, &tag, &data]);
 
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
             encryption_contexts: vec![crucible_protocol::EncryptionContext {
@@ -4263,7 +4240,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
@@ -4279,7 +4255,6 @@ mod test {
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
             encryption_contexts: vec![],
@@ -4311,7 +4286,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
@@ -4341,7 +4315,6 @@ mod test {
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
             encryption_contexts: vec![crucible_protocol::EncryptionContext {
@@ -4886,7 +4859,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let next_id = {
@@ -5050,7 +5022,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let next_id = {
