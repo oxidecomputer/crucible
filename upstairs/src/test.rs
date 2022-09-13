@@ -4226,25 +4226,21 @@ mod up_test {
         };
 
         // Set the error that everyone will use.
-        let response = Err(CrucibleError::GenericError(format!("bad")));
+        let response = Err(CrucibleError::GenericError("bad".to_string()));
 
         // Process the operation for client 0
-        assert_eq!(
-            up.process_ds_operation(next_id, 0, response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(next_id, 0, response.clone())
+            .unwrap(),);
         // client 0 is failed, the others should be okay still
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Active);
         assert_eq!(up.ds_state(2), DsState::Active);
 
         // Process the operation for client 1
-        assert_eq!(
-            up.process_ds_operation(next_id, 1, response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(next_id, 1, response.clone())
+            .unwrap(),);
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Failed);
         assert_eq!(up.ds_state(2), DsState::Active);
@@ -4257,11 +4253,7 @@ mod up_test {
         }
         // Three failures, process_ds_operaion should return true now.
         // Process the operation for client 2
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, response.clone())
-                .unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(next_id, 2, response).unwrap());
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Failed);
         assert_eq!(up.ds_state(2), DsState::Failed);
@@ -4316,29 +4308,21 @@ mod up_test {
         };
 
         // Set the error that everyone will use.
-        let err_response = Err(CrucibleError::GenericError(format!("bad")));
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
 
         // Process the error operation for client 0
-        assert_eq!(
-            up.process_ds_operation(next_id, 0, err_response).unwrap(),
-            false
-        );
+        assert!(!up.process_ds_operation(next_id, 0, err_response).unwrap());
         // client 0 should be marked failed.
         assert_eq!(up.ds_state(0), DsState::Failed);
 
         let ok_response = Ok(vec![]);
         // Process the good operation for client 1
-        assert_eq!(
-            up.process_ds_operation(next_id, 1, ok_response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(next_id, 1, ok_response.clone())
+            .unwrap(),);
 
         // process_ds_operaion should return true after we process this.
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, ok_response).unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Active);
         assert_eq!(up.ds_state(2), DsState::Active);
@@ -4370,24 +4354,16 @@ mod up_test {
             next_id
         };
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
         // Process the operation for client 1 this should return true
-        assert_eq!(
-            up.process_ds_operation(next_id, 1, response.clone())
-                .unwrap(),
-            true
-        );
+        assert!(up
+            .process_ds_operation(next_id, 1, response.clone())
+            .unwrap(),);
 
         // Process the operation for client 2 this should return false
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up.process_ds_operation(next_id, 2, response).unwrap());
 
         // Verify we can ack this work, then ack it.
         assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
@@ -4411,17 +4387,12 @@ mod up_test {
 
         let ok_response = Ok(vec![]);
         // Process the operation for client 1
-        assert_eq!(
-            up.process_ds_operation(next_id, 1, ok_response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(next_id, 1, ok_response.clone())
+            .unwrap(),);
 
         // process_ds_operaion should return true after we process this.
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, ok_response).unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
 
         // ACK the flush and let retire_check move things along.
         assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
@@ -4475,34 +4446,26 @@ mod up_test {
         };
 
         // Set the error that everyone will use.
-        let err_response = Err(CrucibleError::GenericError(format!("bad")));
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
 
         // Process the operation for client 0
-        assert_eq!(
-            up.process_ds_operation(next_id, 0, err_response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(next_id, 0, err_response.clone())
+            .unwrap());
         // client 0 is failed, the others should be okay still
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Active);
         assert_eq!(up.ds_state(2), DsState::Active);
 
         // Process the operation for client 1
-        assert_eq!(
-            up.process_ds_operation(next_id, 1, err_response).unwrap(),
-            false
-        );
+        assert!(!up.process_ds_operation(next_id, 1, err_response).unwrap());
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Failed);
         assert_eq!(up.ds_state(2), DsState::Active);
 
         let ok_response = Ok(vec![]);
         // process_ds_operaion should return true after we process this.
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, ok_response).unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
         assert_eq!(up.ds_state(0), DsState::Failed);
         assert_eq!(up.ds_state(1), DsState::Failed);
         assert_eq!(up.ds_state(2), DsState::Active);
@@ -4534,17 +4497,11 @@ mod up_test {
             next_id
         };
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
         // Process the operation for client 1 this should return true
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, response.clone())
-                .unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(next_id, 2, response).unwrap());
     }
 
     #[test]
@@ -4590,28 +4547,21 @@ mod up_test {
         };
 
         // Make the error and ok responses
-        let err_response = Err(CrucibleError::GenericError(format!("bad")));
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
         let ok_response = Ok(vec![]);
 
         // Process the operation for client 0
-        assert_eq!(
-            up.process_ds_operation(next_id, 0, ok_response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(next_id, 0, ok_response.clone())
+            .unwrap(),);
 
         // Process the error for client 1
-        assert_eq!(
-            up.process_ds_operation(next_id, 1, err_response).unwrap(),
-            false
-        );
+        assert!(!up.process_ds_operation(next_id, 1, err_response).unwrap());
 
         // process_ds_operaion should return true after we process this.
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, ok_response.clone())
-                .unwrap(),
-            true
-        );
+        assert!(up
+            .process_ds_operation(next_id, 2, ok_response.clone())
+            .unwrap(),);
 
         // Verify client states
         assert_eq!(up.ds_state(0), DsState::Active);
@@ -4652,19 +4602,15 @@ mod up_test {
         };
 
         // Process the operation for client 0, re-use ok_response from above.
-        assert_eq!(
-            up.process_ds_operation(next_id, 0, ok_response.clone())
-                .unwrap(),
-            false
-        );
+        // This will return false as we don't have enough work done yet.
+        assert!(!up
+            .process_ds_operation(next_id, 0, ok_response.clone())
+            .unwrap(),);
 
         // We don't process client 1, it had failed
 
         // process_ds_operaion should return true after we process this.
-        assert_eq!(
-            up.process_ds_operation(next_id, 2, ok_response).unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
 
         // Verify we can ack this work, the total is now 2 jobs to ack
         assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 2);
@@ -4687,17 +4633,12 @@ mod up_test {
 
         let ok_response = Ok(vec![]);
         // Process the operation for client 0
-        assert_eq!(
-            up.process_ds_operation(flush_id, 0, ok_response.clone())
-                .unwrap(),
-            false
-        );
+        assert!(!up
+            .process_ds_operation(flush_id, 0, ok_response.clone())
+            .unwrap(),);
 
         // process_ds_operaion should return true after we process client 2.
-        assert_eq!(
-            up.process_ds_operation(flush_id, 2, ok_response).unwrap(),
-            true
-        );
+        assert!(up.process_ds_operation(flush_id, 2, ok_response).unwrap());
 
         // ACK all the jobs and let retire_check move things along.
         assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 3);

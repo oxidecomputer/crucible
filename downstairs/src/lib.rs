@@ -4028,7 +4028,7 @@ mod test {
 
         // `complete_work` will return Ok(()) despite not doing anything to the
         // Work struct.
-        assert_eq!(result.unwrap(), ());
+        assert!(result.is_ok());
 
         Ok(())
     }
