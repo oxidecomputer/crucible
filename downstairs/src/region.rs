@@ -3033,11 +3033,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3117,11 +3113,7 @@ mod test {
 
         // Now read back that block, make sure it is updated.
         let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            }],
+            &[crucible_protocol::ReadRequest { eid, offset }],
             0,
         )?;
 
@@ -3182,11 +3174,7 @@ mod test {
 
         // Now read back that block, make sure it has the first write
         let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            }],
+            &[crucible_protocol::ReadRequest { eid, offset }],
             2,
         )?;
 
@@ -3272,11 +3260,7 @@ mod test {
 
         // Read back our block, make sure it has the first write data
         let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            }],
+            &[crucible_protocol::ReadRequest { eid, offset }],
             2,
         )?;
 
@@ -3354,11 +3338,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3469,11 +3449,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3585,11 +3561,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3694,11 +3666,7 @@ mod test {
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
             println!("Read eid: {}, {} offset: {:?}", eid, i, offset);
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3805,11 +3773,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3873,7 +3837,6 @@ mod test {
             &[crucible_protocol::ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
-                num_blocks: 1,
             }],
             0,
         )?;

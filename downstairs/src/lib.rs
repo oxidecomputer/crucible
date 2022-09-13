@@ -101,7 +101,6 @@ pub fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
                             block_offset,
                             &region.def(),
                         ),
-                        num_blocks: 1,
                     }],
                     0,
                 )?;
@@ -2399,7 +2398,6 @@ mod test {
                         requests: vec![ReadRequest {
                             eid: 1,
                             offset: Block::new_512(1),
-                            num_blocks: 1,
                         }],
                     }
                 },
@@ -2567,7 +2565,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
-                num_blocks: 1,
             }],
         };
         ds.add_work(upstairs_connection, 1000, rio).await?;
@@ -2578,7 +2575,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 1,
                 offset: Block::new_512(1),
-                num_blocks: 1,
             }],
         };
         ds.add_work(upstairs_connection, 1001, rio).await?;
@@ -3434,7 +3430,6 @@ mod test {
                     &[crucible_protocol::ReadRequest {
                         eid: eid.into(),
                         offset: Block::new_512(offset),
-                        num_blocks: 1,
                     }],
                     0,
                 )?;
@@ -3745,7 +3740,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
-                num_blocks: 1,
             }],
         };
         ds.add_work(upstairs_connection_1, 1000, read_1.clone())
@@ -3756,7 +3750,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 1,
                 offset: Block::new_512(2),
-                num_blocks: 2,
             }],
         };
         ds.add_work(upstairs_connection_2, 1000, read_2.clone())
@@ -3831,7 +3824,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
-                num_blocks: 1,
             }],
         };
         ds.add_work(upstairs_connection_1, 1000, rio).await?;
@@ -3918,7 +3910,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
-                num_blocks: 1,
             }],
         };
         ds.add_work(upstairs_connection_1, 1000, rio).await?;
@@ -4004,7 +3995,6 @@ mod test {
             requests: vec![ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
-                num_blocks: 1,
             }],
         };
         ds.add_work(upstairs_connection_1, 1000, rio).await?;

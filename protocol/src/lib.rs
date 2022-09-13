@@ -43,7 +43,6 @@ pub struct Write {
 pub struct ReadRequest {
     pub eid: u64,
     pub offset: Block,
-    pub num_blocks: u64,
 }
 
 // Note: if you change this, you may have to add to the dump commands that show
@@ -52,7 +51,6 @@ pub struct ReadRequest {
 pub struct ReadResponse {
     pub eid: u64,
     pub offset: Block,
-    pub num_blocks: u64,
 
     pub data: bytes::BytesMut,
     pub encryption_contexts: Vec<EncryptionContext>,
@@ -73,14 +71,13 @@ impl ReadResponse {
          * Also, we (I) need to figure out how to read data into an
          * uninitialized buffer. Until then, we have this workaround.
          */
-        let sz = request.num_blocks as usize * bs;
+        let sz = bs;
         let mut data = BytesMut::with_capacity(sz);
         data.resize(sz, 1);
 
         ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
             data,
             encryption_contexts: vec![],
             hashes: vec![],
@@ -94,7 +91,6 @@ impl ReadResponse {
         ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
             data: BytesMut::from(data),
             encryption_contexts: vec![],
             hashes: vec![crucible_common::integrity_hash(&[data])],
