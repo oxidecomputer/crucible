@@ -41,7 +41,7 @@ mod test {
             )?;
 
             let downstairs = build_downstairs_for_region(
-                &tempdir.path(),
+                tempdir.path(),
                 false, /* lossy */
                 false, /* return_errors */
                 read_only,
@@ -1028,7 +1028,7 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
+        volume.add_read_only_parent(in_memory_data)?;
 
         volume.activate(0)?;
 
@@ -1098,7 +1098,7 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
+        volume.add_read_only_parent(in_memory_data)?;
 
         volume.activate(0)?;
 
@@ -1169,7 +1169,7 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
+        volume.add_read_only_parent(in_memory_data)?;
 
         volume.activate(0)?;
 
@@ -1261,7 +1261,7 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
+        volume.add_read_only_parent(in_memory_data)?;
 
         volume.activate(0)?;
 
@@ -1344,7 +1344,7 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
+        volume.add_read_only_parent(in_memory_data)?;
 
         volume.activate(0)?;
 
@@ -1444,7 +1444,7 @@ mod test {
 
         volume.add_read_only_parent({
             let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume(in_memory_data.clone())?;
+            volume.add_subvolume(in_memory_data)?;
             Arc::new(volume)
         })?;
 
@@ -1565,7 +1565,7 @@ mod test {
 
         volume.add_read_only_parent({
             let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume(in_memory_data.clone())?;
+            volume.add_subvolume(in_memory_data)?;
             Arc::new(volume)
         })?;
 
@@ -2065,7 +2065,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 1]),
+                Bytes::from(vec![0x55; BLOCK_SIZE]),
             )?
             .block_wait()?;
 
