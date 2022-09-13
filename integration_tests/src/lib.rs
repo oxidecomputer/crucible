@@ -1706,6 +1706,64 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_scrub_no_rop() -> Result<()> {
+        // Volume with a subvolume and no RO parent:, verify the scrub
+        // does no work
+        // SV: |----------|
+        //
+        // Read volume, expect 0's
+        // Write to half volume.
+        // SV  |55555-----|
+        //
+        // Run scrubber on volume. (Should do nothing)
+        //
+        // Read volume again, no change
+        // SV  |55555-----|
+
+        const BLOCK_SIZE: usize = 512;
+        let opts = three_downstairs(54079, 54080, 54081, false).unwrap();
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None)?;
+
+        volume.activate(0)?;
+
+        // Verify contents are 00 at startup
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        assert_eq!(vec![0; BLOCK_SIZE * 10], *buffer.as_vec());
+
+        // Write to half volume
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![55; BLOCK_SIZE * 5]),
+            )?
+            .block_wait()?;
+
+        // Call the scrubber.  This should do nothing
+        volume.scrub().unwrap();
+
+        // Read and verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
+            .block_wait()?;
+
+        // Build the expected vec to compare our read with.
+        // First 5 blocks are 5s              |55555-----|
+        let mut expected = vec![55; BLOCK_SIZE * 5];
+        // Original 0s from unwritten blocks  |5555500000|
+        expected.extend(vec![0; BLOCK_SIZE * 5]);
+        assert_eq!(expected, *buffer.as_vec());
+
+        Ok(())
+    }
+
     // The following tests work at the "guest" layer.  The volume
     // layers above (in general) will eventually call a BlockIO trait
     // on a guest layer.  Port numbers from this point below should
