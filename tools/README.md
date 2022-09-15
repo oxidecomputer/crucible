@@ -6,6 +6,7 @@ Various scripts used for Crucible
 A simple script to create three downstairs regions at var/88[1-3]0
 
 ## downstairs_daemon.sh
+NOTE: don't use this if you can, use the `dsc` binary instead.
 A highly custom script that starts three downstairs in a loop and will
 keep them restarted when they are killed.  A bunch of assumptions are made
 around where the region directory is and which ports the downstairs use.
@@ -47,6 +48,11 @@ downstairs UUID and is intended to provide a sample to build off of.
 
 ## test_ds.sh
 Test import then export for crucible downstairs.
+
+## test_nightly.sh
+This runs a selection of tests from this directory and reports their
+results.  It is intended to be a test for Crucible that runs nightly
+and does deeper/longer tests than what we do as part of every push.
 
 ## test_perf.sh
 A test that creates three downstairs regions of ~100G each and then runs

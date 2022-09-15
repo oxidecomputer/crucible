@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# nightly
+# A nightly test, which is just a collection of other tests.
+# If you are adding a test, make sure the binaries/scripts it needs are
+# also part of what buildomat puts in the nightly archive, currently
+# generated in: .github/buildomat/jobs/build-release.sh
 
 SECONDS=0
 err=0

@@ -7,7 +7,7 @@
 #: output_rules = [
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
-#:  "/out/*",
+#:	"/out/*",
 #: ]
 #:
 #: [[publish]]
@@ -45,6 +45,8 @@ for s in tools/test_perf.sh; do
 	cp "$s" /work/scripts/
 done
 
+# Build the nightly archive file which should include all the scripts
+# and binaries needed to run the nightly test.
 banner nightly
 mkdir -p out
 tar cavf out/crucible-nightly.tar.gz \
