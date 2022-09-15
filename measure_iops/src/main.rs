@@ -208,7 +208,7 @@ fn main() -> Result<()> {
     }
 
     // One last flush
-    guest.flush(None)?;
+    guest.flush(None)?.block_wait()?;
 
     println!("Done ok, waiting on show_work");
 

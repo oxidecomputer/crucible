@@ -1590,7 +1590,7 @@ async fn perf_workload(
         }
         let big_end = big_start.elapsed();
 
-        guest.flush(None)?;
+        guest.flush(None)?.block_wait()?;
         perf_summary(
             "rwrites",
             count,
@@ -1662,7 +1662,8 @@ async fn perf_workload(
             );
         }
 
-        guest.flush(None)?;
+        guest.flush(None)?.block_wait()?;
+
         // Before we finish, make sure the work queues are empty.
         loop {
             let wc = guest.query_work_queue()?;

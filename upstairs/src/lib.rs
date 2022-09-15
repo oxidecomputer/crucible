@@ -6156,6 +6156,7 @@ impl BlockReq {
  * When BlockOps are sent to a guest, the calling function receives a
  * waiter that it can block on.
  */
+#[must_use]
 pub struct BlockReqWaiter {
     recv: std_mpsc::Receiver<Result<(), CrucibleError>>,
 }
