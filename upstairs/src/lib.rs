@@ -5709,6 +5709,7 @@ fn test_buffer_len_after_clone() {
 
     let new_buffer = data.clone();
     assert_eq!(new_buffer.len(), READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 #[test]

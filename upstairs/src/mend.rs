@@ -392,7 +392,7 @@ mod test {
             flush_numbers: vec![3, 3, 3, 3],
             dirty: vec![false, false, false, false],
         };
-        let _fix = DownstairsMend::new(&dsr.clone(), &dsr, &dsr_long);
+        let _fix = DownstairsMend::new(&dsr, &dsr, &dsr_long);
     }
 
     #[test]
@@ -1051,8 +1051,8 @@ mod test {
         };
         let d2 = RegionMetadata {
             generation: gen2,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
+            flush_numbers: flush,
+            dirty,
         };
         let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
 
@@ -1149,8 +1149,8 @@ mod test {
         };
         let d2 = RegionMetadata {
             generation: gen2,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
+            flush_numbers: flush,
+            dirty,
         };
         let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
 
@@ -1247,8 +1247,8 @@ mod test {
         };
         let d2 = RegionMetadata {
             generation: gen2,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
+            flush_numbers: flush,
+            dirty,
         };
         let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
 
@@ -1340,9 +1340,9 @@ mod test {
             dirty: dirty.clone(),
         };
         let d2 = RegionMetadata {
-            generation: gen.clone(),
+            generation: gen,
             flush_numbers: flush2,
-            dirty: dirty.clone(),
+            dirty,
         };
         let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
 
@@ -1437,9 +1437,9 @@ mod test {
             dirty: dirty.clone(),
         };
         let d2 = RegionMetadata {
-            generation: gen.clone(),
+            generation: gen,
             flush_numbers: flush2,
-            dirty: dirty.clone(),
+            dirty,
         };
         let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
 
@@ -1535,9 +1535,9 @@ mod test {
             dirty: dirty.clone(),
         };
         let d2 = RegionMetadata {
-            generation: gen.clone(),
+            generation: gen,
             flush_numbers: flush2,
-            dirty: dirty.clone(),
+            dirty,
         };
         let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
 
