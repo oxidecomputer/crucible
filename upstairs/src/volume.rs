@@ -371,11 +371,11 @@ impl BlockIO for Volume {
 
     fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.deactivate()?;
+            sub_volume.deactivate()?.block_wait()?;
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.deactivate()?;
+            read_only_parent.deactivate()?.block_wait()?;
         }
 
         BlockReqWaiter::immediate()
