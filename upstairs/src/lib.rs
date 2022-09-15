@@ -64,6 +64,8 @@ pub use stats::*;
 pub trait BlockIO {
     fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
 
+    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError>;
+
     fn query_is_active(&self) -> Result<bool, CrucibleError>;
 
     // Total bytes of Volume
@@ -6589,16 +6591,6 @@ impl Guest {
         *active
     }
 
-    pub fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        // Disable any more IO from this guest and deactivate the downstairs.
-        // We can't deactivate if we are not yet active.
-        if !self.is_active() {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        Ok(self.send(BlockOp::Deactivate))
-    }
-
     pub fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
         let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
@@ -6720,6 +6712,16 @@ impl BlockIO for Guest {
                 std::thread::sleep(std::time::Duration::from_secs(3));
             }
         }
+    }
+
+    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        // Disable any more IO from this guest and deactivate the downstairs.
+        // We can't deactivate if we are not yet active.
+        if !self.is_active() {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        Ok(self.send(BlockOp::Deactivate))
     }
 
     fn query_is_active(&self) -> Result<bool, CrucibleError> {

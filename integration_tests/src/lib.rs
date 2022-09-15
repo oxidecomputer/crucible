@@ -18,8 +18,11 @@ mod test {
 
     #[allow(dead_code)]
     struct TestDownstairs {
+        address: IpAddr,
+        port: u16,
         tempdir: TempDir,
         downstairs: Arc<Mutex<Downstairs>>,
+        join_handle: tokio::task::JoinHandle<Result<()>>,
     }
 
     impl TestDownstairs {
@@ -48,7 +51,7 @@ mod test {
             )?;
 
             let adownstairs = downstairs.clone();
-            tokio::spawn(async move {
+            let join_handle = tokio::spawn(async move {
                 start_downstairs(
                     adownstairs,
                     address,
@@ -62,9 +65,119 @@ mod test {
             });
 
             Ok(TestDownstairs {
+                address,
+                port,
                 tempdir,
                 downstairs,
+                join_handle,
             })
+        }
+
+        pub fn reboot_read_only(&mut self) -> Result<()> {
+            self.join_handle.abort();
+
+            self.downstairs = build_downstairs_for_region(
+                self.tempdir.path(),
+                false, /* lossy */
+                false, /* return_errors */
+                true,
+            )?;
+
+            let adownstairs = self.downstairs.clone();
+            let address = self.address.clone();
+            let port = self.port;
+
+            self.join_handle = tokio::spawn(async move {
+                start_downstairs(
+                    adownstairs,
+                    address,
+                    None, /* oximeter */
+                    port,
+                    None, /* cert_pem */
+                    None, /* key_pem */
+                    None, /* root_cert_pem */
+                )
+                .await
+            });
+
+            Ok(())
+        }
+    }
+
+    struct TestDownstairsSet {
+        downstairs1: TestDownstairs,
+        downstairs2: TestDownstairs,
+        downstairs3: TestDownstairs,
+        crucible_opts: CrucibleOpts,
+    }
+
+    impl TestDownstairsSet {
+        pub fn new(
+            port1: u16,
+            port2: u16,
+            port3: u16,
+            read_only: bool,
+        ) -> Result<TestDownstairsSet> {
+            let downstairs1 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                port1,
+                true,
+                read_only,
+            )?;
+            let downstairs2 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                port2,
+                true,
+                read_only,
+            )?;
+            let downstairs3 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                port3,
+                true,
+                read_only,
+            )?;
+
+            // Generate random data for our key
+            let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+            let key_string = encode(&key_bytes);
+
+            let crucible_opts = CrucibleOpts {
+                id: Uuid::new_v4(),
+                target: vec![
+                    format!("127.0.0.1:{}", port1).parse()?,
+                    format!("127.0.0.1:{}", port2).parse()?,
+                    format!("127.0.0.1:{}", port3).parse()?,
+                ],
+                lossy: false,
+                flush_timeout: None,
+                key: Some(key_string),
+                cert_pem: None,
+                key_pem: None,
+                root_cert_pem: None,
+                control: None,
+                read_only,
+            };
+
+            Ok(TestDownstairsSet {
+                downstairs1,
+                downstairs2,
+                downstairs3,
+                crucible_opts,
+            })
+        }
+
+        pub fn opts(&self) -> CrucibleOpts {
+            self.crucible_opts.clone()
+        }
+
+        pub fn reboot_read_only(&mut self) -> Result<()> {
+            self.downstairs1.reboot_read_only()?;
+            self.downstairs2.reboot_read_only()?;
+            self.downstairs3.reboot_read_only()?;
+
+            self.crucible_opts.read_only = true;
+
+            Ok(())
         }
     }
 
@@ -77,34 +190,9 @@ mod test {
         port3: u16,
         read_only: bool,
     ) -> Result<CrucibleOpts> {
-        let _downstairs1 =
-            TestDownstairs::new("127.0.0.1".parse()?, port1, true, read_only)?;
-        let _downstairs2 =
-            TestDownstairs::new("127.0.0.1".parse()?, port2, true, read_only)?;
-        let _downstairs3 =
-            TestDownstairs::new("127.0.0.1".parse()?, port3, true, read_only)?;
-
-        // Generate random data for our key
-        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-        let key_string = encode(&key_bytes);
-
-        let co = CrucibleOpts {
-            id: Uuid::new_v4(),
-            target: vec![
-                format!("127.0.0.1:{}", port1).parse()?,
-                format!("127.0.0.1:{}", port2).parse()?,
-                format!("127.0.0.1:{}", port3).parse()?,
-            ],
-            lossy: false,
-            flush_timeout: None,
-            key: Some(key_string),
-            cert_pem: None,
-            key_pem: None,
-            root_cert_pem: None,
-            control: None,
-            read_only,
-        };
-        Ok(co)
+        let test_downstairs_set =
+            TestDownstairsSet::new(port1, port2, port3, read_only)?;
+        Ok(test_downstairs_set.opts())
     }
 
     // Note the port number for downstairs in each test must be unique
@@ -1764,9 +1852,172 @@ mod test {
         Ok(())
     }
 
-    // The following tests work at the "guest" layer.  The volume
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_snapshot_backed_vol() -> Result<()> {
+        // Test using a "snapshot" (for this test, downstairs booted read-only)
+        // as a read-only parent.
+
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set =
+            TestDownstairsSet::new(54082, 54083, 54084, false)?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(
+            test_downstairs_set.opts(),
+            0,
+            None,
+        )?;
+
+        volume.activate(0)?;
+
+        let random_buffer = {
+            let mut random_buffer = vec![0u8; volume.total_size()? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )?
+            .block_wait()?;
+
+        volume.deactivate()?.block_wait()?;
+
+        let mut active_check_counter = 0;
+        while volume.query_is_active()? {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            active_check_counter += 1;
+            if active_check_counter > 10 {
+                panic!("took too long to deactivate!");
+            }
+        }
+
+        drop(volume);
+
+        test_downstairs_set.reboot_read_only()?;
+
+        // Validate that this now accepts reads and flushes, but rejects writes
+        {
+            let mut volume = Volume::new(BLOCK_SIZE as u64);
+            volume.add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                0,
+                None,
+            )?;
+
+            volume.activate(0)?;
+
+            let buffer = Buffer::new(volume.total_size()? as usize);
+            tokio::task::block_in_place(|| {
+                volume.read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )
+            })?
+            .block_wait()?;
+
+            assert_eq!(*buffer.as_vec(), random_buffer);
+
+            assert!(volume
+                .write(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    Bytes::from(vec![0u8; BLOCK_SIZE]),
+                )
+                .is_err());
+
+            volume.flush(None)?.block_wait()?;
+        }
+
+        // create a new volume, layering a new set of downstairs on top of the
+        // read-only one we just (re)booted
+        let top_layer_opts = three_downstairs(54085, 54086, 54087, false)?;
+        let bottom_layer_opts = test_downstairs_set.opts();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts: top_layer_opts,
+                    gen: 0,
+                }],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Volume {
+                        id: Uuid::new_v4(),
+                        block_size: BLOCK_SIZE as u64,
+                        sub_volumes: vec![VolumeConstructionRequest::Region {
+                            block_size: BLOCK_SIZE as u64,
+                            opts: bottom_layer_opts,
+                            gen: 0,
+                        }],
+                        read_only_parent: None,
+                    },
+                )),
+            };
+
+        // XXX Crucible uses std::sync::mpsc::Receiver, not
+        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
+        // Remove that when Crucible changes over to the tokio mpsc.
+        let volume =
+            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+        volume.activate(0)?;
+
+        // Validate that source blocks originally come from the read-only parent
+        {
+            let buffer = Buffer::new(volume.total_size()? as usize);
+            tokio::task::block_in_place(|| {
+                volume.read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )
+            })?
+            .block_wait()?;
+
+            assert_eq!(*buffer.as_vec(), random_buffer);
+        }
+
+        // Validate a flush works
+        volume.flush(None)?.block_wait()?;
+
+        // Write one block of 0x00 in, validate with a read
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0u8; BLOCK_SIZE]),
+            )?
+            .block_wait()?;
+
+        {
+            let buffer = Buffer::new(volume.total_size()? as usize);
+            tokio::task::block_in_place(|| {
+                volume.read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )
+            })?
+            .block_wait()?;
+
+            let buffer_vec = buffer.as_vec();
+
+            assert_eq!(buffer_vec[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
+            assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+        }
+
+        // Validate a flush still works
+        volume.flush(None)?.block_wait()?;
+
+        Ok(())
+    }
+
+    // The following tests work at the "guest" layer. The volume
     // layers above (in general) will eventually call a BlockIO trait
-    // on a guest layer.  Port numbers from this point below should
+    // on a guest layer. Port numbers from this point below should
     // start at 55001 and go up from there.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
