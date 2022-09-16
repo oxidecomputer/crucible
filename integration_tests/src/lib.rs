@@ -1888,15 +1888,6 @@ mod test {
 
         volume.deactivate()?.block_wait()?;
 
-        let mut active_check_counter = 0;
-        while volume.query_is_active()? {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            active_check_counter += 1;
-            if active_check_counter > 10 {
-                panic!("took too long to deactivate!");
-            }
-        }
-
         drop(volume);
 
         test_downstairs_set.reboot_read_only()?;
