@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -129,10 +129,12 @@ impl Inner {
         Ok(())
     }
 
-    /*
-     * For a given block, return all encryption contexts since last flush.
-     * Order so latest is last.
-     */
+    /// For a given block range, return all encryption contexts since the last
+    /// flush. `get_hashes` returns a `Vec<Vec<u64>>` of length equal to
+    /// `count`. Each `Vec<u64>` inside this parent Vec contains all
+    /// contexts for a single block, ordered so the latest context is last.
+    /// If the region is not using encryption, the inner Vecs will all be
+    /// empty, but the outer Vec will still be of length `count`.
     fn get_encryption_contexts(
         &self,
         block: u64,
@@ -166,10 +168,10 @@ impl Inner {
         Ok(results)
     }
 
-    /*
-     * For a given block range, return all hashes since last flush. Order so
-     * latest is last.
-     */
+    /// For a given block range, return all hashes since the last flush.
+    /// `get_hashes` returns a `Vec<Vec<u64>>` of length equal to `count`. Each
+    /// `Vec<u64>` inside this parent Vec contains all hashes for a single
+    /// block, ordered so the latest hash is last.
     pub fn get_hashes(&self, block: u64, count: u64) -> Result<Vec<Vec<u64>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
         let stmt = "SELECT block, hash FROM integrity_hashes \
@@ -1119,8 +1121,8 @@ impl Extent {
                     + 1;
 
                 // Query hashes for the write range.
-                // XXX we should add a query that doesnt actually give us back
-                // the data, just checks for its presence
+                // TODO we should consider adding a query that doesnt actually
+                // give us back the data, just checks for its presence.
                 let hashes = inner.get_hashes(
                     first_write.offset.value,
                     n_contiguous_writes as u64,
@@ -1164,10 +1166,10 @@ impl Extent {
         tx.commit()?;
 
         // Buffer writes for fewer syscalls. The 65536 buffer size here is
-        // chosen somewhat arbitrarily. We could reimplement this ourselves
-        // without BufWriter but I don't see a reason to at the moment.
-        let mut buffered_writer = BufWriter::with_capacity(65536, &inner.file);
+        // chosen somewhat arbitrarily.
+        let mut write_buffer = [0u8; 65536];
 
+        let mut bytes_in_run = 0;
         let mut next_block_in_run = u64::MAX;
         for write in writes {
             let block = write.offset.value;
@@ -1176,19 +1178,35 @@ impl Extent {
                 continue;
             }
 
-            // Seeking flushes the buffer so only do it when we need to
+            // If the current write isn't contiguous with previous writes,
+            // write our buffer to the file and seek.
             if block != next_block_in_run {
-                buffered_writer
-                    .seek(SeekFrom::Start(block * self.block_size))?;
+                if bytes_in_run > 0 {
+                    inner.file.write_all(&write_buffer[..bytes_in_run])?;
+                    bytes_in_run = 0;
+                }
+
+                // Write any buffered data, and then seek
+                inner.file.seek(SeekFrom::Start(block * self.block_size))?;
             }
 
-            buffered_writer.write_all(&write.data)?;
+            // If the write buffer is full, write out to the file
+            if write_buffer.len() - bytes_in_run < self.block_size as usize {
+                inner.file.write_all(&write_buffer[..bytes_in_run])?;
+                bytes_in_run = 0;
+            }
+
+            write_buffer[bytes_in_run..][..self.block_size as usize]
+                .copy_from_slice(&write.data);
+            bytes_in_run += self.block_size as usize;
 
             next_block_in_run = block + 1;
         }
 
-        // writes remaining buffer without calling flush() on the file handle.
-        drop(buffered_writer);
+        // Write any remaining buffered data
+        if bytes_in_run > 0 {
+            inner.file.write_all(&write_buffer[..bytes_in_run])?;
+        }
 
         Ok(())
     }
