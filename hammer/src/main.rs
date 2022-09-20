@@ -166,7 +166,11 @@ fn main() -> Result<()> {
     println!("Initial Handing off to CPF {}", cpf_idx);
     cpfs[cpf_idx].activate(generation_number)?;
     generation_number += 1;
-    println!("Initial Hand off to CPF {} {:?}", cpf_idx, cpfs[cpf_idx].uuid());
+    println!(
+        "Initial Hand off to CPF {} {:?}",
+        cpf_idx,
+        cpfs[cpf_idx].uuid()
+    );
 
     if opt.verify_isolation {
         println!("clearing...");
@@ -196,7 +200,12 @@ fn main() -> Result<()> {
             cpf.activate(generation_number)?;
             generation_number += 1;
 
-            println!("Round {} Handed off to CPF {} {:?}", idx, cpf_idx, cpf.uuid());
+            println!(
+                "Round {} Handed off to CPF {} {:?}",
+                idx,
+                cpf_idx,
+                cpf.uuid()
+            );
 
             cpf
         } else {
