@@ -10,7 +10,6 @@ use std::{cmp, io};
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tokio::runtime::Builder;
 
 use crucible::*;
 
@@ -89,8 +88,8 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
-    let volume_size = crucible.total_size()?;
+async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
+    let volume_size = crucible.total_size().await?;
 
     // If num_bytes is None, we take that to mean "read to the end of the
     // region"
@@ -104,7 +103,7 @@ fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         return Ok(());
     }
 
-    let native_block_size = crucible.get_block_size()?;
+    let native_block_size = crucible.get_block_size().await?;
 
     // Check that the read is fully within the region
     if opt.byte_offset + num_bytes > volume_size {
@@ -145,14 +144,14 @@ fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let buffer = Buffer::new(native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        let mut waiter = crucible.read(offset, buffer.clone())?;
-        waiter.block_wait()?;
+        let waiter = crucible.read(offset, buffer.clone()).await?;
+        waiter.wait().await?;
 
         // write only (block size - misalignment) bytes
         // So say we have an offset of 5. we're misaligned by 5 bytes, so we
         // read 5 bytes we don't need. we skip those 5 bytes then write
         // the rest to the output
-        let bytes = buffer.as_vec();
+        let bytes = buffer.as_vec().await;
         output.write_all(
             &bytes[offset_misalignment as usize
                 ..(offset_misalignment + alignment_bytes) as usize],
@@ -188,7 +187,7 @@ fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         // queue. We re-use the buffers to avoid lots of allocations
         let w_buf =
             Buffer::new((opt.iocmd_block_count * native_block_size) as usize);
-        let w_waiter = crucible.read(offset, w_buf.clone())?;
+        let w_waiter = crucible.read(offset, w_buf.clone()).await?;
         buffers.push_back(w_buf);
         waiters.push_back(w_waiter);
 
@@ -197,11 +196,11 @@ fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         if waiters.len() == opt.pipeline_length {
             // unwrapping is safe because of the length check
             let r_buf = buffers.pop_front().unwrap();
-            let mut r_waiter = waiters.pop_front().unwrap();
+            let r_waiter = waiters.pop_front().unwrap();
 
             // drain the buffer to the output file
-            r_waiter.block_wait()?;
-            output.write_all(&r_buf.as_vec())?;
+            r_waiter.wait().await?;
+            output.write_all(&r_buf.as_vec().await)?;
         }
     }
 
@@ -209,11 +208,11 @@ fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
     while !waiters.is_empty() {
         // unwrapping is safe because of the length check
         let r_buf = buffers.pop_front().unwrap();
-        let mut r_waiter = waiters.pop_front().unwrap();
+        let r_waiter = waiters.pop_front().unwrap();
 
         // drain the buffer to the output file
-        r_waiter.block_wait()?;
-        output.write_all(&r_buf.as_vec())?;
+        r_waiter.wait().await?;
+        output.write_all(&r_buf.as_vec().await)?;
     }
 
     // Issue our final read command, if any. This could be interleaved with
@@ -226,19 +225,89 @@ fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let buffer = Buffer::new((blocks * native_block_size) as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        let mut waiter = crucible.read(offset, buffer.clone())?;
-        waiter.block_wait()?;
-        output.write_all(&buffer.as_vec()[0..remainder as usize])?;
+        let waiter = crucible.read(offset, buffer.clone()).await?;
+        waiter.wait().await?;
+        output.write_all(&buffer.as_vec().await[0..remainder as usize])?;
     }
 
     Ok(())
 }
 
-fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
+// We need to run this at the end to handle the remainder bytes, but we also
+// need to do the exact same thing if the input stream ends early. So
+// let's not copy-paste
+// - write all block-aligned data remaining
+// - read/mod/write the last block if necessary
+// - issue a flush
+// - block on all waiters
+async fn write_remainder_and_finalize<T: BlockIO>(
+    crucible: Arc<T>,
+    mut w_buf: BytesMut,
+    offset: Block,
+    n_read: usize,
+    native_block_size: u64,
+    mut waiters: VecDeque<BlockReqWaiter>,
+) -> Result<()> {
+    // the input stream ended,
+    // - read/mod/write for alignment
+    // - block on all waiters
+
+    // uflow short for underflow, as we're underflowing are normal iocmd
+    // block
+    let uflow_blocks = n_read as u64 / native_block_size;
+    let uflow_remainder = n_read as u64 % native_block_size;
+
+    if uflow_remainder == 0 {
+        // no need to RMW, just write
+        w_buf.resize(n_read, 0);
+        let w_waiter = crucible.write(offset, w_buf.freeze()).await?;
+        waiters.push_back(w_waiter);
+    } else {
+        // RMW oof
+
+        // Adjust buffer to be block-aligned to our data
+        w_buf.resize(((uflow_blocks + 1) * native_block_size) as usize, 0);
+
+        // How many bytes we need to copy into the end of w_buf
+        let uflow_backfill = (native_block_size - uflow_remainder) as usize;
+
+        // First, read the final partial-block
+        let uflow_offset = Block::new(
+            offset.value + uflow_blocks,
+            native_block_size.trailing_zeros(),
+        );
+        let uflow_r_buf = Buffer::new(native_block_size as usize);
+        let r_waiter = crucible.read(uflow_offset, uflow_r_buf.clone()).await?;
+        r_waiter.wait().await?;
+
+        // Copy it into w_buf
+        let r_bytes = uflow_r_buf.as_vec().await;
+        w_buf[n_read..n_read + uflow_backfill]
+            .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
+
+        // Issue the write
+        let w_waiter = crucible.write(offset, w_buf.freeze()).await?;
+        waiters.push_back(w_waiter);
+    }
+
+    // Flush
+    let flush_waiter = crucible.flush(None).await?;
+    waiters.push_back(flush_waiter);
+
+    // Wait for all the writes
+    while !waiters.is_empty() {
+        let w_waiter = waiters.pop_front().unwrap();
+        w_waiter.wait().await?;
+    }
+
+    Ok(())
+}
+
+async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
     // A lot of this is going to be repeat from cmd_read, but it is
     // subtly different to handle things like read-modify-write for partial
     // blocks.
-    let volume_size = crucible.total_size()?;
+    let volume_size = crucible.total_size().await?;
 
     // If num_bytes is None, we take that to mean "write to the end of the
     // region" Of course, if the input stream ends first, we'll stop early.
@@ -252,7 +321,7 @@ fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         return Ok(());
     }
 
-    let native_block_size = crucible.get_block_size()?;
+    let native_block_size = crucible.get_block_size().await?;
 
     // Check that the write is fully within the region
     if opt.byte_offset + num_bytes > volume_size {
@@ -286,10 +355,10 @@ fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let buffer = Buffer::new(native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        let mut r_waiter = crucible.read(offset, buffer.clone())?;
-        r_waiter.block_wait()?;
+        let r_waiter = crucible.read(offset, buffer.clone()).await?;
+        r_waiter.wait().await?;
 
-        let mut w_vec = buffer.as_vec().clone();
+        let mut w_vec = buffer.as_vec().await.clone();
         // Write our data into the buffer
         let bytes_read = input.read(
             &mut w_vec[offset_misalignment as usize
@@ -297,8 +366,8 @@ fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         )?;
         let w_bytes = Bytes::from(w_vec);
 
-        let mut w_waiter = crucible.write(offset, w_bytes)?;
-        w_waiter.block_wait()?;
+        let w_waiter = crucible.write(offset, w_bytes).await?;
+        w_waiter.wait().await?;
 
         if bytes_read != alignment_bytes as usize {
             // underrun, exit early
@@ -325,75 +394,6 @@ fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
     let cmd_count = num_bytes / (opt.iocmd_block_count * native_block_size);
     let remainder = num_bytes % (opt.iocmd_block_count * native_block_size);
 
-    // We need to run this at the end to handle the remainder bytes, but we also
-    // need to do the exact same thing if the input stream ends early. So
-    // let's not copy-paste
-    // - write all block-aligned data remaining
-    // - read/mod/write the last block if necessary
-    // - issue a flush
-    // - block on all waiters
-    let write_remainder_and_finalize = |mut w_buf: BytesMut,
-                                        offset: Block,
-                                        n_read: usize,
-                                        mut waiters: VecDeque<
-        BlockReqWaiter,
-    >|
-     -> Result<()> {
-        // the input stream ended,
-        // - read/mod/write for alignment
-        // - block on all waiters
-
-        // uflow short for underflow, as we're underflowing are normal iocmd
-        // block
-        let uflow_blocks = n_read as u64 / native_block_size;
-        let uflow_remainder = n_read as u64 % native_block_size;
-
-        if uflow_remainder == 0 {
-            // no need to RMW, just write
-            w_buf.resize(n_read, 0);
-            let w_waiter = crucible.write(offset, w_buf.freeze())?;
-            waiters.push_back(w_waiter);
-        } else {
-            // RMW oof
-
-            // Adjust buffer to be block-aligned to our data
-            w_buf.resize(((uflow_blocks + 1) * native_block_size) as usize, 0);
-
-            // How many bytes we need to copy into the end of w_buf
-            let uflow_backfill = (native_block_size - uflow_remainder) as usize;
-
-            // First, read the final partial-block
-            let uflow_offset = Block::new(
-                offset.value + uflow_blocks,
-                native_block_size.trailing_zeros(),
-            );
-            let uflow_r_buf = Buffer::new(native_block_size as usize);
-            let mut r_waiter =
-                crucible.read(uflow_offset, uflow_r_buf.clone())?;
-            r_waiter.block_wait()?;
-
-            // Copy it into w_buf
-            let r_bytes = uflow_r_buf.as_vec();
-            w_buf[n_read..n_read + uflow_backfill]
-                .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
-
-            // Issue the write
-            let w_waiter = crucible.write(offset, w_buf.freeze())?;
-            waiters.push_back(w_waiter);
-        }
-
-        // Flush
-        let flush_waiter = crucible.flush(None)?;
-        waiters.push_back(flush_waiter);
-
-        // Wait for all the writes
-        while !waiters.is_empty() {
-            let mut w_waiter = waiters.pop_front().unwrap();
-            w_waiter.block_wait()?;
-        }
-        Ok(())
-    };
-
     // Issue all of our write commands
     for i in 0..cmd_count {
         // which blocks in the underlying store are we accessing?
@@ -417,19 +417,25 @@ fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         if n_read < w_buf.capacity() {
             eprintln!("n_read was {}, returning early", n_read);
             return write_remainder_and_finalize(
-                w_buf, offset, n_read, waiters,
-            );
+                crucible,
+                w_buf,
+                offset,
+                n_read,
+                native_block_size,
+                waiters,
+            )
+            .await;
         } else {
             eprintln!("writing full iocmd");
             // good to go for a write
-            let w_waiter = crucible.write(offset, w_buf.freeze())?;
+            let w_waiter = crucible.write(offset, w_buf.freeze()).await?;
             waiters.push_back(w_waiter);
         }
 
         // Block on waiters so we dont get a backlog
         if waiters.len() == opt.pipeline_length {
-            let mut w_waiter = waiters.pop_front().unwrap();
-            w_waiter.block_wait()?;
+            let w_waiter = waiters.pop_front().unwrap();
+            w_waiter.wait().await?;
         }
     }
 
@@ -453,13 +459,22 @@ fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
                 }
             }
         }
-        return write_remainder_and_finalize(w_buf, offset, n_read, waiters);
+        return write_remainder_and_finalize(
+            crucible,
+            w_buf,
+            offset,
+            n_read,
+            native_block_size,
+            waiters,
+        )
+        .await;
     }
 
     Ok(())
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let opt = opts()?;
     let crucible_opts = CrucibleOpts {
         target: opt.target.clone(),
@@ -473,30 +488,18 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    /*
-     * Crucible needs a runtime as it will create several async tasks to
-     * handle adding new IOs, communication with the three downstairs
-     * instances, and completing IOs.
-     */
-    let runtime = Builder::new_multi_thread()
-        .worker_threads(10)
-        .thread_name("crucible-tokio")
-        .enable_all()
-        .build()
-        .unwrap();
-
     // TODO: volumes?
     let guest = Arc::new(Guest::new());
 
-    runtime.spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
+    tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
     eprintln!("Crucible runtime is spawned");
 
     // IO time
-    guest.activate(opt.gen)?;
+    guest.activate(opt.gen).await?;
 
     let act_result = match opt.subcommand {
-        CruddAct::Write => cmd_write(&opt, guest.clone()),
-        CruddAct::Read => cmd_read(&opt, guest.clone()),
+        CruddAct::Write => cmd_write(&opt, guest.clone()).await,
+        CruddAct::Read => cmd_read(&opt, guest.clone()).await,
     };
     match act_result {
         Ok(()) => {}
@@ -505,7 +508,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut deactivation = guest.deactivate()?;
-    deactivation.block_wait()?;
+    let deactivation = guest.deactivate().await?;
+    deactivation.wait().await?;
     Ok(())
 }

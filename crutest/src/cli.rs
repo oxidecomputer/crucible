@@ -198,7 +198,7 @@ enum CliCommand {
  * After verify, we truncate the data to 10 fields and return that so
  * the cli server can send it back to the client for display.
  */
-fn cli_read(
+async fn cli_read(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
     block_index: usize,
@@ -213,11 +213,15 @@ fn cli_read(
     let vec: Vec<u8> = vec![255; length];
     let data = crucible::Buffer::from_vec(vec);
 
-    println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
-    let mut waiter = guest.read(offset, data.clone())?;
-    waiter.block_wait()?;
+    println!(
+        "Read  at block {:5}, len:{:7}",
+        offset.value,
+        data.len().await
+    );
+    let waiter = guest.read(offset, data.clone()).await?;
+    waiter.wait().await?;
 
-    let mut dl = data.as_vec().to_vec();
+    let mut dl = data.as_vec().await.to_vec();
     match validate_vec(
         dl.clone(),
         block_index,
@@ -243,7 +247,7 @@ fn cli_read(
 /*
  * A wrapper around write that just picks a random offset.
  */
-fn rand_write(
+async fn rand_write(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
 ) -> Result<(), CrucibleError> {
@@ -261,7 +265,7 @@ fn rand_write(
     let block_max = ri.total_blocks - size + 1;
     let block_index = rng.gen_range(0..block_max) as usize;
 
-    cli_write(guest, ri, block_index, size)
+    cli_write(guest, ri, block_index, size).await
 }
 
 /*
@@ -269,7 +273,7 @@ fn rand_write(
  * Data is generated based on the value in the internal write counter.
  * Update the internal write counter so we have something to compare to.
  */
-fn cli_write(
+async fn cli_write(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
     block_index: usize,
@@ -290,8 +294,8 @@ fn cli_write(
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
-    let mut waiter = guest.write(offset, data)?;
-    waiter.block_wait()?;
+    let waiter = guest.write(offset, data).await?;
+    waiter.wait().await?;
 
     Ok(())
 }
@@ -304,7 +308,7 @@ fn cli_write(
  * If we do believe the block is written to, then we don't update our
  * internal counter and we don't expect our write to change the contents.
  */
-fn cli_write_unwritten(
+async fn cli_write_unwritten(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
     block_index: usize,
@@ -341,8 +345,8 @@ fn cli_write_unwritten(
         data.len(),
     );
 
-    let mut waiter = guest.write_unwritten(offset, data)?;
-    waiter.block_wait()?;
+    let waiter = guest.write_unwritten(offset, data).await?;
+    waiter.wait().await?;
 
     Ok(())
 }
@@ -716,12 +720,12 @@ async fn process_cli_command(
     verify_output: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
-        CliMessage::Activate(gen) => match guest.activate(gen) {
+        CliMessage::Activate(gen) => match guest.activate(gen).await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
-        CliMessage::Deactivate => match guest.deactivate() {
-            Ok(mut waiter) => match waiter.block_wait() {
+        CliMessage::Deactivate => match guest.deactivate().await {
+            Ok(waiter) => match waiter.wait().await {
                 Ok(_) => fw.send(CliMessage::DoneOk).await,
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             },
@@ -818,17 +822,17 @@ async fn process_cli_command(
         }
         CliMessage::Flush => {
             println!("Flush");
-            match guest.flush(None) {
+            match guest.flush(None).await {
                 Ok(_) => fw.send(CliMessage::DoneOk).await,
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
         }
-        CliMessage::IsActive => match guest.query_is_active() {
+        CliMessage::IsActive => match guest.query_is_active().await {
             Ok(a) => fw.send(CliMessage::ActiveIs(a)).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
         CliMessage::InfoPlease => {
-            let new_ri = get_region_info(guest);
+            let new_ri = get_region_info(guest).await;
             match new_ri {
                 Ok(new_ri) => {
                     let bs = new_ri.block_size;
@@ -843,7 +847,7 @@ async fn process_cli_command(
                      */
                     if !*wc_filled {
                         if let Some(vi) = verify_input {
-                            load_write_log(guest, ri, vi, false)?;
+                            load_write_log(guest, ri, vi, false).await?;
                             *wc_filled = true;
                         }
                     }
@@ -893,7 +897,7 @@ async fn process_cli_command(
                 let block_max = ri.total_blocks - size + 1;
                 let offset = rng.gen_range(0..block_max);
 
-                let res = cli_read(guest, ri, offset, size);
+                let res = cli_read(guest, ri, offset, size).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
@@ -904,7 +908,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match rand_write(guest, ri) {
+                match rand_write(guest, ri).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -917,11 +921,11 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                let res = cli_read(guest, ri, offset, len);
+                let res = cli_read(guest, ri, offset, len).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
-        CliMessage::ShowWork => match guest.show_work() {
+        CliMessage::ShowWork => match guest.show_work().await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
@@ -932,7 +936,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match cli_write(guest, ri, offset, len) {
+                match cli_write(guest, ri, offset, len).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -945,14 +949,14 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match cli_write_unwritten(guest, ri, offset) {
+                match cli_write_unwritten(guest, ri, offset).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
             }
         }
         CliMessage::Uuid => {
-            let uuid = guest.query_upstairs_uuid()?;
+            let uuid = guest.query_upstairs_uuid().await?;
             fw.send(CliMessage::MyUuid(uuid)).await
         }
         CliMessage::Verify => {
@@ -962,7 +966,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match verify_volume(guest, ri, false) {
+                match verify_volume(guest, ri, false).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         println!("Verify failed with {:?}", e);

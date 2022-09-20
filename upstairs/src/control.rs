@@ -123,10 +123,10 @@ async fn upstairs_fill_info(
 ) -> Result<HttpResponseOk<UpstairsStats>, HttpError> {
     let api_context = rqctx.context();
 
-    let act = api_context.up.active.lock().unwrap().up_state;
-    let ds_state = api_context.up.ds_state_copy();
-    let up_jobs = api_context.up.guest.guest_work.lock().unwrap().active.len();
-    let ds = api_context.up.downstairs.lock().unwrap();
+    let act = api_context.up.active.lock().await.up_state;
+    let ds_state = api_context.up.ds_state_copy().await;
+    let up_jobs = api_context.up.guest.guest_work.lock().await.active.len();
+    let ds = api_context.up.downstairs.lock().await;
     let ds_jobs = ds.active.len();
     let repair_done = ds.reconcile_repaired;
     let repair_needed = ds.reconcile_repair_needed;
@@ -165,18 +165,19 @@ async fn take_snapshot(
     let apictx = rqctx.context();
     let take_snapshot_params = take_snapshot_params.into_inner();
 
-    let mut waiter = apictx
+    let waiter = apictx
         .up
         .guest
         .flush(Some(SnapshotDetails {
             snapshot_name: take_snapshot_params.snapshot_name.clone(),
         }))
+        .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-    tokio::task::block_in_place(|| -> Result<(), CrucibleError> {
-        waiter.block_wait()
-    })
-    .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+    waiter
+        .wait()
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     Ok(HttpResponseCreated(TakeSnapshotResponse {
         snapshot_name: take_snapshot_params.snapshot_name,

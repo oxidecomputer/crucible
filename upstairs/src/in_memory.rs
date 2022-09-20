@@ -20,37 +20,38 @@ impl InMemoryBlockIO {
     }
 }
 
+#[async_trait]
 impl BlockIO for InMemoryBlockIO {
-    fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
         Ok(())
     }
 
-    fn query_is_active(&self) -> Result<bool, CrucibleError> {
+    async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         Ok(true)
     }
 
-    fn total_size(&self) -> Result<u64, CrucibleError> {
-        Ok(self.bytes.lock().unwrap().len() as u64)
+    async fn total_size(&self) -> Result<u64, CrucibleError> {
+        Ok(self.bytes.lock().await.len() as u64)
     }
 
-    fn get_block_size(&self) -> Result<u64, CrucibleError> {
+    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.block_size)
     }
 
-    fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
+    async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
 
-    fn read(
+    async fn read(
         &self,
         offset: Block,
         data: Buffer,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut data_vec = data.as_vec();
-        let mut owned_vec = data.owned_vec();
+        let mut data_vec = data.as_vec().await;
+        let mut owned_vec = data.owned_vec().await;
 
-        let bytes = self.bytes.lock().unwrap();
-        let owned = self.owned.lock().unwrap();
+        let bytes = self.bytes.lock().await;
+        let owned = self.owned.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
@@ -59,16 +60,16 @@ impl BlockIO for InMemoryBlockIO {
             owned_vec[i] = owned[start + i];
         }
 
-        BlockReqWaiter::immediate()
+        BlockReqWaiter::immediate().await
     }
 
-    fn write(
+    async fn write(
         &self,
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut bytes = self.bytes.lock().unwrap();
-        let mut owned = self.owned.lock().unwrap();
+        let mut bytes = self.bytes.lock().await;
+        let mut owned = self.owned.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
@@ -77,16 +78,16 @@ impl BlockIO for InMemoryBlockIO {
             owned[start + i] = true;
         }
 
-        BlockReqWaiter::immediate()
+        BlockReqWaiter::immediate().await
     }
 
-    fn write_unwritten(
+    async fn write_unwritten(
         &self,
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut bytes = self.bytes.lock().unwrap();
-        let mut owned = self.owned.lock().unwrap();
+        let mut bytes = self.bytes.lock().await;
+        let mut owned = self.owned.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
@@ -97,17 +98,17 @@ impl BlockIO for InMemoryBlockIO {
             }
         }
 
-        BlockReqWaiter::immediate()
+        BlockReqWaiter::immediate().await
     }
 
-    fn flush(
+    async fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate()
+        BlockReqWaiter::immediate().await
     }
 
-    fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+    async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,

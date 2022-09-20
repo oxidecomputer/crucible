@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use clap::Parser;
 use rand::Rng;
-use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -67,7 +66,8 @@ macro_rules! ceiling_div {
     };
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let opt = opts()?;
 
     let crucible_opts = CrucibleOpts {
@@ -82,18 +82,6 @@ fn main() -> Result<()> {
         control: None,
         read_only: false,
     };
-
-    /*
-     * Crucible needs a runtime as it will create several async tasks to
-     * handle adding new IOs, communication with the three downstairs
-     * instances, and completing IOs.
-     */
-    let runtime = Builder::new_multi_thread()
-        .worker_threads(10)
-        .thread_name("crucible-tokio")
-        .enable_all()
-        .build()
-        .unwrap();
 
     /*
      * If any of our async tasks in our runtime panic, then we should
@@ -116,15 +104,15 @@ fn main() -> Result<()> {
     }
 
     let guest = Arc::new(guest);
-    runtime.spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
+    tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
     println!("Crucible runtime is spawned");
 
-    guest.activate(opt.gen)?;
+    guest.activate(opt.gen).await?;
 
     let mut rng = rand::thread_rng();
 
-    let bsz: u64 = guest.query_block_size()?;
-    let total_blocks: u64 = guest.query_total_size()? / bsz;
+    let bsz: u64 = guest.query_block_size().await?;
+    let total_blocks: u64 = guest.query_total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
         io_size_in_bytes
@@ -166,24 +154,28 @@ fn main() -> Result<()> {
                 rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz as u64);
 
             if rng.gen::<bool>() {
-                let waiter = guest.write_to_byte_offset(
-                    offset * bsz,
-                    write_buffers[i].clone(),
-                )?;
+                let waiter = guest
+                    .write_to_byte_offset(
+                        offset * bsz,
+                        write_buffers[i].clone(),
+                    )
+                    .await?;
 
                 waiters.push(waiter);
             } else {
-                let waiter = guest.read_from_byte_offset(
-                    offset * bsz,
-                    read_buffers[i].clone(),
-                )?;
+                let waiter = guest
+                    .read_from_byte_offset(
+                        offset * bsz,
+                        read_buffers[i].clone(),
+                    )
+                    .await?;
 
                 waiters.push(waiter);
             }
         }
 
-        for mut waiter in waiters {
-            waiter.block_wait()?;
+        for waiter in waiters {
+            waiter.wait().await?;
             io_operations_sent += ceiling_div!(io_size, 16 * 1024 * 1024);
             bw_consumed += io_size;
 
@@ -208,17 +200,17 @@ fn main() -> Result<()> {
     }
 
     // One last flush
-    guest.flush(None)?;
+    guest.flush(None).await?.wait().await?;
 
     println!("Done ok, waiting on show_work");
 
     loop {
-        let wc = guest.show_work()?;
+        let wc = guest.show_work().await?;
         println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 
     println!("IOPS: {:?}", iops);

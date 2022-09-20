@@ -66,49 +66,54 @@ impl IOSpan {
     }
 
     #[instrument(skip(block_io))]
-    pub fn read_affected_blocks_from_volume<T: BlockIO>(
+    pub async fn read_affected_blocks_from_volume<T: BlockIO>(
         &mut self,
         block_io: &Arc<T>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        block_io.read(
-            Block::new(
-                self.affected_block_numbers[0],
-                self.block_size.trailing_zeros(),
-            ),
-            self.buffer.clone(),
-        )
+        block_io
+            .read(
+                Block::new(
+                    self.affected_block_numbers[0],
+                    self.block_size.trailing_zeros(),
+                ),
+                self.buffer.clone(),
+            )
+            .await
     }
 
     #[instrument(skip(block_io))]
-    pub fn write_affected_blocks_to_volume<T: BlockIO>(
+    pub async fn write_affected_blocks_to_volume<T: BlockIO>(
         &self,
         block_io: &Arc<T>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        let bytes = Bytes::from(self.buffer.as_vec().clone());
-        block_io.write(
-            Block::new(
-                self.affected_block_numbers[0],
-                self.block_size.trailing_zeros(),
-            ),
-            bytes,
-        )
+        let bytes = Bytes::from(self.buffer.as_vec().await.clone());
+
+        block_io
+            .write(
+                Block::new(
+                    self.affected_block_numbers[0],
+                    self.block_size.trailing_zeros(),
+                ),
+                bytes,
+            )
+            .await
     }
 
     #[instrument]
-    pub fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
+    pub async fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
         assert_eq!(data.len(), self.sz as usize);
 
         for (i, item) in data.iter_mut().enumerate() {
-            *item = self.buffer.as_vec()[self.phase as usize + i];
+            *item = self.buffer.as_vec().await[self.phase as usize + i];
         }
     }
 
     #[instrument]
-    pub fn write_from_buffer_into_blocks(&self, data: &[u8]) {
+    pub async fn write_from_buffer_into_blocks(&self, data: &[u8]) {
         assert_eq!(data.len(), self.sz as usize);
 
         for (i, item) in data.iter().enumerate() {
-            self.buffer.as_vec()[self.phase as usize + i] = *item;
+            self.buffer.as_vec().await[self.phase as usize + i] = *item;
         }
     }
 }
@@ -147,8 +152,8 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         self.sz
     }
 
-    pub fn activate(&mut self, gen: u64) -> Result<(), CrucibleError> {
-        if let Err(e) = self.block_io.activate(gen) {
+    pub async fn activate(&mut self, gen: u64) -> Result<(), CrucibleError> {
+        if let Err(e) = self.block_io.activate(gen).await {
             match e {
                 CrucibleError::UpstairsAlreadyActive => {
                     // underlying block io is already active, but pseudo file
@@ -160,17 +165,17 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
             }
         }
 
-        self.sz = self.block_io.total_size()?;
-        self.block_size = self.block_io.get_block_size()?;
-        self.uuid = self.block_io.get_uuid()?;
+        self.sz = self.block_io.total_size().await?;
+        self.block_size = self.block_io.get_block_size().await?;
+        self.uuid = self.block_io.get_uuid().await?;
 
         self.active = true;
 
         Ok(())
     }
 
-    pub fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        self.block_io.show_work()
+    pub async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+        self.block_io.show_work().await
     }
 
     pub fn uuid(&self) -> Uuid {
@@ -191,7 +196,10 @@ impl<T: BlockIO> Read for CruciblePseudoFile<T> {
             ));
         }
 
-        self._read(buf).map_err(|e| e.into())
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self._read(buf))
+        })
+        .map_err(|e| e.into())
     }
 }
 
@@ -204,7 +212,10 @@ impl<T: BlockIO> Write for CruciblePseudoFile<T> {
             ));
         }
 
-        self._write(buf).map_err(|e| e.into())
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self._write(buf))
+        })
+        .map_err(|e| e.into())
     }
 
     fn flush(&mut self) -> IOResult<()> {
@@ -215,7 +226,10 @@ impl<T: BlockIO> Write for CruciblePseudoFile<T> {
             ));
         }
 
-        self._flush().map_err(|e| e.into())
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self._flush())
+        })
+        .map_err(|e| e.into())
     }
 }
 
@@ -255,17 +269,18 @@ impl<T: BlockIO> Seek for CruciblePseudoFile<T> {
 }
 
 impl<T: BlockIO> CruciblePseudoFile<T> {
-    fn _read(&mut self, buf: &mut [u8]) -> Result<usize, CrucibleError> {
-        let _guard = self.rmw_lock.read().unwrap();
+    async fn _read(&mut self, buf: &mut [u8]) -> Result<usize, CrucibleError> {
+        let _guard = self.rmw_lock.read().await;
 
         let mut span =
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
-        let mut waiter =
-            span.read_affected_blocks_from_volume(&self.block_io)?;
-        waiter.block_wait()?;
+        let waiter = span
+            .read_affected_blocks_from_volume(&self.block_io)
+            .await?;
+        waiter.wait().await?;
 
-        span.read_from_blocks_into_buffer(buf);
+        span.read_from_blocks_into_buffer(buf).await;
 
         // TODO: for block devices, we can't increment offset past the
         // device size but we're supposed to be pretending to be a proper
@@ -275,7 +290,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         Ok(buf.len())
     }
 
-    fn _write(&mut self, buf: &[u8]) -> Result<usize, CrucibleError> {
+    async fn _write(&mut self, buf: &[u8]) -> Result<usize, CrucibleError> {
         let mut span =
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
@@ -290,27 +305,28 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
          * read portion of this lock and Crucible will sort it out.
          */
         if !span.is_block_regular() {
-            let _guard = self.rmw_lock.write().unwrap();
+            let _guard = self.rmw_lock.write().await;
 
-            let mut waiter =
-                span.read_affected_blocks_from_volume(&self.block_io)?;
-            waiter.block_wait()?;
+            let waiter = span
+                .read_affected_blocks_from_volume(&self.block_io)
+                .await?;
+            waiter.wait().await?;
 
-            span.write_from_buffer_into_blocks(buf);
+            span.write_from_buffer_into_blocks(buf).await;
 
-            let mut waiter =
-                span.write_affected_blocks_to_volume(&self.block_io)?;
-            waiter.block_wait()?;
+            let waiter =
+                span.write_affected_blocks_to_volume(&self.block_io).await?;
+            waiter.wait().await?;
         } else {
-            let _guard = self.rmw_lock.read().unwrap();
+            let _guard = self.rmw_lock.read().await;
 
             let offset = Block::new(
                 self.offset / self.block_size,
                 self.block_size.trailing_zeros(),
             );
             let bytes = BytesMut::from(buf);
-            let mut waiter = self.block_io.write(offset, bytes.freeze())?;
-            waiter.block_wait()?;
+            let waiter = self.block_io.write(offset, bytes.freeze()).await?;
+            waiter.wait().await?;
         }
 
         // TODO: can't increment offset past the device size
@@ -319,11 +335,11 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         Ok(buf.len())
     }
 
-    fn _flush(&mut self) -> Result<(), CrucibleError> {
-        let _guard = self.rmw_lock.write().unwrap();
+    async fn _flush(&mut self) -> Result<(), CrucibleError> {
+        let _guard = self.rmw_lock.write().await;
 
-        let mut waiter = self.block_io.flush(None)?;
-        waiter.block_wait()?;
+        let waiter = self.block_io.flush(None).await?;
+        waiter.wait().await?;
 
         Ok(())
     }
