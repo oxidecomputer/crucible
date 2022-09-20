@@ -133,6 +133,9 @@ pub trait BlockIO {
 /// order of probes an IO will hit as it works its way through the
 /// system.
 ///
+/// volume__*__start: This is when the volume layer has received an
+/// IO request and has started work on it.
+///
 /// gw__*__start: This is when the upstairs has taken work from the
 /// `guest` structure and created a new `gw_id` used to track this IO
 /// through the system.  At the point of this probe, we have already
@@ -164,10 +167,20 @@ pub trait BlockIO {
 ///
 /// gw__*__done: An IO is completed and the Upstairs has sent the
 /// completion notice to the guest.
+///
+/// reqwest__read__[start|done] a probe covering BlockIO reqwest read
+/// requests. These happen if a volume has a read only parent and either
+/// there is no sub volume, or the sub volume did not contain any data.
+///
+/// volume__*__done: An IO is completed at the volume layer.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
+    fn volume__read__start(_: u32, _: Uuid) {}
+    fn volume__write__start(_: u32, _: Uuid) {}
+    fn volume__writeunwritten__start(_: u32, _: Uuid) {}
+    fn volume__flush__start(_: u32, _: Uuid) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__write__unwritten__start(_: u64) {}
@@ -192,6 +205,12 @@ mod cdt {
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn reqwest__read__start(_: u32, _: Uuid) {}
+    fn reqwest__read__done(_: u32, _: Uuid) {}
+    fn volume__read__done(_: u32, _: Uuid) {}
+    fn volume__write__done(_: u32, _: Uuid) {}
+    fn volume__writeunwritten__done(_: u32, _: Uuid) {}
+    fn volume__flush__done(_: u32, _: Uuid) {}
 }
 
 pub fn deadline_secs(secs: u64) -> Instant {
@@ -290,6 +309,10 @@ async fn process_message(
         return Err(CrucibleError::UuidMismatch.into());
     }
 
+    // Process this operation.  If the processing results in the
+    // job being ready to ACK, then send a message on the ds_done
+    // channel.  Note that a failed IO still needs to ACK that failure
+    // back to the guest.
     if u.process_ds_operation(ds_id, up_coms.client_id, result)? {
         up_coms.ds_done_tx.send(ds_id).await?;
     }
@@ -1233,8 +1256,14 @@ where
                  * about it.  If we fail in process_message, we should
                  * handle it.
                  */
-                let _result =
-                    process_message(&up_c, &m, up_coms_c.clone()).await;
+                if let Err(e) =
+                    process_message(&up_c, &m, up_coms_c.clone()).await
+                {
+                    println!(
+                        "[{}] Error processing message: {}",
+                        up_coms_c.client_id, e
+                    );
+                }
 
                 if up_c.ds_deactivate(up_coms_c.client_id) {
                     bail!("[{}] exits after deactivation", up_coms_c.client_id);
@@ -1250,8 +1279,8 @@ where
             /*
              * We set biased so the loop will:
              * First make sure the pm task is still running.
-             * Second, get and look at messages received from the downstiars.
-             *   Some messages we can handle right here, but ACK's from
+             * Second, get and look at messages received from the downstairs.
+             *   Some messages we can handle right here, but ACKs from
              *   messages we sent are passed on to the pm task.
              *
              * By handling messages from the downstairs before sending
@@ -2891,7 +2920,7 @@ impl Downstairs {
          */
         if oldstate != IOState::InProgress {
             bail!(
-                "[{}] job completed while not InProgress: {}",
+                "[{}] job completed while not InProgress: {:?}",
                 client_id,
                 oldstate
             );
@@ -3135,7 +3164,7 @@ impl Downstairs {
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
-            // hasn't acked back yet. We check for NotAcked so we  don't
+            // hasn't acked back yet. We check for NotAcked so we don't
             // double count three done and return true if we already have
             // AckReady set.
             let wc = job.state_count();
@@ -4215,11 +4244,7 @@ impl Upstairs {
         let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
 
         for (eid, bo) in nwo {
-            requests.push(ReadRequest {
-                eid,
-                offset: bo,
-                num_blocks: 1,
-            });
+            requests.push(ReadRequest { eid, offset: bo });
         }
 
         sub.insert(next_id, 0); // XXX does this value matter?
@@ -5170,7 +5195,7 @@ impl Upstairs {
                 // Downstairs anymore? One could imagine setting that untrusted
                 // here:
                 //
-                // self.ds_transition(client_id, DsState::Untrusted);
+                // ds_transition_with_lock( ...  DsState::Untrusted);
             } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
                 // skip
             }
@@ -5194,7 +5219,12 @@ impl Upstairs {
                         writes: _,
                     }
                 ) {
-                    self.ds_transition(client_id, DsState::Failed);
+                    self.ds_transition_with_lock(
+                        ds,
+                        up_state,
+                        client_id,
+                        DsState::Failed,
+                    );
                 }
             }
         }
@@ -5506,8 +5536,8 @@ impl fmt::Display for IOState {
             IOState::Skipped => {
                 write!(f, "Skip")
             }
-            IOState::Error(e) => {
-                write!(f, " Err: {:?}", e)
+            IOState::Error(_) => {
+                write!(f, " Err")
             }
         }
     }
@@ -5692,6 +5722,7 @@ fn test_buffer_len_after_clone() {
 
     let new_buffer = data.clone();
     assert_eq!(new_buffer.len(), READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 #[test]
@@ -7260,7 +7291,7 @@ async fn up_listen(
                 flush_check = deadline_secs(flush_timeout.into());
             }
             _ = sleep_until(show_work_interval) => {
-                //show_all_work(up);
+                // show_all_work(up);
                 show_work_interval = deadline_secs(5);
             }
         }
@@ -7570,7 +7601,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     } else {
         println!(
-            "{0:>5} {1:>8} {2:>5} {3:>6} {4:>7} {5:>5} {6:>5} {7:>5} {8:>6}",
+            "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7} {5:>5} {6:>5} {7:>5} {8:>7}",
             "GW_ID",
             "ACK",
             "DSID",
@@ -7593,12 +7624,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     requests,
                 } => {
                     let job_type = "Read".to_string();
-                    let mut num_blocks = 0;
-
-                    for request in requests {
-                        num_blocks += request.num_blocks as usize;
-                    }
-
+                    let num_blocks = requests.len();
                     (job_type, num_blocks)
                 }
                 IOop::Write {
@@ -7659,7 +7685,7 @@ fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     }
                 }
             }
-            print!(" {0:>5}", job.replay);
+            print!(" {0:>6}", job.replay);
 
             println!();
         }

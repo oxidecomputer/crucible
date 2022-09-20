@@ -6,6 +6,7 @@ members = [
     "common",
     "control-client",
     "crucadm",
+    "crudd",
     "crutest",
     "downstairs",
     "dsc",
