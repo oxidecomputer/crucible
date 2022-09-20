@@ -44,8 +44,8 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
-verify_file=/tmp/repair_test_verify.data
-test_log=/tmp/verify_out.txt
+verify_file=/tmp/test_repair_verify.data
+test_log=/tmp/test_repair_out.txt
 ds_log_prefix=/tmp/test_repair_ds
 
 dump_args=()

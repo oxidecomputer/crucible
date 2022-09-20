@@ -12,34 +12,31 @@ SECONDS=0
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
-    rm -f /var/tmp/ds_test/up
-    touch /var/tmp/ds_test/stop
-    if [[ -n "$dsd_pid" ]]; then
-        kill "$dsd_pid"
-    fi
+    ${dsc} cmd shutdown
 }
 
-loop_log=/tmp/reconnect.log
-test_log=/tmp/reconnect_test.log
+loop_log=/tmp/test_reconnect_summary.log
+test_log=/tmp/test_reconnect.log
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 crucible_test="$BINDIR/crutest"
-if [[ ! -f "$crucible_test" ]]; then
+dsc="$BINDIR/dsc"
+if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]]; then
     echo "Can't find crucible-test binary at $crucible_test"
     exit 1
 fi
 
 echo "" > ${loop_log}
+echo "" > ${test_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-./tools/downstairs_daemon.sh -r -u >> "$test_log" 2>&1 &
-dsd_pid=$!
+${dsc} start --cleanup --create --extent-count 50 >> "$test_log" 2>&1 &
+dsc_pid=$!
 sleep 5
-
-if ! ps -p $dsd_pid > /dev/null; then
-    echo "downstairs_daemon failed to start"
+if ! ps -p $dsc_pid > /dev/null; then
+    echo "$dsc failed to start"
     exit 1
 fi
 
@@ -54,21 +51,20 @@ done
 if ! "$crucible_test" fill "${args[@]}" -q \
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
-    touch /var/tmp/ds_test/stop
-    exit 1
+    ${dsc} cmd shutdown
 fi
 
 # Allow the downstairs to start restarting now.
-rm -f /var/tmp/ds_test/up
+${dsc} cmd enable-random-stop
 sleep 5
 
 # Now run the quick crucible client test in a loop
-for i in {1..10}
+for i in {1..5}
 do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
-    "$crucible_test" generic "${args[@]}" \
+    "$crucible_test" generic "${args[@]}" -c 15000 \
             -q --verify-out alan \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1
@@ -92,7 +88,7 @@ $((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
 "$err" $duration | tee -a ${loop_log}
 
 done
-touch /var/tmp/ds_test/stop
+${dsc} cmd shutdown
 sleep 4
 echo "Final results:" | tee -a ${loop_log}
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}

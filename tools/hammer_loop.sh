@@ -55,13 +55,16 @@ echo "" > ${loop_log}
 echo "starting Hammer test on $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-for i in {1..10}
+gen=0
+# This is held at 1 loop till we fix the #389 issue, or implement
+# generation numbers properly.
+for i in {1..2}
 do
     SECONDS=0
     echo "" > "$test_log"
-    echo "New loop starts now $(date)" >> "$test_log"
+    echo "New loop with gen $gen starts now $(date)" >> "$test_log"
     "$hammer" -t 127.0.0.1:8810 -t 127.0.0.1:8820 \
-        -t 127.0.0.1:8830 >> "$test_log" 2>&1
+        -t 127.0.0.1:8830 -g "$gen" >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
         touch /tmp/ds_test/up 2> /dev/null
@@ -81,11 +84,13 @@ do
         exit 1
     fi
     duration=$SECONDS
+    # Each loop of the hammer test uses 5 generation numbers, give it more
+    (( gen += 10 ))
     (( pass_total += 1 ))
     (( total += duration ))
     ave=$(( total / pass_total ))
-    printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
-last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) \
+    printf "[%03d][%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
+last_run_seconds:%d\n" "$i" "$gen" $((duration / 60)) $((duration % 60)) \
 $((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
 "$err" $duration | tee -a ${loop_log}
 
