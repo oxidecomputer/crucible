@@ -10,6 +10,12 @@ mod up_test {
     use ringbuffer::RingBuffer;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
+
     fn extent_tuple(eid: u64, offset: u64) -> (u64, Block) {
         (eid, Block::new_512(offset))
     }
@@ -211,7 +217,7 @@ mod up_test {
             ..Default::default()
         };
 
-        Upstairs::new(&opts, 0, def, Arc::new(Guest::new()))
+        Upstairs::new(&opts, 0, def, Arc::new(Guest::new()), csl())
     }
 
     /*
@@ -1004,7 +1010,7 @@ mod up_test {
     fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
         let target = vec![];
-        let mut ds = Downstairs::new(target);
+        let mut ds = Downstairs::new(target, csl());
 
         let id = ds.next_id();
 
@@ -3772,7 +3778,7 @@ mod up_test {
     fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
         let target = vec![];
-        let mut ds = Downstairs::new(target);
+        let mut ds = Downstairs::new(target, csl());
         let next_id = ds.next_id();
 
         let request = ReadRequest {
