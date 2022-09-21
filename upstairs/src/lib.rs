@@ -2261,7 +2261,7 @@ impl Downstairs {
             for (i, s) in self.ds_state.iter_mut().enumerate() {
                 if *s == DsState::Repair {
                     *s = DsState::FailedRepair;
-                    info!(self.log, "Mark {} as FAILED REPAIR", i);
+                    warn!(self.log, "Mark {} as FAILED REPAIR", i);
                 }
             }
             info!(self.log, "Clear out existing repair work queue");
@@ -2761,11 +2761,11 @@ impl Downstairs {
 
             if !successful_hash {
                 // No integrity hash was correct for this response
-                info!(log, "No match computed hash:0x{:x}", computed_hash,);
+                error!(log, "No match computed hash:0x{:x}", computed_hash,);
                 for hash in response.hashes.iter().rev() {
-                    info!(log, "No match          hash:0x{:x}", hash);
+                    error!(log, "No match          hash:0x{:x}", hash);
                 }
-                info!(log, "Data from hash: {:?}", response.data);
+                error!(log, "Data from hash: {:?}", response.data);
 
                 return Err(CrucibleError::HashMismatch);
             }
@@ -5343,7 +5343,7 @@ impl Upstairs {
          */
         let ds_state = ds.ds_state[client_id as usize];
         if ds_state != DsState::Active && ds_state != DsState::Repair {
-            info!(
+            warn!(
                 self.log,
                 "[{}] {} WARNING finish job {} when downstairs state:{:?}",
                 client_id,
@@ -5363,7 +5363,7 @@ impl Upstairs {
         ) {
             Err(e) => {
                 let job = ds.active.get_mut(&ds_id).unwrap();
-                info!(
+                error!(
                     self.log,
                     "[{}] ds_completion error: {:?} j:{} {:?} {:?} ",
                     client_id,
@@ -5380,7 +5380,7 @@ impl Upstairs {
         // Mark this downstairs as bad if this was a write or flush
         if let Err(err) = ds.client_error(ds_id, client_id) {
             if err == CrucibleError::UpstairsInactive {
-                info!(
+                error!(
                     self.log,
                     "Saw CrucibleError::UpstairsInactive on client {}!",
                     client_id
@@ -5392,7 +5392,7 @@ impl Upstairs {
                     DsState::Disabled,
                 );
             } else if err == CrucibleError::DecryptionError {
-                info!(
+                error!(
                     self.log,
                     "Authenticated decryption failed from client id {}!",
                     client_id
@@ -7333,7 +7333,7 @@ async fn process_new_io(
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             if !up.guest_io_ready() {
-                info!(
+                warn!(
                     up.log,
                     "Can't request block size, upstairs is not active"
                 );
@@ -7345,7 +7345,7 @@ async fn process_new_io(
         }
         BlockOp::QueryTotalSize { data } => {
             if !up.guest_io_ready() {
-                info!(
+                warn!(
                     up.log,
                     "Can't request total size, upstairs is not active"
                 );
@@ -7359,7 +7359,7 @@ async fn process_new_io(
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
             if !up.guest_io_ready() {
-                info!(
+                warn!(
                     up.log,
                     "Can't request extent size, upstairs is not active"
                 );
@@ -7464,7 +7464,7 @@ async fn up_listen(
     mut ds_reconcile_done_rx: mpsc::Receiver<Repair>,
     timeout: Option<u32>,
 ) {
-    info!(up.log, "ZZZ up_listen starts"; "source" => "up_listen");
+    info!(up.log, "up_listen starts"; "task" => "up_listen");
     info!(up.log, "Wait for all three downstairs to come online");
     let flush_timeout = timeout.unwrap_or(5);
     info!(up.log, "Flush timeout: {}", flush_timeout);
@@ -7556,7 +7556,7 @@ async fn up_listen(
                  */
                 if up.flush_needed() {
                     if let Err(e) = up.submit_flush(None, None) {
-                        info!(up.log, "flush send failed:{:?}", e);
+                        error!(up.log, "flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
                         send_work(&dst, 1);
@@ -7603,7 +7603,7 @@ pub async fn up_main(
         panic!("Failed to register probes: {:#?}", e);
     }
     let log = Logger::root(drain.fuse(), o!());
-    info!(log, "ZZZ Upstairs starts");
+    info!(log, "Upstairs starts");
 
     /*
      * Build the Upstairs struct that we use to share data between
