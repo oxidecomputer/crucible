@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
@@ -46,9 +46,9 @@ pub struct Inner {
 
 impl Inner {
     pub fn gen_number(&self) -> Result<u64> {
-        let mut stmt = self
-            .metadb
-            .prepare("SELECT value FROM metadata where name='gen_number'")?;
+        let mut stmt = self.metadb.prepare_cached(
+            "SELECT value FROM metadata where name='gen_number'",
+        )?;
         let gen_number_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut gen_number_values: Vec<u64> = vec![];
@@ -62,9 +62,9 @@ impl Inner {
     }
 
     pub fn flush_number(&self) -> Result<u64> {
-        let mut stmt = self
-            .metadb
-            .prepare("SELECT value FROM metadata where name='flush_number'")?;
+        let mut stmt = self.metadb.prepare_cached(
+            "SELECT value FROM metadata where name='flush_number'",
+        )?;
         let flush_number_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut flush_number_values: Vec<u64> = vec![];
@@ -81,25 +81,26 @@ impl Inner {
      * The flush and generation numbers will be updated at the same time.
      */
     fn set_flush_number(&self, new_flush: u64, new_gen: u64) -> Result<()> {
-        let mut stmt = self.metadb.prepare(
+        let mut stmt = self.metadb.prepare_cached(
             "UPDATE metadata SET value=?1 WHERE name='flush_number'",
         )?;
 
-        let _rows_affected = stmt.execute(params![new_flush])?;
+        let _rows_affected = stmt.execute([new_flush])?;
 
-        let mut stmt = self
-            .metadb
-            .prepare("UPDATE metadata SET value=?1 WHERE name='gen_number'")?;
+        let mut stmt = self.metadb.prepare_cached(
+            "UPDATE metadata SET value=?1 WHERE name='gen_number'",
+        )?;
 
-        let _rows_affected = stmt.execute(params![new_gen])?;
+        let _rows_affected = stmt.execute([new_gen])?;
 
         /*
          * When we write out the new flush number, the dirty bit should be
          * set back to false.
          */
-        let _rows_affected = self
+        let mut stmt = self
             .metadb
-            .execute("UPDATE metadata SET value=0 WHERE name='dirty'", [])?;
+            .prepare_cached("UPDATE metadata SET value=0 WHERE name='dirty'")?;
+        let _rows_affected = stmt.execute([])?;
 
         Ok(())
     }
@@ -107,7 +108,7 @@ impl Inner {
     pub fn dirty(&self) -> Result<bool> {
         let mut stmt = self
             .metadb
-            .prepare("SELECT value FROM metadata where name='dirty'")?;
+            .prepare_cached("SELECT value FROM metadata where name='dirty'")?;
         let dirty_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut dirty_values: Vec<bool> = vec![];
@@ -121,65 +122,80 @@ impl Inner {
     }
 
     fn set_dirty(&self) -> Result<()> {
-        let _rows_affected = self
+        let _ = self
             .metadb
-            .execute("UPDATE metadata SET value=1 WHERE name='dirty'", [])?;
+            .prepare_cached("UPDATE metadata SET value=1 WHERE name='dirty'")?
+            .execute([])?;
         Ok(())
     }
 
-    /*
-     * For a given block, return all encryption contexts since last flush.
-     * Order so latest is last.
-     */
+    /// For a given block range, return all encryption contexts since the last
+    /// flush. `get_hashes` returns a `Vec<Vec<u64>>` of length equal to
+    /// `count`. Each `Vec<u64>` inside this parent Vec contains all
+    /// contexts for a single block, ordered so the latest context is last.
+    /// If the region is not using encryption, the inner Vecs will all be
+    /// empty, but the outer Vec will still be of length `count`.
     fn get_encryption_contexts(
         &self,
         block: u64,
-    ) -> Result<Vec<EncryptionContext>> {
+        count: u64,
+    ) -> Result<Vec<Vec<EncryptionContext>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = vec![
-            "SELECT nonce, tag FROM encryption_context where block=?1",
-            "ORDER BY counter ASC",
-        ]
-        .join(" ");
+        let stmt = "SELECT block, nonce, tag FROM encryption_context \
+             WHERE block BETWEEN ?1 AND ?2 \
+             ORDER BY counter ASC";
+        let mut stmt = self.metadb.prepare_cached(stmt)?;
 
-        let mut stmt = self.metadb.prepare(&stmt)?;
+        let stmt_iter =
+            stmt.query_map(params![block, block + count - 1], |row| {
+                let block: u64 = row.get(0)?;
+                let nonce: Vec<u8> = row.get(1)?;
+                let tag: Vec<u8> = row.get(2)?;
+                Ok((block, nonce, tag))
+            })?;
 
-        let stmt_iter = stmt
-            .query_map(params![block], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(count as usize);
+        for _i in 0..count {
+            results.push(Vec::new());
+        }
 
         for row in stmt_iter {
-            let (nonce, tag) = row?;
-            results.push(EncryptionContext { nonce, tag });
+            let (row_block, nonce, tag) = row?;
+            results[(row_block - block) as usize]
+                .push(EncryptionContext { nonce, tag });
         }
 
         Ok(results)
     }
 
-    /*
-     * For a given block, return all hashes since last flush. Order so latest
-     * is last.
-     */
-    pub fn get_hashes(&self, block: u64) -> Result<Vec<u64>> {
+    /// For a given block range, return all hashes since the last flush.
+    /// `get_hashes` returns a `Vec<Vec<u64>>` of length equal to `count`. Each
+    /// `Vec<u64>` inside this parent Vec contains all hashes for a single
+    /// block, ordered so the latest hash is last.
+    pub fn get_hashes(&self, block: u64, count: u64) -> Result<Vec<Vec<u64>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = vec![
-            "SELECT hash FROM integrity_hashes where block=?1",
-            "ORDER BY counter ASC",
-        ]
-        .join(" ");
+        let stmt = "SELECT block, hash FROM integrity_hashes \
+             WHERE block BETWEEN ?1 AND ?2 \
+             ORDER BY counter ASC";
+        let mut stmt = self.metadb.prepare_cached(stmt)?;
 
-        let mut stmt = self.metadb.prepare(&stmt)?;
+        let stmt_iter =
+            stmt.query_map(params![block, block + count - 1], |row| {
+                let block: u64 = row.get(0)?;
+                let hash: Vec<u8> = row.get(1)?;
+                Ok((block, hash))
+            })?;
 
-        let stmt_iter = stmt.query_map(params![block], |row| row.get(0))?;
-
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(count as usize);
+        for _i in 0..count {
+            results.push(Vec::new());
+        }
 
         for row in stmt_iter {
-            let hash: Vec<u8> = row?;
+            let (row_block, hash) = row?;
             assert_eq!(hash.len(), 8);
-
-            results.push(u64::from_le_bytes(hash[..].try_into()?));
+            results[(row_block - block) as usize]
+                .push(u64::from_le_bytes(hash[..].try_into()?));
         }
 
         Ok(results)
@@ -197,27 +213,18 @@ impl Inner {
     ) -> Result<()> {
         let (block, encryption_context) = encryption_context_params;
 
-        let stmt: String = vec![
-            "INSERT INTO encryption_context".to_string(),
-            "(counter, block, nonce, tag) values".to_string(),
-            format!(
-                "({}, {}, X'{}', X'{}')",
-                /*
-                 * Auto-increment counter based on what's in the db
-                 */
-                vec![
-                    "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
-                    format!("from encryption_context WHERE block={})", block),
-                ]
-                .join(" "),
-                block,
-                hex::encode(&encryption_context.nonce),
-                hex::encode(&encryption_context.tag),
-            ),
-        ]
-        .join(" ");
+        let stmt =
+            "INSERT INTO encryption_context (counter, block, nonce, tag) \
+             VALUES ( \
+                 (SELECT IFNULL(MAX(counter), 0) + 1 FROM encryption_context WHERE block=?1), \
+                 ?1, ?2, ?3 \
+             )";
 
-        let rows_affected = tx.execute(&stmt, [])?;
+        let rows_affected = tx.prepare_cached(stmt)?.execute(params![
+            block,
+            &encryption_context.nonce,
+            &encryption_context.tag
+        ])?;
         assert_eq!(rows_affected, 1);
 
         Ok(())
@@ -235,7 +242,7 @@ impl Inner {
         let tx = self.metadb.transaction()?;
 
         for tuple in encryption_context_params {
-            Self::tx_set_encryption_context(&tx, &tuple)?;
+            Self::tx_set_encryption_context(&tx, tuple)?;
         }
 
         tx.commit()?;
@@ -252,26 +259,16 @@ impl Inner {
     ) -> Result<()> {
         let (block, hash) = hash_params;
 
-        let stmt: String = vec![
-            "INSERT INTO integrity_hashes".to_string(),
-            "(counter, block, hash) values".to_string(),
-            format!(
-                "({}, {}, X'{}')",
-                /*
-                 * Auto-increment counter based on what's in the db
-                 */
-                vec![
-                    "(SELECT IFNULL(MAX(counter),0) + 1".to_string(),
-                    format!("from integrity_hashes WHERE block={})", block),
-                ]
-                .join(" "),
-                block,
-                hex::encode(&hash.to_le_bytes())
-            ),
-        ]
-        .join(" ");
+        let stmt =
+            "INSERT INTO integrity_hashes (counter, block, hash) \
+             VALUES ( \
+                 (SELECT IFNULL(MAX(counter), 0) + 1 FROM integrity_hashes WHERE block=?1), \
+                 ?1, ?2 \
+             )";
 
-        let rows_affected = tx.execute(&stmt, [])?;
+        let rows_affected = tx
+            .prepare_cached(stmt)?
+            .execute(params![block, &hash.to_le_bytes()])?;
         assert_eq!(rows_affected, 1);
 
         Ok(())
@@ -298,34 +295,32 @@ impl Inner {
         let tx = self.metadb.transaction()?;
 
         // Clear encryption context
-        let stmt: String = vec![
-            "DELETE FROM encryption_context WHERE ROWID not in",
-            "(select ROWID from",
-            "(select ROWID,block,MAX(counter)",
-            "from encryption_context group by block)",
-            ");",
-        ]
-        .join(" ");
+        let stmt = "DELETE FROM encryption_context WHERE ROWID not in \
+             (select ROWID from \
+                 (select ROWID,block,MAX(counter) \
+                  from encryption_context group by block\
+                 ) \
+             )";
 
-        let _rows_affected = tx.execute(&stmt, [])?;
+        let _rows_affected = tx.prepare_cached(stmt)?.execute([])?;
 
-        let _rows_affected =
-            tx.execute("UPDATE encryption_context SET counter = 0", [])?;
+        let _rows_affected = tx
+            .prepare_cached("UPDATE encryption_context SET counter = 0")?
+            .execute([])?;
 
         // Clear integrity hash
-        let stmt: String = vec![
-            "DELETE FROM integrity_hashes WHERE ROWID not in",
-            "(select ROWID from",
-            "(select ROWID,block,MAX(counter)",
-            "from integrity_hashes group by block)",
-            ");",
-        ]
-        .join(" ");
+        let stmt = "DELETE FROM integrity_hashes WHERE ROWID not in \
+             (select ROWID from \
+                 (select ROWID,block,MAX(counter) \
+                  from integrity_hashes group by block \
+                 ) \
+             )";
 
-        let _rows_affected = tx.execute(&stmt, [])?;
+        let _rows_affected = tx.prepare_cached(stmt)?.execute([])?;
 
-        let _rows_affected =
-            tx.execute("UPDATE integrity_hashes SET counter = 0", [])?;
+        let _rows_affected = tx
+            .prepare_cached("UPDATE integrity_hashes SET counter = 0")?
+            .execute([])?;
 
         tx.commit()?;
 
@@ -342,7 +337,7 @@ impl Inner {
     ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
-            .prepare(&"SELECT block, counter FROM encryption_context")?;
+            .prepare_cached("SELECT block, counter FROM encryption_context")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -362,7 +357,7 @@ impl Inner {
     ) -> Result<Vec<(u64, u64)>> {
         let mut stmt = self
             .metadb
-            .prepare(&"SELECT block, counter FROM integrity_hashes")?;
+            .prepare_cached("SELECT block, counter FROM integrity_hashes")?;
 
         let stmt_iter =
             stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -580,6 +575,37 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
     assert!(metadb.is_autocommit());
     metadb.pragma_update(None, "journal_mode", &"WAL")?;
     metadb.pragma_update(None, "synchronous", &"FULL")?;
+
+    // rusqlite provides an LRU Cache (a cache which, when full, evicts the
+    // least-recently-used value). This caches prepared statements, allowing
+    // us to nullify the cost of parsing and compiling frequently used
+    // statements.  I've changed all sqlite queries in Inner to use
+    // `prepare_cached` to take advantage of this cache. I have not done this
+    // for `prepare_cached` region creation,
+    // since it wouldn't be relevant there.
+
+    // The result is a dramatic reduction in CPU time spent parsing queries.
+    // Prior to this change, sqlite3Prepare was taking 60% of CPU time
+    // during reads and 50% during writes based on dtrace flamegraphs.
+    // Afterwards, they don't even show up on the graph. I'm seeing a minimum
+    // doubling of actual throughput with `crudd` after this change on my
+    // local hardware.
+
+    // However, this does cost some amount of memory per-extent and thus will
+    // scale linearly . This cache size I'm setting now (64 statements) is
+    // chosen somewhat arbitrarily. If this becomes a significant consumer
+    // of memory, we should reduce the size of the LRU, and stop caching the
+    // statements in the coldest paths. At present, it doesn't seem to have any
+    // meaningful impact on memory usage.
+
+    // We could instead try to pre-generate and hold onto all the statements we
+    // need to use ourselves, but I looked into doing that, and basically
+    // the code required would be a mess due to lifetimes. We shouldn't do
+    // that except as a last resort.
+
+    // Also, if you're curious, the hashing function used is
+    // https://docs.rs/ahash/latest/ahash/index.html
+    metadb.set_prepared_statement_cache_capacity(64);
 
     Ok(metadb)
 }
@@ -883,6 +909,9 @@ impl Extent {
         self.number
     }
 
+    /// Read the real data off underlying storage, and get block metadata. If
+    /// an error occurs while processing any of the requests, the state of
+    /// `responses` is undefined.
     #[instrument]
     pub fn read(
         &self,
@@ -891,32 +920,87 @@ impl Extent {
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
 
-        for request in requests {
-            let mut response = crucible_protocol::ReadResponse::from_request(
-                request,
-                self.block_size as usize,
+        // This code batches up operations for contiguous regions of
+        // ReadRequests, so we can perform larger read syscalls and sqlite
+        // queries. This significantly improves read throughput.
+
+        // Keep track of the index of the first request in any contiguous run
+        // of requests. Of course, a "contiguous run" might just be a single
+        // request.
+        let mut req_run_start = 0;
+        while req_run_start < requests.len() {
+            let first_req = requests[req_run_start];
+
+            // Starting from the first request in the potential run, we scan
+            // forward until we find a request with a block that isn't
+            // contiguous with the request before it. Since we're counting
+            // pairs, and the number of pairs is one less than the number of
+            // requests, we need to add 1 to get our actual run length.
+            let n_contiguous_requests = requests[req_run_start..]
+                .windows(2)
+                .take_while(|reqs| {
+                    reqs[0].offset.value + 1 == reqs[1].offset.value
+                })
+                .count()
+                + 1;
+
+            // Create our responses and push them into the output. While we're
+            // at it, check for overflows
+            let resp_run_start = responses.len();
+            for req in requests[req_run_start..][..n_contiguous_requests].iter()
+            {
+                let resp =
+                    ReadResponse::from_request(req, self.block_size as usize);
+                self.check_input(req.offset, &resp.data)?;
+                responses.push(resp);
+            }
+
+            // Finally we get to read the actual data. That's why we're here
+            inner.file.seek(SeekFrom::Start(
+                first_req.offset.value * self.block_size,
+            ))?;
+            let mut read_buffer = BytesMut::with_capacity(
+                n_contiguous_requests * self.block_size as usize,
             );
+            read_buffer.resize(read_buffer.capacity(), 0);
+            inner.file.read_exact(&mut read_buffer)?;
 
-            self.check_input(request.offset, &response.data)?;
+            // Query the block metadata
+            let enc_ctxts = inner.get_encryption_contexts(
+                first_req.offset.value,
+                n_contiguous_requests as u64,
+            )?;
+            let hashes = inner.get_hashes(
+                first_req.offset.value,
+                n_contiguous_requests as u64,
+            )?;
 
-            let byte_offset = request.offset.value * self.block_size;
+            // Now it's time to put everything into the responses.
+            // We use into_iter here to move values out of enc_ctxts/hashes,
+            // avoiding a clone(). For code consistency, we use iters for the
+            // response and data chunks too. These iters will be the same length
+            // (equal to n_contiguous_requests) so zipping is fine
+            let resp_iter =
+                responses[resp_run_start..][..n_contiguous_requests].iter_mut();
+            let enc_iter = enc_ctxts.into_iter();
+            let hash_iter = hashes.into_iter();
+            let data_iter = read_buffer.chunks_exact(self.block_size as usize);
 
-            inner.file.seek(SeekFrom::Start(byte_offset))?;
+            // We could make this a little cleaner if we pulled in itertools and
+            // used multizip from that, but i don't think it's worth it.
+            for (((resp, r_encs), r_hashes), r_data) in
+                resp_iter.zip(enc_iter).zip(hash_iter).zip(data_iter)
+            {
+                // Shove everything into the response
+                resp.encryption_contexts = r_encs;
+                resp.hashes = r_hashes;
 
-            /*
-             * XXX This read_exact only works because we have filled our
-             * buffer with data ahead of time.  If we want to use
-             * an uninitialized buffer, then we need a different
-             * read or type for the destination
-             */
-            inner.file.read_exact(&mut response.data)?;
+                // XXX if resp.data was Bytes instead of BytesMut we could avoid
+                // a copy here and instead assign it to a frozen subslice.
+                resp.data.copy_from_slice(r_data);
+            }
 
-            response.encryption_contexts =
-                inner.get_encryption_contexts(request.offset.value)?;
-
-            response.hashes = inner.get_hashes(request.offset.value)?;
-
-            responses.push(response);
+            req_run_start += n_contiguous_requests;
         }
 
         Ok(())
@@ -1014,34 +1098,62 @@ impl Extent {
          * a checksum.
          */
 
-        let mut writes_to_skip: Vec<u64> = Vec::new();
+        // If `only_write_written`, we need to skip writing to blocks that
+        // already contain data. We'll first query the metadata to see which
+        // blocks have hashes
+        let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
-            for write in writes {
-                if !inner.get_hashes(write.offset.value).unwrap().is_empty() {
-                    writes_to_skip.push(write.offset.value);
+            let mut write_run_start = 0;
+            while write_run_start < writes.len() {
+                let first_write = writes[write_run_start];
+
+                // Starting from the first write in the potential run, we scan
+                // forward until we find a write with a block that isn't
+                // contiguous with the request before it. Since we're counting
+                // pairs, and the number of pairs is one less than the number of
+                // writes, we need to add 1 to get our actual run length.
+                let n_contiguous_writes = writes[write_run_start..]
+                    .windows(2)
+                    .take_while(|wr_pair| {
+                        wr_pair[0].offset.value + 1 == wr_pair[1].offset.value
+                    })
+                    .count()
+                    + 1;
+
+                // Query hashes for the write range.
+                // TODO we should consider adding a query that doesnt actually
+                // give us back the data, just checks for its presence.
+                let hashes = inner.get_hashes(
+                    first_write.offset.value,
+                    n_contiguous_writes as u64,
+                )?;
+
+                for (i, block_hashes) in hashes.iter().enumerate() {
+                    if !block_hashes.is_empty() {
+                        let _ = writes_to_skip
+                            .insert(i as u64 + first_write.offset.value);
+                    }
                 }
+
+                write_run_start += n_contiguous_writes;
+            }
+
+            if writes_to_skip.len() == writes.len() {
+                // Nothing to do
+                return Ok(());
             }
         }
-        if only_write_unwritten && writes_to_skip.len() == writes.len() {
-            // For read fill, if the list of blocks to skip is the same
-            // length as the number of blocks in the write list, then we
-            // have no work to do here.
-            return Ok(());
-        }
 
-        // We know we have at least one block to write.
         inner.set_dirty()?;
 
+        // Write all the metadata to the DB
         let tx = inner.metadb_transaction()?;
         for write in writes {
-            // Since we only add to writes_to_skip if only_write_unwritten,
-            // this will be empty if only_write_unwritten is false, so we
-            // don't need to check again here for only_write_unwritten
-            // being true.
             if writes_to_skip.contains(&write.offset.value) {
-                assert!(only_write_unwritten);
+                debug_assert!(only_write_unwritten);
                 continue;
             }
+
             if let Some(encryption_context) = &write.encryption_context {
                 Inner::tx_set_encryption_context(
                     &tx,
@@ -1053,15 +1165,47 @@ impl Extent {
         }
         tx.commit()?;
 
+        // Buffer writes for fewer syscalls. The 65536 buffer size here is
+        // chosen somewhat arbitrarily.
+        let mut write_buffer = [0u8; 65536];
+
+        let mut bytes_in_run = 0;
+        let mut next_block_in_run = u64::MAX;
         for write in writes {
-            if writes_to_skip.contains(&write.offset.value) {
-                assert!(only_write_unwritten);
+            let block = write.offset.value;
+            if writes_to_skip.contains(&block) {
+                debug_assert!(only_write_unwritten);
                 continue;
             }
-            let byte_offset = write.offset.value * self.block_size;
 
-            inner.file.seek(SeekFrom::Start(byte_offset))?;
-            inner.file.write_all(&write.data)?;
+            // If the current write isn't contiguous with previous writes,
+            // write our buffer to the file and seek.
+            if block != next_block_in_run {
+                if bytes_in_run > 0 {
+                    inner.file.write_all(&write_buffer[..bytes_in_run])?;
+                    bytes_in_run = 0;
+                }
+
+                // Write any buffered data, and then seek
+                inner.file.seek(SeekFrom::Start(block * self.block_size))?;
+            }
+
+            // If the write buffer is full, write out to the file
+            if write_buffer.len() - bytes_in_run < self.block_size as usize {
+                inner.file.write_all(&write_buffer[..bytes_in_run])?;
+                bytes_in_run = 0;
+            }
+
+            write_buffer[bytes_in_run..][..self.block_size as usize]
+                .copy_from_slice(&write.data);
+            bytes_in_run += self.block_size as usize;
+
+            next_block_in_run = block + 1;
+        }
+
+        // Write any remaining buffered data
+        if bytes_in_run > 0 {
+            inner.file.write_all(&write_buffer[..bytes_in_run])?;
         }
 
         Ok(())
@@ -2324,7 +2468,7 @@ mod test {
         std::fs::copy(source_path.clone(), dest_path.clone())?;
 
         let rd = replace_dir(&dir, 1);
-        rename(cp.clone(), rd.clone())?;
+        rename(cp, rd.clone())?;
 
         drop(region);
 
@@ -2344,7 +2488,7 @@ mod test {
     #[test]
     fn validate_repair_files_empty() {
         // No repair files is a failure
-        assert_eq!(validate_repair_files(1, &Vec::new()), false);
+        assert!(!validate_repair_files(1, &Vec::new()));
     }
 
     #[test]
@@ -2373,7 +2517,7 @@ mod test {
         // duplicate file names for extent 2
         let good_files: Vec<String> =
             vec!["002".to_string(), "002".to_string()];
-        assert_eq!(validate_repair_files(2, &good_files), false);
+        assert!(!validate_repair_files(2, &good_files));
     }
 
     #[test]
@@ -2385,7 +2529,7 @@ mod test {
             "002.db".to_string(),
             "002.db".to_string(),
         ];
-        assert_eq!(validate_repair_files(2, &good_files), false);
+        assert!(!validate_repair_files(2, &good_files));
     }
 
     #[test]
@@ -2397,7 +2541,7 @@ mod test {
             "001.db-shm".to_string(),
             "001.db-shm".to_string(),
         ];
-        assert_eq!(validate_repair_files(1, &good_files), false);
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[test]
@@ -2410,7 +2554,7 @@ mod test {
             "001.db-wal".to_string(),
         ];
 
-        assert_eq!(validate_repair_files(2, &good_files), false);
+        assert!(!validate_repair_files(2, &good_files));
     }
 
     #[test]
@@ -2423,7 +2567,7 @@ mod test {
             "001.db-shm".to_string(),
             "001.db-wal".to_string(),
         ];
-        assert_eq!(validate_repair_files(1, &good_files), false);
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[test]
@@ -2434,7 +2578,7 @@ mod test {
             "001.db".to_string(),
             "001.db-wal".to_string(),
         ];
-        assert_eq!(validate_repair_files(1, &good_files), false);
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[test]
@@ -2490,7 +2634,7 @@ mod test {
 
     #[test]
     #[should_panic]
-    fn bad_import_region() -> () {
+    fn bad_import_region() {
         let _ = Region::open(
             &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
@@ -2498,7 +2642,6 @@ mod test {
             false,
         )
         .unwrap();
-        ()
     }
 
     #[test]
@@ -2507,8 +2650,8 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        assert_eq!((), ext.check_input(Block::new_512(0), &data).unwrap());
-        assert_eq!((), ext.check_input(Block::new_512(99), &data).unwrap());
+        ext.check_input(Block::new_512(0), &data).unwrap();
+        ext.check_input(Block::new_512(99), &data).unwrap();
     }
 
     #[test]
@@ -2558,7 +2701,7 @@ mod test {
         data.put(&[1; 512 * 100][..]);
 
         let ext = new_extent(0);
-        assert_eq!((), ext.check_input(Block::new_512(1), &data).unwrap());
+        ext.check_input(Block::new_512(1), &data).unwrap();
     }
 
     #[test]
@@ -2670,9 +2813,7 @@ mod test {
         /*
          * Build the Vec for our region dir
          */
-        let pdir = dir.into_path();
-        let mut dvec = Vec::new();
-        dvec.push(pdir);
+        let dvec = vec![dir.into_path()];
 
         /*
          * Dump the region
@@ -2758,8 +2899,8 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_contexts(0)?.is_empty());
-        assert!(inner.get_encryption_contexts(1)?.is_empty());
+        assert!(inner.get_encryption_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's context
 
@@ -2771,7 +2912,7 @@ mod test {
             },
         )])?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
@@ -2780,7 +2921,7 @@ mod test {
 
         // Block 1 should still be blank
 
-        assert!(inner.get_encryption_contexts(1)?.is_empty());
+        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
 
         // Set and verify a new context for block 0
 
@@ -2795,7 +2936,7 @@ mod test {
             },
         )])?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 2);
 
@@ -2808,7 +2949,7 @@ mod test {
         // "Flush", so only the latest should remain.
         inner.truncate_encryption_contexts_and_hashes()?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
@@ -2836,8 +2977,8 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_contexts(0)?.is_empty());
-        assert!(inner.get_encryption_contexts(1)?.is_empty());
+        assert!(inner.get_encryption_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's and 1's context
 
@@ -2858,14 +2999,14 @@ mod test {
             ),
         ])?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
         assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
         assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
 
-        let ctxs = inner.get_encryption_contexts(1)?;
+        let ctxs = inner.get_encryption_contexts(1, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
@@ -2886,14 +3027,14 @@ mod test {
 
         // Hashes for blocks 0 and 1 should start blank
 
-        assert!(inner.get_hashes(0)?.is_empty());
-        assert!(inner.get_hashes(1)?.is_empty());
+        assert!(inner.get_hashes(0, 1)?[0].is_empty());
+        assert!(inner.get_hashes(1, 1)?[0].is_empty());
 
         // Set and verify block 0's hash
 
         inner.set_hashes(&[(0, 23874612987634)])?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
 
@@ -2901,7 +3042,7 @@ mod test {
 
         // Block 1 should still be blank
 
-        assert!(inner.get_hashes(1)?.is_empty());
+        assert!(inner.get_hashes(1, 1)?[0].is_empty());
 
         // Set and verify a new hash for block 0
 
@@ -2909,7 +3050,7 @@ mod test {
 
         inner.set_hashes(&[(0, blob1)])?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 2);
 
@@ -2919,7 +3060,7 @@ mod test {
         // "Flush", so only the latest should remain.
         inner.truncate_encryption_contexts_and_hashes()?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
 
@@ -2944,20 +3085,20 @@ mod test {
 
         // Hashes for blocks 0 and 1 should start blank
 
-        assert!(inner.get_hashes(0)?.is_empty());
-        assert!(inner.get_hashes(1)?.is_empty());
+        assert!(inner.get_hashes(0, 1)?[0].is_empty());
+        assert!(inner.get_hashes(1, 1)?[0].is_empty());
 
         // Set and verify block 0's and 1's context
 
         inner
             .set_hashes(&[(0, 0xbd1f97574fa0c3f4), (1, 0xa040b75cd3c96fff)])?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], 0xbd1f97574fa0c3f4);
 
-        let hashes = inner.get_hashes(1)?;
+        let hashes = inner.get_hashes(1, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], 0xa040b75cd3c96fff);
@@ -2979,8 +3120,7 @@ mod test {
         // use region_write to fill region
 
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3029,11 +3169,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3109,15 +3245,11 @@ mod test {
         // We know our EID, so we can shortcut to getting the actual extent.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, true);
+        assert!(dirty);
 
         // Now read back that block, make sure it is updated.
         let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            }],
+            &[crucible_protocol::ReadRequest { eid, offset }],
             0,
         )?;
 
@@ -3178,11 +3310,7 @@ mod test {
 
         // Now read back that block, make sure it has the first write
         let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            }],
+            &[crucible_protocol::ReadRequest { eid, offset }],
             2,
         )?;
 
@@ -3230,8 +3358,7 @@ mod test {
         // Verify the dirty bit is now set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, true);
-        drop(dirty);
+        assert!(dirty);
 
         // Flush extent with eid, fn, gen, job_id.
         region.region_flush_extent(eid as usize, 1, 1, 1)?;
@@ -3239,8 +3366,7 @@ mod test {
         // Verify the dirty bit is no longer set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, false);
-        drop(dirty);
+        assert!(!dirty);
 
         // Create a new write IO with different data.
         let data = BytesMut::from(&[1u8; 512][..]);
@@ -3264,15 +3390,11 @@ mod test {
         // Verify the dirty bit is not set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
         let dirty = inner.lock().unwrap().dirty().unwrap();
-        assert_eq!(dirty, false);
+        assert!(!dirty);
 
         // Read back our block, make sure it has the first write data
         let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            }],
+            &[crucible_protocol::ReadRequest { eid, offset }],
             2,
         )?;
 
@@ -3302,8 +3424,7 @@ mod test {
         // use region_write to fill region
 
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3350,11 +3471,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3410,8 +3527,7 @@ mod test {
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3440,8 +3556,8 @@ mod test {
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
         // for the first block to have that original data.
-        for i in 0..512 {
-            buffer[i] = 9;
+        for a_buf in buffer.iter_mut().take(512) {
+            *a_buf = 9;
         }
 
         // read data into File, compare what was written to buffer
@@ -3465,11 +3581,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3525,8 +3637,7 @@ mod test {
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3556,8 +3667,8 @@ mod test {
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
         // for the first block to have that original data.
-        for i in 512..1024 {
-            buffer[i] = 9;
+        for a_buf in buffer.iter_mut().take(1024).skip(512) {
+            *a_buf = 9;
         }
 
         // read data into File, compare what was written to buffer
@@ -3581,11 +3692,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3644,8 +3751,7 @@ mod test {
 
         // Now use region_write to fill four blocks
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         println!("buffer size:{}", buffer.len());
         rng.fill_bytes(&mut buffer);
 
@@ -3676,8 +3782,8 @@ mod test {
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our
         // expected buffer for the final block to have that original data.
-        for i in 1536..2048 {
-            buffer[i] = 9;
+        for a_buf in buffer.iter_mut().take(2048).skip(1536) {
+            *a_buf = 9;
         }
 
         // read all using region_read
@@ -3690,11 +3796,7 @@ mod test {
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
             println!("Read eid: {}, {} offset: {:?}", eid, i, offset);
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3754,8 +3856,7 @@ mod test {
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = Vec::with_capacity(total_size);
-        buffer.resize(total_size, 0u8);
+        let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
         let mut writes: Vec<crucible_protocol::Write> =
@@ -3787,8 +3888,8 @@ mod test {
         for b in blocks_to_write {
             let b_start = b * 512;
             let b_end = b_start + 512;
-            for i in b_start..b_end {
-                buffer[i] = 9;
+            for a_buf in buffer.iter_mut().take(b_end).skip(b_start) {
+                *a_buf = 9;
             }
         }
 
@@ -3801,11 +3902,7 @@ mod test {
             let offset: Block =
                 Block::new_512((i as u64) % ddef.extent_size().value);
 
-            requests.push(crucible_protocol::ReadRequest {
-                eid,
-                offset,
-                num_blocks: 1,
-            });
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
         let responses = region.region_read(&requests, 0)?;
@@ -3852,7 +3949,7 @@ mod test {
                 // ok
             }
             _ => {
-                assert!(false);
+                panic!("Incorrect error with hash mismatch");
             }
         }
 
@@ -3869,7 +3966,6 @@ mod test {
             &[crucible_protocol::ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
-                num_blocks: 1,
             }],
             0,
         )?;

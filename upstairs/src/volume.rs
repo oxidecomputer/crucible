@@ -2132,7 +2132,7 @@ mod test {
             volume.add_subvolume(subvolume.clone())?;
         }
 
-        volume.add_read_only_parent(parent.clone())?;
+        volume.add_read_only_parent(parent)?;
 
         volume.activate(0)?;
 

@@ -540,7 +540,6 @@ fn show_extent(
                 &[ReadRequest {
                     eid: cmp_extent as u64,
                     offset: Block::new_with_ddef(block, &region.def()),
-                    num_blocks: 1,
                 }],
                 0,
             )?;
@@ -665,7 +664,6 @@ fn show_extent_block(
             &[ReadRequest {
                 eid: cmp_extent as u64,
                 offset: Block::new_with_ddef(block_in_extent, &region.def()),
-                num_blocks: 1,
             }],
             0,
         )?;

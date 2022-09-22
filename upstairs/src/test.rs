@@ -4,7 +4,7 @@
 use super::*;
 
 #[cfg(test)]
-mod test {
+mod up_test {
     use super::*;
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
@@ -254,7 +254,7 @@ mod test {
         let up = make_upstairs();
 
         for i in 0..99 {
-            let exv = vec![extent_tuple(0, i + 0), extent_tuple(0, i + 1)];
+            let exv = vec![extent_tuple(0, i), extent_tuple(0, i + 1)];
             assert_eq!(up_efo(&up, Block::new_512(i), 2).unwrap(), exv);
         }
 
@@ -365,12 +365,12 @@ mod test {
         let key_bytes =
             base64::decode("ClENKTXD2bCyXSHnKXY7GGnk+NvQKbwpatjWP2fJzk0=")
                 .unwrap();
-        let context = EncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
+        let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
         thread_rng().fill(&mut block[..]);
 
-        let orig_block = block.clone();
+        let orig_block = block;
 
         let (nonce, tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
@@ -388,19 +388,19 @@ mod test {
         let key_bytes =
             base64::decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
                 .unwrap();
-        let context = EncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
+        let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
         thread_rng().fill(&mut block[..]);
 
-        let orig_block = block.clone();
+        let orig_block = block;
 
         let (_, tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
 
         let nonce = context.get_random_nonce();
 
-        let block_before_failing_decrypt_in_place = block.clone();
+        let block_before_failing_decrypt_in_place = block;
 
         let result = context.decrypt_in_place(&mut block[..], &nonce, &tag);
         assert!(result.is_err());
@@ -422,19 +422,19 @@ mod test {
         let key_bytes =
             base64::decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
                 .unwrap();
-        let context = EncryptionContext::new(Vec::<u8>::from(key_bytes), 512);
+        let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
         thread_rng().fill(&mut block[..]);
 
-        let orig_block = block.clone();
+        let orig_block = block;
 
         let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..])?;
         assert_ne!(block, orig_block);
 
-        tag[2] += 1;
+        tag[2] = tag[2].wrapping_add(1);
 
-        let block_before_failing_decrypt_in_place = block.clone();
+        let block_before_failing_decrypt_in_place = block;
 
         let result = context.decrypt_in_place(&mut block[..], &nonce, &tag);
         assert!(result.is_err());
@@ -465,31 +465,27 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
@@ -497,17 +493,15 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 1);
     }
@@ -528,45 +522,39 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
 
         ds.ack(next_id);
@@ -591,45 +579,39 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 2,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
 
         ds.ack(next_id);
@@ -649,7 +631,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -659,22 +640,12 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
@@ -682,41 +653,21 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                1,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 1, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         // A flush is required to move work to completed
         assert_eq!(ds.completed.len(), 0);
@@ -733,7 +684,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -743,36 +693,24 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                1,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 1, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
@@ -780,22 +718,12 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         // A flush is required to move work to completed
         // That this is still zero is part of the test
@@ -813,7 +741,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -823,50 +750,36 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
 
         ds.ack(next_id);
@@ -888,9 +801,8 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
-        let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+        let op = create_read_eob(next_id, vec![], 10, vec![request]);
 
         ds.enqueue(op);
 
@@ -898,45 +810,39 @@ mod test {
         ds.in_progress(next_id, 1);
         ds.in_progress(next_id, 2);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 2,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
 
         ds.ack(next_id);
@@ -954,7 +860,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let next_id = {
@@ -974,22 +879,14 @@ mod test {
             next_id
         };
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        assert_eq!(
-            upstairs
-                .process_ds_operation(next_id, 2, response.clone())
-                .unwrap(),
-            true
-        );
+        assert!(upstairs
+            .process_ds_operation(next_id, 2, response.clone())
+            .unwrap());
 
-        assert_eq!(
-            upstairs.process_ds_operation(next_id, 0, response).unwrap(),
-            false
-        );
+        assert!(!upstairs.process_ds_operation(next_id, 0, response).unwrap());
 
         {
             // emulated run in up_ds_listen
@@ -1002,16 +899,13 @@ mod test {
             ds.retire_check(next_id);
         }
 
-        assert_eq!(
-            upstairs
-                .process_ds_operation(
-                    next_id,
-                    1,
-                    Err(CrucibleError::GenericError(format!("bad")))
-                )
-                .unwrap(),
-            false
-        );
+        assert!(!upstairs
+            .process_ds_operation(
+                next_id,
+                1,
+                Err(CrucibleError::GenericError("bad".to_string()))
+            )
+            .unwrap());
 
         {
             let mut ds = upstairs.downstairs.lock().unwrap();
@@ -1033,7 +927,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1044,10 +937,7 @@ mod test {
 
         // Generate the first read response, this will be what we compare
         // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![9],
-        )]);
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[9])]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
@@ -1058,10 +948,7 @@ mod test {
         ds.ack(id);
 
         // Second read response, different hash
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1083,7 +970,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1094,10 +980,7 @@ mod test {
 
         // Generate the first read response, this will be what we compare
         // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![0],
-        )]);
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[0])]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
@@ -1108,10 +991,7 @@ mod test {
         ds.ack(id);
 
         // Second read response, it matches the first.
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1131,7 +1011,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1143,27 +1022,18 @@ mod test {
 
         // Generate the first read response, this will be what we compare
         // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
 
         // Second read response, it matches the first.
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         ds.process_ds_completion(id, 1, r2, &None, UpState::Active)
             .unwrap();
 
-        let r3 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![2],
-        )]);
+        let r3 = Ok(vec![ReadResponse::from_request_with_data(&request, &[2])]);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1185,7 +1055,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1197,28 +1066,19 @@ mod test {
 
         // Generate the first read response, this will be what we compare
         // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
 
         // Second read response, it matches the first.
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         ds.ack(id);
         ds.process_ds_completion(id, 1, r2, &None, UpState::Active)
             .unwrap();
 
-        let r3 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![2],
-        )]);
+        let r3 = Ok(vec![ReadResponse::from_request_with_data(&request, &[2])]);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1239,7 +1099,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1252,7 +1111,7 @@ mod test {
         // future responses with.
         let r1 = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![1, 2, 3, 4],
+            &[1, 2, 3, 4],
         )]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
@@ -1261,7 +1120,7 @@ mod test {
         // Second read response, hash vec has different length/
         let r2 = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![1, 2, 3, 9],
+            &[1, 2, 3, 9],
         )]);
 
         let result =
@@ -1284,7 +1143,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1295,19 +1153,13 @@ mod test {
 
         // Generate the first read response, this will be what we compare
         // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
 
         // Second read response, hash vec has different length/
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1328,7 +1180,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(id, vec![], 10, vec![request.clone()]);
 
@@ -1339,19 +1190,13 @@ mod test {
 
         // Generate the first read response, this will be what we compare
         // future responses with.
-        let r1 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![1],
-        )]);
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
 
         ds.process_ds_completion(id, 0, r1, &None, UpState::Active)
             .unwrap();
 
         // Second read response, hash vec has different length/
-        let r2 = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1401,47 +1246,35 @@ mod test {
         assert!(ds.in_progress(next_id, 1).is_some());
         assert!(ds.in_progress(next_id, 2).is_some());
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         assert!(ds.active.get(&next_id).unwrap().data.is_none());
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         assert!(ds.active.get(&next_id).unwrap().data.is_none());
 
         let response = Ok(vec![]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
 
         assert!(ds.downstairs_errors.get(&0).is_some());
         assert!(ds.downstairs_errors.get(&1).is_some());
@@ -1454,7 +1287,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1464,22 +1296,12 @@ mod test {
         assert!(ds.in_progress(next_id, 1).is_none());
         assert!(ds.in_progress(next_id, 2).is_some());
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![3],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[3])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
 
         let responses = ds.active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
@@ -1505,7 +1327,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1515,50 +1336,36 @@ mod test {
         assert!(ds.in_progress(next_id, 1).is_some());
         assert!(ds.in_progress(next_id, 2).is_some());
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         assert!(ds.active.get(&next_id).unwrap().data.is_none());
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         assert!(ds.active.get(&next_id).unwrap().data.is_none());
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![3],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[3])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
 
         let responses = ds.active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
@@ -1581,7 +1388,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1591,50 +1397,36 @@ mod test {
         assert!(ds.in_progress(next_id, 1).is_some());
         assert!(ds.in_progress(next_id, 2).is_some());
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false,
-        );
+            .unwrap());
 
         assert!(ds.active.get(&next_id).unwrap().data.is_none());
 
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 1,
-                Err(CrucibleError::GenericError(format!("bad"))),
+                Err(CrucibleError::GenericError("bad".to_string())),
                 &None,
                 UpState::Active,
             )
-            .unwrap(),
-            false,
-        );
+            .unwrap());
 
         assert!(ds.active.get(&next_id).unwrap().data.is_none());
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![6],
-        )]);
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[6])]);
 
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
 
         let responses = ds.active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
@@ -1661,7 +1453,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
 
@@ -1673,57 +1464,27 @@ mod test {
         ds.in_progress(next_id, 2);
 
         // Downstairs 0 now has completed this work.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
 
         // One completion of a read means we can ACK
         assert_eq!(ds.ackable_work().len(), 1);
 
         // Complete downstairs 1 and 2
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                1,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds
+            .process_ds_completion(next_id, 1, response, &None, UpState::Active)
+            .unwrap());
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                2,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds
+            .process_ds_completion(next_id, 2, response, &None, UpState::Active)
+            .unwrap());
 
         // Make sure the job is still active
         assert_eq!(ds.completed.len(), 0);
@@ -1751,40 +1512,34 @@ mod test {
         ds.in_progress(next_id, 2);
 
         // Complete the Flush at each downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
         // Two completed means we return true (ack ready now)
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         let state = ds.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -1860,50 +1615,18 @@ mod test {
         assert!(ds.in_progress(id2, 1).is_some());
 
         // Simulate completing both writes to downstairs 0 and 1
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(id1, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(id2, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(id2, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // Both writes can now ACK to the guest.
         ds.ack(id1);
@@ -1923,28 +1646,24 @@ mod test {
         ds.in_progress(flush_id, 1);
 
         // Simulate completing the flush to downstairs 0 and 1
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 flush_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(
                 flush_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
 
         // Ack the flush back to the guest
         ds.ack(flush_id);
@@ -1966,45 +1685,27 @@ mod test {
         // Now, finish the writes to downstairs 2
         assert!(ds.in_progress(id1, 2).is_some());
         assert!(ds.in_progress(id2, 2).is_some());
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                2,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                2,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 2, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(id2, 2, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // The job should not move to completed until the flush goes as well.
         assert_eq!(ds.completed.len(), 0);
 
         // Complete the flush on downstairs 2.
         ds.in_progress(flush_id, 2);
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 flush_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         // All three jobs should now move to completed
         assert_eq!(ds.completed.len(), 3);
@@ -2054,39 +1755,33 @@ mod test {
         ds.in_progress(next_id, 2);
 
         // Complete the write on all three downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         // Ack the write to the guest
         ds.ack(next_id);
@@ -2106,39 +1801,33 @@ mod test {
         ds.in_progress(next_id, 2);
 
         // Complete the flush on all three downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(
                 next_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(
                 next_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         let state = ds.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -2210,50 +1899,18 @@ mod test {
         assert!(ds.in_progress(id2, 2).is_some());
 
         // Complete the writes that we sent to the 2 downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                2,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(id1, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(id2, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(id2, 2, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // Ack the writes to the guest.
         ds.ack(id1);
@@ -2273,28 +1930,24 @@ mod test {
         ds.in_progress(flush_id, 2);
 
         // Complete the flush on those downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 flush_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(
                 flush_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
 
         // Ack the flush
         ds.ack(flush_id);
@@ -2314,45 +1967,27 @@ mod test {
         // Now, finish sending and completing the writes
         assert!(ds.in_progress(id1, 2).is_some());
         assert!(ds.in_progress(id2, 0).is_some());
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                2,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 2, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(id2, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // Completed work won't happen till the last flush is done
         assert_eq!(ds.completed.len(), 0);
 
         // Send and complete the flush
         ds.in_progress(flush_id, 1);
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 flush_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Active
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         // Now, all three jobs (w,w,f) will move to completed.
         assert_eq!(ds.completed.len(), 3);
@@ -2373,7 +2008,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2384,21 +2018,11 @@ mod test {
         ds.in_progress(next_id, 2);
 
         // Complete the read on one downstairs.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
 
         // One completion should allow for an ACK
         assert_eq!(ds.ackable_work().len(), 1);
@@ -2406,10 +2030,10 @@ mod test {
         assert_eq!(state, AckStatus::AckReady);
 
         // Be sure the job is not yet in replay
-        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, false);
+        assert!(!ds.active.get_mut(&next_id).unwrap().replay);
         ds.re_new(0);
         // Now the IO should be replay
-        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, true);
+        assert!(ds.active.get_mut(&next_id).unwrap().replay);
 
         // The act of taking a downstairs offline should move a read
         // back from AckReady if it was the only completed read.
@@ -2430,7 +2054,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2443,19 +2066,11 @@ mod test {
         // Complete the read on one downstairs, verify it is ack ready.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![1, 2, 3, 4],
+            &[1, 2, 3, 4],
         )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
         let state = ds.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -2463,19 +2078,11 @@ mod test {
         // Complete the read on a 2nd downstairs.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![1, 2, 3, 4],
+            &[1, 2, 3, 4],
         )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                1,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 1, response, &None, UpState::Active)
+            .unwrap());
 
         // Now, take the first downstairs offline.
         ds.re_new(0);
@@ -2492,21 +2099,11 @@ mod test {
         // Redo the read on DS 0, IO should go back to ackable.
         ds.in_progress(next_id, 0);
 
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
         let state = ds.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
@@ -2525,7 +2122,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2536,21 +2132,11 @@ mod test {
         ds.in_progress(next_id, 2);
 
         // Complete the read on one downstairs.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
 
         // Verify the read is now AckReady
         assert_eq!(ds.ackable_work().len(), 1);
@@ -2577,21 +2163,11 @@ mod test {
 
         // Redo on DS 0, IO should remain acked.
         ds.in_progress(next_id, 0);
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &vec![],
-        )]);
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
         let state = ds.active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
@@ -2629,7 +2205,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2642,31 +2217,23 @@ mod test {
         // Construct our fake response
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![122], // Original data.
+            &[122], // Original data.
         )]);
 
         // Complete the read on one downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
 
         // Ack the read to the guest.
         ds.ack(next_id);
 
         // Before re re_new, the IO is not replay
-        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, false);
+        assert!(!ds.active.get_mut(&next_id).unwrap().replay);
         // Now, take that downstairs offline
         ds.re_new(0);
         // Now the IO should be replay
-        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, true);
+        assert!(ds.active.get_mut(&next_id).unwrap().replay);
 
         // Move it to in-progress.
         ds.in_progress(next_id, 0);
@@ -2675,22 +2242,14 @@ mod test {
         // produce a different hash.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![123], // Different data than before
+            &[123], // Different data than before
         )]);
 
         // Process the new read (with different data), make sure we don't
         // trigger the hash mismatch check.
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
 
         // Some final checks.  The replay should behave in every other way
         // like a regular read.
@@ -2728,7 +2287,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
         ds.enqueue(op);
@@ -2741,40 +2299,24 @@ mod test {
         // Construct our fake response
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![122], // Original data.
+            &[122], // Original data.
         )]);
 
         // Complete the read on one downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                0,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(next_id, 0, response, &None, UpState::Active)
+            .unwrap());
 
         // Construct our fake response for another downstairs.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![122], // Original data.
+            &[122], // Original data.
         )]);
 
         // Complete the read on the this downstairs as well
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                1,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 1, response, &None, UpState::Active)
+            .unwrap());
 
         // Ack the read to the guest.
         ds.ack(next_id);
@@ -2782,7 +2324,7 @@ mod test {
         // Now, take the second downstairs offline
         ds.re_new(1);
         // Now the IO should be replay
-        assert_eq!(ds.active.get_mut(&next_id).unwrap().replay, true);
+        assert!(ds.active.get_mut(&next_id).unwrap().replay);
 
         // Move it to in-progress.
         ds.in_progress(next_id, 1);
@@ -2791,22 +2333,14 @@ mod test {
         // produce a different hash.
         let response = Ok(vec![ReadResponse::from_request_with_data(
             &request,
-            &vec![123], // Different data than before
+            &[123], // Different data than before
         )]);
 
         // Process the new read (with different data), make sure we don't
         // trigger the hash mismatch check.
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                1,
-                response,
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(next_id, 1, response, &None, UpState::Active)
+            .unwrap());
 
         // Some final checks.  The replay should behave in every other way
         // like a regular read.
@@ -2855,28 +2389,12 @@ mod test {
         assert!(ds.in_progress(id1, 1).is_some());
 
         // Complete the write on two downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(id1, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // Verify AckReady
         let state = ds.active.get_mut(&id1).unwrap().ack_status;
@@ -2884,10 +2402,10 @@ mod test {
 
         /* Now, take that downstairs offline */
         // Before re re_new, the IO is not replay
-        assert_eq!(ds.active.get_mut(&id1).unwrap().replay, false);
+        assert!(!ds.active.get_mut(&id1).unwrap().replay);
         ds.re_new(1);
         // Now the IO should be replay
-        assert_eq!(ds.active.get_mut(&id1).unwrap().replay, true);
+        assert!(ds.active.get_mut(&id1).unwrap().replay);
 
         // State goes back to NotAcked
         let state = ds.active.get_mut(&id1).unwrap().ack_status;
@@ -2895,17 +2413,9 @@ mod test {
 
         // Re-submit and complete the write
         assert!(ds.in_progress(id1, 1).is_some());
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(ds
+            .process_ds_completion(id1, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // State should go back to acked.
         let state = ds.active.get_mut(&id1).unwrap().ack_status;
@@ -2950,28 +2460,12 @@ mod test {
         assert!(ds.in_progress(id1, 1).is_some());
 
         // Complete the write on two downstairs.
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                1,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            true
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(ds
+            .process_ds_completion(id1, 1, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
 
         // Verify it is ackable..
         assert_eq!(ds.ackable_work().len(), 1);
@@ -2993,28 +2487,12 @@ mod test {
         assert!(ds.in_progress(id1, 0).is_some());
         assert!(ds.in_progress(id1, 2).is_some());
 
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                0,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                2,
-                Ok(vec![]),
-                &None,
-                UpState::Active
-            )
-            .unwrap(),
-            false
-        );
+        assert!(!ds
+            .process_ds_completion(id1, 0, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
+        assert!(!ds
+            .process_ds_completion(id1, 2, Ok(vec![]), &None, UpState::Active)
+            .unwrap());
     }
 
     #[test]
@@ -3149,42 +2627,38 @@ mod test {
 
         // Complete the flush on those downstairs.
         // One flush won't result in an ACK
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 flush_id,
                 0,
                 Ok(vec![]),
                 &None,
                 UpState::Deactivating
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         // The 2nd ack when disconnecting still won't trigger an ack.
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(!ds
+            .process_ds_completion(
                 flush_id,
                 2,
                 Ok(vec![]),
                 &None,
                 UpState::Deactivating
             )
-            .unwrap(),
-            false
-        );
+            .unwrap());
 
         // Verify we can deactivate the completed DS
         drop(ds);
-        assert_eq!(up.ds_deactivate(0), true);
-        assert_eq!(up.ds_deactivate(2), true);
+        assert!(up.ds_deactivate(0));
+        assert!(up.ds_deactivate(2));
 
         // Verify the remaining DS can not deactivate
-        assert_eq!(up.ds_deactivate(1), false);
+        assert!(!up.ds_deactivate(1));
 
         // Verify the deactivate is not done yet.
         up.deactivate_transition_check();
-        assert_eq!(up.is_deactivating(), true);
+        assert!(up.is_deactivating());
 
         ds = up.downstairs.lock().unwrap();
         // Make sure the correct DS have changed state.
@@ -3194,22 +2668,20 @@ mod test {
 
         // Send and complete the flush
         ds.in_progress(flush_id, 1);
-        assert_eq!(
-            ds.process_ds_completion(
+        assert!(ds
+            .process_ds_completion(
                 flush_id,
                 1,
                 Ok(vec![]),
                 &None,
                 UpState::Deactivating
             )
-            .unwrap(),
-            true
-        );
+            .unwrap());
         // Ack the flush..
         ds.ack(flush_id);
 
         drop(ds);
-        assert_eq!(up.ds_deactivate(1), true);
+        assert!(up.ds_deactivate(1));
 
         // Report all three DS as missing, which moves them to New
         up.ds_missing(0);
@@ -3218,7 +2690,7 @@ mod test {
 
         // Verify we have disconnected and can go back to init.
         up.deactivate_transition_check();
-        assert_eq!(up.is_deactivating(), false);
+        assert!(!up.is_deactivating());
 
         // Verify after the ds_missing, all downstairs are New
         let ds = up.downstairs.lock().unwrap();
@@ -3245,9 +2717,9 @@ mod test {
         up.set_deactivate(None).unwrap();
 
         // Verify we can deactivate as there is no work
-        assert_eq!(up.ds_deactivate(0), true);
-        assert_eq!(up.ds_deactivate(1), true);
-        assert_eq!(up.ds_deactivate(2), true);
+        assert!(up.ds_deactivate(0));
+        assert!(up.ds_deactivate(1));
+        assert!(up.ds_deactivate(2));
 
         ds = up.downstairs.lock().unwrap();
         // Make sure the correct DS have changed state.
@@ -3263,7 +2735,7 @@ mod test {
 
         // Verify now we can go back to init.
         up.deactivate_transition_check();
-        assert_eq!(up.is_deactivating(), false);
+        assert!(!up.is_deactivating());
     }
 
     #[test]
@@ -3345,13 +2817,13 @@ mod test {
 
         // Verify we will not transition to deactivated without a flush.
         drop(ds);
-        assert_eq!(up.ds_deactivate(0), false);
-        assert_eq!(up.ds_deactivate(1), false);
-        assert_eq!(up.ds_deactivate(2), false);
+        assert!(!up.ds_deactivate(0));
+        assert!(!up.ds_deactivate(1));
+        assert!(!up.ds_deactivate(2));
 
         // Verify the deactivate is not done yet.
         up.deactivate_transition_check();
-        assert_eq!(up.is_deactivating(), true);
+        assert!(up.is_deactivating());
 
         ds = up.downstairs.lock().unwrap();
         // Make sure no DS have changed state.
@@ -3389,9 +2861,9 @@ mod test {
         drop(ds);
 
         // Verify we cannot deactivate even when there is no work
-        assert_eq!(up.ds_deactivate(0), false);
-        assert_eq!(up.ds_deactivate(1), false);
-        assert_eq!(up.ds_deactivate(2), false);
+        assert!(!up.ds_deactivate(0));
+        assert!(!up.ds_deactivate(1));
+        assert!(!up.ds_deactivate(2));
 
         ds = up.downstairs.lock().unwrap();
         // Make sure no DS have changed state.
@@ -3407,9 +2879,9 @@ mod test {
         let up = Upstairs::default();
 
         // Verify we cannot deactivate before the upstairs is active
-        assert_eq!(up.ds_deactivate(0), false);
-        assert_eq!(up.ds_deactivate(1), false);
-        assert_eq!(up.ds_deactivate(2), false);
+        assert!(!up.ds_deactivate(0));
+        assert!(!up.ds_deactivate(1));
+        assert!(!up.ds_deactivate(2));
 
         let ds = up.downstairs.lock().unwrap();
         // Make sure no DS have changed state.
@@ -3522,8 +2994,7 @@ mod test {
         };
 
         // We just make one target to keep the method happy.
-        let mut d = Vec::new();
-        d.push(dst);
+        let d = vec![dst];
         let mut lastcast: u64 = 1;
         let res = tokio_test::block_on(up.connect_region_set(
             &d,
@@ -3785,7 +3256,7 @@ mod test {
 
         drop(ds);
         // Now, we should be empty, so nw is false
-        assert_eq!(tokio_test::block_on(up.new_rec_work()).unwrap(), false);
+        assert!(!tokio_test::block_on(up.new_rec_work()).unwrap());
     }
 
     #[test]
@@ -3950,7 +3421,7 @@ mod test {
         let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
         let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
         let r2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 803);
-        ds.ds_repair.insert(0, r0.clone());
+        ds.ds_repair.insert(0, r0);
         ds.ds_repair.insert(1, r1);
         ds.ds_repair.insert(2, r2);
 
@@ -4067,7 +3538,7 @@ mod test {
         let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
         let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
         let r2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 803);
-        ds.ds_repair.insert(0, r0.clone());
+        ds.ds_repair.insert(0, r0);
         ds.ds_repair.insert(1, r1);
         ds.ds_repair.insert(2, r2);
 
@@ -4187,7 +3658,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
@@ -4223,12 +3693,11 @@ mod test {
 
         // compute integrity hash after alteration above! It should still
         // validate
-        let hash = crucible_common::integrity_hash(&[&nonce, &tag, &data]);
+        let hash = integrity_hash(&[&nonce, &tag, &data]);
 
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
             encryption_contexts: vec![crucible_protocol::EncryptionContext {
@@ -4263,7 +3732,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
@@ -4279,7 +3747,6 @@ mod test {
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
             encryption_contexts: vec![],
@@ -4311,7 +3778,6 @@ mod test {
         let request = ReadRequest {
             eid: 0,
             offset: Block::new_512(7),
-            num_blocks: 2,
         };
 
         let op = create_read_eob(next_id, vec![], 10, vec![request.clone()]);
@@ -4341,7 +3807,6 @@ mod test {
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
             offset: request.offset,
-            num_blocks: request.num_blocks,
 
             data: BytesMut::from(&data[..]),
             encryption_contexts: vec![crucible_protocol::EncryptionContext {
@@ -4716,5 +4181,475 @@ mod test {
         assert!(guest.consume_req().is_some());
 
         Ok(())
+    }
+
+    #[test]
+    fn work_writes_bad() {
+        // Verify that three bad writes will ACK the IO, and set the
+        // downstairs clients to failed.
+        // This test also makes sure proper mutex behavior is used in
+        // process_ds_operaion.
+        let up = Upstairs::default();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive);
+            up.ds_transition(cid, DsState::WaitQuorum);
+            up.ds_transition(cid, DsState::Active);
+        }
+        up.set_active().unwrap();
+
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+
+            let op = create_write_eob(
+                next_id,
+                vec![],
+                10,
+                vec![crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(7),
+                    data: Bytes::from(vec![1]),
+                    encryption_context: None,
+                    hash: 0,
+                }],
+                false,
+            );
+
+            ds.enqueue(op);
+
+            assert!(ds.in_progress(next_id, 0).is_some());
+            assert!(ds.in_progress(next_id, 1).is_some());
+            assert!(ds.in_progress(next_id, 2).is_some());
+
+            next_id
+        };
+
+        // Set the error that everyone will use.
+        let response = Err(CrucibleError::GenericError("bad".to_string()));
+
+        // Process the operation for client 0
+        assert!(!up
+            .process_ds_operation(next_id, 0, response.clone())
+            .unwrap(),);
+        // client 0 is failed, the others should be okay still
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Active);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        // Process the operation for client 1
+        assert!(!up
+            .process_ds_operation(next_id, 1, response.clone())
+            .unwrap(),);
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Failed);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        {
+            // Verify we are not ready to ACK yet.
+            let mut ds = up.downstairs.lock().unwrap();
+            let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+            assert_eq!(state, AckStatus::NotAcked);
+        }
+        // Three failures, process_ds_operaion should return true now.
+        // Process the operation for client 2
+        assert!(up.process_ds_operation(next_id, 2, response).unwrap());
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Failed);
+        assert_eq!(up.ds_state(2), DsState::Failed);
+
+        // Verify we can ack this (failed) work
+        let mut ds = up.downstairs.lock().unwrap();
+        assert_eq!(ds.ackable_work().len(), 1);
+    }
+
+    #[test]
+    fn read_after_write_fail_is_alright() {
+        // Verify that if a single write fails on a downstairs, reads can still
+        // be acked.
+        //
+        // Verify after acking IOs, we can then send a flush and
+        // clear the jobs (some now failed/skipped) from the work queue.
+        let up = Upstairs::default();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive);
+            up.ds_transition(cid, DsState::WaitQuorum);
+            up.ds_transition(cid, DsState::Active);
+        }
+        up.set_active().unwrap();
+
+        // Create the write that fails on one DS
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+
+            let op = create_write_eob(
+                next_id,
+                vec![],
+                10,
+                vec![crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(7),
+                    data: Bytes::from(vec![1]),
+                    encryption_context: None,
+                    hash: 0,
+                }],
+                false,
+            );
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, 0);
+            ds.in_progress(next_id, 1);
+            ds.in_progress(next_id, 2);
+
+            next_id
+        };
+
+        // Set the error that everyone will use.
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
+
+        // Process the error operation for client 0
+        assert!(!up.process_ds_operation(next_id, 0, err_response).unwrap());
+        // client 0 should be marked failed.
+        assert_eq!(up.ds_state(0), DsState::Failed);
+
+        let ok_response = Ok(vec![]);
+        // Process the good operation for client 1
+        assert!(!up
+            .process_ds_operation(next_id, 1, ok_response.clone())
+            .unwrap(),);
+
+        // process_ds_operaion should return true after we process this.
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Active);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        // Verify we can ack this work, then ack it.
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
+        up.downstairs.lock().unwrap().ack(next_id);
+
+        // Now, do a read.
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+        };
+
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+            let op =
+                create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+
+            ds.enqueue(op);
+
+            // As this DS is failed, it should return none
+            assert_eq!(ds.in_progress(next_id, 0), None);
+            assert!(ds.in_progress(next_id, 1).is_some());
+            assert!(ds.in_progress(next_id, 2).is_some());
+
+            next_id
+        };
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        // Process the operation for client 1 this should return true
+        assert!(up
+            .process_ds_operation(next_id, 1, response.clone())
+            .unwrap(),);
+
+        // Process the operation for client 2 this should return false
+        assert!(!up.process_ds_operation(next_id, 2, response).unwrap());
+
+        // Verify we can ack this work, then ack it.
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
+        up.downstairs.lock().unwrap().ack(next_id);
+
+        // Perform the flush.
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+            let op = create_flush(next_id, vec![], 10, 0, 0, None);
+            ds.enqueue(op);
+
+            // As this DS is failed, it should return none
+            assert_eq!(ds.in_progress(next_id, 0), None);
+            assert!(ds.in_progress(next_id, 1).is_some());
+            assert!(ds.in_progress(next_id, 2).is_some());
+
+            next_id
+        };
+
+        let ok_response = Ok(vec![]);
+        // Process the operation for client 1
+        assert!(!up
+            .process_ds_operation(next_id, 1, ok_response.clone())
+            .unwrap(),);
+
+        // process_ds_operaion should return true after we process this.
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
+
+        // ACK the flush and let retire_check move things along.
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
+        up.downstairs.lock().unwrap().ack(next_id);
+        up.downstairs.lock().unwrap().retire_check(next_id);
+
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 0);
+
+        // The write, the read, and now the flush should be completed.
+        assert_eq!(up.downstairs.lock().unwrap().completed.len(), 3);
+    }
+
+    #[test]
+    fn read_after_two_write_fail_is_alright() {
+        // Verify that if two writes fail, a read can still be acked.
+        let up = Upstairs::default();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive);
+            up.ds_transition(cid, DsState::WaitQuorum);
+            up.ds_transition(cid, DsState::Active);
+        }
+        up.set_active().unwrap();
+
+        // Create the write that fails on two DS
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+
+            let op = create_write_eob(
+                next_id,
+                vec![],
+                10,
+                vec![crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(7),
+                    data: Bytes::from(vec![1]),
+                    encryption_context: None,
+                    hash: 0,
+                }],
+                false,
+            );
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, 0);
+            ds.in_progress(next_id, 1);
+            ds.in_progress(next_id, 2);
+
+            next_id
+        };
+
+        // Set the error that everyone will use.
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
+
+        // Process the operation for client 0
+        assert!(!up
+            .process_ds_operation(next_id, 0, err_response.clone())
+            .unwrap());
+        // client 0 is failed, the others should be okay still
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Active);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        // Process the operation for client 1
+        assert!(!up.process_ds_operation(next_id, 1, err_response).unwrap());
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Failed);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        let ok_response = Ok(vec![]);
+        // process_ds_operaion should return true after we process this.
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
+        assert_eq!(up.ds_state(0), DsState::Failed);
+        assert_eq!(up.ds_state(1), DsState::Failed);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        // Verify we can ack this work
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
+
+        // Now, do a read.
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+        };
+
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+
+            let op =
+                create_read_eob(next_id, vec![], 10, vec![request.clone()]);
+
+            ds.enqueue(op);
+
+            // As this DS is failed, it should return none
+            assert_eq!(ds.in_progress(next_id, 0), None);
+            assert_eq!(ds.in_progress(next_id, 1), None);
+            assert!(ds.in_progress(next_id, 2).is_some());
+
+            next_id
+        };
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        // Process the operation for client 1 this should return true
+        assert!(up.process_ds_operation(next_id, 2, response).unwrap());
+    }
+
+    #[test]
+    fn write_after_write_fail_is_alright() {
+        // Verify that if a single write fails on a downstairs, a second
+        // write can still be acked.
+        // Then, send a flush and verify the work queue is cleared.
+        let up = Upstairs::default();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive);
+            up.ds_transition(cid, DsState::WaitQuorum);
+            up.ds_transition(cid, DsState::Active);
+        }
+        up.set_active().unwrap();
+
+        // Create the write that fails on one DS
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+
+            let op = create_write_eob(
+                next_id,
+                vec![],
+                10,
+                vec![crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(7),
+                    data: Bytes::from(vec![1]),
+                    encryption_context: None,
+                    hash: 0,
+                }],
+                false,
+            );
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, 0);
+            ds.in_progress(next_id, 1);
+            ds.in_progress(next_id, 2);
+
+            next_id
+        };
+
+        // Make the error and ok responses
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
+        let ok_response = Ok(vec![]);
+
+        // Process the operation for client 0
+        assert!(!up
+            .process_ds_operation(next_id, 0, ok_response.clone())
+            .unwrap(),);
+
+        // Process the error for client 1
+        assert!(!up.process_ds_operation(next_id, 1, err_response).unwrap());
+
+        // process_ds_operaion should return true after we process this.
+        assert!(up
+            .process_ds_operation(next_id, 2, ok_response.clone())
+            .unwrap(),);
+
+        // Verify client states
+        assert_eq!(up.ds_state(0), DsState::Active);
+        assert_eq!(up.ds_state(1), DsState::Failed);
+        assert_eq!(up.ds_state(2), DsState::Active);
+
+        // Verify we can ack this work
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 1);
+
+        let first_id = next_id;
+        // Now, do another write.
+        let next_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+
+            let op = create_write_eob(
+                next_id,
+                vec![],
+                10,
+                vec![crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(7),
+                    data: Bytes::from(vec![1]),
+                    encryption_context: None,
+                    hash: 0,
+                }],
+                false,
+            );
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, 0);
+            assert_eq!(ds.in_progress(next_id, 1), None);
+            ds.in_progress(next_id, 2);
+
+            next_id
+        };
+
+        // Process the operation for client 0, re-use ok_response from above.
+        // This will return false as we don't have enough work done yet.
+        assert!(!up
+            .process_ds_operation(next_id, 0, ok_response.clone())
+            .unwrap(),);
+
+        // We don't process client 1, it had failed
+
+        // process_ds_operaion should return true after we process this.
+        assert!(up.process_ds_operation(next_id, 2, ok_response).unwrap());
+
+        // Verify we can ack this work, the total is now 2 jobs to ack
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 2);
+
+        // Perform the flush.
+        let flush_id = {
+            let mut ds = up.downstairs.lock().unwrap();
+
+            let next_id = ds.next_id();
+            let op = create_flush(next_id, vec![], 10, 0, 0, None);
+            ds.enqueue(op);
+
+            assert!(ds.in_progress(next_id, 0).is_some());
+            // As this DS is failed, it should return none
+            assert_eq!(ds.in_progress(next_id, 1), None);
+            assert!(ds.in_progress(next_id, 2).is_some());
+
+            next_id
+        };
+
+        let ok_response = Ok(vec![]);
+        // Process the operation for client 0
+        assert!(!up
+            .process_ds_operation(flush_id, 0, ok_response.clone())
+            .unwrap(),);
+
+        // process_ds_operaion should return true after we process client 2.
+        assert!(up.process_ds_operation(flush_id, 2, ok_response).unwrap());
+
+        // ACK all the jobs and let retire_check move things along.
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 3);
+        up.downstairs.lock().unwrap().ack(first_id);
+        up.downstairs.lock().unwrap().ack(next_id);
+        up.downstairs.lock().unwrap().ack(flush_id);
+        up.downstairs.lock().unwrap().retire_check(flush_id);
+
+        assert_eq!(up.downstairs.lock().unwrap().ackable_work().len(), 0);
+
+        // The two writes and the flush should be completed.
+        assert_eq!(up.downstairs.lock().unwrap().completed.len(), 3);
     }
 }
