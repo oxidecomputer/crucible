@@ -266,11 +266,7 @@ impl Volume {
             let scrub_start = Instant::now();
             println!("Scrub for {} begins", self.uuid);
 
-            println!(
-                "Scrub with total_size:{:?} block_size:{:?}",
-                ts,
-                bs,
-            );
+            println!("Scrub with total_size:{:?} block_size:{:?}", ts, bs,);
             let start = read_only_parent.lba_range.start;
             let end = read_only_parent.lba_range.end;
 
@@ -312,7 +308,7 @@ impl Volume {
                     let waiter =
                         read_only_parent.read(block, buffer.clone()).await;
                     match waiter {
-                        Ok(mut waiter) => {
+                        Ok(waiter) => {
                             // Once we have our waiter, we can wait on it
                             // to answer or read.
                             waiter.wait().await?;
@@ -339,10 +335,12 @@ impl Volume {
                 }
 
                 // TODO: Nexus needs to know about this failure.
-                let mut waiter = self.write_unwritten(
-                    Block::new(offset, bs.trailing_zeros()),
-                    Bytes::from(buffer.as_vec().await.clone()),
-                ).await?;
+                let waiter = self
+                    .write_unwritten(
+                        Block::new(offset, bs.trailing_zeros()),
+                        Bytes::from(buffer.as_vec().await.clone()),
+                    )
+                    .await?;
                 waiter.wait().await?;
 
                 offset += block_count as u64;
@@ -366,7 +364,7 @@ impl Volume {
                 total_time.as_secs(),
                 retries,
             );
-            self.flush(None).await.wait().await?;
+            self.flush(None).await?.wait().await?;
         } else {
             println!("Scrub for {} not required", self.uuid);
         }
@@ -2396,7 +2394,7 @@ mod test {
         // volumes: 0 0 0 0 0 0 0 0 0 0
         //  parent: P P P P P P P P P P
 
-        test_volume_scrub_point_lba_range(block_size, 10, &[10])?;
+        test_volume_scrub_point_lba_range(block_size, 10, &[10]).await?;
 
         Ok(())
     }
@@ -2411,7 +2409,7 @@ mod test {
         // volumes: 0 0 0 0 0 0 0 0 0 0
         //  parent: P P P P P
 
-        test_volume_scrub_point_lba_range(block_size, 5, &[10])?;
+        test_volume_scrub_point_lba_range(block_size, 5, &[10]).await?;
 
         Ok(())
     }
@@ -2426,7 +2424,7 @@ mod test {
         // volume1: 0 0 0 0 0 0 0 0 0 0
         // volume2:                     0 0 0 0 0
         // parent: P P P P P
-        test_volume_scrub_point_lba_range(block_size, 5, &[10, 5])?;
+        test_volume_scrub_point_lba_range(block_size, 5, &[10, 5]).await?;
 
         Ok(())
     }
@@ -2441,7 +2439,7 @@ mod test {
         // volume1: 0 0 0 0 0
         // volume2:           0 0 0 0 0
         // parent:  P P P P P
-        test_volume_scrub_point_lba_range(block_size, 5, &[5, 5])?;
+        test_volume_scrub_point_lba_range(block_size, 5, &[5, 5]).await?;
 
         Ok(())
     }
@@ -2456,7 +2454,7 @@ mod test {
         // volume1: 0 0 0 0 0
         // volume2:           0 0 0 0 0
         // parent:  P P P P P P P P
-        test_volume_scrub_point_lba_range(block_size, 8, &[5, 5])?;
+        test_volume_scrub_point_lba_range(block_size, 8, &[5, 5]).await?;
 
         Ok(())
     }
@@ -2471,7 +2469,7 @@ mod test {
         // volume1: 0 0 0 0 0
         // volume2:           0 0 0 0 0
         // parent:  P P P P P P P P P P
-        test_volume_scrub_point_lba_range(block_size, 8, &[5, 5])?;
+        test_volume_scrub_point_lba_range(block_size, 8, &[5, 5]).await?;
 
         Ok(())
     }
@@ -2482,7 +2480,7 @@ mod test {
     // correct LBA range is returned.
     //
     // All the possible IO offsets, sizes, and scrub points are checked.
-    fn test_volume_scrub_point_lba_range(
+    async fn test_volume_scrub_point_lba_range(
         block_size: usize,
         parent_blocks: usize,
         subvol_sizes: &[usize],
@@ -2497,7 +2495,7 @@ mod test {
                 block_size as u64,
                 block_size * size,
             ));
-            volume.add_subvolume(subvolume.clone())?;
+            volume.add_subvolume(subvolume.clone()).await?;
         }
 
         // Create the read only parent
@@ -2507,11 +2505,11 @@ mod test {
             block_size * parent_blocks,
         ));
 
-        volume.add_read_only_parent(parent.clone())?;
-        volume.activate(0)?;
+        volume.add_read_only_parent(parent.clone()).await?;
+        volume.activate(0).await?;
 
         // The total blocks in our volume
-        let volume_blocks = volume.total_size()? / block_size as u64;
+        let volume_blocks = volume.total_size().await? / block_size as u64;
 
         // Walk all the possible sizes (in blocks) for an IO.
         for size in 1..volume_blocks {

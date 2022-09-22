@@ -5220,13 +5220,15 @@ impl Upstairs {
 
     async fn ds_state_show(&self) {
         let ds = self.downstairs.lock().await;
+
+        let mut state_line = String::new();
         state_line.push_str(&self.uuid.to_string());
 
-        let ds = self.downstairs.lock().unwrap();
         for state in ds.ds_state.iter() {
             state_line.push(' ');
             state_line.push_str(&state.to_string());
         }
+
         info!(self.log, "{}", state_line);
     }
 
