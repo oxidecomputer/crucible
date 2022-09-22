@@ -3935,7 +3935,7 @@ mod up_test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn test_flush_does_not_consume_iops() -> Result<()> {
         let mut guest = Guest::new();
         guest.set_active().await;
