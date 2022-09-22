@@ -46,6 +46,7 @@ impl DownstairsMend {
         c0: &RegionMetadata,
         c1: &RegionMetadata,
         c2: &RegionMetadata,
+        log: Logger,
     ) -> Option<DownstairsMend> {
         let mut dsm = DownstairsMend {
             mend: HashMap::new(),
@@ -106,8 +107,9 @@ impl DownstairsMend {
          */
         for (i, dirty0) in c0.dirty.iter().enumerate() {
             if *dirty0 || c1.dirty[i] || c2.dirty[i] {
-                println!("Extents {} dirty", i);
-                let ef = make_repair_list(i, c0, c1, c2);
+                info!(log, "Extents {} dirty", i);
+                let log_mrl = log.new(o!("mrl" => "dirty".to_string()));
+                let ef = make_repair_list(i, c0, c1, c2, log_mrl);
                 dsm.mend.insert(i, ef);
             } else {
                 to_check.push(i as usize);
@@ -124,8 +126,10 @@ impl DownstairsMend {
             if c0.flush_numbers[*i] != c1.flush_numbers[*i]
                 || c1.flush_numbers[*i] != c2.flush_numbers[*i]
             {
-                println!("Extent {} has flush number mismatch", i);
-                let ef = make_repair_list(*i, c0, c1, c2);
+                info!(log, "Extent {} has flush number mismatch", i);
+                let log_mrl =
+                    log.new(o!("mrl" => "flush_mismatch".to_string()));
+                let ef = make_repair_list(*i, c0, c1, c2, log_mrl);
                 dsm.mend.insert(*i, ef);
             } else {
                 second_check.push(*i);
@@ -140,8 +144,9 @@ impl DownstairsMend {
             if c0.generation[*i] != c1.generation[*i]
                 || c1.generation[*i] != c2.generation[*i]
             {
-                println!("generation number mismatch {}", i);
-                let ef = make_repair_list(*i, c0, c1, c2);
+                info!(log, "generation number mismatch {}", i);
+                let log_mrl = log.new(o!("mrl" => "gen_mismatch".to_string()));
+                let ef = make_repair_list(*i, c0, c1, c2, log_mrl);
                 dsm.mend.insert(*i, ef);
             }
         }
@@ -164,9 +169,10 @@ fn make_repair_list(
     c0: &RegionMetadata,
     c1: &RegionMetadata,
     c2: &RegionMetadata,
+    log: Logger,
 ) -> ExtentFix {
-    let source = find_source(i, c0, c1, c2);
-    let dest = find_dest(i, source, c0, c1, c2);
+    let source = find_source(i, c0, c1, c2, &log);
+    let dest = find_dest(i, source, c0, c1, c2, &log);
 
     ExtentFix { source, dest }
 }
@@ -191,6 +197,7 @@ fn find_source(
     c0: &RegionMetadata,
     c1: &RegionMetadata,
     c2: &RegionMetadata,
+    log: &Logger,
 ) -> u8 {
     /*
      * All three client IDs are candidates for the max generation number,
@@ -198,13 +205,13 @@ fn find_source(
      */
     let mut max_gen = vec![0, 1, 2];
 
-    println!("First source client ID for extent {}", i);
+    info!(log, "First source client ID for extent {}", i);
 
     let gen0 = c0.generation[i];
     let gen1 = c1.generation[i];
     let gen2 = c2.generation[i];
 
-    println!("extent:{}  gens: {} {} {}", i, gen0, gen1, gen2);
+    info!(log, "extent:{}  gens: {} {} {}", i, gen0, gen1, gen2);
 
     if gen0 != gen1 || gen1 != gen2 {
         /*
@@ -245,7 +252,8 @@ fn find_source(
      */
     let rec = vec![c0, c1, c2];
 
-    println!(
+    info!(
+        log,
         "extent:{}  flush: {} {} {} scs: {:?}",
         i,
         c0.flush_numbers[i],
@@ -268,7 +276,7 @@ fn find_source(
         }
     }
 
-    println!("max_flush now has: {:?}", max_flush);
+    info!(log, "max_flush now has: {:?}", max_flush);
     if max_flush.len() == 1 {
         return max_flush[0];
     }
@@ -278,9 +286,9 @@ fn find_source(
      * the gen and flush are the same.  All that remains to break the tie is
      * an extent with the dirty bit set.
      */
-    println!(
-        "extent:{}  dirty: {} {} {}",
-        i, c0.dirty[i], c1.dirty[i], c2.dirty[i],
+    info!(
+        log,
+        "extent:{}  dirty: {} {} {}", i, c0.dirty[i], c1.dirty[i], c2.dirty[i],
     );
     for sc in max_flush.iter() {
         if rec[*sc as usize].dirty[i] {
@@ -294,7 +302,7 @@ fn find_source(
      * consideration, with the remaining two client extents having
      * matching gen and flush numbers.
      */
-    println!("No maxes found, left with: {:?}", max_flush);
+    info!(log, "No maxes found, left with: {:?}", max_flush);
     assert_eq!(max_flush.len(), 2);
 
     /*
@@ -316,6 +324,7 @@ fn find_dest(
     c0: &RegionMetadata,
     c1: &RegionMetadata,
     c2: &RegionMetadata,
+    log: &Logger,
 ) -> Vec<u8> {
     assert!(source < 3);
     let mut dest: Vec<u8> = Vec::new();
@@ -326,7 +335,10 @@ fn find_dest(
      */
     let rec = vec![c0, c1, c2];
 
-    println!("find dest for source {} for extent at index {}", source, i);
+    info!(
+        log,
+        "find dest for source {} for extent at index {}", source, i
+    );
 
     let to_check = match source {
         0 => vec![1, 2],
@@ -338,22 +350,22 @@ fn find_dest(
     for dc in to_check.iter() {
         if rec[source].generation[i] != rec[*dc as usize].generation[i] {
             dest.push(*dc);
-            println!("source {}, add dest {} gen", source, dc);
+            info!(log, "source {}, add dest {} gen", source, dc);
             continue;
         }
         if rec[source].flush_numbers[i] != rec[*dc as usize].flush_numbers[i] {
             dest.push(*dc);
-            println!("source {}, add dest {} flush", source, dc);
+            info!(log, "source {}, add dest {} flush", source, dc);
             continue;
         }
         if rec[source].dirty[i] {
             dest.push(*dc);
-            println!("source {}, add dest {} source flush", source, dc);
+            info!(log, "source {}, add dest {} source flush", source, dc);
             continue;
         }
         if rec[*dc as usize].dirty[i] {
             dest.push(*dc);
-            println!("source {}, add dest {} dc flush", source, dc);
+            info!(log, "source {}, add dest {} dc flush", source, dc);
             continue;
         }
     }
@@ -364,6 +376,12 @@ fn find_dest(
 mod test {
     use super::*;
 
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
+
     #[test]
     fn reconcile_one() {
         // Verify simple reconcile
@@ -373,7 +391,7 @@ mod test {
             flush_numbers: vec![3, 3, 3],
             dirty: vec![false, false, false],
         };
-        let to_fix = DownstairsMend::new(&dsr, &dsr, &dsr);
+        let to_fix = DownstairsMend::new(&dsr, &dsr, &dsr, csl());
         assert!(to_fix.is_none());
     }
 
@@ -392,7 +410,7 @@ mod test {
             flush_numbers: vec![3, 3, 3, 3],
             dirty: vec![false, false, false, false],
         };
-        let _fix = DownstairsMend::new(&dsr, &dsr, &dsr_long);
+        let _fix = DownstairsMend::new(&dsr, &dsr, &dsr_long, csl());
     }
 
     #[test]
@@ -411,7 +429,7 @@ mod test {
             flush_numbers: vec![0, 0, 0],
             dirty: vec![false, false, false, false],
         };
-        let _fix = DownstairsMend::new(&d1, &d1, &d2);
+        let _fix = DownstairsMend::new(&d1, &d1, &d2, csl());
     }
 
     #[test]
@@ -430,7 +448,7 @@ mod test {
             flush_numbers: vec![0, 0, 0, 0],
             dirty: vec![false, false, false, false],
         };
-        let _fix = DownstairsMend::new(&d1, &d2, &d1);
+        let _fix = DownstairsMend::new(&d1, &d2, &d1, csl());
     }
 
     #[test]
@@ -442,7 +460,7 @@ mod test {
             flush_numbers: vec![0, 0, 0],
             dirty: vec![false, false, false],
         };
-        let _fix = DownstairsMend::new(&d1, &d1, &d1);
+        let _fix = DownstairsMend::new(&d1, &d1, &d1, csl());
     }
 
     #[test]
@@ -455,7 +473,7 @@ mod test {
             dirty: vec![false, false, false, false],
         };
 
-        let fix = DownstairsMend::new(&dsr, &dsr, &dsr);
+        let fix = DownstairsMend::new(&dsr, &dsr, &dsr, csl());
         assert!(fix.is_none());
     }
 
@@ -486,7 +504,7 @@ mod test {
             flush_numbers: vec![2, 1, 3, 1],
             dirty: vec![false, false, true, false],
         };
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
 
         // Extent 2 has the mismatch
         let mut ef = fix.mend.remove(&2).unwrap();
@@ -523,7 +541,7 @@ mod test {
             flush_numbers,
             dirty: vec![false, true, false, false],
         };
-        let mut fix = DownstairsMend::new(&d1, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d1, &d2, csl()).unwrap();
 
         // Extent 1 has the mismatch, so we should find in the HM.
         let mut ef = fix.mend.remove(&1).unwrap();
@@ -555,7 +573,7 @@ mod test {
             flush_numbers,
             dirty: vec![false, false, true, false],
         };
-        let mut fix = DownstairsMend::new(&d1, &d2, &d1).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d1, csl()).unwrap();
 
         // Extent 2 has the mismatch
         let mut ef = fix.mend.remove(&2).unwrap();
@@ -583,7 +601,7 @@ mod test {
             flush_numbers: vec![2, 1, 2, 1],
             dirty: vec![true, false, false, true],
         };
-        let mut fix = DownstairsMend::new(&d1, &d1, &d1).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d1, &d1, csl()).unwrap();
 
         // Extents 0 and 3 have the mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -623,7 +641,7 @@ mod test {
             dirty,
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
         let mut ef = fix.mend.remove(&0).unwrap();
 
         assert_eq!(ef.source, 0);
@@ -654,7 +672,7 @@ mod test {
             dirty,
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d1).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d1, csl()).unwrap();
 
         // Extent 0 has the mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -698,7 +716,7 @@ mod test {
             dirty,
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
 
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -747,7 +765,7 @@ mod test {
             dirty,
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
 
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -789,7 +807,7 @@ mod test {
             dirty,
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
 
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -868,7 +886,7 @@ mod test {
             dirty,
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d1, &d2, csl()).unwrap();
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
 
@@ -912,7 +930,7 @@ mod test {
             dirty: vec![true, false, false, true],
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
         // Extent 0 has a flush mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
 
@@ -977,7 +995,7 @@ mod test {
             dirty: vec![false, false, false, false],
         };
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3).unwrap();
+        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
         // Extent 0 has a flush mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
 
@@ -1054,7 +1072,7 @@ mod test {
             flush_numbers: flush,
             dirty,
         };
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has no mismatch
         // Extent 1 has a mismatch, so we should find it in the HM.
@@ -1152,7 +1170,7 @@ mod test {
             flush_numbers: flush,
             dirty,
         };
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -1250,7 +1268,7 @@ mod test {
             flush_numbers: flush,
             dirty,
         };
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -1344,7 +1362,7 @@ mod test {
             flush_numbers: flush2,
             dirty,
         };
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has no mismatch
         // Extent 1 has a mismatch, so we should find it in the HM.
@@ -1441,7 +1459,7 @@ mod test {
             flush_numbers: flush2,
             dirty,
         };
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
@@ -1539,7 +1557,7 @@ mod test {
             flush_numbers: flush2,
             dirty,
         };
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2).unwrap();
+        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
