@@ -6406,6 +6406,7 @@ impl GuestWork {
                         );
                     }
                 }
+
                 gtos_job.completed.push(ds_id);
             } else {
                 println!("gw_id:{} ({}) already removed???", gw_id, ds_id);
@@ -6417,25 +6418,22 @@ impl GuestWork {
             }
 
             /*
-             * If all the downstairs jobs created for this have completed,
-             * we can copy (if present) read data back to the guest buffer
-             * they provided to us, and notify any waiters.
+             * Copy (if present) read data back to the guest buffer they
+             * provided to us, and notify any waiters.
              */
-            if gtos_job.submitted.is_empty() {
-                if result.is_ok() && gtos_job.guest_buffer.is_some() {
-                    gtos_job.transfer().await;
-                }
-
-                assert!(gtos_job.submitted.is_empty());
-                gtos_job.notify(result).await;
-
-                self.completed.push(gw_id);
+            assert!(gtos_job.submitted.is_empty());
+            if result.is_ok() && gtos_job.guest_buffer.is_some() {
+                gtos_job.transfer().await;
             }
+
+            gtos_job.notify(result).await;
+
+            self.completed.push(gw_id);
         } else {
             /*
              * XXX This is just so I can see if ever does happen.
              */
-            println!(
+            panic!(
                 "gw_id {} from removed job {} not on active list",
                 gw_id, ds_id
             );
