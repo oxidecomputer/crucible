@@ -2,7 +2,9 @@
 use super::*;
 
 /**
- * Couple a BlockOp with a notifier for calling code.
+ * Couple a BlockOp with a notifier for calling code. This uses a single-use
+ * channel to send the result of a particular operation, and is meant to be
+ * paired with a BlockReqWaiter.
  */
 #[must_use]
 #[derive(Debug)]
@@ -26,8 +28,7 @@ impl BlockReq {
 
     /// Consume this BlockReq and send Ok to the receiver
     pub async fn send_ok(self) {
-        // XXX this eats the result!
-        let _ = self.sender.send(Ok(())).await;
+        self.send_result(Ok(())).await;
     }
 
     /// Consume this BlockReq and send an Err to the receiver
@@ -43,8 +44,9 @@ impl BlockReq {
 }
 
 /**
- * When BlockOps are sent to a guest, the calling function receives a
- * waiter that it can block on.
+ * When BlockOps are sent to a guest, the calling function receives a waiter
+ * that it can block on. This uses a single-use channel to receive the result of
+ * a particular operation, and is meant to be paired with a BlockReq.
  */
 #[must_use]
 pub struct BlockReqWaiter {
