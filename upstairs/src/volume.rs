@@ -3,7 +3,7 @@
 use super::*;
 use oximeter::types::ProducerRegistry;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
 
@@ -12,7 +12,12 @@ pub struct Volume {
     uuid: Uuid,
 
     sub_volumes: Vec<SubVolume>,
-    read_only_parent: Option<SubVolume>,
+    read_only_parent: Option<Arc<SubVolume>>,
+
+    /*
+     * The block below which the scrubber has written
+     */
+    scrub_point: Arc<AtomicU64>,
 
     /*
      * Each sub volume should be the same block size (unit is bytes)
@@ -40,6 +45,7 @@ impl Volume {
             uuid,
             sub_volumes: vec![],
             read_only_parent: None,
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size,
             count: AtomicU32::new(0),
         }
@@ -72,6 +78,7 @@ impl Volume {
             uuid,
             sub_volumes: vec![sub_volume],
             read_only_parent: None,
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size,
             count: AtomicU32::new(0),
         })
@@ -165,14 +172,14 @@ impl Volume {
         // None when done - read block by block, don't overwrite if owned by sub
         // volume
 
-        self.read_only_parent = Some(SubVolume {
+        self.read_only_parent = Some(Arc::new(SubVolume {
             // Read only parent LBA range always starts from 0
             lba_range: Range {
                 start: 0,
                 end: number_of_blocks,
             },
             block_io,
-        });
+        }));
 
         Ok(())
     }
@@ -245,44 +252,137 @@ impl Volume {
         start: u64,
         length: u64,
     ) -> Option<Range<u64>> {
-        // Does the read only parent apply for this range
         if let Some(ref read_only_parent) = self.read_only_parent {
-            read_only_parent.lba_range_coverage(start, length)
+            // Check if the scrubber has passed this offset
+            let scrub_point = self.scrub_point.load(Ordering::SeqCst);
+            if start + length <= scrub_point {
+                None
+            } else {
+                read_only_parent.lba_range_coverage(start, length)
+            }
         } else {
             None
         }
     }
 
-    // If a volume has a read only parent, do the work to read from
-    // it and write_unwritten to the LBA it covers.
+    // Scrub a volume.
+    // If a volume has a read only parent, we do the work to read from
+    // the read only side, and write_unwritten to the LBA of the SubVolume
+    // that is "below" it.
+    //
+    // Still TODO: here
+    // If there is an error, how to we tell Nexus?
+    // If we finish the scrub, how do we tell Nexus?
     pub fn scrub(&self) -> Result<(), CrucibleError> {
         println!("Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
         if let Some(ref read_only_parent) = self.read_only_parent {
-            let ts = read_only_parent.total_size()?;
-            let bs = read_only_parent.get_block_size()? as usize;
+            let scrub_start = Instant::now();
+            println!("Scrub for {} begins", self.uuid);
 
-            println!("Scrub for total_size:{:?} block_size:{:?}", ts, bs);
+            let bs = read_only_parent.get_block_size()? as usize;
+            println!(
+                "Scrub with total_size:{:?} block_size:{:?}",
+                read_only_parent.total_size()?,
+                bs
+            );
             let start = read_only_parent.lba_range.start;
             let end = read_only_parent.lba_range.end;
-            println!("Scrub will go from {:?} to {:?}", start, end);
 
-            for offset in start..end {
+            // Based on some seat of the pants measurements, we are doing
+            // 256 KiB IOs during the scrub. Here we select how many blocks
+            // this is.
+            // TODO: Determine if this value should be adjusted.
+            let mut block_count = 262144 / bs;
+            println!(
+                "Scrub from block {:?} to {:?} in ({}) {:?} size IOs",
+                start,
+                end,
+                block_count,
+                block_count * bs,
+            );
+
+            let mut retries = 0;
+            let showstep = (end - start) / 25;
+            let mut showat = start + showstep;
+            let mut offset = start;
+            while offset < end {
+                if offset + block_count as u64 > end {
+                    block_count = (end - offset) as usize;
+                    println!(
+                        "Adjust block_count to {} at offset {}",
+                        block_count, offset
+                    );
+                }
+                assert!(offset + block_count as u64 <= end);
                 let block = Block::new(offset, bs.trailing_zeros());
-                let buffer = Buffer::new(bs);
+                let buffer = Buffer::new(block_count * bs);
 
-                let mut waiter =
-                    read_only_parent.read(block, buffer.clone())?;
-                waiter.block_wait()?;
-
+                // The read will first try to establish a connection to
+                // the remote side before returning something we can block_wait
+                // on.  If that initial connection fails, we can retry.
+                let mut retry_needed = true;
+                let mut retry_count = 0;
+                while retry_needed {
+                    let waiter = read_only_parent.read(block, buffer.clone());
+                    match waiter {
+                        Ok(mut waiter) => {
+                            // Once we have our waiter, we can wait on it
+                            // to answer or read.
+                            waiter.block_wait()?;
+                            retry_needed = false;
+                            if retry_count > 0 {
+                                // This counter indicates a retry was
+                                // eventually successful.
+                                retries += 1;
+                            }
+                        }
+                        Err(e) => {
+                            println!("scrub {}, offset {}", e, offset);
+                            retry_count += 1;
+                        }
+                    }
+                    if retry_count > 5 {
+                        // TODO: Nexus needs to know the scrub had problems.
+                        crucible_bail!(
+                            IoError,
+                            "Scrub failed to read at offset {}",
+                            offset
+                        );
+                    }
+                }
+                // TODO: Nexus needs to know about this failure.
                 let mut waiter = self.write_unwritten(
                     Block::new(offset, bs.trailing_zeros()),
                     Bytes::from(buffer.as_vec().clone()),
                 )?;
                 waiter.block_wait()?;
+
+                offset += block_count as u64;
+
+                // Set the scrub high water mark
+                self.scrub_point.store(offset, Ordering::SeqCst);
+
+                if offset > showat {
+                    println!(
+                        "Scrub at offset {}/{} sp:{:?}",
+                        offset, end, self.scrub_point
+                    );
+                    showat += showstep;
+                }
             }
-            println!("Scrub for {} has completed", self.uuid);
+
+            let total_time = scrub_start.elapsed();
+            println!(
+                "Scrub {} done in {} seconds.  Retries:{}",
+                self.uuid,
+                total_time.as_secs(),
+                retries,
+            );
+            self.flush(None)?;
+        } else {
+            println!("Scrub for {} not required", self.uuid);
         }
         Ok(())
     }
@@ -363,7 +463,6 @@ impl BlockIO for Volume {
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
             read_only_parent.conditional_activate(gen)?;
-            // TODO: Scrubber starts here?  Maybe?
         }
 
         Ok(())
@@ -942,6 +1041,7 @@ mod test {
                 },
             ],
             read_only_parent: None,
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
             count: AtomicU32::new(0),
         };
@@ -992,6 +1092,7 @@ mod test {
                 },
             ],
             read_only_parent: None,
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
             count: AtomicU32::new(0),
         };
@@ -1059,6 +1160,7 @@ mod test {
                 )),
             }],
             read_only_parent: None,
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
             count: AtomicU32::new(0),
         };
@@ -1082,14 +1184,15 @@ mod test {
                     512 * 512,
                 )),
             }],
-            read_only_parent: Some(SubVolume {
+            read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range { start: 0, end: 256 },
                 block_io: Arc::new(InMemoryBlockIO::new(
                     Uuid::new_v4(),
                     512,
                     256 * 512,
                 )),
-            }),
+            })),
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
             count: AtomicU32::new(0),
         };
@@ -1648,13 +1751,14 @@ mod test {
         let volume = Volume {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Some(SubVolume {
+            read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size()? / BLOCK_SIZE as u64,
                 },
                 block_io: parent.clone(),
-            }),
+            })),
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
             count: AtomicU32::new(0),
         };
@@ -1686,13 +1790,14 @@ mod test {
         let volume = Volume {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Some(SubVolume {
+            read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().unwrap() / BLOCK_SIZE as u64,
                 },
                 block_io: parent.clone(),
-            }),
+            })),
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
             count: AtomicU32::new(0),
         };
@@ -1717,13 +1822,14 @@ mod test {
         let volume = Volume {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Some(SubVolume {
+            read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().unwrap() / BLOCK_SIZE as u64,
                 },
                 block_io: parent.clone(),
-            }),
+            })),
+            scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
             count: AtomicU32::new(0),
         };
@@ -2184,5 +2290,184 @@ mod test {
             &[subvolume_1, subvolume_2, subvolume_3],
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn test_scrub_point_subvolume_equal() -> Result<()> {
+        // Test that scrub high water mark is honored.
+        let block_size: usize = 512;
+
+        // One volume with full read only parent overlap
+        //
+        // volumes: 0 0 0 0 0 0 0 0 0 0
+        //  parent: P P P P P P P P P P
+
+        test_volume_scrub_point_lba_range(block_size, 10, &[10])?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scrub_point_subvolume_smaller() -> Result<()> {
+        // Test that scrub high water mark is honored.
+        let block_size: usize = 512;
+
+        // One volume with partial read only parent overlap
+        //
+        // volumes: 0 0 0 0 0 0 0 0 0 0
+        //  parent: P P P P P
+
+        test_volume_scrub_point_lba_range(block_size, 5, &[10])?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scrub_point_two_subvolume_smaller_1() -> Result<()> {
+        // Test that scrub high water mark is honored.
+        let block_size: usize = 512;
+
+        // Two volumes with partial read only parent overlap
+        //
+        // volume1: 0 0 0 0 0 0 0 0 0 0
+        // volume2:                     0 0 0 0 0
+        // parent: P P P P P
+        test_volume_scrub_point_lba_range(block_size, 5, &[10, 5])?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scrub_point_two_subvolume_smaller_2() -> Result<()> {
+        // Test that scrub high water mark is honored.
+        let block_size: usize = 512;
+
+        // Two volumes with partial read only parent overlap
+        //
+        // volume1: 0 0 0 0 0
+        // volume2:           0 0 0 0 0
+        // parent:  P P P P P
+        test_volume_scrub_point_lba_range(block_size, 5, &[5, 5])?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scrub_point_two_subvolume_smaller_3() -> Result<()> {
+        // Test that scrub high water mark is honored.
+        let block_size: usize = 512;
+
+        // Two volumes with partial read only parent overlap
+        //
+        // volume1: 0 0 0 0 0
+        // volume2:           0 0 0 0 0
+        // parent:  P P P P P P P P
+        test_volume_scrub_point_lba_range(block_size, 8, &[5, 5])?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scrub_point_two_subvolume_equal() -> Result<()> {
+        // Test that scrub high water mark is honored.
+        let block_size: usize = 512;
+
+        // Two volumes with full read only parent overlap
+        //
+        // volume1: 0 0 0 0 0
+        // volume2:           0 0 0 0 0
+        // parent:  P P P P P P P P P P
+        test_volume_scrub_point_lba_range(block_size, 8, &[5, 5])?;
+
+        Ok(())
+    }
+
+    // This test accepts a vec of sub-volume sizes, and a size for the read
+    // only parent.  A volume is created using these inputs.  The test will
+    // then walk all possible scrub points and IO sizes to test that the
+    // correct LBA range is returned.
+    //
+    // All the possible IO offsets, sizes, and scrub points are checked.
+    fn test_volume_scrub_point_lba_range(
+        block_size: usize,
+        parent_blocks: usize,
+        subvol_sizes: &[usize],
+    ) -> Result<()> {
+        // Create a volume
+        let mut volume = Volume::new(block_size as u64);
+
+        // Create the subvolume(s) of the requested size(s)
+        for size in subvol_sizes {
+            let subvolume = Arc::new(InMemoryBlockIO::new(
+                Uuid::new_v4(),
+                block_size as u64,
+                block_size * size,
+            ));
+            volume.add_subvolume(subvolume.clone())?;
+        }
+
+        // Create the read only parent
+        let parent = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            block_size as u64,
+            block_size * parent_blocks,
+        ));
+
+        volume.add_read_only_parent(parent.clone())?;
+        volume.activate(0)?;
+
+        // The total blocks in our volume
+        let volume_blocks = volume.total_size()? / block_size as u64;
+
+        // Walk all the possible sizes (in blocks) for an IO.
+        for size in 1..volume_blocks {
+            // Walk the possible scrub points across the parent volume.
+            for scrub_point in 0..=parent_blocks {
+                volume
+                    .scrub_point
+                    .store(scrub_point as u64, Ordering::SeqCst);
+
+                // Now walk the block offsets for the volume, verify the
+                // returned lba_range is correct.
+                //
+                // Because we are testing all possible IO sizes, we only
+                // need to walk the blocks up to the point where our
+                // offset+size reaches the end of the volume.
+                let final_volume_offset = volume_blocks - size;
+                for block in 0..=final_volume_offset {
+                    let r = volume.read_only_parent_for_lba_range(block, size);
+                    if block >= parent_blocks as u64 {
+                        // The block is past the end of the parent, this will
+                        // not have a read_only_parent irregardless of the
+                        // current scrub point location.
+                        println!(
+                            "block {} > parent {}. Go to SubVolume",
+                            block, parent_blocks
+                        );
+                        assert!(r.is_none());
+                    } else if block + size <= scrub_point as u64 {
+                        // Our IO is fully under the scrub point, we should
+                        // go directly to the SubVolume
+                        println!(
+                            "block {}+{} <= scrub_point {}. No parent check",
+                            block, size, scrub_point,
+                        );
+                        assert!(r.is_none());
+                    } else {
+                        // Our IO is not fully under the scrub point, but we
+                        // know it's still below the
+                        // size of the parent, so we have
+                        // to check.
+                        println!(
+                            "block {} < scrub_point {}. Check with your parent",
+                            block, scrub_point,
+                        );
+                        assert!(r.is_some());
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
