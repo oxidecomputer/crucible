@@ -15,6 +15,13 @@ mod test {
     use rand::Rng;
     use tempfile::*;
     use uuid::*;
+    use lazy_static::lazy_static;
+
+    use std::collections::HashSet;
+
+    lazy_static! {
+        static ref PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
+    }
 
     #[allow(dead_code)]
     struct TestDownstairs {
@@ -26,13 +33,21 @@ mod test {
     }
 
     impl TestDownstairs {
-        pub fn new(
+        pub async fn new(
             address: IpAddr,
             port: u16,
             encrypted: bool,
             read_only: bool,
         ) -> Result<Self> {
-            let tempdir = tempdir()?;
+            {
+                let mut ports = PORTS.lock().await;
+                assert!(ports.insert(port));
+            }
+
+            let tempdir = tempfile::Builder::new()
+                .prefix(&format!("downstairs-{}", port))
+                .rand_bytes(8)
+                .tempdir()?;
 
             let _region = create_region(
                 512, /* block_size */
@@ -112,7 +127,8 @@ mod test {
     }
 
     impl TestDownstairsSet {
-        pub fn new(
+        // Spin off three downstairs at the given ports.
+        pub async fn new(
             port1: u16,
             port2: u16,
             port3: u16,
@@ -123,19 +139,19 @@ mod test {
                 port1,
                 true,
                 read_only,
-            )?;
+            ).await?;
             let downstairs2 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 port2,
                 true,
                 read_only,
-            )?;
+            ).await?;
             let downstairs3 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 port3,
                 true,
                 read_only,
-            )?;
+            ).await?;
 
             // Generate random data for our key
             let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
@@ -166,6 +182,8 @@ mod test {
             })
         }
 
+        // Return a Crucible Opts struct pre-populated with the same
+        // three given ports for targets.
         pub fn opts(&self) -> CrucibleOpts {
             self.crucible_opts.clone()
         }
@@ -181,31 +199,18 @@ mod test {
         }
     }
 
-    // Spin off three downstairs at the given ports.
-    // Return a Crucible Opts struct pre-populated with the same
-    // three given ports for targets.
-    fn three_downstairs(
-        port1: u16,
-        port2: u16,
-        port3: u16,
-        read_only: bool,
-    ) -> Result<CrucibleOpts> {
-        let test_downstairs_set =
-            TestDownstairsSet::new(port1, port2, port3, read_only)?;
-        Ok(test_downstairs_set.opts())
-    }
-
     // Note the port number for downstairs in each test must be unique
     // from both the other downstairs in the same test, AND with other
-    // downstairs in other tests.  The helpful three_downstairs()
-    // function should help to make this easier.
+    // downstairs in other tests. There's a check in TestDownstairs::new for
+    // this.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_region() -> Result<()> {
         // Test a simple single layer volume with a read, write, read
         const BLOCK_SIZE: usize = 512;
 
-        let opts = three_downstairs(54001, 54002, 54003, false).unwrap();
+        let tds = TestDownstairsSet::new(54001, 54002, 54003, false).await?;
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -257,13 +262,15 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_two_layers() -> Result<()> {
-        let opts = three_downstairs(54004, 54005, 54006, false).unwrap();
+        let tds = TestDownstairsSet::new(54004, 54005, 54006, false).await?;
+        let opts = tds.opts();
         integration_test_two_layers_common(opts, false).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
-        let opts = three_downstairs(54007, 54008, 54009, false).unwrap();
+        let tds = TestDownstairsSet::new(54007, 54008, 54009, false).await?;
+        let opts = tds.opts();
         integration_test_two_layers_common(opts, true).await
     }
 
@@ -347,7 +354,8 @@ mod test {
     async fn integration_test_three_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let opts = three_downstairs(54010, 54011, 54012, false).unwrap();
+        let tds = TestDownstairsSet::new(54010, 54011, 54012, false).await?;
+        let opts = tds.opts();
 
         // Create in memory block io full of 11
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -436,7 +444,8 @@ mod test {
     async fn integration_test_url() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let opts = three_downstairs(54013, 54014, 54015, false).unwrap();
+        let tds = TestDownstairsSet::new(54013, 54014, 54015, false).await?;
+        let opts = tds.opts();
 
         let server = Server::run();
         server.expect(
@@ -522,7 +531,8 @@ mod test {
         // Just do a read of a new volume.
         const BLOCK_SIZE: usize = 512;
 
-        let opts = three_downstairs(54016, 54017, 54018, true).unwrap();
+        let tds = TestDownstairsSet::new(54016, 54017, 54018, true).await?;
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -576,7 +586,8 @@ mod test {
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
 
-        let opts = three_downstairs(54019, 54020, 54021, false).unwrap();
+        let tds = TestDownstairsSet::new(54019, 54020, 54021, false).await?;
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -649,7 +660,8 @@ mod test {
         // Should result in:
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
-        let opts = three_downstairs(54022, 54023, 54024, false).unwrap();
+        let tds = TestDownstairsSet::new(54022, 54023, 54024, false).await?;
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -724,7 +736,8 @@ mod test {
         // |ABBBBBBBBBB|
         const BLOCK_SIZE: usize = 512;
 
-        let opts = three_downstairs(54025, 54026, 54027, false).unwrap();
+        let tds = TestDownstairsSet::new(54025, 54026, 54027, false).await?;
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -801,13 +814,15 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let opts = three_downstairs(54028, 54029, 54030, false).unwrap();
+        let tds1 = TestDownstairsSet::new(54028, 54029, 54030, false).await?;
+        let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let opts = three_downstairs(54031, 54032, 54033, false).unwrap();
+        let tds2 = TestDownstairsSet::new(54031, 54032, 54033, false).await?;
+        let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
@@ -885,13 +900,15 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let opts = three_downstairs(54034, 54035, 54036, false).unwrap();
+        let tds1 = TestDownstairsSet::new(54034, 54035, 54036, false).await?;
+        let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let opts = three_downstairs(54037, 54038, 54039, false).unwrap();
+        let tds2 = TestDownstairsSet::new(54037, 54038, 54039, false).await?;
+        let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
@@ -992,13 +1009,15 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let opts = three_downstairs(54040, 54041, 54042, false).unwrap();
+        let tds1 = TestDownstairsSet::new(54040, 54041, 54042, false).await?;
+        let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let opts = three_downstairs(54043, 54044, 54045, false).unwrap();
+        let tds2 = TestDownstairsSet::new(54043, 54044, 54045, false).await?;
+        let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
@@ -1073,14 +1092,16 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
-        let opts = three_downstairs(54046, 54047, 54048, false).unwrap();
+        let tds = TestDownstairsSet::new(54046, 54047, 54048, false).await?;
+        let opts = tds.opts();
         integration_test_two_layers_small_common(opts, false).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
     {
-        let opts = three_downstairs(54049, 54050, 54051, false).unwrap();
+        let tds = TestDownstairsSet::new(54049, 54050, 54051, false).await?;
+        let opts = tds.opts();
         integration_test_two_layers_small_common(opts, true).await
     }
 
@@ -1167,7 +1188,8 @@ mod test {
         //     |1111111111|
 
         const BLOCK_SIZE: usize = 512;
-        let opts = three_downstairs(54052, 54053, 54054, false).unwrap();
+        let tds = TestDownstairsSet::new(54052, 54053, 54054, false).await?;
+        let opts = tds.opts();
 
         // Create in_memory block_io
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -1238,7 +1260,8 @@ mod test {
         //     |1111155555|
 
         const BLOCK_SIZE: usize = 512;
-        let opts = three_downstairs(54055, 54056, 54057, false).unwrap();
+        let tds = TestDownstairsSet::new(54055, 54056, 54057, false).await?;
+        let opts = tds.opts();
 
         // Create in_memory block_io
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -1330,7 +1353,8 @@ mod test {
         //     |1121100300|
 
         const BLOCK_SIZE: usize = 512;
-        let opts = three_downstairs(54058, 54059, 54060, false).unwrap();
+        let tds = TestDownstairsSet::new(54058, 54059, 54060, false).await?;
+        let opts = tds.opts();
 
         // Create in_memory block_io
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -1413,7 +1437,8 @@ mod test {
         // SV  |5555555555|
 
         const BLOCK_SIZE: usize = 512;
-        let opts = three_downstairs(54061, 54062, 54063, false).unwrap();
+        let tds = TestDownstairsSet::new(54061, 54062, 54063, false).await?;
+        let opts = tds.opts();
 
         // Create in_memory block_io
         let in_memory_data = Arc::new(InMemoryBlockIO::new(
@@ -1503,13 +1528,15 @@ mod test {
             .block_wait()?;
 
         let mut sv = Vec::new();
-        let opts = three_downstairs(54064, 54065, 54066, false).unwrap();
+        let tds1 = TestDownstairsSet::new(54064, 54065, 54066, false).await?;
+        let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let opts = three_downstairs(54067, 54068, 54069, false).unwrap();
+        let tds2 = TestDownstairsSet::new(54067, 54068, 54069, false).await?;
+        let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
@@ -1624,13 +1651,15 @@ mod test {
             .block_wait()?;
 
         let mut sv = Vec::new();
-        let opts = three_downstairs(54070, 54071, 54072, false).unwrap();
+        let tds1 = TestDownstairsSet::new(54070, 54071, 54072, false).await?;
+        let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let opts = three_downstairs(54073, 54074, 54075, false).unwrap();
+        let tds2 = TestDownstairsSet::new(54073, 54074, 54075, false).await?;
+        let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
@@ -1727,7 +1756,8 @@ mod test {
     async fn integration_test_multi_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let mut opts = three_downstairs(54076, 54077, 54078, true).unwrap();
+        let tds = TestDownstairsSet::new(54076, 54077, 54078, true).await?;
+        let mut opts = tds.opts();
 
         let vcr_1: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -1810,7 +1840,8 @@ mod test {
         // SV  |55555-----|
 
         const BLOCK_SIZE: usize = 512;
-        let opts = three_downstairs(54079, 54080, 54081, false).unwrap();
+        let tds = TestDownstairsSet::new(54079, 54080, 54081, false).await?;
+        let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(opts, 0, None)?;
@@ -1862,7 +1893,7 @@ mod test {
         // boot three downstairs, write some data to them, then change to
         // read-only.
         let mut test_downstairs_set =
-            TestDownstairsSet::new(54082, 54083, 54084, false)?;
+            TestDownstairsSet::new(54082, 54083, 54084, false).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume.add_subvolume_create_guest(
@@ -1926,7 +1957,8 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_opts = three_downstairs(54085, 54086, 54087, false)?;
+        let top_layer_tds = TestDownstairsSet::new(54085, 54086, 54087, false).await?;
+        let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -2018,7 +2050,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55016, 55017, 55018, false).unwrap();
+        let tds = TestDownstairsSet::new(55016, 55017, 55018, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2062,7 +2095,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin up three read-only downstairs
-        let opts = three_downstairs(55019, 55020, 55021, true).unwrap();
+        let tds = TestDownstairsSet::new(55019, 55020, 55021, true).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2098,7 +2132,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55022, 55023, 55024, false).unwrap();
+        let tds = TestDownstairsSet::new(55022, 55023, 55024, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2172,7 +2207,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55025, 55026, 55027, false).unwrap();
+        let tds = TestDownstairsSet::new(55025, 55026, 55027, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2231,7 +2267,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55028, 55029, 55030, false).unwrap();
+        let tds = TestDownstairsSet::new(55028, 55029, 55030, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2291,7 +2328,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55031, 55032, 55033, false).unwrap();
+        let tds = TestDownstairsSet::new(55031, 55032, 55033, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2349,7 +2387,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55034, 55035, 55036, false).unwrap();
+        let tds = TestDownstairsSet::new(55034, 55035, 55036, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
@@ -2407,7 +2446,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let opts = three_downstairs(55037, 55038, 55039, false).unwrap();
+        let tds = TestDownstairsSet::new(55037, 55038, 55039, false).await?;
+        let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
