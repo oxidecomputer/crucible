@@ -284,7 +284,7 @@ impl Volume {
             let bs = read_only_parent.get_block_size()? as usize;
             println!(
                 "Scrub with total_size:{:?} block_size:{:?}",
-                read_only_parent.total_size().unwrap(),
+                read_only_parent.total_size()?,
                 bs
             );
             let start = read_only_parent.lba_range.start;
