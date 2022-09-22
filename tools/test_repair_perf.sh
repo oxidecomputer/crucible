@@ -229,7 +229,7 @@ repair_round   4096 100  #  16 MiB @ 4k block size
 repair_round   8192 100  #  32 MiB
 repair_round  16384 100  #  64 MiB
 repair_round  32768 100  # 128 MiB
-repair_round  49152 100  #  64 MiB
+repair_round  49152 100  # 192 MiB
 repair_round  65536 100  # 256 MiB
 
 echo "Test done"
