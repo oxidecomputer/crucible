@@ -12,10 +12,10 @@ mod test {
     use crucible_downstairs::*;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
+    use lazy_static::lazy_static;
     use rand::Rng;
     use tempfile::*;
     use uuid::*;
-    use lazy_static::lazy_static;
 
     use std::collections::HashSet;
 
@@ -99,7 +99,7 @@ mod test {
             )?;
 
             let adownstairs = self.downstairs.clone();
-            let address = self.address.clone();
+            let address = self.address;
             let port = self.port;
 
             self.join_handle = tokio::spawn(async move {
@@ -139,19 +139,22 @@ mod test {
                 port1,
                 true,
                 read_only,
-            ).await?;
+            )
+            .await?;
             let downstairs2 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 port2,
                 true,
                 read_only,
-            ).await?;
+            )
+            .await?;
             let downstairs3 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 port3,
                 true,
                 read_only,
-            ).await?;
+            )
+            .await?;
 
             // Generate random data for our key
             let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
@@ -1957,7 +1960,8 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::new(54085, 54086, 54087, false).await?;
+        let top_layer_tds =
+            TestDownstairsSet::new(54085, 54086, 54087, false).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
