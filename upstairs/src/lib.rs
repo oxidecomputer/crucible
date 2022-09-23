@@ -174,6 +174,23 @@ pub trait BlockIO: Sync {
     }
 }
 
+/// Await on multiple BlockReqWaiters in parallel
+#[inline]
+pub async fn wait_all(
+    iter: impl IntoIterator<Item = BlockReqWaiter>,
+) -> Result<(), CrucibleError> {
+    let block_req_wait_futures =
+        iter.into_iter().map(|waiter| waiter.wait());
+
+    futures::future::join_all(block_req_wait_futures)
+        .await
+        .into_iter()
+        .collect::<Vec<Result<(), CrucibleError>>>()
+        .into_iter()
+        .collect::<Result<Vec<()>, CrucibleError>>()
+        .map(|_| ())
+}
+
 /// DTrace probes in the upstairs
 ///
 /// up__status: This tracks the state of each of the three downstairs
@@ -4191,7 +4208,7 @@ impl Upstairs {
      * parameter is set.
      */
     #[instrument]
-    pub async fn submit_flush(
+    async fn submit_flush(
         &self,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
