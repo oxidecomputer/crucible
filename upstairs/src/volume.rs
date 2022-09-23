@@ -380,7 +380,7 @@ impl Volume {
                 total_time.as_secs(),
                 retries,
             );
-            self.flush(None)?;
+            self.flush(None)?.block_wait()?;
         } else {
             println!("Scrub for {} not required", self.uuid);
         }
