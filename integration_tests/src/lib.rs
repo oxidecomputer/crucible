@@ -43,7 +43,9 @@ mod test {
             // re-used
             {
                 let mut ports = PORTS.lock().await;
-                assert!(ports.insert(port));
+                if !ports.insert(port) {
+                    panic!("port {} reused!", port);
+                }
             }
 
             let tempdir = tempfile::Builder::new()
@@ -2146,7 +2148,7 @@ mod test {
         const NUM_BLOCKS: usize = 10;
 
         let test_downstairs_set =
-            TestDownstairsSet::new(54085, 54086, 54087, false).await?;
+            TestDownstairsSet::new(54088, 54089, 54090, false).await?;
         let opts = test_downstairs_set.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
@@ -2223,7 +2225,7 @@ mod test {
         const NUM_BLOCKS: usize = 10;
 
         let test_downstairs_set =
-            TestDownstairsSet::new(54088, 54089, 54090, false).await?;
+            TestDownstairsSet::new(54091, 54092, 54093, false).await?;
         let opts = test_downstairs_set.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
