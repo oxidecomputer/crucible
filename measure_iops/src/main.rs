@@ -176,8 +176,8 @@ async fn main() -> Result<()> {
 
         crucible::wait_all(waiters).await?;
 
-        io_operations_sent += ceiling_div!(io_size, 16 * 1024 * 1024);
-        bw_consumed += io_size;
+        io_operations_sent += ceiling_div!(io_size * io_depth, 16 * 1024 * 1024);
+        bw_consumed += io_size * io_depth;
 
         let diff = io_operation_time.elapsed();
 
