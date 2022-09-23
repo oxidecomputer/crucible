@@ -5,9 +5,20 @@
 #: target = "helios"
 #: rust_toolchain = "nightly-2021-11-24"
 #: output_rules = [
+#:	"/out/*",
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
 #: ]
+#:
+#: [[publish]]
+#: series = "image"
+#: name = "crucible.tar.gz"
+#: from_output = "/out/crucible.tar.gz"
+#:
+#: [[publish]]
+#: series = "image"
+#: name = "crucible.sha256.txt"
+#: from_output = "/out/crucible.sha256.txt"
 #:
 
 set -o errexit
@@ -18,7 +29,7 @@ cargo --version
 rustc --version
 
 banner rbuild
-ptime -m cargo build --verbose --release
+ptime -m cargo build --verbose --release --all-features
 
 banner rtest
 ptime -m cargo test --verbose
@@ -34,8 +45,15 @@ for s in tools/test_perf.sh; do
 	cp "$s" /work/scripts/
 done
 
-echo in_work_scripts
-ls -l /work/scripts
-echo in_work_rbins
-ls -l /work/rbins
+banner image
+ptime -m cargo run --bin crucible-package
 
+banner contents
+tar tvfz out/crucible.tar.gz
+
+banner copy
+pfexec mkdir -p /out
+pfexec chown "$UID" /out
+mv out/crucible.tar.gz /out/crucible.tar.gz
+cd /out
+digest -a sha256 crucible.tar.gz > crucible.sha256.txt

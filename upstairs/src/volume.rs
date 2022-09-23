@@ -457,6 +457,18 @@ impl BlockIO for Volume {
         Ok(())
     }
 
+    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        for sub_volume in &self.sub_volumes {
+            sub_volume.deactivate().await?.wait().await?;
+        }
+
+        if let Some(ref read_only_parent) = &self.read_only_parent {
+            read_only_parent.deactivate().await?.wait().await?;
+        }
+
+        BlockReqWaiter::immediate().await
+    }
+
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         for sub_volume in &self.sub_volumes {
             if !sub_volume.query_is_active().await? {
@@ -814,6 +826,10 @@ impl SubVolume {
 impl BlockIO for SubVolume {
     async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
         self.block_io.activate(gen).await
+    }
+
+    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        self.block_io.deactivate().await
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
@@ -2073,63 +2089,6 @@ mod test {
         assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn construct_snapshot_backed_vol() {
-        let _request = VolumeConstructionRequest::Volume {
-            id: Uuid::new_v4(),
-            block_size: 512,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size: 512,
-                opts: CrucibleOpts {
-                    target: vec![
-                        "127.0.0.1:123".parse().unwrap(),
-                        "127.0.0.1:456".parse().unwrap(),
-                        "127.0.0.1:789".parse().unwrap(),
-                    ],
-                    key: Some("key".to_string()),
-                    ..Default::default()
-                },
-                gen: 0,
-            }],
-            read_only_parent: Some(Box::new(
-                VolumeConstructionRequest::Region {
-                    block_size: 512,
-                    opts: CrucibleOpts {
-                        target: vec![
-                            "127.0.0.1:11111".parse().unwrap(),
-                            "127.0.0.1:22222".parse().unwrap(),
-                            "127.0.0.1:33333".parse().unwrap(),
-                        ],
-                        key: Some("key".to_string()),
-                        ..Default::default()
-                    },
-                    gen: 0,
-                },
-            )),
-        };
-
-        // XXX can't test this without a running set of downstairs
-        // let vol = Volume::construct(request).unwrap();
-    }
-
-    #[tokio::test]
-    async fn construct_read_only_iso_volume() {
-        let _request = VolumeConstructionRequest::Volume {
-            id: Uuid::new_v4(),
-            block_size: 512,
-            sub_volumes: vec![],
-            read_only_parent: Some(Box::new(VolumeConstructionRequest::Url {
-                id: Uuid::new_v4(),
-                block_size: 512,
-                // You can boot anything as long as it's Alpine
-                url: "https://fake.test/alpine.iso".to_string(),
-            })),
-        };
-
-        // XXX can't test this without a running set of downstairs
-        // let vol = Volume::construct(request).unwrap();
     }
 
     #[tokio::test]

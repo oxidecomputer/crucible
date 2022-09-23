@@ -1646,6 +1646,7 @@ async fn perf_workload(
         }
 
         guest.flush(None).await?.wait().await?;
+
         // Before we finish, make sure the work queues are empty.
         loop {
             let wc = guest.query_work_queue().await?;

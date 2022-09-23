@@ -71,6 +71,8 @@ use async_trait::async_trait;
 pub trait BlockIO: Sync {
     async fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
 
+    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError>;
+
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
 
     // Total bytes of Volume
@@ -1613,8 +1615,8 @@ where
                             // our UUID. We shouldn't have received this
                             // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
-                                uuid and our gen {} >= new gen {}!",
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
                                 up.get_generation().await,
@@ -4905,6 +4907,8 @@ impl Upstairs {
         repair_commands: usize,
     ) -> Result<()> {
         let mut completed = 0;
+        info!(self.log, "Begin repair with {} commands", repair_commands);
+        let repair_start = Instant::now();
         loop {
             /*
              * If we get an error here, all Downstairs have to reset and
@@ -4999,7 +5003,18 @@ impl Upstairs {
                 }
             }
         }
-        info!(self.log, "All repair completed, clear queue and notify");
+        let repair_total = repair_start.elapsed();
+        let time_f = repair_total.as_secs() as f32
+            + (repair_total.subsec_nanos() as f32 / 1e9);
+
+        // An extent repair takes four commands.  To get the number of
+        // extents repaired, divide repair_commands by 4
+        let repaired = repair_commands / 4;
+        let ave = time_f / repaired as f32;
+        info!(
+            self.log,
+            "{} extents repaired in {:5.3} ave:{:6.4}", repaired, time_f, ave,
+        );
         self.downstairs.lock().await.reconcile_current_work = None;
         Ok(())
     }
@@ -6982,6 +6997,16 @@ impl BlockIO for Guest {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
         }
+    }
+
+    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        // Disable any more IO from this guest and deactivate the downstairs.
+        // We can't deactivate if we are not yet active.
+        if !self.is_active() {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        Ok(self.send(BlockOp::Deactivate).await)
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
