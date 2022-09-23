@@ -2169,17 +2169,18 @@ mod test {
                 //
                 // the writes should be submitted in order but execute
                 // concurrently.
-                let waiter = volume.write(
-                    Block::new_512(i as u64),
-                    // every write but the last should overlap
-                    if (i + 1) < NUM_BLOCKS {
-                        Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
-                    } else {
-                        Bytes::from(vec![byte_val; BLOCK_SIZE])
-                    },
-                )
-                .await
-                .unwrap();
+                let waiter = volume
+                    .write(
+                        Block::new_512(i as u64),
+                        // every write but the last should overlap
+                        if (i + 1) < NUM_BLOCKS {
+                            Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
+                        } else {
+                            Bytes::from(vec![byte_val; BLOCK_SIZE])
+                        },
+                    )
+                    .await
+                    .unwrap();
 
                 waiters.push(waiter);
             }
@@ -2213,7 +2214,8 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn integration_test_wait_all_is_ordered_for_reads_and_writes() -> Result<()> {
+    async fn integration_test_wait_all_is_ordered_for_reads_and_writes(
+    ) -> Result<()> {
         // In a loop, test that submitting a big batch of operations and waiting
         // on their BlockReqWaiters in parallel is correct. It's important that
         // this test use multiple worker_threads!
@@ -2245,27 +2247,28 @@ mod test {
                 // 2:         22222222
                 // ...
                 //
-                let waiter = volume.write(
-                    Block::new_512(i as u64),
-                    // every write but the last should overlap
-                    if (i + 1) < NUM_BLOCKS {
-                        Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
-                    } else {
-                        Bytes::from(vec![byte_val; BLOCK_SIZE])
-                    },
-                )
-                .await
-                .unwrap();
+                let waiter = volume
+                    .write(
+                        Block::new_512(i as u64),
+                        // every write but the last should overlap
+                        if (i + 1) < NUM_BLOCKS {
+                            Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
+                        } else {
+                            Bytes::from(vec![byte_val; BLOCK_SIZE])
+                        },
+                    )
+                    .await
+                    .unwrap();
 
                 waiters.push(waiter);
 
                 // submit a read for one block
                 let read_buffer = Buffer::new(BLOCK_SIZE);
                 waiters.push(
-                    volume.read(
-                        Block::new_512(i as u64),
-                        read_buffer.clone(),
-                    ).await.unwrap(),
+                    volume
+                        .read(Block::new_512(i as u64), read_buffer.clone())
+                        .await
+                        .unwrap(),
                 );
                 read_buffers.push(read_buffer);
             }

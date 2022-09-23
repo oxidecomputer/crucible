@@ -154,16 +154,18 @@ mod test {
                     // 1:     11111111
                     // 2:         22222222
                     // ...
-                    //
-                    in_memory.write(
-                        Block::new_512(i as u64),
-                        // every write but the last should overlap
-                        if (i + 1) < NUM_BLOCKS {
-                            Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
-                        } else {
-                            Bytes::from(vec![byte_val; BLOCK_SIZE])
-                        },
-                    ).await.unwrap(),
+                    in_memory
+                        .write(
+                            Block::new_512(i as u64),
+                            // every write but the last should overlap
+                            if (i + 1) < NUM_BLOCKS {
+                                Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
+                            } else {
+                                Bytes::from(vec![byte_val; BLOCK_SIZE])
+                            },
+                        )
+                        .await
+                        .unwrap(),
                 );
             }
 

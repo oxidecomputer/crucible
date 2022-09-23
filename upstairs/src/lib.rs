@@ -179,8 +179,7 @@ pub trait BlockIO: Sync {
 pub async fn wait_all(
     iter: impl IntoIterator<Item = BlockReqWaiter>,
 ) -> Result<(), CrucibleError> {
-    let block_req_wait_futures =
-        iter.into_iter().map(|waiter| waiter.wait());
+    let block_req_wait_futures = iter.into_iter().map(|waiter| waiter.wait());
 
     futures::future::join_all(block_req_wait_futures)
         .await
