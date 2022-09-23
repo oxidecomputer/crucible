@@ -82,6 +82,11 @@ pub trait BlockIO: Sync {
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError>;
 
+    /*
+     * `read`, `write`, and `write_unwritten` accept a block offset, and data
+     * buffer size must be a multiple of block size.
+     */
+
     async fn read(
         &self,
         offset: Block,
@@ -105,6 +110,10 @@ pub trait BlockIO: Sync {
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<BlockReqWaiter, CrucibleError>;
 
+    /*
+     * Test call that displays the internal job queue on the upstairs, and
+     * returns the guest side and downstairs side job queue depths.
+     */
     async fn show_work(&self) -> Result<WQCounts, CrucibleError>;
 
     // Common methods for BlockIO
@@ -6760,91 +6769,6 @@ impl Guest {
         self.notify.notify_one();
     }
 
-    /*
-     * `read` and `write` accept a block offset, and data must be a
-     * multiple of block size.
-     */
-    pub async fn read(
-        &self,
-        offset: Block,
-        data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        let bs = self.query_block_size().await?;
-
-        if (data.len().await % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
-
-        let rio = BlockOp::Read { offset, data };
-        Ok(self.send(rio).await)
-    }
-
-    pub async fn write(
-        &self,
-        offset: Block,
-        data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        let bs = self.query_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
-
-        let wio = BlockOp::Write { offset, data };
-        Ok(self.send(wio).await)
-    }
-
-    // Guest does support write_unwritten
-    pub async fn write_unwritten(
-        &self,
-        offset: Block,
-        data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        let bs = self.query_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
-
-        let wio = BlockOp::WriteUnwritten { offset, data };
-        Ok(self.send(wio).await)
-    }
-
-    pub async fn flush(
-        &self,
-        snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        Ok(self.send(BlockOp::Flush { snapshot_details }).await)
-    }
-
     pub async fn set_active(&self) {
         let mut active = self.active.lock().await;
         *active = true;
@@ -6949,30 +6873,6 @@ impl Guest {
 
         Ok(())
     }
-
-    /*
-     * Test call that displays the internal job queue on the upstairs, and
-     * returns the guest side and downstairs side job queue depths.
-     */
-    pub async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        if !self.is_active().await {
-            println!("Request for work from inactive upstairs");
-            // XXX Test access is allowed for now, but not forever.
-            //return Err(CrucibleError::UpstairsInactive);
-        }
-
-        let wc = WQCounts {
-            up_count: 0,
-            ds_count: 0,
-        };
-
-        let data = Arc::new(Mutex::new(wc));
-        let sw = BlockOp::ShowWork { data: data.clone() };
-        self.send(sw).await.wait().await.unwrap();
-
-        let wc = data.lock().await;
-        Ok(*wc)
-    }
 }
 
 #[async_trait]
@@ -7031,7 +6931,22 @@ impl BlockIO for Guest {
         offset: Block,
         data: Buffer,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        self.read(offset, data).await
+        if !self.is_active().await {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let bs = self.query_block_size().await?;
+
+        if (data.len().await % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
+
+        let rio = BlockOp::Read { offset, data };
+        Ok(self.send(rio).await)
     }
 
     async fn write(
@@ -7039,7 +6954,22 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        self.write(offset, data).await
+        if !self.is_active().await {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let bs = self.query_block_size().await?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
+
+        let wio = BlockOp::Write { offset, data };
+        Ok(self.send(wio).await)
     }
 
     async fn write_unwritten(
@@ -7047,18 +6977,53 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        self.write_unwritten(offset, data).await
+        if !self.is_active().await {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let bs = self.query_block_size().await?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
+        if offset.block_size_in_bytes() as u64 != bs {
+            crucible_bail!(BlockSizeMismatch);
+        }
+
+        let wio = BlockOp::WriteUnwritten { offset, data };
+        Ok(self.send(wio).await)
     }
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<BlockReqWaiter, CrucibleError> {
-        self.flush(snapshot_details).await
+        if !self.is_active().await {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        Ok(self.send(BlockOp::Flush { snapshot_details }).await)
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        self.show_work().await
+        if !self.is_active().await {
+            println!("Request for work from inactive upstairs");
+            // XXX Test access is allowed for now, but not forever.
+            //return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let wc = WQCounts {
+            up_count: 0,
+            ds_count: 0,
+        };
+
+        let data = Arc::new(Mutex::new(wc));
+        let sw = BlockOp::ShowWork { data: data.clone() };
+        self.send(sw).await.wait().await.unwrap();
+
+        let wc = data.lock().await;
+        Ok(*wc)
     }
 }
 
