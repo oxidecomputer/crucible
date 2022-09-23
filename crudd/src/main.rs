@@ -194,25 +194,28 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         // Once we have a full queue of waiters, we can start blocking on them
         // to access our data and drain them to `output`.
         if waiters.len() == opt.pipeline_length {
-            // unwrapping is safe because of the length check
-            let r_buf = buffers.pop_front().unwrap();
-            let r_waiter = waiters.pop_front().unwrap();
+            crucible::wait_all(waiters).await?;
+            waiters = VecDeque::with_capacity(opt.pipeline_length);
 
             // drain the buffer to the output file
-            r_waiter.wait().await?;
-            output.write_all(&r_buf.as_vec().await)?;
+            while !buffers.is_empty() {
+                // unwrapping is safe because of the length check
+                let r_buf = buffers.pop_front().unwrap();
+                output.write_all(&r_buf.as_vec().await)?;
+            }
         }
     }
 
     // Drain the outstanding commands
-    while !waiters.is_empty() {
-        // unwrapping is safe because of the length check
-        let r_buf = buffers.pop_front().unwrap();
-        let r_waiter = waiters.pop_front().unwrap();
+    if !waiters.is_empty() {
+        crucible::wait_all(waiters).await?;
 
         // drain the buffer to the output file
-        r_waiter.wait().await?;
-        output.write_all(&r_buf.as_vec().await)?;
+        while !buffers.is_empty() {
+            // unwrapping is safe because of the length check
+            let r_buf = buffers.pop_front().unwrap();
+            output.write_all(&r_buf.as_vec().await)?;
+        }
     }
 
     // Issue our final read command, if any. This could be interleaved with
@@ -241,7 +244,7 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
 // - issue a flush
 // - block on all waiters
 async fn write_remainder_and_finalize<T: BlockIO>(
-    crucible: Arc<T>,
+    crucible: &Arc<T>,
     mut w_buf: BytesMut,
     offset: Block,
     n_read: usize,
@@ -295,10 +298,7 @@ async fn write_remainder_and_finalize<T: BlockIO>(
     waiters.push_back(flush_waiter);
 
     // Wait for all the writes
-    while !waiters.is_empty() {
-        let w_waiter = waiters.pop_front().unwrap();
-        w_waiter.wait().await?;
-    }
+    crucible::wait_all(waiters).await?;
 
     Ok(())
 }
@@ -417,7 +417,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         if n_read < w_buf.capacity() {
             eprintln!("n_read was {}, returning early", n_read);
             return write_remainder_and_finalize(
-                crucible,
+                &crucible,
                 w_buf,
                 offset,
                 n_read,
@@ -434,8 +434,8 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
 
         // Block on waiters so we dont get a backlog
         if waiters.len() == opt.pipeline_length {
-            let w_waiter = waiters.pop_front().unwrap();
-            w_waiter.wait().await?;
+            crucible::wait_all(waiters).await?;
+            waiters = VecDeque::with_capacity(opt.pipeline_length);
         }
     }
 
@@ -460,7 +460,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
             }
         }
         return write_remainder_and_finalize(
-            crucible,
+            &crucible,
             w_buf,
             offset,
             n_read,

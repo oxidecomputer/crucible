@@ -174,28 +174,27 @@ async fn main() -> Result<()> {
             }
         }
 
-        for waiter in waiters {
-            waiter.wait().await?;
-            io_operations_sent += ceiling_div!(io_size, 16 * 1024 * 1024);
-            bw_consumed += io_size;
+        crucible::wait_all(waiters).await?;
 
-            let diff = io_operation_time.elapsed();
+        io_operations_sent += ceiling_div!(io_size, 16 * 1024 * 1024);
+        bw_consumed += io_size;
 
-            if diff > Duration::from_secs(1) {
-                let fractional_seconds: f32 =
-                    diff.as_secs() as f32 + (diff.subsec_nanos() as f32 / 1e9);
+        let diff = io_operation_time.elapsed();
 
-                iops.push(io_operations_sent as f32 / fractional_seconds);
-                bws.push(bw_consumed as f32 / fractional_seconds);
+        if diff > Duration::from_secs(1) {
+            let fractional_seconds: f32 =
+                diff.as_secs() as f32 + (diff.subsec_nanos() as f32 / 1e9);
 
-                if iops.len() >= opt.samples {
-                    break 'outer;
-                }
+            iops.push(io_operations_sent as f32 / fractional_seconds);
+            bws.push(bw_consumed as f32 / fractional_seconds);
 
-                io_operations_sent = 0;
-                bw_consumed = 0;
-                io_operation_time = Instant::now();
+            if iops.len() >= opt.samples {
+                break 'outer;
             }
+
+            io_operations_sent = 0;
+            bw_consumed = 0;
+            io_operation_time = Instant::now();
         }
     }
 

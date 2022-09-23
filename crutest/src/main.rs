@@ -1337,9 +1337,7 @@ async fn dirty_workload(
     }
 
     println!("loop over {} waiters", waiterlist.len());
-    for wa in waiterlist {
-        wa.wait().await?;
-    }
+    crucible::wait_all(waiterlist).await?;
     Ok(())
 }
 
@@ -1564,9 +1562,7 @@ async fn perf_workload(
                 write_waiters.push(waiter);
             }
 
-            for waiter in write_waiters {
-                waiter.wait().await?;
-            }
+            crucible::wait_all(write_waiters).await?;
             wtime.push(burst_start.elapsed());
         }
         let big_end = big_start.elapsed();
@@ -1622,9 +1618,7 @@ async fn perf_workload(
                     .await?;
                 read_waiters.push(waiter);
             }
-            for waiter in read_waiters {
-                waiter.wait().await?;
-            }
+            crucible::wait_all(read_waiters).await?;
             rtime.push(burst_start.elapsed());
         }
         let big_end = big_start.elapsed();
@@ -2039,9 +2033,7 @@ async fn repair_workload(
         }
     }
     println!("loop over {} waiters", waiterlist.len());
-    for wa in waiterlist {
-        wa.wait().await?;
-    }
+    crucible::wait_all(waiterlist).await?;
 
     Ok(())
 }
@@ -2116,9 +2108,7 @@ async fn demo_workload(
     };
 
     println!("loop over {} waiters", waiterlist.len());
-    for wa in waiterlist {
-        wa.wait().await?;
-    }
+    crucible::wait_all(waiterlist).await?;
 
     /*
      * Continue loping until all downstairs jobs finish also.
@@ -2368,9 +2358,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         flush_waiter.wait().await?;
 
         println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
-        for wa in waiterlist {
-            wa.wait().await?;
-        }
+        crucible::wait_all(waiterlist).await?;
         println!("Loop:{} all waiters done", my_count);
         guest.show_work().await?;
     }
