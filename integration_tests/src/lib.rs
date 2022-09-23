@@ -39,6 +39,8 @@ mod test {
             encrypted: bool,
             read_only: bool,
         ) -> Result<Self> {
+            // Assert that the ports we're using for the downstairs are not
+            // re-used
             {
                 let mut ports = PORTS.lock().await;
                 assert!(ports.insert(port));
@@ -1978,7 +1980,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_snapshot_backed_vol() -> Result<()> {
         // Test using a "snapshot" (for this test, downstairs booted read-only)
         // as a read-only parent.
@@ -1991,16 +1993,15 @@ mod test {
             TestDownstairsSet::new(54082, 54083, 54084, false).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(
-            test_downstairs_set.opts(),
-            0,
-            None,
-        )?;
+        volume
+            .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+            .await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         let random_buffer = {
-            let mut random_buffer = vec![0u8; volume.total_size()? as usize];
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
             rand::thread_rng().fill(&mut random_buffer[..]);
             random_buffer
         };
@@ -2009,10 +2010,12 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(random_buffer.clone()),
-            )?
-            .block_wait()?;
+            )
+            .await?
+            .wait()
+            .await?;
 
-        volume.deactivate()?.block_wait()?;
+        volume.deactivate().await?.wait().await?;
 
         drop(volume);
 
@@ -2021,33 +2024,33 @@ mod test {
         // Validate that this now accepts reads and flushes, but rejects writes
         {
             let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume_create_guest(
-                test_downstairs_set.opts(),
-                0,
-                None,
-            )?;
+            volume
+                .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+                .await?;
 
-            volume.activate(0)?;
+            volume.activate(0).await?;
 
-            let buffer = Buffer::new(volume.total_size()? as usize);
-            tokio::task::block_in_place(|| {
-                volume.read(
+            let buffer = Buffer::new(volume.total_size().await? as usize);
+            volume
+                .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     buffer.clone(),
                 )
-            })?
-            .block_wait()?;
+                .await?
+                .wait()
+                .await?;
 
-            assert_eq!(*buffer.as_vec(), random_buffer);
+            assert_eq!(*buffer.as_vec().await, random_buffer);
 
             assert!(volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     Bytes::from(vec![0u8; BLOCK_SIZE]),
                 )
+                .await
                 .is_err());
 
-            volume.flush(None)?.block_wait()?;
+            volume.flush(None).await?.wait().await?;
         }
 
         // create a new volume, layering a new set of downstairs on top of the
@@ -2080,56 +2083,56 @@ mod test {
                 )),
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
-        volume.activate(0)?;
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(0).await?;
 
         // Validate that source blocks originally come from the read-only parent
         {
-            let buffer = Buffer::new(volume.total_size()? as usize);
-            tokio::task::block_in_place(|| {
-                volume.read(
+            let buffer = Buffer::new(volume.total_size().await? as usize);
+            volume
+                .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     buffer.clone(),
                 )
-            })?
-            .block_wait()?;
+                .await?
+                .wait()
+                .await?;
 
-            assert_eq!(*buffer.as_vec(), random_buffer);
+            assert_eq!(*buffer.as_vec().await, random_buffer);
         }
 
         // Validate a flush works
-        volume.flush(None)?.block_wait()?;
+        volume.flush(None).await?.wait().await?;
 
         // Write one block of 0x00 in, validate with a read
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0u8; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?
+            .wait()
+            .await?;
 
         {
-            let buffer = Buffer::new(volume.total_size()? as usize);
-            tokio::task::block_in_place(|| {
-                volume.read(
+            let buffer = Buffer::new(volume.total_size().await? as usize);
+            volume
+                .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     buffer.clone(),
                 )
-            })?
-            .block_wait()?;
+                .await?
+                .wait()
+                .await?;
 
-            let buffer_vec = buffer.as_vec();
+            let buffer_vec = buffer.as_vec().await;
 
             assert_eq!(buffer_vec[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
             assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
         }
 
         // Validate a flush still works
-        volume.flush(None)?.block_wait()?;
+        volume.flush(None).await?.wait().await?;
 
         Ok(())
     }
