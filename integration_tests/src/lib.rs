@@ -2137,6 +2137,152 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_wait_all_is_ordered_for_writes() -> Result<()> {
+        // In a loop, test that submitting a big batch of operations and waiting
+        // on their BlockReqWaiters in parallel is correct. It's important that
+        // this test use multiple worker_threads!
+        const BLOCK_SIZE: usize = 512;
+        const NUM_BLOCKS: usize = 10;
+
+        let test_downstairs_set =
+            TestDownstairsSet::new(54085, 54086, 54087, false).await?;
+        let opts = test_downstairs_set.opts();
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.activate(0).await?;
+
+        for x in 0..32 {
+            // Submit overlapping writes
+            let mut waiters = Vec::with_capacity(NUM_BLOCKS);
+
+            for i in 0..NUM_BLOCKS {
+                let byte_val: u8 = ((x + i) % 256) as u8;
+
+                // the writes we submit should overlap:
+                //
+                // 0: 00000000
+                // 1:     11111111
+                // 2:         22222222
+                // ...
+                //
+                // the writes should be submitted in order but execute
+                // concurrently.
+                let waiter = volume.write(
+                    Block::new_512(i as u64),
+                    // every write but the last should overlap
+                    if (i + 1) < NUM_BLOCKS {
+                        Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
+                    } else {
+                        Bytes::from(vec![byte_val; BLOCK_SIZE])
+                    },
+                )
+                .await
+                .unwrap();
+
+                waiters.push(waiter);
+            }
+
+            // one final flush
+            waiters.push(volume.flush(None).await.unwrap());
+
+            crucible::wait_all(waiters).await.unwrap();
+
+            // Read the data, and validate the on-disk blocks
+            let read_buffer = Buffer::new(NUM_BLOCKS * BLOCK_SIZE);
+            volume
+                .read(Block::new_512(0), read_buffer.clone())
+                .await
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+
+            let data = read_buffer.as_vec().await;
+            for i in 0..NUM_BLOCKS {
+                let byte_val: u8 = ((x + i) % 256) as u8;
+                assert_eq!(
+                    data[(i * BLOCK_SIZE)..((i + 1) * BLOCK_SIZE)],
+                    vec![byte_val; BLOCK_SIZE],
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn integration_test_wait_all_is_ordered_for_reads_and_writes() -> Result<()> {
+        // In a loop, test that submitting a big batch of operations and waiting
+        // on their BlockReqWaiters in parallel is correct. It's important that
+        // this test use multiple worker_threads!
+        const BLOCK_SIZE: usize = 512;
+        const NUM_BLOCKS: usize = 10;
+
+        let test_downstairs_set =
+            TestDownstairsSet::new(54088, 54089, 54090, false).await?;
+        let opts = test_downstairs_set.opts();
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.activate(0).await?;
+
+        for x in 0..32 {
+            // Submit writes followed by reads, to test that job dependencies
+            // still work if users wait on all the returned BlockReqWaiters at
+            // the end.
+            let mut read_buffers: Vec<Buffer> = Vec::with_capacity(NUM_BLOCKS);
+            let mut waiters = Vec::with_capacity(NUM_BLOCKS);
+
+            for i in 0..NUM_BLOCKS {
+                let byte_val: u8 = ((x + i) % 256) as u8;
+
+                // the writes we submit should overlap:
+                //
+                // 0: 00000000
+                // 1:     11111111
+                // 2:         22222222
+                // ...
+                //
+                let waiter = volume.write(
+                    Block::new_512(i as u64),
+                    // every write but the last should overlap
+                    if (i + 1) < NUM_BLOCKS {
+                        Bytes::from(vec![byte_val; BLOCK_SIZE * 2])
+                    } else {
+                        Bytes::from(vec![byte_val; BLOCK_SIZE])
+                    },
+                )
+                .await
+                .unwrap();
+
+                waiters.push(waiter);
+
+                // submit a read for one block
+                let read_buffer = Buffer::new(BLOCK_SIZE);
+                waiters.push(
+                    volume.read(
+                        Block::new_512(i as u64),
+                        read_buffer.clone(),
+                    ).await.unwrap(),
+                );
+                read_buffers.push(read_buffer);
+            }
+
+            crucible::wait_all(waiters).await.unwrap();
+
+            // Read the data, and validate the on-disk blocks
+            for (i, read_buffer) in read_buffers.iter().enumerate() {
+                let data = read_buffer.as_vec().await;
+                let byte_val: u8 = ((x + i) % 256) as u8;
+                assert_eq!(data[..], vec![byte_val; BLOCK_SIZE],);
+            }
+        }
+
+        Ok(())
+    }
+
     // The following tests work at the "guest" layer. The volume
     // layers above (in general) will eventually call a BlockIO trait
     // on a guest layer. Port numbers from this point below should
