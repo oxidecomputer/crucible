@@ -25,6 +25,10 @@ impl BlockIO for InMemoryBlockIO {
         Ok(())
     }
 
+    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        BlockReqWaiter::immediate()
+    }
+
     fn query_is_active(&self) -> Result<bool, CrucibleError> {
         Ok(true)
     }
