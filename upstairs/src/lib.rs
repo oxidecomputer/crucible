@@ -122,6 +122,37 @@ pub trait BlockIO: Sync {
         Ok(Block::new(offset / bs, bs.trailing_zeros()))
     }
 
+    /*
+     * `read_from_byte_offset` and `write_to_byte_offset` accept a byte
+     * offset, and data must be a multiple of block size.
+     */
+
+    async fn read_from_byte_offset(
+        &self,
+        offset: u64,
+        data: Buffer,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        if !self.query_is_active().await? {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        self.read(self.byte_offset_to_block(offset).await?, data)
+            .await
+    }
+
+    async fn write_to_byte_offset(
+        &self,
+        offset: u64,
+        data: Bytes,
+    ) -> Result<BlockReqWaiter, CrucibleError> {
+        if !self.query_is_active().await? {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        self.write(self.byte_offset_to_block(offset).await?, data)
+            .await
+    }
+
     async fn conditional_activate(
         &self,
         gen: u64,
@@ -6801,36 +6832,6 @@ impl Guest {
 
         let wio = BlockOp::WriteUnwritten { offset, data };
         Ok(self.send(wio).await)
-    }
-
-    /*
-     * `read_from_byte_offset` and `write_to_byte_offset` accept a byte
-     * offset, and data must be a multiple of block size.
-     */
-    pub async fn read_from_byte_offset(
-        &self,
-        offset: u64,
-        data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        self.read(self.byte_offset_to_block(offset).await?, data)
-            .await
-    }
-
-    pub async fn write_to_byte_offset(
-        &self,
-        offset: u64,
-        data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        self.write(self.byte_offset_to_block(offset).await?, data)
-            .await
     }
 
     pub async fn flush(
