@@ -300,8 +300,8 @@ impl Volume {
                 let buffer = Buffer::new(block_count * bs);
 
                 // The read will first try to establish a connection to
-                // the remote side before returning something we can block_wait
-                // on.  If that initial connection fails, we can retry.
+                // the remote side before returning something we can await
+                // on. If that initial connection fails, we can retry.
                 let mut retry_needed = true;
                 let mut retry_count = 0;
                 while retry_needed {

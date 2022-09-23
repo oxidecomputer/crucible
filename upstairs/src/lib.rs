@@ -7002,7 +7002,7 @@ impl BlockIO for Guest {
     async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
         // Disable any more IO from this guest and deactivate the downstairs.
         // We can't deactivate if we are not yet active.
-        if !self.is_active() {
+        if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
         }
 

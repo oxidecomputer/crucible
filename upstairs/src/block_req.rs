@@ -45,8 +45,9 @@ impl BlockReq {
 
 /**
  * When BlockOps are sent to a guest, the calling function receives a waiter
- * that it can block on. This uses a single-use channel to receive the result of
- * a particular operation, and is meant to be paired with a BlockReq.
+ * that it can block on. This uses a single-use channel to receive the
+ * result of a particular operation, and is meant to be paired with a
+ * BlockReq.
  */
 #[must_use]
 pub struct BlockReqWaiter {
