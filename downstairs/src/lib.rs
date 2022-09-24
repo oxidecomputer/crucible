@@ -56,7 +56,7 @@ fn deadline_secs(secs: u64) -> Instant {
  * We will start from the provided start_block.
  * We will stop after "count" blocks are written to the export_path.
  */
-pub fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
+pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
     region: &mut Region,
     export_path: P,
     start_block: u64,
@@ -95,16 +95,18 @@ pub fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
-                let mut responses = region.region_read(
-                    &[ReadRequest {
-                        eid: eid as u64,
-                        offset: Block::new_with_ddef(
-                            block_offset,
-                            &region.def(),
-                        ),
-                    }],
-                    0,
-                )?;
+                let mut responses = region
+                    .region_read(
+                        &[ReadRequest {
+                            eid: eid as u64,
+                            offset: Block::new_with_ddef(
+                                block_offset,
+                                &region.def(),
+                            ),
+                        }],
+                        0,
+                    )
+                    .await?;
                 let response = responses.pop().unwrap();
 
                 out_file.write_all(&response.data).unwrap();
@@ -126,7 +128,7 @@ pub fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
  * The total size of the region will be rounded up to the next largest
  * extent multiple.
  */
-pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
+pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     region: &mut Region,
     import_path: P,
 ) -> Result<()> {
@@ -243,7 +245,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -602,7 +604,7 @@ where
                     *flush_number,
                     *gen_number,
                     *repair_id,
-                ) {
+                ).await {
                     Ok(()) => Message::RepairAckId {
                         repair_id: *repair_id,
                     },
@@ -626,7 +628,7 @@ where
                 info!(d.log, "{} Close extent {}", repair_id, extent_id);
                 match d.region.extents.get_mut(*extent_id) {
                     Some(ext) => {
-                        ext.close()?;
+                        ext.close().await?;
                         Message::RepairAckId {
                             repair_id: *repair_id,
                         }
@@ -1158,9 +1160,9 @@ where
                         }
                         negotiated = 4;
                         let ds = ads.lock().await;
-                        let flush_numbers = ds.region.flush_numbers()?;
-                        let gen_numbers = ds.region.gen_numbers()?;
-                        let dirty_bits = ds.region.dirty()?;
+                        let flush_numbers = ds.region.flush_numbers().await?;
+                        let gen_numbers = ds.region.gen_numbers().await?;
+                        let dirty_bits = ds.region.dirty().await?;
                         drop(ds);
 
                         let mut fw = fw.lock().await;
@@ -1644,7 +1646,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_read(requests, job_id)
+                    self.region.region_read(requests, job_id).await
                 };
 
                 Ok(Some(Message::ReadResponse {
@@ -1671,7 +1673,7 @@ impl Downstairs {
                 } else {
                     // The region_write will handle what happens to each block
                     // based on if they have data or not.
-                    self.region.region_write(writes, job_id, true)
+                    self.region.region_write(writes, job_id, true).await
                 };
 
                 Ok(Some(Message::WriteUnwrittenAck {
@@ -1692,7 +1694,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_write(writes, job_id, false)
+                    self.region.region_write(writes, job_id, false).await
                 };
 
                 Ok(Some(Message::WriteAck {
@@ -1715,12 +1717,14 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_flush(
-                        *flush_number,
-                        *gen_number,
-                        snapshot_details,
-                        job_id,
-                    )
+                    self.region
+                        .region_flush(
+                            *flush_number,
+                            *gen_number,
+                            snapshot_details,
+                            job_id,
+                        )
+                        .await
                 };
 
                 Ok(Some(Message::FlushAck {
@@ -1830,9 +1834,11 @@ impl Downstairs {
                     upstairs_connection,
                 );
 
-                match futures::executor::block_on(
-                    active_upstairs.terminate_sender.send(upstairs_connection),
-                ) {
+                match active_upstairs
+                    .terminate_sender
+                    .send(upstairs_connection)
+                    .await
+                {
                     Ok(_) => {}
                     Err(e) => {
                         /*
@@ -1988,11 +1994,11 @@ impl Downstairs {
                         upstairs_connection,
                     );
 
-                    match futures::executor::block_on(
-                        active_upstairs
-                            .terminate_sender
-                            .send(upstairs_connection),
-                    ) {
+                    match active_upstairs
+                        .terminate_sender
+                        .send(upstairs_connection)
+                        .await
+                    {
                         Ok(_) => {}
                         Err(e) => {
                             /*
@@ -3415,8 +3421,8 @@ mod test {
         assert_eq!(work.completed, vec![1000, 1001, 1002, 1003]);
     }
 
-    #[test]
-    fn import_test_basic() -> Result<()> {
+    #[tokio::test]
+    async fn import_test_basic() -> Result<()> {
         /*
          * import + export test where data matches region size
          */
@@ -3461,8 +3467,8 @@ mod test {
 
         // import random_data to the region
 
-        downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None, 0)?;
+        downstairs_import(&mut region, &random_file_path).await?;
+        region.region_flush(1, 1, &None, 0).await?;
 
         // export region to another file
 
@@ -3472,7 +3478,8 @@ mod test {
             &export_path,
             0,
             total_bytes / block_size,
-        )?;
+        )
+        .await?;
 
         // compare files
 
@@ -3484,8 +3491,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn import_test_too_small() -> Result<()> {
+    #[tokio::test]
+    async fn import_test_too_small() -> Result<()> {
         /*
          * import + export test where data is smaller than region size
          */
@@ -3529,8 +3536,8 @@ mod test {
 
         // import random_data to the region
 
-        downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None, 0)?;
+        downstairs_import(&mut region, &random_file_path).await?;
+        region.region_flush(1, 1, &None, 0).await?;
 
         // export region to another file (note: 100 fewer bytes imported than
         // region size still means the whole region is exported)
@@ -3542,7 +3549,8 @@ mod test {
             &export_path,
             0,
             region_size / block_size,
-        )?;
+        )
+        .await?;
 
         // compare files
 
@@ -3566,8 +3574,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn import_test_too_large() -> Result<()> {
+    #[tokio::test]
+    async fn import_test_too_large() -> Result<()> {
         /*
          * import + export test where data is larger than region size
          */
@@ -3611,8 +3619,8 @@ mod test {
 
         // import random_data to the region
 
-        downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None, 0)?;
+        downstairs_import(&mut region, &random_file_path).await?;
+        region.region_flush(1, 1, &None, 0).await?;
 
         // export region to another file (note: 100 more bytes will have caused
         // 10 more extents to be added, but someone running the export command
@@ -3625,7 +3633,8 @@ mod test {
             &export_path,
             0,
             total_bytes / block_size + 1,
-        )?;
+        )
+        .await?;
 
         // compare files
 
@@ -3648,8 +3657,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn import_test_basic_read_blocks() -> Result<()> {
+    #[tokio::test]
+    async fn import_test_basic_read_blocks() -> Result<()> {
         /*
          * import + export test where data matches region size, and read the
          * blocks
@@ -3694,20 +3703,22 @@ mod test {
 
         // import random_data to the region
 
-        downstairs_import(&mut region, &random_file_path)?;
-        region.region_flush(1, 1, &None, 0)?;
+        downstairs_import(&mut region, &random_file_path).await?;
+        region.region_flush(1, 1, &None, 0).await?;
 
         // read block by block
         let mut read_data = Vec::with_capacity(total_bytes as usize);
         for eid in 0..region.def().extent_count() {
             for offset in 0..region.def().extent_size().value {
-                let responses = region.region_read(
-                    &[crucible_protocol::ReadRequest {
-                        eid: eid.into(),
-                        offset: Block::new_512(offset),
-                    }],
-                    0,
-                )?;
+                let responses = region
+                    .region_read(
+                        &[crucible_protocol::ReadRequest {
+                            eid: eid.into(),
+                            offset: Block::new_512(offset),
+                        }],
+                        0,
+                    )
+                    .await?;
 
                 assert_eq!(responses.len(), 1);
 
