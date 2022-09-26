@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
@@ -129,51 +129,73 @@ impl Inner {
         Ok(())
     }
 
-    /*
-     * For a given block, return all encryption contexts since last flush.
-     * Order so latest is last.
-     */
+    /// For a given block range, return all encryption contexts since the last
+    /// flush. `get_hashes` returns a `Vec<Vec<u64>>` of length equal to
+    /// `count`. Each `Vec<u64>` inside this parent Vec contains all
+    /// contexts for a single block, ordered so the latest context is last.
+    /// If the region is not using encryption, the inner Vecs will all be
+    /// empty, but the outer Vec will still be of length `count`.
     fn get_encryption_contexts(
         &self,
         block: u64,
-    ) -> Result<Vec<EncryptionContext>> {
+        count: u64,
+    ) -> Result<Vec<Vec<EncryptionContext>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = "SELECT nonce, tag FROM encryption_context where block=?1 \
+        let stmt = "SELECT block, nonce, tag FROM encryption_context \
+             WHERE block BETWEEN ?1 AND ?2 \
              ORDER BY counter ASC";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
-        let stmt_iter = stmt
-            .query_map(params![block], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let stmt_iter =
+            stmt.query_map(params![block, block + count - 1], |row| {
+                let block: u64 = row.get(0)?;
+                let nonce: Vec<u8> = row.get(1)?;
+                let tag: Vec<u8> = row.get(2)?;
+                Ok((block, nonce, tag))
+            })?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(count as usize);
+        for _i in 0..count {
+            results.push(Vec::new());
+        }
 
         for row in stmt_iter {
-            let (nonce, tag) = row?;
-            results.push(EncryptionContext { nonce, tag });
+            let (row_block, nonce, tag) = row?;
+            results[(row_block - block) as usize]
+                .push(EncryptionContext { nonce, tag });
         }
 
         Ok(results)
     }
 
-    /*
-     * For a given block, return all hashes since last flush. Order so latest
-     * is last.
-     */
-    pub fn get_hashes(&self, block: u64) -> Result<Vec<u64>> {
+    /// For a given block range, return all hashes since the last flush.
+    /// `get_hashes` returns a `Vec<Vec<u64>>` of length equal to `count`. Each
+    /// `Vec<u64>` inside this parent Vec contains all hashes for a single
+    /// block, ordered so the latest hash is last.
+    pub fn get_hashes(&self, block: u64, count: u64) -> Result<Vec<Vec<u64>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = "SELECT hash FROM integrity_hashes where block=?1 \
+        let stmt = "SELECT block, hash FROM integrity_hashes \
+             WHERE block BETWEEN ?1 AND ?2 \
              ORDER BY counter ASC";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
-        let stmt_iter = stmt.query_map(params![block], |row| row.get(0))?;
+        let stmt_iter =
+            stmt.query_map(params![block, block + count - 1], |row| {
+                let block: u64 = row.get(0)?;
+                let hash: Vec<u8> = row.get(1)?;
+                Ok((block, hash))
+            })?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(count as usize);
+        for _i in 0..count {
+            results.push(Vec::new());
+        }
 
         for row in stmt_iter {
-            let hash: Vec<u8> = row?;
+            let (row_block, hash) = row?;
             assert_eq!(hash.len(), 8);
-
-            results.push(u64::from_le_bytes(hash[..].try_into()?));
+            results[(row_block - block) as usize]
+                .push(u64::from_le_bytes(hash[..].try_into()?));
         }
 
         Ok(results)
@@ -887,6 +909,9 @@ impl Extent {
         self.number
     }
 
+    /// Read the real data off underlying storage, and get block metadata. If
+    /// an error occurs while processing any of the requests, the state of
+    /// `responses` is undefined.
     #[instrument]
     pub fn read(
         &self,
@@ -895,32 +920,87 @@ impl Extent {
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
 
-        for request in requests {
-            let mut response = crucible_protocol::ReadResponse::from_request(
-                request,
-                self.block_size as usize,
+        // This code batches up operations for contiguous regions of
+        // ReadRequests, so we can perform larger read syscalls and sqlite
+        // queries. This significantly improves read throughput.
+
+        // Keep track of the index of the first request in any contiguous run
+        // of requests. Of course, a "contiguous run" might just be a single
+        // request.
+        let mut req_run_start = 0;
+        while req_run_start < requests.len() {
+            let first_req = requests[req_run_start];
+
+            // Starting from the first request in the potential run, we scan
+            // forward until we find a request with a block that isn't
+            // contiguous with the request before it. Since we're counting
+            // pairs, and the number of pairs is one less than the number of
+            // requests, we need to add 1 to get our actual run length.
+            let n_contiguous_requests = requests[req_run_start..]
+                .windows(2)
+                .take_while(|reqs| {
+                    reqs[0].offset.value + 1 == reqs[1].offset.value
+                })
+                .count()
+                + 1;
+
+            // Create our responses and push them into the output. While we're
+            // at it, check for overflows
+            let resp_run_start = responses.len();
+            for req in requests[req_run_start..][..n_contiguous_requests].iter()
+            {
+                let resp =
+                    ReadResponse::from_request(req, self.block_size as usize);
+                self.check_input(req.offset, &resp.data)?;
+                responses.push(resp);
+            }
+
+            // Finally we get to read the actual data. That's why we're here
+            inner.file.seek(SeekFrom::Start(
+                first_req.offset.value * self.block_size,
+            ))?;
+            let mut read_buffer = BytesMut::with_capacity(
+                n_contiguous_requests * self.block_size as usize,
             );
+            read_buffer.resize(read_buffer.capacity(), 0);
+            inner.file.read_exact(&mut read_buffer)?;
 
-            self.check_input(request.offset, &response.data)?;
+            // Query the block metadata
+            let enc_ctxts = inner.get_encryption_contexts(
+                first_req.offset.value,
+                n_contiguous_requests as u64,
+            )?;
+            let hashes = inner.get_hashes(
+                first_req.offset.value,
+                n_contiguous_requests as u64,
+            )?;
 
-            let byte_offset = request.offset.value * self.block_size;
+            // Now it's time to put everything into the responses.
+            // We use into_iter here to move values out of enc_ctxts/hashes,
+            // avoiding a clone(). For code consistency, we use iters for the
+            // response and data chunks too. These iters will be the same length
+            // (equal to n_contiguous_requests) so zipping is fine
+            let resp_iter =
+                responses[resp_run_start..][..n_contiguous_requests].iter_mut();
+            let enc_iter = enc_ctxts.into_iter();
+            let hash_iter = hashes.into_iter();
+            let data_iter = read_buffer.chunks_exact(self.block_size as usize);
 
-            inner.file.seek(SeekFrom::Start(byte_offset))?;
+            // We could make this a little cleaner if we pulled in itertools and
+            // used multizip from that, but i don't think it's worth it.
+            for (((resp, r_encs), r_hashes), r_data) in
+                resp_iter.zip(enc_iter).zip(hash_iter).zip(data_iter)
+            {
+                // Shove everything into the response
+                resp.encryption_contexts = r_encs;
+                resp.hashes = r_hashes;
 
-            /*
-             * XXX This read_exact only works because we have filled our
-             * buffer with data ahead of time.  If we want to use
-             * an uninitialized buffer, then we need a different
-             * read or type for the destination
-             */
-            inner.file.read_exact(&mut response.data)?;
+                // XXX if resp.data was Bytes instead of BytesMut we could avoid
+                // a copy here and instead assign it to a frozen subslice.
+                resp.data.copy_from_slice(r_data);
+            }
 
-            response.encryption_contexts =
-                inner.get_encryption_contexts(request.offset.value)?;
-
-            response.hashes = inner.get_hashes(request.offset.value)?;
-
-            responses.push(response);
+            req_run_start += n_contiguous_requests;
         }
 
         Ok(())
@@ -1018,34 +1098,62 @@ impl Extent {
          * a checksum.
          */
 
-        let mut writes_to_skip: Vec<u64> = Vec::new();
+        // If `only_write_written`, we need to skip writing to blocks that
+        // already contain data. We'll first query the metadata to see which
+        // blocks have hashes
+        let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
-            for write in writes {
-                if !inner.get_hashes(write.offset.value).unwrap().is_empty() {
-                    writes_to_skip.push(write.offset.value);
+            let mut write_run_start = 0;
+            while write_run_start < writes.len() {
+                let first_write = writes[write_run_start];
+
+                // Starting from the first write in the potential run, we scan
+                // forward until we find a write with a block that isn't
+                // contiguous with the request before it. Since we're counting
+                // pairs, and the number of pairs is one less than the number of
+                // writes, we need to add 1 to get our actual run length.
+                let n_contiguous_writes = writes[write_run_start..]
+                    .windows(2)
+                    .take_while(|wr_pair| {
+                        wr_pair[0].offset.value + 1 == wr_pair[1].offset.value
+                    })
+                    .count()
+                    + 1;
+
+                // Query hashes for the write range.
+                // TODO we should consider adding a query that doesnt actually
+                // give us back the data, just checks for its presence.
+                let hashes = inner.get_hashes(
+                    first_write.offset.value,
+                    n_contiguous_writes as u64,
+                )?;
+
+                for (i, block_hashes) in hashes.iter().enumerate() {
+                    if !block_hashes.is_empty() {
+                        let _ = writes_to_skip
+                            .insert(i as u64 + first_write.offset.value);
+                    }
                 }
+
+                write_run_start += n_contiguous_writes;
+            }
+
+            if writes_to_skip.len() == writes.len() {
+                // Nothing to do
+                return Ok(());
             }
         }
-        if only_write_unwritten && writes_to_skip.len() == writes.len() {
-            // For read fill, if the list of blocks to skip is the same
-            // length as the number of blocks in the write list, then we
-            // have no work to do here.
-            return Ok(());
-        }
 
-        // We know we have at least one block to write.
         inner.set_dirty()?;
 
+        // Write all the metadata to the DB
         let tx = inner.metadb_transaction()?;
         for write in writes {
-            // Since we only add to writes_to_skip if only_write_unwritten,
-            // this will be empty if only_write_unwritten is false, so we
-            // don't need to check again here for only_write_unwritten
-            // being true.
             if writes_to_skip.contains(&write.offset.value) {
-                assert!(only_write_unwritten);
+                debug_assert!(only_write_unwritten);
                 continue;
             }
+
             if let Some(encryption_context) = &write.encryption_context {
                 Inner::tx_set_encryption_context(
                     &tx,
@@ -1057,15 +1165,47 @@ impl Extent {
         }
         tx.commit()?;
 
+        // Buffer writes for fewer syscalls. The 65536 buffer size here is
+        // chosen somewhat arbitrarily.
+        let mut write_buffer = [0u8; 65536];
+
+        let mut bytes_in_run = 0;
+        let mut next_block_in_run = u64::MAX;
         for write in writes {
-            if writes_to_skip.contains(&write.offset.value) {
-                assert!(only_write_unwritten);
+            let block = write.offset.value;
+            if writes_to_skip.contains(&block) {
+                debug_assert!(only_write_unwritten);
                 continue;
             }
-            let byte_offset = write.offset.value * self.block_size;
 
-            inner.file.seek(SeekFrom::Start(byte_offset))?;
-            inner.file.write_all(&write.data)?;
+            // If the current write isn't contiguous with previous writes,
+            // write our buffer to the file and seek.
+            if block != next_block_in_run {
+                if bytes_in_run > 0 {
+                    inner.file.write_all(&write_buffer[..bytes_in_run])?;
+                    bytes_in_run = 0;
+                }
+
+                // Write any buffered data, and then seek
+                inner.file.seek(SeekFrom::Start(block * self.block_size))?;
+            }
+
+            // If the write buffer is full, write out to the file
+            if write_buffer.len() - bytes_in_run < self.block_size as usize {
+                inner.file.write_all(&write_buffer[..bytes_in_run])?;
+                bytes_in_run = 0;
+            }
+
+            write_buffer[bytes_in_run..][..self.block_size as usize]
+                .copy_from_slice(&write.data);
+            bytes_in_run += self.block_size as usize;
+
+            next_block_in_run = block + 1;
+        }
+
+        // Write any remaining buffered data
+        if bytes_in_run > 0 {
+            inner.file.write_all(&write_buffer[..bytes_in_run])?;
         }
 
         Ok(())
@@ -2759,8 +2899,8 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_contexts(0)?.is_empty());
-        assert!(inner.get_encryption_contexts(1)?.is_empty());
+        assert!(inner.get_encryption_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's context
 
@@ -2772,7 +2912,7 @@ mod test {
             },
         )])?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
@@ -2781,7 +2921,7 @@ mod test {
 
         // Block 1 should still be blank
 
-        assert!(inner.get_encryption_contexts(1)?.is_empty());
+        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
 
         // Set and verify a new context for block 0
 
@@ -2796,7 +2936,7 @@ mod test {
             },
         )])?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 2);
 
@@ -2809,7 +2949,7 @@ mod test {
         // "Flush", so only the latest should remain.
         inner.truncate_encryption_contexts_and_hashes()?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
@@ -2837,8 +2977,8 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_contexts(0)?.is_empty());
-        assert!(inner.get_encryption_contexts(1)?.is_empty());
+        assert!(inner.get_encryption_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's and 1's context
 
@@ -2859,14 +2999,14 @@ mod test {
             ),
         ])?;
 
-        let ctxs = inner.get_encryption_contexts(0)?;
+        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
         assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
         assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
 
-        let ctxs = inner.get_encryption_contexts(1)?;
+        let ctxs = inner.get_encryption_contexts(1, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
@@ -2887,14 +3027,14 @@ mod test {
 
         // Hashes for blocks 0 and 1 should start blank
 
-        assert!(inner.get_hashes(0)?.is_empty());
-        assert!(inner.get_hashes(1)?.is_empty());
+        assert!(inner.get_hashes(0, 1)?[0].is_empty());
+        assert!(inner.get_hashes(1, 1)?[0].is_empty());
 
         // Set and verify block 0's hash
 
         inner.set_hashes(&[(0, 23874612987634)])?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
 
@@ -2902,7 +3042,7 @@ mod test {
 
         // Block 1 should still be blank
 
-        assert!(inner.get_hashes(1)?.is_empty());
+        assert!(inner.get_hashes(1, 1)?[0].is_empty());
 
         // Set and verify a new hash for block 0
 
@@ -2910,7 +3050,7 @@ mod test {
 
         inner.set_hashes(&[(0, blob1)])?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 2);
 
@@ -2920,7 +3060,7 @@ mod test {
         // "Flush", so only the latest should remain.
         inner.truncate_encryption_contexts_and_hashes()?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
 
@@ -2945,20 +3085,20 @@ mod test {
 
         // Hashes for blocks 0 and 1 should start blank
 
-        assert!(inner.get_hashes(0)?.is_empty());
-        assert!(inner.get_hashes(1)?.is_empty());
+        assert!(inner.get_hashes(0, 1)?[0].is_empty());
+        assert!(inner.get_hashes(1, 1)?[0].is_empty());
 
         // Set and verify block 0's and 1's context
 
         inner
             .set_hashes(&[(0, 0xbd1f97574fa0c3f4), (1, 0xa040b75cd3c96fff)])?;
 
-        let hashes = inner.get_hashes(0)?;
+        let hashes = inner.get_hashes(0, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], 0xbd1f97574fa0c3f4);
 
-        let hashes = inner.get_hashes(1)?;
+        let hashes = inner.get_hashes(1, 1)?[0].clone();
 
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], 0xa040b75cd3c96fff);

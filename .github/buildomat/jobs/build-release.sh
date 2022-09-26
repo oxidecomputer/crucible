@@ -5,6 +5,7 @@
 #: target = "helios"
 #: rust_toolchain = "nightly-2021-11-24"
 #: output_rules = [
+#:	"/out/*",
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
 #:	"/out/*",
@@ -18,6 +19,16 @@
 #: [[publish]]
 #: series = "nightly-image"
 #: name = "crucible-nightly.sha256.txt"
+#: from_output = "/out/crucible-nightly.sha256.txt"
+#:
+#: [[publish]]
+#: series = "image"
+#: name = "crucible.tar.gz"
+#: from_output = "/out/crucible.tar.gz"
+#:
+#: [[publish]]
+#: series = "image"
+#: name = "crucible.sha256.txt"
 #: from_output = "/out/crucible.sha256.txt"
 #:
 
@@ -29,7 +40,7 @@ cargo --version
 rustc --version
 
 banner rbuild
-ptime -m cargo build --verbose --release
+ptime -m cargo build --verbose --release --all-features
 
 banner rtest
 ptime -m cargo test --verbose
@@ -49,6 +60,7 @@ done
 # and binaries needed to run the nightly test.
 banner nightly
 mkdir -p out
+pfexec chown "$UID" /out
 tar cavf out/crucible-nightly.tar.gz \
     target/release/crutest \
     target/release/crucible-downstairs \
@@ -62,8 +74,17 @@ tar cavf out/crucible-nightly.tar.gz \
     tools/test_nightly.sh
 
 banner copy
-pfexec mkdir -p /out
-pfexec chown "$UID" /out
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
+
+
+# Make the crucible package image
+banner image
+ptime -m cargo run --bin crucible-package
+
+banner contents
+tar tvfz out/crucible.tar.gz
+mv out/crucible.tar.gz /out/crucible.tar.gz
+
 cd /out
+digest -a sha256 crucible.tar.gz > crucible.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt

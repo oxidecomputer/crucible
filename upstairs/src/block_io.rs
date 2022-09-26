@@ -40,6 +40,10 @@ impl BlockIO for FileBlockIO {
         Ok(())
     }
 
+    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        BlockReqWaiter::immediate()
+    }
+
     fn query_is_active(&self) -> Result<bool, CrucibleError> {
         Ok(true)
     }
@@ -177,6 +181,10 @@ impl ReqwestBlockIO {
 impl BlockIO for ReqwestBlockIO {
     fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
         Ok(())
+    }
+
+    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+        BlockReqWaiter::immediate()
     }
 
     fn query_is_active(&self) -> Result<bool, CrucibleError> {
