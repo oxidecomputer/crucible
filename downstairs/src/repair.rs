@@ -40,6 +40,7 @@ fn build_api() -> ApiDescription<FileServerContext> {
     api
 }
 
+/// Returns Ok if everything launched ok, Err otherwise
 pub async fn repair_main(
     ds: &Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
@@ -87,11 +88,16 @@ pub async fn repair_main(
         .map_err(|error| format!("failed to create server: {}", error))?
         .start();
 
-    /*
-     * Wait for the server to stop.  Note that there's not any code to shut
-     * down this server, so we should never get past this point.
-     */
-    server.await
+    tokio::spawn(async move {
+        /*
+         * Wait for the server to stop.  Note that there's not any code to
+         * shut down this server, so we should never get past this
+         * point.
+         */
+        server.await
+    });
+
+    Ok(())
 }
 
 #[derive(Deserialize, JsonSchema)]

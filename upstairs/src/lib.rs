@@ -671,41 +671,6 @@ where
         + std::marker::Send
         + 'static,
 {
-    {
-        let mut ds = up.downstairs.lock().await;
-        let my_state = ds.ds_state[up_coms.client_id as usize];
-        info!(
-            up.log,
-            "[{}] Proc runs for {} in state {:?} repair at: {:?}",
-            up_coms.client_id,
-            target,
-            my_state,
-            ds.repair_addr(up_coms.client_id),
-        );
-        // XXX Move this all to some state check place?
-        if my_state != DsState::New
-            && my_state != DsState::Disconnected
-            && my_state != DsState::Failed
-            && my_state != DsState::Offline
-        {
-            panic!(
-                "[{}] failed proc with state {:?}",
-                up_coms.client_id, my_state
-            );
-        }
-
-        /*
-         * This is only applicable for a downstairs that is returning
-         * from being disconnected.  Mark any in progress jobs since the
-         * last good flush back to New, as we have reconnected to this
-         * downstairs and will need to replay any work that we were
-         * holding that we did not flush.
-         */
-        if my_state == DsState::Offline {
-            ds.re_new(up_coms.client_id);
-        }
-    }
-
     let mut self_promotion = false;
 
     /*
@@ -876,7 +841,7 @@ where
                             up.encrypted(),
                         );
                     }
-                    Some(Message::YesItsMe { version }) => {
+                    Some(Message::YesItsMe { version, repair_addr }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
@@ -893,7 +858,47 @@ where
                             ).await;
                             bail!("expected version 1, got {}", version);
                         }
+
                         negotiated = 1;
+
+                        up.ds_repair_address(up_coms.client_id, repair_addr).await;
+
+                        // If this downstairs is returning, then attempt repair
+                        {
+                            let mut ds = up.downstairs.lock().await;
+                            let my_state = ds.ds_state[up_coms.client_id as usize];
+                            info!(
+                                up.log,
+                                "[{}] Proc runs for {} in state {:?} repair at: {:?}",
+                                up_coms.client_id,
+                                target,
+                                my_state,
+                                ds.repair_addr(up_coms.client_id),
+                            );
+                            // XXX Move this all to some state check place?
+                            if my_state != DsState::New
+                                && my_state != DsState::Disconnected
+                                && my_state != DsState::Failed
+                                && my_state != DsState::Offline
+                            {
+                                panic!(
+                                    "[{}] failed proc with state {:?}",
+                                    up_coms.client_id, my_state
+                                );
+                            }
+
+                            /*
+                             * This is only applicable for a downstairs that is returning
+                             * from being disconnected.  Mark any in progress jobs since the
+                             * last good flush back to New, as we have reconnected to this
+                             * downstairs and will need to replay any work that we were
+                             * holding that we did not flush.
+                             */
+                            if my_state == DsState::Offline {
+                                ds.re_new(up_coms.client_id);
+                            }
+                        }
+
                         /*
                          * We only set guest_io_ready after all three downstairs
                          * have gone active, which means the upstairs did
@@ -2188,9 +2193,10 @@ struct Downstairs {
      * UUID for each downstairs, index by client ID
      */
     ds_uuid: HashMap<u8, Uuid>,
+
     /*
      * The IP:Port for repair when contacting the downstairs, hashed by
-     * the client index the upstairs gives it..
+     * the client index the upstairs gives it.
      */
     ds_repair: HashMap<u8, SocketAddr>,
 
@@ -2248,20 +2254,10 @@ struct Downstairs {
 }
 
 impl Downstairs {
-    fn new(target: Vec<SocketAddr>, log: Logger) -> Self {
-        // Fill the repair hashmap based on the
-        // addresses from each downstairs.
-        let mut ds_repair = HashMap::new();
-        for (i, addr) in target.iter().enumerate() {
-            assert!(addr.port() < u16::MAX - REPAIR_PORT_OFFSET);
-            let port = addr.port() + REPAIR_PORT_OFFSET;
-            let repair_addr = SocketAddr::new(addr.ip(), port);
-            ds_repair.insert(i as u8, repair_addr);
-        }
-
+    fn new(log: Logger) -> Self {
         Self {
             ds_uuid: HashMap::new(),
-            ds_repair,
+            ds_repair: HashMap::new(),
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
@@ -2433,6 +2429,7 @@ impl Downstairs {
             );
         }
     }
+
     /*
      * Given a client ID, return the SocketAddr for repair to use.
      */
@@ -3811,10 +3808,7 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(
-                opt.target.clone(),
-                log.clone(),
-            )),
+            downstairs: Mutex::new(Downstairs::new(log.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
@@ -5566,6 +5560,11 @@ impl Upstairs {
         }
 
         Ok(notify_guest)
+    }
+
+    async fn ds_repair_address(&self, client_id: u8, addr: SocketAddr) {
+        let mut ds = self.downstairs.lock().await;
+        ds.ds_repair.insert(client_id, addr);
     }
 }
 
@@ -7565,17 +7564,18 @@ async fn up_listen(
 }
 
 /*
- * This is the main upstairs task that starts all the other async
- * tasks.  The final step is to call up_listen() which will coordinate
- * the connection to the downstairs and start listening for incoming
- * IO from the guest when the time is ready.
+ * This is the main upstairs task that starts all the other async tasks. The
+ * final step is to call up_listen() which will coordinate the connection to
+ * the downstairs and start listening for incoming IO from the guest when the
+ * time is ready. It will return Ok with a join handle if every required task
+ * was successfully launched, and Err otherwise.
  */
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
-) -> Result<()> {
+) -> Result<tokio::task::JoinHandle<()>> {
     register_probes().unwrap();
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator)
@@ -7711,22 +7711,20 @@ pub async fn up_main(
             info!(upi.log, "Control HTTP task finished with {:?}", r);
         });
     }
-    /*
-     * The final step is to call this function to wait for our downstairs
-     * tasks to connect to their respective downstairs instance.
-     * Once connected, we then take work requests from the guest and
-     * submit them into the upstairs
-     */
-    up_listen(
-        &up,
-        dst,
-        ds_status_rx,
-        ds_reconcile_done_rx,
-        opt.flush_timeout,
-    )
-    .await;
 
-    Ok(())
+    let flush_timeout = opt.flush_timeout;
+    let join_handle = tokio::spawn(async move {
+        /*
+         * The final step is to call this function to wait for our downstairs
+         * tasks to connect to their respective downstairs instance.
+         * Once connected, we then take work requests from the guest and
+         * submit them into the upstairs
+         */
+        up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx, flush_timeout)
+            .await
+    });
+
+    Ok(join_handle)
 }
 
 /*

@@ -20,6 +20,7 @@ pub struct RunDownstairsForRegionParams {
     oximeter: Option<SocketAddr>,
     lossy: bool,
     port: u16,
+    rport: u16,
     return_errors: bool,
     cert_pem: Option<String>,
     key_pem: Option<String>,
@@ -67,20 +68,20 @@ pub async fn run_downstairs_for_region(
     )
     .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-    let dd = d.clone();
-    tokio::spawn(async move {
-        // XXX result eaten here!
-        let _ = start_downstairs(
-            dd,
-            run_params.address,
-            run_params.oximeter,
-            run_params.port,
-            run_params.cert_pem,
-            run_params.key_pem,
-            run_params.root_cert_pem,
-        )
-        .await;
-    });
+    let _join_handle = start_downstairs(
+        d.clone(),
+        run_params.address,
+        run_params.oximeter,
+        run_params.port,
+        run_params.rport,
+        run_params.cert_pem,
+        run_params.key_pem,
+        run_params.root_cert_pem,
+    )
+    .await
+    .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    // past here, the downstairs has started successfully
 
     downstairs.insert(uuid, d);
 
