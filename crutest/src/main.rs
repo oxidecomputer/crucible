@@ -216,9 +216,9 @@ async fn get_region_info(
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = guest.query_block_size().await?;
+    let block_size = guest.get_block_size().await?;
     let extent_size = guest.query_extent_size().await?;
-    let total_size = guest.query_total_size().await?;
+    let total_size = guest.total_size().await?;
     let total_blocks = (total_size / block_size) as usize;
 
     /*
@@ -880,8 +880,7 @@ async fn verify_volume(
         let length: usize = next_io_blocks * ri.block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
-        let waiter = guest.read(offset, data.clone()).await?;
-        waiter.wait().await?;
+        guest.read(offset, data.clone()).await?;
 
         let dl = data.as_vec().await.to_vec();
         match validate_vec(
@@ -1100,17 +1099,13 @@ async fn balloon_workload(
                 Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
             println!("IO at block:{}  size in blocks:{}", block_index, size);
-            let waiter = guest.write(offset, data).await?;
-            waiter.wait().await?;
-
-            let waiter = guest.flush(None).await?;
-            waiter.wait().await?;
+            guest.write(offset, data).await?;
+            guest.flush(None).await?;
 
             let length: usize = size * ri.block_size as usize;
             let vec: Vec<u8> = vec![255; length];
             let data = crucible::Buffer::from_vec(vec);
-            let waiter = guest.read(offset, data.clone()).await?;
-            waiter.wait().await?;
+            guest.read(offset, data.clone()).await?;
 
             let dl = data.as_vec().await.to_vec();
             match validate_vec(
@@ -1164,15 +1159,13 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
             fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
         let data = Bytes::from(vec);
 
-        let waiter = guest.write(offset, data).await?;
-        waiter.wait().await?;
+        guest.write(offset, data).await?;
 
         block_index += next_io_blocks;
         pb.set_position(block_index as u64);
     }
 
-    let waiter = guest.flush(None).await?;
-    waiter.wait().await?;
+    guest.flush(None).await?;
     pb.finish();
 
     verify_volume(guest, ri, false).await?;
@@ -1205,8 +1198,7 @@ async fn generic_workload(
                 count,
                 width = count_width,
             );
-            let waiter = guest.flush(None).await?;
-            waiter.wait().await?;
+            guest.flush(None).await?;
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -1241,8 +1233,7 @@ async fn generic_workload(
                     data.len(),
                     width = count_width,
                 );
-                let waiter = guest.write(offset, data).await?;
-                waiter.wait().await?;
+                guest.write(offset, data).await?;
             } else {
                 // Read (+ verify)
                 let length: usize = size * ri.block_size as usize;
@@ -1256,8 +1247,7 @@ async fn generic_workload(
                     data.len().await,
                     width = count_width,
                 );
-                let waiter = guest.read(offset, data.clone()).await?;
-                waiter.wait().await?;
+                guest.read(offset, data.clone()).await?;
 
                 let dl = data.as_vec().await.to_vec();
                 match validate_vec(
@@ -1297,7 +1287,7 @@ async fn dirty_workload(
     /*
      * To store our write requests
      */
-    let mut waiterlist = Vec::new();
+    let mut futureslist = Vec::new();
 
     let size = 1;
     /*
@@ -1332,12 +1322,12 @@ async fn dirty_workload(
             width = count_width,
         );
 
-        let waiter = guest.write(offset, data).await?;
-        waiterlist.push(waiter);
+        let future = guest.write(offset, data);
+        futureslist.push(future);
     }
 
-    println!("loop over {} waiters", waiterlist.len());
-    crucible::wait_all(waiterlist).await?;
+    println!("loop over {} futures", futureslist.len());
+    crucible::join_all(futureslist).await?;
     Ok(())
 }
 
@@ -1549,25 +1539,23 @@ async fn perf_workload(
         let big_start = Instant::now();
         for _ in 0..count {
             let burst_start = Instant::now();
-            let mut write_waiters = Vec::with_capacity(io_depth);
+            let mut write_futures = Vec::with_capacity(io_depth);
+
             for write_buffer in write_buffers.iter().take(io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
-
-                let waiter = guest
-                    .write_to_byte_offset(
-                        offset * ri.block_size,
-                        write_buffer.clone(),
-                    )
-                    .await?;
-                write_waiters.push(waiter);
+                let future = guest.write_to_byte_offset(
+                    offset * ri.block_size,
+                    write_buffer.clone(),
+                );
+                write_futures.push(future);
             }
 
-            crucible::wait_all(write_waiters).await?;
+            crucible::join_all(write_futures).await?;
             wtime.push(burst_start.elapsed());
         }
         let big_end = big_start.elapsed();
 
-        guest.flush(None).await?.wait().await?;
+        guest.flush(None).await?;
         perf_summary(
             "rwrites",
             count,
@@ -1606,19 +1594,17 @@ async fn perf_workload(
         let big_start = Instant::now();
         for _ in 0..count {
             let burst_start = Instant::now();
-            let mut read_waiters = Vec::with_capacity(io_depth);
+            let mut read_futures = Vec::with_capacity(io_depth);
+
             for read_buffer in read_buffers.iter().take(io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
-
-                let waiter = guest
-                    .read_from_byte_offset(
-                        offset * ri.block_size,
-                        read_buffer.clone(),
-                    )
-                    .await?;
-                read_waiters.push(waiter);
+                let future = guest.read_from_byte_offset(
+                    offset * ri.block_size,
+                    read_buffer.clone(),
+                );
+                read_futures.push(future);
             }
-            crucible::wait_all(read_waiters).await?;
+            crucible::join_all(read_futures).await?;
             rtime.push(burst_start.elapsed());
         }
         let big_end = big_start.elapsed();
@@ -1639,7 +1625,7 @@ async fn perf_workload(
             );
         }
 
-        guest.flush(None).await?.wait().await?;
+        guest.flush(None).await?;
 
         // Before we finish, make sure the work queues are empty.
         loop {
@@ -1686,8 +1672,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
-    let waiter = guest.write(offset, data).await?;
-    waiter.wait().await?;
+    guest.write(offset, data).await?;
 
     let length: usize = size * ri.block_size as usize;
     let vec: Vec<u8> = vec![255; length];
@@ -1698,8 +1683,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         offset.value,
         data.len().await
     );
-    let waiter = guest.read(offset, data.clone()).await?;
-    waiter.wait().await?;
+    guest.read(offset, data.clone()).await?;
 
     let dl = data.as_vec().await.to_vec();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
@@ -1711,8 +1695,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     }
 
     println!("Flush");
-    let waiter = guest.flush(None).await?;
-    waiter.wait().await?;
+    guest.flush(None).await?;
 
     Ok(())
 }
@@ -1744,14 +1727,13 @@ async fn deactivate_workload(
             count,
             width = count_width
         );
-        let waiter = guest.deactivate().await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect wait",
             c,
             count,
             width = count_width
         );
-        waiter.wait().await?;
+        guest.deactivate().await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect done.",
             c,
@@ -1849,17 +1831,14 @@ async fn rand_workload(
             data.len(),
             width = count_width,
         );
-        let waiter = guest.write(offset, data).await?;
-        waiter.wait().await?;
+        guest.write(offset, data).await?;
 
-        let waiter = guest.flush(None).await?;
-        waiter.wait().await?;
+        guest.flush(None).await?;
 
         let length: usize = size * ri.block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
-        let waiter = guest.read(offset, data.clone()).await?;
-        waiter.wait().await?;
+        guest.read(offset, data.clone()).await?;
 
         let dl = data.as_vec().await.to_vec();
         match validate_vec(
@@ -1948,7 +1927,7 @@ async fn repair_workload(
     // Any state coming in should have been verified, so we can
     // consider the current write log to be the minimum possible values.
     ri.write_log.commit();
-    let mut waiterlist = Vec::new();
+    let mut futureslist = Vec::new();
     // TODO: Allow user to request r/w/f percentage (how???)
     // We want at least one write, otherwise there will be nothing to
     // repair.
@@ -1965,8 +1944,7 @@ async fn repair_workload(
                 count,
                 width = count_width,
             );
-            let waiter = guest.flush(None).await?;
-            waiterlist.push(waiter);
+            futureslist.push(guest.flush(None));
             // Commit the current write log because we know this flush
             // will make it out on at least two DS, so any writes before this
             // point should also be persistent.
@@ -2012,8 +1990,7 @@ async fn repair_workload(
                     data.len(),
                     width = count_width,
                 );
-                let waiter = guest.write(offset, data).await?;
-                waiterlist.push(waiter);
+                futureslist.push(guest.write(offset, data));
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
@@ -2027,13 +2004,13 @@ async fn repair_workload(
                     data.len().await,
                     width = count_width,
                 );
-                let waiter = guest.read(offset, data.clone()).await?;
-                waiterlist.push(waiter);
+                let future = guest.read(offset, data.clone());
+                futureslist.push(future);
             }
         }
     }
-    println!("loop over {} waiters", waiterlist.len());
-    crucible::wait_all(waiterlist).await?;
+    println!("loop over {} futures", futureslist.len());
+    crucible::join_all(futureslist).await?;
 
     Ok(())
 }
@@ -2051,15 +2028,14 @@ async fn demo_workload(
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    let mut waiterlist = Vec::new();
+    let mut futureslist = Vec::new();
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
     for i in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            let waiter = guest.flush(None).await?;
-            waiterlist.push(waiter);
+            futureslist.push(guest.flush(None));
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -2086,15 +2062,13 @@ async fn demo_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                let waiter = guest.write(offset, data).await?;
-                waiterlist.push(waiter);
+                futureslist.push(guest.write(offset, data));
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
-                let waiter = guest.read(offset, data.clone()).await?;
-                waiterlist.push(waiter);
+                futureslist.push(guest.read(offset, data.clone()));
             }
 
             if i == 10 || i == 20 {
@@ -2107,8 +2081,8 @@ async fn demo_workload(
         ds_count: 0,
     };
 
-    println!("loop over {} waiters", waiterlist.len());
-    crucible::wait_all(waiterlist).await?;
+    println!("loop over {} futures", futureslist.len());
+    crucible::join_all(futureslist).await?;
 
     /*
      * Continue loping until all downstairs jobs finish also.
@@ -2147,20 +2121,17 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let data = Bytes::from(vec);
 
     println!("Sending a write spanning two extents");
-    let waiter = guest.write(offset, data).await?;
-    waiter.wait().await?;
+    guest.write(offset, data).await?;
 
     println!("Sending a flush");
-    let waiter = guest.flush(None).await?;
-    waiter.wait().await?;
+    guest.flush(None).await?;
 
     let length: usize = 2 * ri.block_size as usize;
     let vec: Vec<u8> = vec![99; length];
     let data = crucible::Buffer::from_vec(vec);
 
     println!("Sending a read spanning two extents");
-    let waiter = guest.read(offset, data.clone()).await?;
-    waiter.wait().await?;
+    guest.read(offset, data.clone()).await?;
 
     let dl = data.as_vec().await.to_vec();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
@@ -2192,17 +2163,14 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         let offset =
             Block::new(block_index as u64, ri.block_size.trailing_zeros());
 
-        let waiter = guest.write(offset, data).await?;
-        waiter.wait().await?;
+        guest.write(offset, data).await?;
 
-        let waiter = guest.flush(None).await?;
-        waiter.wait().await?;
+        guest.flush(None).await?;
 
         let length: usize = ri.block_size as usize;
         let vec: Vec<u8> = vec![255; length];
         let data = crucible::Buffer::from_vec(vec);
-        let waiter = guest.read(offset, data.clone()).await?;
-        waiter.wait().await?;
+        guest.read(offset, data.clone()).await?;
 
         let dl = data.as_vec().await.to_vec();
         match validate_vec(
@@ -2279,8 +2247,7 @@ async fn biggest_io_workload(
             block_index, next_io_blocks
         );
 
-        let waiter = guest.write(offset, data).await?;
-        waiter.wait().await?;
+        guest.write(offset, data).await?;
 
         block_index += next_io_blocks;
     }
@@ -2302,7 +2269,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     let mut my_offset: u64 = 0;
     for my_count in 1..150 {
-        let mut waiterlist = Vec::new();
+        let mut futureslist = Vec::new();
 
         /*
          * Generate some number of operations
@@ -2328,9 +2295,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let waiter =
-                    guest.write_to_byte_offset(my_offset, data).await?;
-                waiterlist.push(waiter);
+                futureslist.push(guest.write_to_byte_offset(my_offset, data));
             } else {
                 let vec: Vec<u8> = vec![0; ri.block_size as usize];
                 let data = crucible::Buffer::from_vec(vec);
@@ -2342,9 +2307,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     my_offset,
                     data.len().await
                 );
-                let waiter =
-                    guest.read_from_byte_offset(my_offset, data).await?;
-                waiterlist.push(waiter);
+                futureslist.push(guest.read_from_byte_offset(my_offset, data));
             }
         }
 
@@ -2354,12 +2317,12 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         // last command is a write or read and we have to wait x seconds for the
         // flush check to trigger.
         println!("Loop:{} send a final flush and wait", my_count);
-        let flush_waiter = guest.flush(None).await?;
-        flush_waiter.wait().await?;
+        let flush_future = guest.flush(None);
+        futureslist.push(flush_future);
 
-        println!("Loop:{} loop over {} waiters", my_count, waiterlist.len());
-        crucible::wait_all(waiterlist).await?;
-        println!("Loop:{} all waiters done", my_count);
+        println!("Loop:{} loop over {} futures", my_count, futureslist.len());
+        crucible::join_all(futureslist).await?;
+        println!("Loop:{} all futures done", my_count);
         guest.show_work().await?;
     }
 

@@ -6,8 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::SeekFrom;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// Implement BlockIO for a file
-
+/// Implement BlockIO for a file
 pub struct FileBlockIO {
     uuid: Uuid,
     block_size: u64,
@@ -41,8 +40,8 @@ impl BlockIO for FileBlockIO {
         Ok(())
     }
 
-    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate().await
+    async fn deactivate(&self) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
@@ -65,7 +64,7 @@ impl BlockIO for FileBlockIO {
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let mut data_vec = data.as_vec().await;
         let mut owned_vec = data.owned_vec().await;
 
@@ -79,28 +78,28 @@ impl BlockIO for FileBlockIO {
             owned_vec[i] = true;
         }
 
-        BlockReqWaiter::immediate().await
+        Ok(())
     }
 
     async fn write(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let start = offset.value * self.block_size;
 
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start))?;
         file.write_all(&data[..])?;
 
-        BlockReqWaiter::immediate().await
+        Ok(())
     }
 
     async fn write_unwritten(
         &self,
         _offset: Block,
         _data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         crucible_bail!(
             Unsupported,
             "write_unwritten unsupported for FileBlockIO"
@@ -110,10 +109,10 @@ impl BlockIO for FileBlockIO {
     async fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let mut file = self.file.lock().await;
         file.flush()?;
-        BlockReqWaiter::immediate().await
+        Ok(())
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
@@ -186,8 +185,8 @@ impl BlockIO for ReqwestBlockIO {
         Ok(())
     }
 
-    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate().await
+    async fn deactivate(&self) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
@@ -210,7 +209,7 @@ impl BlockIO for ReqwestBlockIO {
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
 
@@ -259,14 +258,14 @@ impl BlockIO for ReqwestBlockIO {
         }
 
         cdt::reqwest__read__done!(|| (cc, self.uuid));
-        BlockReqWaiter::immediate().await
+        Ok(())
     }
 
     async fn write(
         &self,
         _offset: Block,
         _data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         crucible_bail!(Unsupported, "write unsupported for ReqwestBlockIO")
     }
 
@@ -274,7 +273,7 @@ impl BlockIO for ReqwestBlockIO {
         &self,
         _offset: Block,
         _data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         crucible_bail!(
             Unsupported,
             "write_unwritten unsupported for ReqwestBlockIO"
@@ -284,8 +283,8 @@ impl BlockIO for ReqwestBlockIO {
     async fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate().await
+    ) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {

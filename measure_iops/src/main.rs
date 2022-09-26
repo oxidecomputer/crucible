@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
 
     let mut rng = rand::thread_rng();
 
-    let bsz: u64 = guest.query_block_size().await?;
-    let total_blocks: u64 = guest.query_total_size().await? / bsz;
+    let bsz: u64 = guest.get_block_size().await?;
+    let total_blocks: u64 = guest.total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
         io_size_in_bytes
@@ -147,34 +147,30 @@ async fn main() -> Result<()> {
     let mut bws: Vec<f32> = vec![];
 
     'outer: loop {
-        let mut waiters = Vec::with_capacity(io_depth);
+        let mut futures = Vec::with_capacity(io_depth);
 
         for i in 0..io_depth {
             let offset: u64 =
                 rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz as u64);
 
             if rng.gen::<bool>() {
-                let waiter = guest
-                    .write_to_byte_offset(
-                        offset * bsz,
-                        write_buffers[i].clone(),
-                    )
-                    .await?;
+                let future = guest.write_to_byte_offset(
+                    offset * bsz,
+                    write_buffers[i].clone(),
+                );
 
-                waiters.push(waiter);
+                futures.push(future);
             } else {
-                let waiter = guest
-                    .read_from_byte_offset(
-                        offset * bsz,
-                        read_buffers[i].clone(),
-                    )
-                    .await?;
+                let future = guest.read_from_byte_offset(
+                    offset * bsz,
+                    read_buffers[i].clone(),
+                );
 
-                waiters.push(waiter);
+                futures.push(future);
             }
         }
 
-        crucible::wait_all(waiters).await?;
+        crucible::join_all(futures).await?;
 
         io_operations_sent +=
             ceiling_div!(io_size * io_depth, 16 * 1024 * 1024);
@@ -200,7 +196,7 @@ async fn main() -> Result<()> {
     }
 
     // One last flush
-    guest.flush(None).await?.wait().await?;
+    guest.flush(None).await?;
 
     println!("Done ok, waiting on show_work");
 

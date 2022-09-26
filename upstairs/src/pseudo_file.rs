@@ -69,7 +69,7 @@ impl IOSpan {
     pub async fn read_affected_blocks_from_volume<T: BlockIO>(
         &mut self,
         block_io: &Arc<T>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         block_io
             .read(
                 Block::new(
@@ -85,7 +85,7 @@ impl IOSpan {
     pub async fn write_affected_blocks_to_volume<T: BlockIO>(
         &self,
         block_io: &Arc<T>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let bytes = Bytes::from(self.buffer.as_vec().await.clone());
 
         block_io
@@ -275,10 +275,8 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         let mut span =
             IOSpan::new(self.offset, buf.len() as u64, self.block_size);
 
-        let waiter = span
-            .read_affected_blocks_from_volume(&self.block_io)
+        span.read_affected_blocks_from_volume(&self.block_io)
             .await?;
-        waiter.wait().await?;
 
         span.read_from_blocks_into_buffer(buf).await;
 
@@ -307,16 +305,12 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         if !span.is_block_regular() {
             let _guard = self.rmw_lock.write().await;
 
-            let waiter = span
-                .read_affected_blocks_from_volume(&self.block_io)
+            span.read_affected_blocks_from_volume(&self.block_io)
                 .await?;
-            waiter.wait().await?;
 
             span.write_from_buffer_into_blocks(buf).await;
 
-            let waiter =
-                span.write_affected_blocks_to_volume(&self.block_io).await?;
-            waiter.wait().await?;
+            span.write_affected_blocks_to_volume(&self.block_io).await?;
         } else {
             let _guard = self.rmw_lock.read().await;
 
@@ -325,8 +319,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
                 self.block_size.trailing_zeros(),
             );
             let bytes = BytesMut::from(buf);
-            let waiter = self.block_io.write(offset, bytes.freeze()).await?;
-            waiter.wait().await?;
+            self.block_io.write(offset, bytes.freeze()).await?;
         }
 
         // TODO: can't increment offset past the device size
@@ -338,8 +331,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
     async fn _flush(&mut self) -> Result<(), CrucibleError> {
         let _guard = self.rmw_lock.write().await;
 
-        let waiter = self.block_io.flush(None).await?;
-        waiter.wait().await?;
+        self.block_io.flush(None).await?;
 
         Ok(())
     }

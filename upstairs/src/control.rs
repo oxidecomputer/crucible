@@ -165,17 +165,12 @@ async fn take_snapshot(
     let apictx = rqctx.context();
     let take_snapshot_params = take_snapshot_params.into_inner();
 
-    let waiter = apictx
+    apictx
         .up
         .guest
         .flush(Some(SnapshotDetails {
             snapshot_name: take_snapshot_params.snapshot_name.clone(),
         }))
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
-
-    waiter
-        .wait()
         .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 

@@ -13,6 +13,7 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,7 +57,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub use block_req::{BlockReq, BlockReqWaiter};
+pub(crate) use block_req::{BlockReq, BlockReqWaiter};
 
 mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
@@ -67,11 +68,14 @@ pub use stats::*;
 
 use async_trait::async_trait;
 
+/// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
+/// disk): there is no contract about what order operations that are submitted
+/// between flushes are performed in.
 #[async_trait]
 pub trait BlockIO: Sync {
     async fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
 
-    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError>;
+    async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
 
@@ -91,29 +95,27 @@ pub trait BlockIO: Sync {
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError>;
+    ) -> Result<(), CrucibleError>;
 
     async fn write(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError>;
+    ) -> Result<(), CrucibleError>;
 
     async fn write_unwritten(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError>;
+    ) -> Result<(), CrucibleError>;
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError>;
+    ) -> Result<(), CrucibleError>;
 
-    /*
-     * Test call that displays the internal job queue on the upstairs, and
-     * returns the guest side and downstairs side job queue depths.
-     */
+    /// Test call that displays the internal job queue on the upstairs, and
+    /// returns the guest side and downstairs side job queue depths.
     async fn show_work(&self) -> Result<WQCounts, CrucibleError>;
 
     // Common methods for BlockIO
@@ -140,7 +142,7 @@ pub trait BlockIO: Sync {
         &self,
         offset: u64,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         if !self.query_is_active().await? {
             return Err(CrucibleError::UpstairsInactive);
         }
@@ -153,7 +155,7 @@ pub trait BlockIO: Sync {
         &self,
         offset: u64,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         if !self.query_is_active().await? {
             return Err(CrucibleError::UpstairsInactive);
         }
@@ -162,6 +164,7 @@ pub trait BlockIO: Sync {
             .await
     }
 
+    /// Activate if not active.
     async fn conditional_activate(
         &self,
         gen: u64,
@@ -174,17 +177,25 @@ pub trait BlockIO: Sync {
     }
 }
 
-/// Await on multiple BlockReqWaiters in parallel
-#[inline]
-pub async fn wait_all(
-    iter: impl IntoIterator<Item = BlockReqWaiter>,
-) -> Result<(), CrucibleError> {
-    let block_req_wait_futures = iter.into_iter().map(|waiter| waiter.wait());
+pub type CrucibleBlockIOFuture<'a> = Pin<
+    Box<
+        dyn futures::Future<Output = Result<(), CrucibleError>>
+            + std::marker::Send
+            + 'a,
+    >,
+>;
 
-    futures::future::join_all(block_req_wait_futures)
+/// Await on the results of multiple BlockIO operations
+///
+/// Using [async_trait] with the BlockIO trait will perform Box::pin on the
+/// result of the async operation functions. `join_all` is provided here to
+/// consume a list of multiple BlockIO operations' futures and await them all.
+#[inline]
+pub async fn join_all<'a>(
+    iter: impl IntoIterator<Item = CrucibleBlockIOFuture<'a>>,
+) -> Result<(), CrucibleError> {
+    futures::future::join_all(iter)
         .await
-        .into_iter()
-        .collect::<Vec<Result<(), CrucibleError>>>()
         .into_iter()
         .collect::<Result<Vec<()>, CrucibleError>>()
         .map(|_| ())
@@ -6796,60 +6807,6 @@ impl Guest {
         *active
     }
 
-    pub async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        // Disable any more IO from this guest and deactivate the downstairs.
-        // We can't deactivate if we are not yet active.
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        Ok(self.send(BlockOp::Deactivate).await)
-    }
-
-    pub async fn query_is_active(&self) -> Result<bool, CrucibleError> {
-        let data = Arc::new(Mutex::new(false));
-        let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
-        self.send(active_query).await.wait().await?;
-
-        let result = *data.lock().await;
-        Ok(result)
-    }
-
-    pub async fn query_block_size(&self) -> Result<u64, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        let data = Arc::new(Mutex::new(0));
-        let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-        self.send(size_query).await.wait().await?;
-
-        let result = *data.lock().await;
-        Ok(result)
-    }
-
-    pub async fn query_total_size(&self) -> Result<u64, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
-        let data = Arc::new(Mutex::new(0));
-        let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-        self.send(size_query).await.wait().await?;
-
-        let result = *data.lock().await;
-        Ok(result)
-    }
-
-    pub async fn query_upstairs_uuid(&self) -> Result<Uuid, CrucibleError> {
-        let data = Arc::new(Mutex::new(Uuid::default()));
-        let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
-        self.send(uuid_query).await.wait().await?;
-
-        let result = *data.lock().await;
-        Ok(result)
-    }
-
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
         if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
@@ -6916,42 +6873,73 @@ impl BlockIO for Guest {
         }
     }
 
-    async fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
+    async fn deactivate(&self) -> Result<(), CrucibleError> {
         // Disable any more IO from this guest and deactivate the downstairs.
         // We can't deactivate if we are not yet active.
         if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        Ok(self.send(BlockOp::Deactivate).await)
+        let waiter = self.send(BlockOp::Deactivate).await;
+        waiter.wait().await?;
+
+        Ok(())
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
-        self.query_is_active().await
+        let data = Arc::new(Mutex::new(false));
+        let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
+        self.send(active_query).await.wait().await?;
+
+        let result = *data.lock().await;
+        Ok(result)
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
-        self.query_total_size().await
+        if !self.is_active().await {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let data = Arc::new(Mutex::new(0));
+        let size_query = BlockOp::QueryTotalSize { data: data.clone() };
+        self.send(size_query).await.wait().await?;
+
+        let result = *data.lock().await;
+        Ok(result)
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        self.query_block_size().await
+        if !self.is_active().await {
+            return Err(CrucibleError::UpstairsInactive);
+        }
+
+        let data = Arc::new(Mutex::new(0));
+        let size_query = BlockOp::QueryBlockSize { data: data.clone() };
+        self.send(size_query).await.wait().await?;
+
+        let result = *data.lock().await;
+        Ok(result)
     }
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
-        self.query_upstairs_uuid().await
+        let data = Arc::new(Mutex::new(Uuid::default()));
+        let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
+        self.send(uuid_query).await.wait().await?;
+
+        let result = *data.lock().await;
+        Ok(result)
     }
 
     async fn read(
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        let bs = self.query_block_size().await?;
+        let bs = self.get_block_size().await?;
 
         if (data.len().await % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
@@ -6962,19 +6950,19 @@ impl BlockIO for Guest {
         }
 
         let rio = BlockOp::Read { offset, data };
-        Ok(self.send(rio).await)
+        Ok(self.send(rio).await.wait().await?)
     }
 
     async fn write(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        let bs = self.query_block_size().await?;
+        let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
@@ -6985,19 +6973,19 @@ impl BlockIO for Guest {
         }
 
         let wio = BlockOp::Write { offset, data };
-        Ok(self.send(wio).await)
+        Ok(self.send(wio).await.wait().await?)
     }
 
     async fn write_unwritten(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        let bs = self.query_block_size().await?;
+        let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
@@ -7008,18 +6996,22 @@ impl BlockIO for Guest {
         }
 
         let wio = BlockOp::WriteUnwritten { offset, data };
-        Ok(self.send(wio).await)
+        Ok(self.send(wio).await.wait().await?)
     }
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         if !self.is_active().await {
             return Err(CrucibleError::UpstairsInactive);
         }
 
-        Ok(self.send(BlockOp::Flush { snapshot_details }).await)
+        Ok(self
+            .send(BlockOp::Flush { snapshot_details })
+            .await
+            .wait()
+            .await?)
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {

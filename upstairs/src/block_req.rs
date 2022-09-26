@@ -8,7 +8,7 @@ use super::*;
  */
 #[must_use]
 #[derive(Debug)]
-pub struct BlockReq {
+pub(crate) struct BlockReq {
     pub op: BlockOp,
     sender: mpsc::Sender<Result<(), CrucibleError>>,
 }
@@ -50,7 +50,7 @@ impl BlockReq {
  * BlockReq.
  */
 #[must_use]
-pub struct BlockReqWaiter {
+pub(crate) struct BlockReqWaiter {
     recv: mpsc::Receiver<Result<(), CrucibleError>>,
 }
 
@@ -61,15 +61,6 @@ impl BlockReqWaiter {
         Self { recv }
     }
 
-    /// Create a BlockReqWaiter that returns right away
-    pub async fn immediate() -> Result<BlockReqWaiter, CrucibleError> {
-        let (send, recv) = mpsc::channel(1);
-        send.send(Ok(()))
-            .await
-            .map_err(|e| CrucibleError::SendError(e.to_string()))?;
-        Ok(BlockReqWaiter::new(recv))
-    }
-
     /// Consume this BlockReqWaiter and wait on the message
     pub async fn wait(mut self) -> Result<(), CrucibleError> {
         match self.recv.recv().await {
@@ -78,6 +69,7 @@ impl BlockReqWaiter {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
         match self.recv.try_recv() {
             Ok(v) => Some(v),
@@ -94,16 +86,6 @@ impl BlockReqWaiter {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[tokio::test]
-    async fn test_blockreqwaiter_immediate() {
-        BlockReqWaiter::immediate()
-            .await
-            .unwrap()
-            .wait()
-            .await
-            .unwrap()
-    }
 
     #[tokio::test]
     async fn test_blockreqwaiter_send() {

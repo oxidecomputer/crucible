@@ -218,8 +218,7 @@ async fn cli_read(
         offset.value,
         data.len().await
     );
-    let waiter = guest.read(offset, data.clone()).await?;
-    waiter.wait().await?;
+    guest.read(offset, data.clone()).await?;
 
     let mut dl = data.as_vec().await.to_vec();
     match validate_vec(
@@ -294,8 +293,7 @@ async fn cli_write(
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
-    let waiter = guest.write(offset, data).await?;
-    waiter.wait().await?;
+    guest.write(offset, data).await?;
 
     Ok(())
 }
@@ -345,8 +343,7 @@ async fn cli_write_unwritten(
         data.len(),
     );
 
-    let waiter = guest.write_unwritten(offset, data).await?;
-    waiter.wait().await?;
+    guest.write_unwritten(offset, data).await?;
 
     Ok(())
 }
@@ -725,10 +722,7 @@ async fn process_cli_command(
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
         CliMessage::Deactivate => match guest.deactivate().await {
-            Ok(waiter) => match waiter.wait().await {
-                Ok(_) => fw.send(CliMessage::DoneOk).await,
-                Err(e) => fw.send(CliMessage::Error(e)).await,
-            },
+            Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
         CliMessage::Commit => {
@@ -956,7 +950,7 @@ async fn process_cli_command(
             }
         }
         CliMessage::Uuid => {
-            let uuid = guest.query_upstairs_uuid().await?;
+            let uuid = guest.get_uuid().await?;
             fw.send(CliMessage::MyUuid(uuid)).await
         }
         CliMessage::Verify => {

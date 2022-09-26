@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     // NBD server
 
     guest.activate(opt.gen).await?;
-    let volume = Volume::from_guest(guest).await?;
+    let volume = Volume::from_block_io(guest).await?;
     let mut cpf = crucible::CruciblePseudoFile::from(Arc::new(volume))?;
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();

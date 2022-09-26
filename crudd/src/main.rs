@@ -124,8 +124,11 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
     // interested in seeing how the pipeline length affects performance. I
     // don't think it'll make a difference beyond 2, (one reading from
     // crucible, one writing to output), but we'll see!
+    //
+    // TODO this is no longer true after the Upstairs is async, multiple
+    // requests can be submitted and await'ed on at the same time.
     let mut buffers = VecDeque::with_capacity(opt.pipeline_length);
-    let mut waiters = VecDeque::with_capacity(opt.pipeline_length);
+    let mut futures = VecDeque::with_capacity(opt.pipeline_length);
 
     // First, align our offset to the underlying blocks with an initial read
 
@@ -144,8 +147,7 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let buffer = Buffer::new(native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        let waiter = crucible.read(offset, buffer.clone()).await?;
-        waiter.wait().await?;
+        crucible.read(offset, buffer.clone()).await?;
 
         // write only (block size - misalignment) bytes
         // So say we have an offset of 5. we're misaligned by 5 bytes, so we
@@ -187,15 +189,15 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         // queue. We re-use the buffers to avoid lots of allocations
         let w_buf =
             Buffer::new((opt.iocmd_block_count * native_block_size) as usize);
-        let w_waiter = crucible.read(offset, w_buf.clone()).await?;
+        let w_future = crucible.read(offset, w_buf.clone());
         buffers.push_back(w_buf);
-        waiters.push_back(w_waiter);
+        futures.push_back(w_future);
 
-        // Once we have a full queue of waiters, we can start blocking on them
+        // Once we have a full queue of futures, we can start blocking on them
         // to access our data and drain them to `output`.
-        if waiters.len() == opt.pipeline_length {
-            crucible::wait_all(waiters).await?;
-            waiters = VecDeque::with_capacity(opt.pipeline_length);
+        if futures.len() == opt.pipeline_length {
+            crucible::join_all(futures).await?;
+            futures = VecDeque::with_capacity(opt.pipeline_length);
 
             // drain the buffer to the output file
             while !buffers.is_empty() {
@@ -207,8 +209,8 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
     }
 
     // Drain the outstanding commands
-    if !waiters.is_empty() {
-        crucible::wait_all(waiters).await?;
+    if !futures.is_empty() {
+        crucible::join_all(futures).await?;
 
         // drain the buffer to the output file
         while !buffers.is_empty() {
@@ -228,8 +230,7 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let buffer = Buffer::new((blocks * native_block_size) as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        let waiter = crucible.read(offset, buffer.clone()).await?;
-        waiter.wait().await?;
+        crucible.read(offset, buffer.clone()).await?;
         output.write_all(&buffer.as_vec().await[0..remainder as usize])?;
     }
 
@@ -242,18 +243,18 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
 // - write all block-aligned data remaining
 // - read/mod/write the last block if necessary
 // - issue a flush
-// - block on all waiters
-async fn write_remainder_and_finalize<T: BlockIO>(
+// - block on all futures
+async fn write_remainder_and_finalize<'a, T: BlockIO>(
     crucible: &Arc<T>,
     mut w_buf: BytesMut,
     offset: Block,
     n_read: usize,
     native_block_size: u64,
-    mut waiters: VecDeque<BlockReqWaiter>,
+    mut futures: VecDeque<crucible::CrucibleBlockIOFuture<'a>>,
 ) -> Result<()> {
     // the input stream ended,
     // - read/mod/write for alignment
-    // - block on all waiters
+    // - block on all futures
 
     // uflow short for underflow, as we're underflowing are normal iocmd
     // block
@@ -263,8 +264,8 @@ async fn write_remainder_and_finalize<T: BlockIO>(
     if uflow_remainder == 0 {
         // no need to RMW, just write
         w_buf.resize(n_read, 0);
-        let w_waiter = crucible.write(offset, w_buf.freeze()).await?;
-        waiters.push_back(w_waiter);
+        let w_future = crucible.write(offset, w_buf.freeze());
+        futures.push_back(w_future);
     } else {
         // RMW oof
 
@@ -280,8 +281,7 @@ async fn write_remainder_and_finalize<T: BlockIO>(
             native_block_size.trailing_zeros(),
         );
         let uflow_r_buf = Buffer::new(native_block_size as usize);
-        let r_waiter = crucible.read(uflow_offset, uflow_r_buf.clone()).await?;
-        r_waiter.wait().await?;
+        crucible.read(uflow_offset, uflow_r_buf.clone()).await?;
 
         // Copy it into w_buf
         let r_bytes = uflow_r_buf.as_vec().await;
@@ -289,16 +289,16 @@ async fn write_remainder_and_finalize<T: BlockIO>(
             .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
 
         // Issue the write
-        let w_waiter = crucible.write(offset, w_buf.freeze()).await?;
-        waiters.push_back(w_waiter);
+        let w_future = crucible.write(offset, w_buf.freeze());
+        futures.push_back(w_future);
     }
 
     // Flush
-    let flush_waiter = crucible.flush(None).await?;
-    waiters.push_back(flush_waiter);
+    let flush_future = crucible.flush(None);
+    futures.push_back(flush_future);
 
     // Wait for all the writes
-    crucible::wait_all(waiters).await?;
+    crucible::join_all(futures).await?;
 
     Ok(())
 }
@@ -334,7 +334,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
     let mut input = io::stdin();
 
     // ring buffers
-    let mut waiters = VecDeque::with_capacity(opt.pipeline_length);
+    let mut futures = VecDeque::with_capacity(opt.pipeline_length);
 
     // First, align our offset to the underlying blocks with an initial read
 
@@ -355,8 +355,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let buffer = Buffer::new(native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        let r_waiter = crucible.read(offset, buffer.clone()).await?;
-        r_waiter.wait().await?;
+        crucible.read(offset, buffer.clone()).await?;
 
         let mut w_vec = buffer.as_vec().await.clone();
         // Write our data into the buffer
@@ -366,8 +365,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         )?;
         let w_bytes = Bytes::from(w_vec);
 
-        let w_waiter = crucible.write(offset, w_bytes).await?;
-        w_waiter.wait().await?;
+        crucible.write(offset, w_bytes).await?;
 
         if bytes_read != alignment_bytes as usize {
             // underrun, exit early
@@ -422,20 +420,20 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
                 offset,
                 n_read,
                 native_block_size,
-                waiters,
+                futures,
             )
             .await;
         } else {
             eprintln!("writing full iocmd");
             // good to go for a write
-            let w_waiter = crucible.write(offset, w_buf.freeze()).await?;
-            waiters.push_back(w_waiter);
+            let w_future = crucible.write(offset, w_buf.freeze());
+            futures.push_back(w_future);
         }
 
-        // Block on waiters so we dont get a backlog
-        if waiters.len() == opt.pipeline_length {
-            crucible::wait_all(waiters).await?;
-            waiters = VecDeque::with_capacity(opt.pipeline_length);
+        // Block on futures so we dont get a backlog
+        if futures.len() == opt.pipeline_length {
+            crucible::join_all(futures).await?;
+            futures = VecDeque::with_capacity(opt.pipeline_length);
         }
     }
 
@@ -465,7 +463,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
             offset,
             n_read,
             native_block_size,
-            waiters,
+            futures,
         )
         .await;
     }
@@ -508,7 +506,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    let deactivation = guest.deactivate().await?;
-    deactivation.wait().await?;
+    guest.deactivate().await?;
     Ok(())
 }
