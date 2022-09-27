@@ -1944,7 +1944,8 @@ async fn repair_workload(
                 count,
                 width = count_width,
             );
-            futureslist.push(guest.flush(None));
+            let future = guest.flush(None);
+            futureslist.push(future);
             // Commit the current write log because we know this flush
             // will make it out on at least two DS, so any writes before this
             // point should also be persistent.
@@ -1990,7 +1991,8 @@ async fn repair_workload(
                     data.len(),
                     width = count_width,
                 );
-                futureslist.push(guest.write(offset, data));
+                let future = guest.write(offset, data);
+                futureslist.push(future);
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
@@ -2035,7 +2037,8 @@ async fn demo_workload(
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            futureslist.push(guest.flush(None));
+            let future = guest.flush(None);
+            futureslist.push(future);
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -2062,13 +2065,16 @@ async fn demo_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                futureslist.push(guest.write(offset, data));
+                let future = guest.write(offset, data);
+                futureslist.push(future);
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
-                futureslist.push(guest.read(offset, data.clone()));
+
+                let future = guest.read(offset, data.clone());
+                futureslist.push(future);
             }
 
             if i == 10 || i == 20 {
@@ -2295,7 +2301,8 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                futureslist.push(guest.write_to_byte_offset(my_offset, data));
+                let future = guest.write_to_byte_offset(my_offset, data);
+                futureslist.push(future);
             } else {
                 let vec: Vec<u8> = vec![0; ri.block_size as usize];
                 let data = crucible::Buffer::from_vec(vec);
@@ -2307,7 +2314,8 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     my_offset,
                     data.len().await
                 );
-                futureslist.push(guest.read_from_byte_offset(my_offset, data));
+                let future = guest.read_from_byte_offset(my_offset, data);
+                futureslist.push(future);
             }
         }
 
