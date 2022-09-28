@@ -273,16 +273,17 @@ impl Volume {
     // Still TODO: here
     // If there is an error, how to we tell Nexus?
     // If we finish the scrub, how do we tell Nexus?
-    pub fn scrub(&self) -> Result<(), CrucibleError> {
-        println!("Scrub check for {}", self.uuid);
+    pub fn scrub(&self, log: &Logger) -> Result<(), CrucibleError> {
+        info!(log, "Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
         if let Some(ref read_only_parent) = self.read_only_parent {
             let scrub_start = Instant::now();
-            println!("Scrub for {} begins", self.uuid);
+            info!(log, "Scrub for {} begins", self.uuid);
 
             let bs = read_only_parent.get_block_size()? as usize;
-            println!(
+            info!(
+                log,
                 "Scrub with total_size:{:?} block_size:{:?}",
                 read_only_parent.total_size()?,
                 bs
@@ -295,7 +296,8 @@ impl Volume {
             // this is.
             // TODO: Determine if this value should be adjusted.
             let mut block_count = 262144 / bs;
-            println!(
+            info!(
+                log,
                 "Scrub from block {:?} to {:?} in ({}) {:?} size IOs",
                 start,
                 end,
@@ -310,9 +312,11 @@ impl Volume {
             while offset < end {
                 if offset + block_count as u64 > end {
                     block_count = (end - offset) as usize;
-                    println!(
+                    info!(
+                        log,
                         "Adjust block_count to {} at offset {}",
-                        block_count, offset
+                        block_count,
+                        offset
                     );
                 }
                 assert!(offset + block_count as u64 <= end);
@@ -339,7 +343,7 @@ impl Volume {
                             }
                         }
                         Err(e) => {
-                            println!("scrub {}, offset {}", e, offset);
+                            warn!(log, "scrub {}, offset {}", e, offset);
                             retry_count += 1;
                         }
                     }
@@ -365,16 +369,20 @@ impl Volume {
                 self.scrub_point.store(offset, Ordering::SeqCst);
 
                 if offset > showat {
-                    println!(
+                    info!(
+                        log,
                         "Scrub at offset {}/{} sp:{:?}",
-                        offset, end, self.scrub_point
+                        offset,
+                        end,
+                        self.scrub_point
                     );
                     showat += showstep;
                 }
             }
 
             let total_time = scrub_start.elapsed();
-            println!(
+            info!(
+                log,
                 "Scrub {} done in {} seconds.  Retries:{}",
                 self.uuid,
                 total_time.as_secs(),
@@ -382,7 +390,7 @@ impl Volume {
             );
             self.flush(None)?;
         } else {
-            println!("Scrub for {} not required", self.uuid);
+            info!(log, "Scrub for {} not required", self.uuid);
         }
         Ok(())
     }
@@ -825,8 +833,10 @@ impl SubVolume {
             // coverage:                   ^^^^^^^^^^^^^^^
             Some(self.lba_range.clone())
         } else {
-            println!("{:?} {} {}", self.lba_range, start, length);
-            panic!("should never get here!");
+            panic!(
+                "should never get here! {:?} {} {}",
+                self.lba_range, start, length
+            );
         }
     }
 }

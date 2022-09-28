@@ -536,7 +536,6 @@ pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
 
     for d in remove_dirs {
         if Path::new(&d).exists() {
-            println!("Deleting dir: {:?}", d);
             std::fs::remove_dir_all(&d)?;
         }
     }
@@ -549,7 +548,6 @@ pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
  * and we have a bad list.  No duplicates.
  */
 pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
-    println!("validate {} with {:?}", eid, files);
     let eid = eid as u32;
 
     let some = vec![
@@ -620,6 +618,7 @@ impl Extent {
         def: &RegionDefinition,
         number: u32,
         read_only: bool,
+        log: &Logger,
     ) -> Result<Extent> {
         /*
          * Store extent data in files within a directory hierarchy so that
@@ -637,62 +636,68 @@ impl Extent {
         // the repair before we open the extent.
         let replace_dir = replace_dir(&dir, number);
         if !read_only && Path::new(&replace_dir).exists() {
-            println!(
+            info!(
+                log,
                 "Extent {} found replacement dir, finishing replacement",
                 number
             );
-            move_replacement_extent(&dir, number as usize)?;
+            move_replacement_extent(&dir, number as usize, log)?;
         }
 
         /*
          * Open the extent file and verify the size is as we expect.
          */
-        let file =
-            match OpenOptions::new().read(true).write(!read_only).open(&path) {
-                Err(e) => {
-                    println!(
-                        "Error: Open of {:?} for extent#{} returned: {}",
-                        path, number, e,
-                    );
-                    bail!(
-                        "Open of {:?} for extent#{} returned: {}",
-                        path,
-                        number,
-                        e,
-                    );
-                }
-                Ok(f) => {
-                    let cur_size = f.metadata().unwrap().len();
-                    if size != cur_size {
-                        bail!(
-                            "File size {:?} does not match expected {:?}",
-                            size,
-                            cur_size
-                        );
-                    }
-                    f
-                }
-            };
-
-        /*
-         * Open a connection to the metadata db
-         */
-        path.set_extension("db");
-        let metadb = match open_sqlite_connection(&path) {
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(!read_only)
+            .open(&path)
+        {
             Err(e) => {
-                println!(
-                    "Error: Open of db file {:?} for extent#{} returned: {}",
-                    path, number, e
+                error!(
+                    log,
+                    "Open of {:?} for extent#{} returned: {}", path, number, e,
                 );
                 bail!(
-                    "Open of db file {:?} for extent#{} returned: {}",
+                    "Open of {:?} for extent#{} returned: {}",
                     path,
                     number,
                     e,
                 );
             }
-            Ok(m) => m,
+            Ok(f) => {
+                let cur_size = f.metadata().unwrap().len();
+                if size != cur_size {
+                    bail!(
+                        "File size {:?} does not match expected {:?}",
+                        size,
+                        cur_size
+                    );
+                }
+                f
+            }
         };
+
+        /*
+         * Open a connection to the metadata db
+         */
+        path.set_extension("db");
+        let metadb =
+            match open_sqlite_connection(&path) {
+                Err(e) => {
+                    error!(
+                    log,
+                    "Error: Open of db file {:?} for extent#{} returned: {}",
+                    path, number, e
+                );
+                    bail!(
+                        "Open of db file {:?} for extent#{} returned: {}",
+                        path,
+                        number,
+                        e,
+                    );
+                }
+                Ok(m) => m,
+            };
 
         // XXX: schema updates?
 
@@ -866,7 +871,6 @@ impl Extent {
             crucible_bail!(IoError, "Copy directory:{:?} already exists", cp);
         }
 
-        println!("Create copy dir {:?}", cp);
         std::fs::create_dir_all(&cp)?;
         Ok(cp)
     }
@@ -1217,6 +1221,7 @@ impl Extent {
         new_flush: u64,
         new_gen: u64,
         job_id: u64,
+        log: &Logger,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
 
@@ -1231,7 +1236,8 @@ impl Extent {
         // Read only extents should never have the dirty bit set. If they do,
         // bail
         if self.read_only {
-            eprintln!("read-only extent {} has dirty bit set!", self.number);
+            // XXX Make this a panic?
+            error!(log, "read-only extent {} has dirty bit set!", self.number);
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
@@ -1274,6 +1280,7 @@ pub struct Region {
     def: RegionDefinition,
     pub extents: Vec<Extent>,
     read_only: bool,
+    log: Logger,
 }
 
 impl Region {
@@ -1283,6 +1290,7 @@ impl Region {
     pub fn create<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
+        log: Logger,
     ) -> Result<Region> {
         options.validate()?;
 
@@ -1298,7 +1306,7 @@ impl Region {
 
         let def = RegionDefinition::from_options(&options).unwrap();
         write_json(&cp, &def, false)?;
-        println!("Created new region file {:?}", cp);
+        info!(log, "Created new region file {:?}", cp);
 
         /*
          * Open every extent that presently exists.
@@ -1308,6 +1316,7 @@ impl Region {
             def,
             extents: Vec::new(),
             read_only: false,
+            log,
         };
 
         region.open_extents(true)?;
@@ -1323,6 +1332,7 @@ impl Region {
         options: RegionOptions,
         verbose: bool,
         read_only: bool,
+        log: &Logger,
     ) -> Result<Region> {
         options.validate()?;
 
@@ -1337,7 +1347,7 @@ impl Region {
         };
 
         if verbose {
-            println!("Opened existing region file {:?}", cp);
+            info!(log, "Opened existing region file {:?}", cp);
         }
 
         /*
@@ -1348,6 +1358,7 @@ impl Region {
             def,
             extents: Vec::new(),
             read_only,
+            log: log.clone(),
         };
 
         region.open_extents(false)?;
@@ -1379,7 +1390,13 @@ impl Region {
                 if create {
                     Extent::create(&self.dir, &self.def, eid)
                 } else {
-                    Extent::open(&self.dir, &self.def, eid, self.read_only)
+                    Extent::open(
+                        &self.dir,
+                        &self.def,
+                        eid,
+                        self.read_only,
+                        &self.log,
+                    )
                 }
             })
             .collect::<Result<Vec<Extent>>>()?;
@@ -1428,8 +1445,13 @@ impl Region {
         assert_eq!(self.extents[eid].number, eid as u32);
         assert!(!self.read_only);
 
-        let new_extent =
-            Extent::open(&self.dir, &self.def, eid as u32, self.read_only)?;
+        let new_extent = Extent::open(
+            &self.dir,
+            &self.def,
+            eid as u32,
+            self.read_only,
+            &self.log,
+        )?;
         self.extents[eid] = new_extent;
         Ok(())
     }
@@ -1483,7 +1505,7 @@ impl Region {
         // Returning from get_extent_copy means we have copied all our
         // files and moved the copy directory to replace directory.
         // Now, replace the current extent files with the replacement ones.
-        move_replacement_extent(&self.dir, eid)?;
+        move_replacement_extent(&self.dir, eid, &self.log)?;
 
         Ok(())
     }
@@ -1517,6 +1539,7 @@ impl Region {
 
         let extent = &self.extents[eid];
         let copy_dir = extent.create_copy_dir(&self.dir)?;
+        info!(self.log, "Created copy dir {:?}", copy_dir);
 
         // XXX TLS someday?  Authentication?
         let url = format!("http://{:?}", repair_addr);
@@ -1535,7 +1558,10 @@ impl Region {
             };
 
         repair_files.sort();
-        println!("Found repair files: {:?}", repair_files);
+        info!(
+            self.log,
+            "eid:{} Found repair files: {:?}", eid, repair_files
+        );
 
         // The repair file list should always contain the extent data
         // file itself, and the .db file (metadata) for that extent.
@@ -1616,9 +1642,11 @@ impl Region {
         }
 
         // After we have all files: move the repair dir.
-        println!(
+        info!(
+            self.log,
             "Repair files downloaded, move directory {:?} to {:?}",
-            copy_dir, rd
+            copy_dir,
+            rd
         );
         rename(copy_dir.clone(), rd.clone())?;
 
@@ -1627,7 +1655,7 @@ impl Region {
         // been synced so that change is persistent.
         let current_dir = extent_dir(&self.dir, eid as u32);
 
-        sync_path(&current_dir)?;
+        sync_path(&current_dir, &self.log)?;
         Ok(())
     }
 
@@ -1678,7 +1706,7 @@ impl Region {
         if ver.len() > 12 {
             ver = ver[0..12].to_vec();
         }
-        println!("Current flush_numbers [0..12]: {:?}", ver);
+        info!(self.log, "Current flush_numbers [0..12]: {:?}", ver);
 
         self.extents
             .iter()
@@ -1717,7 +1745,7 @@ impl Region {
                 };
 
             if computed_hash != write.hash {
-                println!("Failed write hash validation");
+                error!(self.log, "Failed write hash validation");
                 crucible_bail!(HashMismatch);
             }
         }
@@ -1835,13 +1863,16 @@ impl Region {
         gen_number: u64,
         job_id: u64,
     ) -> Result<(), CrucibleError> {
-        println!(
+        info!(
+            self.log,
             "Flush just extent {} with f:{} and g:{}",
-            eid, flush_number, gen_number
+            eid,
+            flush_number,
+            gen_number
         );
 
         let extent = &self.extents[eid];
-        extent.flush_block(flush_number, gen_number, 0)?;
+        extent.flush_block(flush_number, gen_number, 0, &self.log)?;
 
         Ok(())
     }
@@ -1869,7 +1900,7 @@ impl Region {
         cdt::os__flush__start!(|| job_id);
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number, gen_number, job_id)?;
+            extent.flush_block(flush_number, gen_number, job_id, &self.log)?;
         }
         cdt::os__flush__done!(|| job_id);
 
@@ -1943,6 +1974,7 @@ impl Region {
  */
 pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
     path: P,
+    log: &Logger,
 ) -> Result<(), CrucibleError> {
     let file = match File::open(&path) {
         Err(e) => {
@@ -1953,7 +1985,7 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
     if let Err(e) = file.sync_all() {
         crucible_bail!(IoError, "{:?}: fsync failure: {:?}", path, e);
     }
-    println!("fsync completed for: {:?}", path);
+    info!(log, "fsync completed for: {:?}", path);
 
     Ok(())
 }
@@ -1965,6 +1997,7 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
 pub fn move_replacement_extent<P: AsRef<Path>>(
     region_dir: P,
     eid: usize,
+    log: &Logger,
 ) -> Result<(), CrucibleError> {
     let destination_dir = extent_dir(&region_dir, eid as u32);
     let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
@@ -1974,7 +2007,10 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     assert!(Path::new(&replace_dir).exists());
     assert!(!Path::new(&completed_dir).exists());
 
-    println!("Copy files from {:?} in {:?}", replace_dir, destination_dir,);
+    info!(
+        log,
+        "Copy files from {:?} in {:?}", replace_dir, destination_dir,
+    );
 
     // Setup the original and replacement file names.
     let mut new_file = replace_dir.clone();
@@ -1994,7 +2030,7 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
             e
         );
     }
-    sync_path(&original_file)?;
+    sync_path(&original_file, log)?;
 
     new_file.set_extension("db");
     original_file.set_extension("db");
@@ -2007,7 +2043,7 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
             e
         );
     }
-    sync_path(&original_file)?;
+    sync_path(&original_file, log)?;
 
     // The .db-shm and .db-wal files may or may not exist.  If they don't
     // exist on the source side, then be sure to remove them locally to
@@ -2024,9 +2060,10 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
                 e
             );
         }
-        sync_path(&original_file)?;
+        sync_path(&original_file, log)?;
     } else if original_file.exists() {
-        println!(
+        info!(
+            log,
             "Remove old file {:?} as there is no replacement",
             original_file.clone()
         );
@@ -2045,25 +2082,29 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
                 e
             );
         }
-        sync_path(&original_file)?;
+        sync_path(&original_file, log)?;
     } else if original_file.exists() {
-        println!(
+        info!(
+            log,
             "Remove old file {:?} as there is no replacement",
             original_file.clone()
         );
         std::fs::remove_file(&original_file)?;
     }
-    sync_path(&destination_dir)?;
+    sync_path(&destination_dir, log)?;
 
     // After we have all files: move the copy dir.
-    println!("Move directory  {:?} to {:?}", replace_dir, completed_dir);
+    info!(
+        log,
+        "Move directory  {:?} to {:?}", replace_dir, completed_dir
+    );
     rename(replace_dir, &completed_dir)?;
 
-    sync_path(&destination_dir)?;
+    sync_path(&destination_dir, log)?;
 
     std::fs::remove_dir_all(&completed_dir)?;
 
-    sync_path(&destination_dir)?;
+    sync_path(&destination_dir, log)?;
     Ok(())
 }
 
@@ -2101,7 +2142,6 @@ pub async fn save_stream_to_file(
         }
     }
     if let Err(e) = file.sync_all() {
-        println!("Failed to fsync repair file: {:?}", e);
         crucible_bail!(IoError, "repair {:?}: fsync failure: {:?}", file, e);
     }
     Ok(())
@@ -2149,6 +2189,12 @@ mod test {
         TEST_UUID_STR.parse().unwrap()
     }
 
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
+
     fn new_region_options() -> crucible_common::RegionOptions {
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
@@ -2166,7 +2212,7 @@ mod test {
         // Create the copy directory, make sure it exists.
         // Remove the copy directory, make sure it goes away.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         let ext_one = &mut region.extents[1];
@@ -2185,7 +2231,8 @@ mod test {
         // Create the copy directory, make sure it exists.
         // Verify a second create will fail.
         let dir = tempdir().unwrap();
-        let mut region = Region::create(&dir, new_region_options()).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
         region.extend(3).unwrap();
 
         let ext_one = &mut region.extents[1];
@@ -2199,7 +2246,7 @@ mod test {
     fn close_extent() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Close extent 1
@@ -2231,7 +2278,7 @@ mod test {
         // opened with that directory present.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Close extent 1
@@ -2261,7 +2308,7 @@ mod test {
         // when an extent is re-opened.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Close extent 1
@@ -2302,7 +2349,7 @@ mod test {
         // metadata files.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Close extent 1
@@ -2367,7 +2414,7 @@ mod test {
         // extent after the reopen has cleaned them up.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Close extent 1
@@ -2447,7 +2494,7 @@ mod test {
 
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Make copy directory for this extent
@@ -2473,7 +2520,8 @@ mod test {
         drop(region);
 
         // Open up the region read_only now.
-        let mut region = Region::open(&dir, new_region_options(), false, true)?;
+        let mut region =
+            Region::open(&dir, new_region_options(), false, true, &csl())?;
 
         // Verify extent 1 has opened again.
         let ext_one = &mut region.extents[1];
@@ -2585,7 +2633,7 @@ mod test {
     fn reopen_all_extents() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(5)?;
 
         // Close extent 1
@@ -2620,15 +2668,15 @@ mod test {
     #[test]
     fn new_region() -> Result<()> {
         let dir = tempdir()?;
-        let _ = Region::create(&dir, new_region_options());
+        let _ = Region::create(&dir, new_region_options(), csl());
         Ok(())
     }
 
     #[test]
     fn new_existing_region() -> Result<()> {
         let dir = tempdir()?;
-        let _ = Region::create(&dir, new_region_options());
-        let _ = Region::open(&dir, new_region_options(), false, false);
+        let _ = Region::create(&dir, new_region_options(), csl());
+        let _ = Region::open(&dir, new_region_options(), false, false, &csl());
         Ok(())
     }
 
@@ -2640,6 +2688,7 @@ mod test {
             new_region_options(),
             false,
             false,
+            &csl(),
         )
         .unwrap();
     }
@@ -2807,7 +2856,7 @@ mod test {
          * Create a region, give it actual size
          */
         let dir = tempdir()?;
-        let mut r1 = Region::create(&dir, new_region_options()).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
         r1.extend(2)?;
 
         /*
@@ -2818,7 +2867,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, None, false, false)?;
+        dump_region(dvec, None, None, false, false, csl())?;
 
         Ok(())
     }
@@ -2833,8 +2882,9 @@ mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create(&dir, new_region_options()).unwrap();
-        let mut r2 = Region::create(&dir2, new_region_options()).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
+        let mut r2 =
+            Region::create(&dir2, new_region_options(), csl()).unwrap();
         r1.extend(2)?;
         r2.extend(2)?;
 
@@ -2850,7 +2900,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, None, false, false)?;
+        dump_region(dvec, None, None, false, false, csl())?;
 
         Ok(())
     }
@@ -2866,9 +2916,10 @@ mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create(&dir, new_region_options()).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
         r1.extend(3)?;
-        let mut r2 = Region::create(&dir2, new_region_options()).unwrap();
+        let mut r2 =
+            Region::create(&dir2, new_region_options(), csl()).unwrap();
         r2.extend(3)?;
 
         /*
@@ -2883,7 +2934,7 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, Some(2), None, false, false)?;
+        dump_region(dvec, Some(2), None, false, false, csl())?;
 
         Ok(())
     }
@@ -2891,7 +2942,7 @@ mod test {
     #[test]
     fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let ext = &region.extents[0];
@@ -2969,7 +3020,7 @@ mod test {
     #[test]
     fn multiple_encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let ext = &region.extents[0];
@@ -3019,7 +3070,7 @@ mod test {
     #[test]
     fn hashes() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let ext = &region.extents[0];
@@ -3077,7 +3128,7 @@ mod test {
     #[test]
     fn multiple_hashes() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let ext = &region.extents[0];
@@ -3109,7 +3160,7 @@ mod test {
     #[test]
     fn test_big_write() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         let ddef = region.def();
@@ -3188,7 +3239,7 @@ mod test {
     #[test]
     fn test_ok_hash_ok() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let data = BytesMut::from(&[1u8; 512][..]);
@@ -3217,7 +3268,7 @@ mod test {
         // Verify that a read fill does write to a block when there is
         // no data written yet.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         // Fill a buffer with "9"'s (random)
@@ -3265,7 +3316,7 @@ mod test {
         // Verify that a read fill does not write to the block when
         // there is data written already.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         // Fill a buffer with "9"'s (random)
@@ -3330,7 +3381,7 @@ mod test {
         // there is data written already.  This time run a flush after the
         // first write.  Verify correct state of dirty bit as well.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         // Fill a buffer with "9"'s
@@ -3413,7 +3464,7 @@ mod test {
         // Do a multi block write where all blocks start new (unwritten)
         // Verify only empty blocks have data.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         let ddef = region.def();
@@ -3493,7 +3544,7 @@ mod test {
         // only_write_unwritten set. Verify block zero is the first write, and
         // the remaining blocks have the contents from the multi block fill.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         let ddef = region.def();
@@ -3604,7 +3655,7 @@ mod test {
         // the other blocks have the data from the multi block fill.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         let ddef = region.def();
@@ -3717,7 +3768,7 @@ mod test {
         // three blocks have the data from the multi block read fill.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(5)?;
 
         let ddef = region.def();
@@ -3818,7 +3869,7 @@ mod test {
         // Do a multi block write_unwritten where a few different blocks have
         // data. Verify only unwritten blocks get the data.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(4)?;
 
         let ddef = region.def();
@@ -3921,7 +3972,7 @@ mod test {
     #[test]
     fn test_bad_hash_bad() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let data = BytesMut::from(&[1u8; 512][..]);
@@ -3959,7 +4010,7 @@ mod test {
     #[test]
     fn test_blank_block_read_ok() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         let responses = region.region_read(

@@ -134,6 +134,7 @@ pub async fn ox_stats(
     dss: DsStatOuter,
     registration_address: SocketAddr,
     my_address: SocketAddr,
+    log: &Logger,
 ) -> Result<()> {
     let dropshot_config = ConfigDropshot {
         bind_address: my_address,
@@ -165,11 +166,12 @@ pub async fn ox_stats(
         match server {
             Ok(server) => {
                 server.registry().register_producer(dss.clone()).unwrap();
-                println!("Oximeter producer registered, now serve_forever");
+                info!(log, "Oximeter producer registered, now serve_forever");
+
                 server.serve_forever().await.unwrap();
             }
             Err(e) => {
-                println!("Can't connect to oximeter server:\n{}", e);
+                warn!(log, "Can't connect to oximeter server:\n{}", e);
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }
         }
