@@ -58,7 +58,7 @@ done
 # Build the nightly archive file which should include all the scripts
 # and binaries needed to run the nightly test.
 banner nightly
-mkdir -p /out
+pfexec mkdir -p /out
 pfexec chown "$UID" /out
 tar cavf out/crucible-nightly.tar.gz \
     target/release/crutest \
