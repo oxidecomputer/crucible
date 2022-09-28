@@ -1000,20 +1000,21 @@ where
                             // negotiation and activation (see `XXX because the
                             // generation number` upstairs). update generation
                             // number here.
+                            if upstairs_connection.gen != gen {
+                                warn!(
+                                    log,
+                                    "warning: generation number at \
+                                    negotiation was {} and {} at \
+                                    activation, updating",
+                                    upstairs_connection.gen,
+                                    gen,
+                                );
+
+                                upstairs_connection.gen = gen;
+                            }
+
                             {
                                 let mut ds = ads.lock().await;
-                                if upstairs_connection.gen != gen {
-                                    warn!(
-                                        ds.log,
-                                        "warning: generation number at \
-                                        negotiation was {} and {} at \
-                                        activation, updating",
-                                        upstairs_connection.gen,
-                                        gen,
-                                    );
-
-                                    upstairs_connection.gen = gen;
-                                }
 
                                 ds.promote_to_active(
                                     *upstairs_connection,
@@ -1099,7 +1100,10 @@ where
                          */
                     }
                     Some(_msg) => {
-                        warn!(log, "Ignored message received during negotiation");
+                        warn!(
+                            log,
+                            "Ignored message received during negotiation"
+                        );
                     }
                 }
             }
@@ -2263,6 +2267,9 @@ pub fn create_region(
     Ok(region)
 }
 
+// Build the downstairs struct given a region directory and some additional
+// needed information.  If a logger is passed in, we will use that, otherwise
+// a logger will be created.
 pub fn build_downstairs_for_region(
     data: &Path,
     lossy: bool,
