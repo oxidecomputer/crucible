@@ -8,7 +8,6 @@
 #:	"/out/*",
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
-#:	"/out/*",
 #: ]
 #:
 #: [[publish]]
@@ -59,7 +58,7 @@ done
 # Build the nightly archive file which should include all the scripts
 # and binaries needed to run the nightly test.
 banner nightly
-mkdir -p out
+mkdir -p /out
 pfexec chown "$UID" /out
 tar cavf out/crucible-nightly.tar.gz \
     target/release/crutest \
@@ -75,7 +74,6 @@ tar cavf out/crucible-nightly.tar.gz \
 
 banner copy
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
-
 
 # Make the crucible package image
 banner image
