@@ -153,6 +153,7 @@ enum Args {
         port: u16,
 
         #[clap(long, action)]
+        // Return errors for IO operations, sometimes.
         return_errors: bool,
 
         #[clap(short, long, action)]
