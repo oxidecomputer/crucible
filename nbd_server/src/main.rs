@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tokio::runtime::Builder;
 
 use crucible::*;
 
@@ -66,7 +65,13 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-fn main() -> Result<()> {
+/*
+ * Crucible needs a runtime as it will create several async tasks to handle
+ * adding new IOs, communication with the three downstairs instances, and
+ * completing IOs.
+ */
+#[tokio::main]
+async fn main() -> Result<()> {
     let opt = opts()?;
     let crucible_opts = CrucibleOpts {
         target: opt.target,
@@ -81,18 +86,6 @@ fn main() -> Result<()> {
     };
 
     /*
-     * Crucible needs a runtime as it will create several async tasks to
-     * handle adding new IOs, communication with the three downstairs
-     * instances, and completing IOs.
-     */
-    let runtime = Builder::new_multi_thread()
-        .worker_threads(10)
-        .thread_name("crucible-tokio")
-        .enable_all()
-        .build()
-        .unwrap();
-
-    /*
      * The structure we use to send work from outside crucible into the
      * Upstairs main task.
      * We create this here instead of inside up_main() so we can use
@@ -100,19 +93,19 @@ fn main() -> Result<()> {
      */
     let guest = Arc::new(Guest::new());
 
-    runtime.spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
+    tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
     println!("Crucible runtime is spawned");
 
     // NBD server
 
-    guest.activate(opt.gen)?;
-    let volume = Volume::from_guest(guest)?;
+    guest.activate(opt.gen).await?;
+    let volume = Volume::from_block_io(guest).await?;
     let mut cpf = crucible::CruciblePseudoFile::from(Arc::new(volume))?;
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
 
     // sent to NBD client during handshake through Export struct
-    cpf.activate(opt.gen)?;
+    cpf.activate(opt.gen).await?;
     println!("NBD advertised size as {} bytes", cpf.sz());
 
     for stream in listener.incoming() {

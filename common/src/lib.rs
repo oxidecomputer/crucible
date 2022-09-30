@@ -42,6 +42,9 @@ pub enum CrucibleError {
     #[error("BlockReqWaiter recv channel disconnected")]
     RecvDisconnected,
 
+    #[error("SendError: {0}")]
+    SendError(String),
+
     #[error("Offset not block aligned")]
     OffsetUnaligned,
 
@@ -68,6 +71,9 @@ pub enum CrucibleError {
 
     #[error("Saw a UUID that wasn't ours!")]
     UuidMismatch,
+
+    #[error("Encryption failed! {0}")]
+    EncryptionError(String),
 
     #[error("Decryption failed!")]
     DecryptionError,
