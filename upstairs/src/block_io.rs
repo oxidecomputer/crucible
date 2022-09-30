@@ -6,8 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::SeekFrom;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// Implement BlockIO for a file
-
+/// Implement BlockIO for a file
 pub struct FileBlockIO {
     uuid: Uuid,
     block_size: u64,
@@ -35,42 +34,43 @@ impl FileBlockIO {
     }
 }
 
+#[async_trait]
 impl BlockIO for FileBlockIO {
-    fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
         Ok(())
     }
 
-    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate()
+    async fn deactivate(&self) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
-    fn query_is_active(&self) -> Result<bool, CrucibleError> {
+    async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         Ok(true)
     }
 
-    fn total_size(&self) -> Result<u64, CrucibleError> {
+    async fn total_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.total_size)
     }
 
-    fn get_block_size(&self) -> Result<u64, CrucibleError> {
+    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.block_size)
     }
 
-    fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
+    async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
 
-    fn read(
+    async fn read(
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut data_vec = data.as_vec();
-        let mut owned_vec = data.owned_vec();
+    ) -> Result<(), CrucibleError> {
+        let mut data_vec = data.as_vec().await;
+        let mut owned_vec = data.owned_vec().await;
 
         let start = offset.value * self.block_size;
 
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut data_vec[..])?;
 
@@ -78,44 +78,44 @@ impl BlockIO for FileBlockIO {
             owned_vec[i] = true;
         }
 
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn write(
+    async fn write(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let start = offset.value * self.block_size;
 
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start))?;
         file.write_all(&data[..])?;
 
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn write_unwritten(
+    async fn write_unwritten(
         &self,
         _offset: Block,
         _data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         crucible_bail!(
             Unsupported,
             "write_unwritten unsupported for FileBlockIO"
         )
     }
 
-    fn flush(
+    async fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut file = self.file.lock().unwrap();
+    ) -> Result<(), CrucibleError> {
+        let mut file = self.file.lock().await;
         file.flush()?;
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+    async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,
@@ -124,8 +124,8 @@ impl BlockIO for FileBlockIO {
 }
 
 // Implement BlockIO over an HTTP(S) url
-use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, RANGE};
+use reqwest::Client;
 use std::str::FromStr;
 
 pub struct ReqwestBlockIO {
@@ -138,7 +138,7 @@ pub struct ReqwestBlockIO {
 }
 
 impl ReqwestBlockIO {
-    pub fn new(
+    pub async fn new(
         id: Uuid,
         block_size: u64,
         url: String,
@@ -148,6 +148,7 @@ impl ReqwestBlockIO {
         let response = client
             .head(&url)
             .send()
+            .await
             .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
         let content_length = response
             .headers()
@@ -178,41 +179,42 @@ impl ReqwestBlockIO {
     }
 }
 
+#[async_trait]
 impl BlockIO for ReqwestBlockIO {
-    fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
         Ok(())
     }
 
-    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate()
+    async fn deactivate(&self) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
-    fn query_is_active(&self) -> Result<bool, CrucibleError> {
+    async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         Ok(true)
     }
 
-    fn total_size(&self) -> Result<u64, CrucibleError> {
+    async fn total_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.total_size)
     }
 
-    fn get_block_size(&self) -> Result<u64, CrucibleError> {
+    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.block_size)
     }
 
-    fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
+    async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
 
-    fn read(
+    async fn read(
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
 
-        let mut data_vec = data.as_vec();
-        let mut owned_vec = data.owned_vec();
+        let mut data_vec = data.as_vec().await;
+        let mut owned_vec = data.owned_vec().await;
 
         let start = offset.value * self.block_size;
 
@@ -228,6 +230,7 @@ impl BlockIO for ReqwestBlockIO {
                 ),
             )
             .send()
+            .await
             .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
         let content_length = response
@@ -246,6 +249,7 @@ impl BlockIO for ReqwestBlockIO {
 
         let bytes = response
             .bytes()
+            .await
             .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
         for i in 0..data_vec.len() {
@@ -254,36 +258,36 @@ impl BlockIO for ReqwestBlockIO {
         }
 
         cdt::reqwest__read__done!(|| (cc, self.uuid));
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn write(
+    async fn write(
         &self,
         _offset: Block,
         _data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         crucible_bail!(Unsupported, "write unsupported for ReqwestBlockIO")
     }
 
-    fn write_unwritten(
+    async fn write_unwritten(
         &self,
         _offset: Block,
         _data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
+    ) -> Result<(), CrucibleError> {
         crucible_bail!(
             Unsupported,
             "write_unwritten unsupported for ReqwestBlockIO"
         )
     }
 
-    fn flush(
+    async fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate()
+    ) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
-    fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+    async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,

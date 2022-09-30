@@ -39,9 +39,13 @@ mod test {
             encrypted: bool,
             read_only: bool,
         ) -> Result<Self> {
+            // Assert that the ports we're using for the downstairs are not
+            // re-used
             {
                 let mut ports = PORTS.lock().await;
-                assert!(ports.insert(port));
+                if !ports.insert(port) {
+                    panic!("port {} reused!", port);
+                }
             }
 
             let tempdir = tempfile::Builder::new()
@@ -207,7 +211,7 @@ mod test {
     // downstairs in other tests. There's a check in TestDownstairs::new for
     // this.
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_region() -> Result<()> {
         // Test a simple single layer volume with a read, write, read
         const BLOCK_SIZE: usize = 512;
@@ -227,50 +231,45 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents are zero on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write data in
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_two_layers() -> Result<()> {
         let tds = TestDownstairsSet::new(54004, 54005, 54006, false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(opts, false).await
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
         let tds = TestDownstairsSet::new(54007, 54008, 54009, false).await?;
         let opts = tds.opts();
@@ -293,29 +292,29 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data.clone())?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_read_only_parent(in_memory_data.clone()).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents are 11 on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write data in
         if is_write_unwritten {
@@ -323,37 +322,37 @@ mod test {
                 .write_unwritten(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     Bytes::from(vec![55; BLOCK_SIZE * 10]),
-                )?
-                .block_wait()?;
+                )
+                .await?;
         } else {
             volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     Bytes::from(vec![55; BLOCK_SIZE * 10]),
-                )?
-                .block_wait()?;
+                )
+                .await?;
         }
 
         // Verify parent wasn't written to
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_three_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
@@ -371,15 +370,15 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Create volume with read only parent
         let vcr: VolumeConstructionRequest =
@@ -394,56 +393,54 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let mut volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+        let mut volume = Volume::construct(vcr, None).await?;
 
-        volume.add_read_only_parent({
-            let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume(in_memory_data.clone())?;
-            Arc::new(volume)
-        })?;
+        volume
+            .add_read_only_parent({
+                let mut volume = Volume::new(BLOCK_SIZE as u64);
+                volume.add_subvolume(in_memory_data.clone()).await?;
+                Arc::new(volume)
+            })
+            .await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents are 11 on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write data in
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Verify parent wasn't written to
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_url() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
@@ -488,48 +485,36 @@ mod test {
                 )),
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
-        volume.activate(0)?;
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(0).await?;
 
         // Read one block: should be all 0xff
         let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume.read(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0xff; BLOCK_SIZE], *buffer.as_vec());
+        assert_eq!(vec![0xff; BLOCK_SIZE], *buffer.as_vec().await);
 
         // Write one block full of 0x01
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x01; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read one block: should be all 0x01
         let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume.read(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x01; BLOCK_SIZE], *buffer.as_vec());
+        assert_eq!(vec![0x01; BLOCK_SIZE], *buffer.as_vec().await);
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_just_read() -> Result<()> {
         // Just do a read of a new volume.
         const BLOCK_SIZE: usize = 512;
@@ -551,29 +536,21 @@ mod test {
                 )),
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
-        volume.activate(0)?;
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(0).await?;
 
         // Read one block: should be all 0x00
         let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume.read(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_write_unwritten_1() -> Result<()> {
         // Test a simple single layer volume, verify write_unwritten
         // works as expected.
@@ -604,51 +581,46 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Write data in
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read volume, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write_unwritten data in, should not change anything
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read volume, verify original contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_write_unwritten_2() -> Result<()> {
         // Test a simple single layer volume, verify a first write_unwritten
         // won't be altered by a 2nd write_unwritten.
@@ -678,51 +650,46 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Write data in
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // A second Write_unwritten data, should not change anything
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read volume, verify original contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_write_unwritten_sparse() -> Result<()> {
         // Test a simple single layer volume
         // Perform a smaller write, then a larger write_unwritten and
@@ -754,39 +721,34 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Write data at block 0
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x33; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // A second Write_unwritten that overlaps the original write.
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read and verify
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first block is from the first write
         assert_eq!(vec![0x33_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
@@ -800,7 +762,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_write_unwritten_subvols() -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // verify a first write_unwritten that crosses the subvols
@@ -840,51 +802,47 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
+
         let full_volume_size = BLOCK_SIZE * 20;
         // Write data in
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; full_volume_size]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read parent, verify contents
         let buffer = Buffer::new(full_volume_size);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; full_volume_size], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; full_volume_size], *buffer.as_vec().await);
 
         // A second Write_unwritten data, should not change anything
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x22; full_volume_size]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read volume, verify original contents
         let buffer = Buffer::new(full_volume_size);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; full_volume_size], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; full_volume_size], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_write_unwritten_subvols_sparse(
     ) -> Result<()> {
         // Test a single layer volume with two subvolumes,
@@ -926,14 +884,9 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
         let full_volume_size = BLOCK_SIZE * 20;
 
         // Write data to last block of first vol, and first block of
@@ -942,16 +895,16 @@ mod test {
             .write_unwritten(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         volume
-            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 2], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 2], *buffer.as_vec().await);
 
         // A second Write_unwritten data, should not change the previous
         // write_unwritten, but should change the remaining blocks that
@@ -960,18 +913,18 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x22; full_volume_size]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read full volume, verify first write_unwritten still valid, but the
         // other blocks of the 2nd write_unwritten are updated.
         let buffer = Buffer::new(full_volume_size);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in blocks 0-9 is the second write_unwritten
         assert_eq!(vec![0x22_u8; BLOCK_SIZE * 9], dl[0..(BLOCK_SIZE * 9)]);
@@ -991,7 +944,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_write_unwritten_subvols_3() -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // A first write_unwritten that crosses the subvols
@@ -1035,14 +988,9 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume = Arc::new(tokio::task::block_in_place(|| {
-            Volume::construct(vcr, None)
-        })?);
+        let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
         let full_volume_size = BLOCK_SIZE * 20;
 
         // Write data to last block of first vol, and first block of
@@ -1051,8 +999,8 @@ mod test {
             .write_unwritten(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // A second Write_unwritten data, should not change the previous
         // write_unwritten, but should change the remaining blocks that
@@ -1061,25 +1009,25 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // A write
         volume
             .write(
                 Block::new(7, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x11; BLOCK_SIZE * 13]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read full volume
         let buffer = Buffer::new(full_volume_size);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in blocks 0-7 is the second write_unwritten
         assert_eq!(vec![0x22_u8; BLOCK_SIZE * 7], dl[0..(BLOCK_SIZE * 7)]);
@@ -1093,14 +1041,14 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
         let tds = TestDownstairsSet::new(54046, 54047, 54048, false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(opts, false).await
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
     {
         let tds = TestDownstairsSet::new(54049, 54050, 54051, false).await?;
@@ -1127,56 +1075,54 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 5]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back in_memory, verify 1s
         let buffer = Buffer::new(BLOCK_SIZE * 5);
         in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data)?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify parent contents in one read
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         let mut expected = vec![11; BLOCK_SIZE * 5];
         expected.extend(vec![0x00; BLOCK_SIZE * 5]);
-        assert_eq!(expected, *buffer.as_vec());
+        assert_eq!(expected, *buffer.as_vec().await);
 
         // One big write!
         let write_offset = Block::new(0, BLOCK_SIZE.trailing_zeros());
         let write_data = Bytes::from(vec![55; BLOCK_SIZE * 10]);
         if is_write_unwritten {
-            volume.write(write_offset, write_data)?.block_wait()?;
+            volume.write(write_offset, write_data).await?;
         } else {
-            volume
-                .write_unwritten(write_offset, write_data)?
-                .block_wait()?;
+            volume.write_unwritten(write_offset, write_data).await?;
         }
 
         // Verify volume contents in one read
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_scrub() -> Result<()> {
         // Volume with a subvolume and a RO parent:
         // SV: |----------|
@@ -1206,26 +1152,26 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data)?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents are 11 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // data as the scrubber has finished.
@@ -1233,21 +1179,21 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_scrub_short() -> Result<()> {
         // Volume with a subvolume and a smaller RO parent:
         // SV: |----------|
@@ -1278,34 +1224,34 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 5]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data)?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents of RO parent are 1s at startup
         let buffer = Buffer::new(BLOCK_SIZE * 5);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         // Verify contents of blocks 5-10 are zero.
         let buffer = Buffer::new(BLOCK_SIZE * 5);
         volume
-            .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![00; BLOCK_SIZE * 5], *buffer.as_vec());
+        assert_eq!(vec![00; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // unwritten data as the scrubber has finished.
@@ -1313,17 +1259,17 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first half is from the RO parent
         assert_eq!(vec![11; BLOCK_SIZE * 5], dl[0..BLOCK_SIZE * 5]);
@@ -1336,7 +1282,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_scrub_short_sparse() -> Result<()> {
         // Volume with a subvolume and a smaller RO parent:
         // SV: |----------|
@@ -1371,41 +1317,41 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 5]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data)?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // SV: |--2-------|
         volume
             .write(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![22; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // SV: |-------3--|
         volume
             .write(
                 Block::new(7, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![33; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume except where new writes have
         // landed
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // First blocks are 1s   |11--------|
         let mut expected = vec![11; BLOCK_SIZE * 2];
@@ -1419,12 +1365,12 @@ mod test {
         expected.extend(vec![33; BLOCK_SIZE]);
         // Two final blocks of 0 |1121100300|
         expected.extend(vec![0; BLOCK_SIZE * 2]);
-        assert_eq!(expected, *buffer.as_vec());
+        assert_eq!(expected, *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_scrub_useless() -> Result<()> {
         // Volume with a subvolume and a RO parent:
         // SV: |----------|
@@ -1455,46 +1401,46 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
-        volume.add_read_only_parent(in_memory_data)?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents are 11 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write to the whole volume
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_subvols_parent_scrub_sparse() -> Result<()>
     {
         // Test a volume with two sub volumes, and RO parent
@@ -1527,8 +1473,8 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::new(54064, 54065, 54066, false).await?;
@@ -1554,19 +1500,17 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let mut volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+        let mut volume = Volume::construct(vcr, None).await?;
 
-        volume.add_read_only_parent({
-            let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume(in_memory_data)?;
-            Arc::new(volume)
-        })?;
+        volume
+            .add_read_only_parent({
+                let mut volume = Volume::new(BLOCK_SIZE as u64);
+                volume.add_subvolume(in_memory_data).await?;
+                Arc::new(volume)
+            })
+            .await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Write data to last block of first vol, and first block of
         // second vol.
@@ -1574,33 +1518,33 @@ mod test {
             .write(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![22; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         volume
-            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec());
+        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec().await);
 
         // A second write
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![33; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Call the scrubber
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Build the expected vec to compare our read with.
         // First two blocks are 3s     |33--------||----------|
@@ -1611,12 +1555,12 @@ mod test {
         expected.extend(vec![22; BLOCK_SIZE * 2]);
         // remaining final blocks of 0 |3311111112||2000000000|
         expected.extend(vec![0; BLOCK_SIZE * 9]);
-        assert_eq!(expected, *buffer.as_vec());
+        assert_eq!(expected, *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_volume_subvols_parent_scrub_sparse_2(
     ) -> Result<()> {
         // Test a volume with two sub volumes, and 3/4th RO parent
@@ -1650,8 +1594,8 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![11; BLOCK_SIZE * 15]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::new(54070, 54071, 54072, false).await?;
@@ -1677,19 +1621,17 @@ mod test {
                 read_only_parent: None,
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let mut volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
+        let mut volume = Volume::construct(vcr, None).await?;
 
-        volume.add_read_only_parent({
-            let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume(in_memory_data)?;
-            Arc::new(volume)
-        })?;
+        volume
+            .add_read_only_parent({
+                let mut volume = Volume::new(BLOCK_SIZE as u64);
+                volume.add_subvolume(in_memory_data).await?;
+                Arc::new(volume)
+            })
+            .await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Write data to last block of first vol, and first block of
         // second vol, AKA write A.
@@ -1698,16 +1640,16 @@ mod test {
             .write(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![22; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         volume
-            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec());
+        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec().await);
 
         // Write B
         //     |33--------||----------|
@@ -1715,8 +1657,8 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![33; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Write C
         //     |----------||----44----|
@@ -1724,17 +1666,17 @@ mod test {
             .write(
                 Block::new(14, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![44; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Call the scrubber
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Build the expected vec to compare our read with.
         // First two blocks are 3s     |33--------||----------|
@@ -1749,13 +1691,13 @@ mod test {
         expected.extend(vec![44; BLOCK_SIZE * 2]);
         // remaining final blocks of 0 |3311111112||2111440000|
         expected.extend(vec![0; BLOCK_SIZE * 4]);
-        assert_eq!(expected, *buffer.as_vec());
+        assert_eq!(expected, *buffer.as_vec().await);
 
         Ok(())
     }
 
     // Test that multiple upstairs can connect to a single read-only downstairs
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_multi_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
@@ -1793,41 +1735,31 @@ mod test {
                 )),
             };
 
-        let volume1 =
-            tokio::task::block_in_place(|| Volume::construct(vcr_1, None))?;
-        volume1.activate(0)?;
+        let volume1 = Volume::construct(vcr_1, None).await?;
+        volume1.activate(0).await?;
 
-        let volume2 =
-            tokio::task::block_in_place(|| Volume::construct(vcr_2, None))?;
-        volume2.activate(0)?;
+        let volume2 = Volume::construct(vcr_2, None).await?;
+        volume2.activate(0).await?;
 
         // Read one block: should be all 0x00
         let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume1.read(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+        volume1
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
 
         let buffer = Buffer::new(BLOCK_SIZE);
-        tokio::task::block_in_place(|| {
-            volume2.read(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                buffer.clone(),
-            )
-        })?
-        .block_wait()?;
+        volume2
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec());
+        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_scrub_no_rop() -> Result<()> {
         // Volume with a subvolume and no RO parent:, verify the scrub
         // does no work
@@ -1847,46 +1779,46 @@ mod test {
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None)?;
+        volume.add_subvolume_create_guest(opts, 0, None).await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         // Verify contents are 00 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write to half volume
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![55; BLOCK_SIZE * 5]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub().unwrap();
+        volume.scrub().await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Build the expected vec to compare our read with.
         // First 5 blocks are 5s              |55555-----|
         let mut expected = vec![55; BLOCK_SIZE * 5];
         // Original 0s from unwritten blocks  |5555500000|
         expected.extend(vec![0; BLOCK_SIZE * 5]);
-        assert_eq!(expected, *buffer.as_vec());
+        assert_eq!(expected, *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_snapshot_backed_vol() -> Result<()> {
         // Test using a "snapshot" (for this test, downstairs booted read-only)
         // as a read-only parent.
@@ -1899,16 +1831,15 @@ mod test {
             TestDownstairsSet::new(54082, 54083, 54084, false).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(
-            test_downstairs_set.opts(),
-            0,
-            None,
-        )?;
+        volume
+            .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+            .await?;
 
-        volume.activate(0)?;
+        volume.activate(0).await?;
 
         let random_buffer = {
-            let mut random_buffer = vec![0u8; volume.total_size()? as usize];
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
             rand::thread_rng().fill(&mut random_buffer[..]);
             random_buffer
         };
@@ -1917,10 +1848,10 @@ mod test {
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(random_buffer.clone()),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
-        volume.deactivate()?.block_wait()?;
+        volume.deactivate().await?;
 
         drop(volume);
 
@@ -1929,33 +1860,31 @@ mod test {
         // Validate that this now accepts reads and flushes, but rejects writes
         {
             let mut volume = Volume::new(BLOCK_SIZE as u64);
-            volume.add_subvolume_create_guest(
-                test_downstairs_set.opts(),
-                0,
-                None,
-            )?;
+            volume
+                .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+                .await?;
 
-            volume.activate(0)?;
+            volume.activate(0).await?;
 
-            let buffer = Buffer::new(volume.total_size()? as usize);
-            tokio::task::block_in_place(|| {
-                volume.read(
+            let buffer = Buffer::new(volume.total_size().await? as usize);
+            volume
+                .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     buffer.clone(),
                 )
-            })?
-            .block_wait()?;
+                .await?;
 
-            assert_eq!(*buffer.as_vec(), random_buffer);
+            assert_eq!(*buffer.as_vec().await, random_buffer);
 
             assert!(volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     Bytes::from(vec![0u8; BLOCK_SIZE]),
                 )
+                .await
                 .is_err());
 
-            volume.flush(None)?.block_wait()?;
+            volume.flush(None).await?;
         }
 
         // create a new volume, layering a new set of downstairs on top of the
@@ -1988,56 +1917,50 @@ mod test {
                 )),
             };
 
-        // XXX Crucible uses std::sync::mpsc::Receiver, not
-        // tokio::sync::mpsc::Receiver, so use tokio::task::block_in_place here.
-        // Remove that when Crucible changes over to the tokio mpsc.
-        let volume =
-            tokio::task::block_in_place(|| Volume::construct(vcr, None))?;
-        volume.activate(0)?;
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(0).await?;
 
         // Validate that source blocks originally come from the read-only parent
         {
-            let buffer = Buffer::new(volume.total_size()? as usize);
-            tokio::task::block_in_place(|| {
-                volume.read(
+            let buffer = Buffer::new(volume.total_size().await? as usize);
+            volume
+                .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     buffer.clone(),
                 )
-            })?
-            .block_wait()?;
+                .await?;
 
-            assert_eq!(*buffer.as_vec(), random_buffer);
+            assert_eq!(*buffer.as_vec().await, random_buffer);
         }
 
         // Validate a flush works
-        volume.flush(None)?.block_wait()?;
+        volume.flush(None).await?;
 
         // Write one block of 0x00 in, validate with a read
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0u8; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         {
-            let buffer = Buffer::new(volume.total_size()? as usize);
-            tokio::task::block_in_place(|| {
-                volume.read(
+            let buffer = Buffer::new(volume.total_size().await? as usize);
+            volume
+                .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
                     buffer.clone(),
                 )
-            })?
-            .block_wait()?;
+                .await?;
 
-            let buffer_vec = buffer.as_vec();
+            let buffer_vec = buffer.as_vec().await;
 
             assert_eq!(buffer_vec[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
             assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
         }
 
         // Validate a flush still works
-        volume.flush(None)?.block_wait()?;
+        volume.flush(None).await?;
 
         Ok(())
     }
@@ -2047,7 +1970,7 @@ mod test {
     // on a guest layer. Port numbers from this point below should
     // start at 55001 and go up from there.
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs() -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write and read work as expected
@@ -2064,37 +1987,37 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(0)?;
-        guest.query_work_queue()?;
+        guest.activate(0).await?;
+        guest.query_work_queue().await?;
 
         // Verify contents are zero on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write data in
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_upstairs_read_only_rejects_write() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
@@ -2110,15 +2033,15 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(0)?;
+        guest.activate(0).await?;
 
         // Expect an error attempting to write.
         let write_result = guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait();
+            )
+            .await;
         assert!(write_result.is_err());
         assert!(matches!(
             write_result.err().unwrap(),
@@ -2128,7 +2051,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten() -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected
@@ -2146,63 +2069,63 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(1)?;
-        guest.query_work_queue()?;
+        guest.activate(1).await?;
+        guest.query_work_queue().await?;
 
         // Write_unwritten data in
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Write_unwritten again with different data
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x99; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back the same blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Verify data is still the original contents.
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Now, just write.  This should update our data.
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x89; BLOCK_SIZE * 10]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back the same blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Verify data is now from the new write.
-        assert_eq!(vec![0x89_u8; BLOCK_SIZE * 10], *buffer.as_vec());
+        assert_eq!(vec![0x89_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_sparse_1() -> Result<()>
     {
         // Test using the guest layer to verify a new region is
@@ -2221,16 +2144,16 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(1)?;
-        guest.query_work_queue()?;
+        guest.activate(1).await?;
+        guest.query_work_queue().await?;
 
         // Write_unwritten data in the first block
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Write_unwritten again with different data and same start
         // range, but write to blocks 2 and 3 this time as well.
@@ -2238,31 +2161,31 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back the first block.
         let buffer = Buffer::new(BLOCK_SIZE);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Verify data is still the original contents.
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE], *buffer.as_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], *buffer.as_vec().await);
 
         // Read back the next two blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         guest
-            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Verify data is still the original contents.
-        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], *buffer.as_vec());
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], *buffer.as_vec().await);
 
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_sparse_mid(
     ) -> Result<()> {
         // Test using the guest layer to verify a new region is
@@ -2281,16 +2204,16 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(1)?;
-        guest.query_work_queue()?;
+        guest.activate(1).await?;
+        guest.query_work_queue().await?;
 
         // Write_unwritten data in the second block
         guest
             .write_unwritten(
                 Block::new(1, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Write_unwritten again with different data and writing
         // to blocks 0, 1, and 2.
@@ -2298,17 +2221,17 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back the all three blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 3);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first block is from the second write_unwritten
         assert_eq!(vec![0x99_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
@@ -2324,7 +2247,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_sparse_end(
     ) -> Result<()> {
         // Test write_unwritten and read work as expected,
@@ -2342,16 +2265,16 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(1)?;
-        guest.query_work_queue()?;
+        guest.activate(1).await?;
+        guest.query_work_queue().await?;
 
         // Write_unwritten data in the third block
         guest
             .write_unwritten(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Write_unwritten again with different data and writing
         // to blocks 0, 1, and 2.
@@ -2359,17 +2282,17 @@ mod test {
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back the all three blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 3);
         guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first two blocks is the data from the
         // second write_unwritten
@@ -2384,7 +2307,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_span() -> Result<()> {
         // Test write_unwritten and read work as expected,
         // Have the IO span an extent boundary.
@@ -2401,16 +2324,16 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(1)?;
-        guest.query_work_queue()?;
+        guest.activate(1).await?;
+        guest.query_work_queue().await?;
 
         // Write_unwritten data in last block of the extent
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Write_unwritten again with different data and a larger
         // write size to include the first block in the 2nd extent.
@@ -2418,17 +2341,17 @@ mod test {
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back both blocks
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         guest
-            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first block is the data from the first write.
         assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
@@ -2442,7 +2365,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_span_2() -> Result<()>
     {
         // Test write_unwritten and read work as expected,
@@ -2460,16 +2383,16 @@ mod test {
             up_main(opts, 0, gc, None).await.unwrap();
         });
 
-        guest.activate(1)?;
-        guest.query_work_queue()?;
+        guest.activate(1).await?;
+        guest.query_work_queue().await?;
 
         // Write_unwritten data in last block of the extent
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x55; BLOCK_SIZE]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Write_unwritten again with different data and a larger
         // write size to include the first block in the 2nd extent.
@@ -2477,17 +2400,17 @@ mod test {
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
                 Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
-            )?
-            .block_wait()?;
+            )
+            .await?;
 
         // Read back both blocks
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         guest
-            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())?
-            .block_wait()?;
+            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
 
         // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().to_vec();
+        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first block is the data from the first write.
         assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
