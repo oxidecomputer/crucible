@@ -55,11 +55,23 @@ for s in tools/test_perf.sh; do
 	cp "$s" /work/scripts/
 done
 
-# Build the nightly archive file which should include all the scripts
-# and binaries needed to run the nightly test.
-banner nightly
+# Make the top level /out directory
 pfexec mkdir -p /out
 pfexec chown "$UID" /out
+
+# Make the crucible package image
+banner image
+ptime -m cargo run --bin crucible-package
+
+banner contents
+tar tvfz out/crucible.tar.gz
+mv out/crucible.tar.gz /out/crucible.tar.gz
+
+# Build the nightly archive file which should include all the scripts
+# and binaries needed to run the nightly test.
+# This needs the ./out directory created above
+banner nightly
+
 tar cavf out/crucible-nightly.tar.gz \
     target/release/crutest \
     target/release/crucible-downstairs \
@@ -75,14 +87,7 @@ tar cavf out/crucible-nightly.tar.gz \
 banner copy
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
 
-# Make the crucible package image
-banner image
-ptime -m cargo run --bin crucible-package
-
-banner contents
-tar tvfz out/crucible.tar.gz
-mv out/crucible.tar.gz /out/crucible.tar.gz
-
+banner checksum
 cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt
