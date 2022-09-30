@@ -71,7 +71,7 @@ fi
 # are the same as what DSC uses by default.  If either side changes, then
 # the other will need to be update manually.
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
-dump_args="-d ${testdir}/8810 -d ${testdir}/8820 -d ${testdir}/8830"
+dump_args+=" -d ${testdir}/8810 -d ${testdir}/8820 -d ${testdir}/8830"
 
 if pgrep -fl -U "$(id -u)" "$cds"; then
     echo "Downstairs already running" >&2
@@ -104,7 +104,7 @@ then
 fi
 
 # Start loop
-for (( i = 0; i < 10; i += 1 )); do
+for (( i = 0; i < 20; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""
