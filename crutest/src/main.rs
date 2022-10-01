@@ -378,8 +378,10 @@ impl WriteLog {
             res = false;
         }
         if update {
-            println!("Update block {} to {} (min:{} max:{} res:{}",
-                index, new_max, min, max, res);
+            println!(
+                "Update block {} to {} (min:{} max:{} res:{}",
+                index, new_max, min, max, res
+            );
             self.count_cur[index] = new_max;
         }
         res
@@ -857,8 +859,10 @@ async fn verify_volume(
 ) -> Result<()> {
     assert_eq!(ri.write_log.len(), ri.total_blocks);
 
-    println!("Read and Verify all blocks (0..{} range:{})",
-        ri.total_blocks, range);
+    println!(
+        "Read and Verify all blocks (0..{} range:{})",
+        ri.total_blocks, range
+    );
 
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
