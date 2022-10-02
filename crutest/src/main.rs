@@ -1937,7 +1937,10 @@ async fn repair_workload(
     // We want at least one write, otherwise there will be nothing to
     // repair.
     let mut one_write = false;
+    // These help the printlns use the minimum white space
     let count_width = count.to_string().len();
+    let block_width = ri.total_blocks.to_string().len();
+    let size_width = (10 * ri.block_size).to_string().len();
     for c in 1..=count {
         let op = rng.gen_range(0..10);
         // Make sure the last few commands are not a flush
@@ -1988,12 +1991,16 @@ async fn repair_workload(
                 let data = Bytes::from(vec);
 
                 println!(
-                    "{:>0width$}/{:>0width$} Write at block {:5}, len:{:7}",
+                    "{:>0width$}/{:>0width$} Write \
+                    block {:>bw$}  len {:>sw$}  data:{:>3}",
                     c,
                     count,
                     offset.value,
                     data.len(),
+                    data[1],
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
                 guest.write(offset, data).await?;
             } else {
@@ -2002,12 +2009,15 @@ async fn repair_workload(
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{:>0width$}/{:>0width$} Read  at block {:5}, len:{:7}",
+                    "{:>0width$}/{:>0width$} Read  \
+                    block {:>bw$}  len {:>sw$}",
                     c,
                     count,
                     offset.value,
                     data.len().await,
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
                 guest.read(offset, data.clone()).await?;
             }
@@ -2268,7 +2278,7 @@ async fn biggest_io_workload(
  * sending jobs to the downstairs, creating dependencys that it will
  * eventually resolve.
  *
- * TODO: Make this test use the global write count.
+ * TODO: Make this test use the global write count, but remember, async.
  */
 async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let final_offset = ri.total_size - ri.block_size;
