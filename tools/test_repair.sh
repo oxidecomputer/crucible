@@ -103,7 +103,7 @@ fi
 (( generation += 1))
 
 # Start loop
-for (( i = 0; i < 200; i += 1 )); do
+for (( i = 0; i < 100; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""
