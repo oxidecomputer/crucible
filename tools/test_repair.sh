@@ -95,16 +95,18 @@ if [[ "$os_name" == 'Darwin' ]]; then
 fi
 
 # Do initial volume population.
+generation=1
 echo "$ct with $target_args  $dump_args $ds0_pid $ds1_pid $ds2_pid"
-if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q
+if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q -g "$generation"
 then
     echo "ERROR: Exit on initial fill"
     cleanup
     exit 1
 fi
+(( generation += 1))
 
 # Start loop
-for (( i = 0; i < 20; i += 1 )); do
+for (( i = 0; i < 100; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""
@@ -129,12 +131,13 @@ for (( i = 0; i < 20; i += 1 )); do
         ds2_pid=$!
     fi
 
-    if ! ${ct} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30
+    if ! ${ct} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30 -g "$generation"
     then
         echo "Exit on repair fail, loop: $i, choice: $choice"
         cleanup
         exit 1
     fi
+    (( generation += 1))
 
     echo ""
     # Stop --lossy downstairs so it can't complete all its IOs
@@ -170,14 +173,15 @@ for (( i = 0; i < 20; i += 1 )); do
     fi
 
     echo "Verifying data now"
-    echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q > "$test_log"
-    if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q >> "$test_log"
+    echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" > "$test_log"
+    if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" >> "$test_log" 2>&1
     then
         echo "Exit on verify fail, loop: $i, choice: $choice"
         echo "Check $test_log for details"
         cleanup
         exit 1
     fi
+    (( generation += 1))
 
     echo "Loop: $i  Downstairs dump after verify (and repair):"
     ${cds} dump ${dump_args[@]}
