@@ -303,7 +303,9 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
         volume.add_read_only_parent(in_memory_data.clone()).await?;
 
         volume.activate(0).await?;
@@ -1087,7 +1089,9 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate(0).await?;
@@ -1156,7 +1160,9 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate(0).await?;
@@ -1228,7 +1234,9 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate(0).await?;
@@ -1321,7 +1329,9 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate(0).await?;
@@ -1405,7 +1415,9 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate(0).await?;
@@ -1779,7 +1791,9 @@ mod test {
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume
+            .add_subvolume_create_guest(opts, 0, None, BLOCK_SIZE)
+            .await?;
 
         volume.activate(0).await?;
 
@@ -1832,7 +1846,12 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume
-            .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                0,
+                None,
+                BLOCK_SIZE,
+            )
             .await?;
 
         volume.activate(0).await?;
@@ -1861,7 +1880,12 @@ mod test {
         {
             let mut volume = Volume::new(BLOCK_SIZE as u64);
             volume
-                .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+                .add_subvolume_create_guest(
+                    test_downstairs_set.opts(),
+                    0,
+                    None,
+                    BLOCK_SIZE,
+                )
                 .await?;
 
             volume.activate(0).await?;
@@ -1980,7 +2004,7 @@ mod test {
         let tds = TestDownstairsSet::new(55016, 55017, 55018, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {
@@ -2025,7 +2049,7 @@ mod test {
         let tds = TestDownstairsSet::new(55019, 55020, 55021, true).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         // Read-only Upstairs should return errors if writes are attempted.
@@ -2062,7 +2086,7 @@ mod test {
         let tds = TestDownstairsSet::new(55022, 55023, 55024, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {
@@ -2137,7 +2161,7 @@ mod test {
         let tds = TestDownstairsSet::new(55025, 55026, 55027, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {
@@ -2197,7 +2221,7 @@ mod test {
         let tds = TestDownstairsSet::new(55028, 55029, 55030, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {
@@ -2258,7 +2282,7 @@ mod test {
         let tds = TestDownstairsSet::new(55031, 55032, 55033, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {
@@ -2317,7 +2341,7 @@ mod test {
         let tds = TestDownstairsSet::new(55034, 55035, 55036, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {
@@ -2376,7 +2400,7 @@ mod test {
         let tds = TestDownstairsSet::new(55037, 55038, 55039, false).await?;
         let opts = tds.opts();
 
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(BLOCK_SIZE));
         let gc = guest.clone();
 
         tokio::spawn(async move {

@@ -179,6 +179,9 @@ pub struct Opt {
     /// A UUID to use for the upstairs.
     #[clap(long, global = true, action)]
     uuid: Option<Uuid>,
+
+    #[clap(long, action)]
+    block_size: usize,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -216,7 +219,7 @@ async fn get_region_info(
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = guest.get_block_size().await?;
+    let block_size = guest.get_block_size();
     let extent_size = guest.query_extent_size().await?;
     let total_size = guest.total_size().await?;
     let total_blocks = (total_size / block_size) as usize;
@@ -490,7 +493,7 @@ async fn main() -> Result<()> {
      * We create this here instead of inside up_main() so we can use
      * the methods provided by guest to interact with Crucible.
      */
-    let guest = Arc::new(Guest::new());
+    let guest = Arc::new(Guest::new(opt.block_size));
 
     let pr;
     if opt.metrics {

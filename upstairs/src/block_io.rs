@@ -52,10 +52,6 @@ impl BlockIO for FileBlockIO {
         Ok(self.total_size)
     }
 
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        Ok(self.block_size)
-    }
-
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
@@ -120,6 +116,12 @@ impl BlockIO for FileBlockIO {
             up_count: 0,
             ds_count: 0,
         })
+    }
+}
+
+impl SyncBlockIO for FileBlockIO {
+    fn get_block_size(&self) -> u64 {
+        self.block_size
     }
 }
 
@@ -195,10 +197,6 @@ impl BlockIO for ReqwestBlockIO {
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.total_size)
-    }
-
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        Ok(self.block_size)
     }
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
@@ -292,5 +290,11 @@ impl BlockIO for ReqwestBlockIO {
             up_count: 0,
             ds_count: 0,
         })
+    }
+}
+
+impl SyncBlockIO for ReqwestBlockIO {
+    fn get_block_size(&self) -> u64 {
+        self.block_size
     }
 }

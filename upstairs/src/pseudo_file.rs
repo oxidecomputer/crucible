@@ -166,7 +166,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         }
 
         self.sz = self.block_io.total_size().await?;
-        self.block_size = self.block_io.get_block_size().await?;
+        self.block_size = self.block_io.get_block_size();
         self.uuid = self.block_io.get_uuid().await?;
 
         self.active = true;

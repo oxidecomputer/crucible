@@ -48,6 +48,9 @@ pub struct Opt {
 
     #[clap(long, action)]
     bw_limit_in_bytes: Option<usize>,
+
+    #[clap(long, action)]
+    block_size: usize,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -93,7 +96,7 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }));
 
-    let mut guest = Guest::new();
+    let mut guest = Guest::new(opt.block_size);
 
     if let Some(iop_limit) = opt.iop_limit {
         guest.set_iop_limit(16 * 1024 * 1024, iop_limit);
@@ -111,7 +114,7 @@ async fn main() -> Result<()> {
 
     let mut rng = rand::thread_rng();
 
-    let bsz: u64 = guest.get_block_size().await?;
+    let bsz: u64 = guest.get_block_size();
     let total_blocks: u64 = guest.total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {

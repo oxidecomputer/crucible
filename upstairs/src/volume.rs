@@ -66,7 +66,7 @@ impl Volume {
     pub async fn from_block_io(
         block_io: Arc<dyn BlockIO + Sync + Send>,
     ) -> Result<Volume, CrucibleError> {
-        let block_size = block_io.get_block_size().await?;
+        let block_size = block_io.get_block_size();
         let uuid = block_io.get_uuid().await?;
 
         let sub_volume = SubVolume {
@@ -108,7 +108,7 @@ impl Volume {
         &mut self,
         block_io: Arc<dyn BlockIO + Send + Sync>,
     ) -> Result<(), CrucibleError> {
-        let block_size = block_io.get_block_size().await?;
+        let block_size = block_io.get_block_size();
 
         if block_size != self.block_size {
             crucible_bail!(BlockSizeMismatch);
@@ -129,8 +129,9 @@ impl Volume {
         opts: CrucibleOpts,
         gen: u64,
         producer_registry: Option<ProducerRegistry>,
+        block_size: usize,
     ) -> Result<(), CrucibleError> {
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(block_size));
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
@@ -163,7 +164,7 @@ impl Volume {
         &mut self,
         block_io: Arc<dyn BlockIO + Send + Sync>,
     ) -> Result<(), CrucibleError> {
-        let block_size = block_io.get_block_size().await?;
+        let block_size = block_io.get_block_size();
 
         if block_size != self.block_size {
             crucible_bail!(BlockSizeMismatch);
@@ -261,7 +262,7 @@ impl Volume {
 
         if let Some(ref read_only_parent) = self.read_only_parent {
             let ts = read_only_parent.total_size().await?;
-            let bs = read_only_parent.get_block_size().await? as usize;
+            let bs = read_only_parent.get_block_size() as usize;
 
             let scrub_start = Instant::now();
             println!("Scrub for {} begins", self.uuid);
@@ -501,10 +502,6 @@ impl BlockIO for Volume {
         }
     }
 
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        Ok(self.block_size)
-    }
-
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
@@ -724,6 +721,12 @@ impl BlockIO for Volume {
     }
 }
 
+impl SyncBlockIO for Volume {
+    fn get_block_size(&self) -> u64 {
+        self.block_size
+    }
+}
+
 // Traditional subvolume is just one region set
 impl SubVolume {
     // Compute sub volume LBA from total volume LBA.
@@ -826,10 +829,6 @@ impl BlockIO for SubVolume {
         self.block_io.total_size().await
     }
 
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        self.block_io.get_block_size().await
-    }
-
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         self.block_io.get_uuid().await
     }
@@ -867,6 +866,12 @@ impl BlockIO for SubVolume {
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         self.block_io.show_work().await
+    }
+}
+
+impl SyncBlockIO for SubVolume {
+    fn get_block_size(&self) -> u64 {
+        self.block_io.get_block_size()
     }
 }
 
@@ -923,8 +928,13 @@ impl Volume {
                 gen,
             } => {
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume_create_guest(opts, gen, producer_registry)
-                    .await?;
+                vol.add_subvolume_create_guest(
+                    opts,
+                    gen,
+                    producer_registry,
+                    block_size as usize,
+                )
+                .await?;
                 Ok(vol)
             }
 
@@ -955,7 +965,7 @@ mod test {
     fn test_single_block() -> Result<()> {
         let sub_volume = SubVolume {
             lba_range: 0..10,
-            block_io: Arc::new(Guest::new()),
+            block_io: Arc::new(Guest::default()),
         };
 
         // Coverage inside region
@@ -968,7 +978,7 @@ mod test {
     fn test_single_sub_volume_lba_coverage() -> Result<()> {
         let sub_volume = SubVolume {
             lba_range: 0..2048,
-            block_io: Arc::new(Guest::new()),
+            block_io: Arc::new(Guest::default()),
         };
 
         // Coverage inside region
@@ -990,7 +1000,7 @@ mod test {
     fn test_single_sub_volume_lba_coverage_with_offset() -> Result<()> {
         let sub_volume = SubVolume {
             lba_range: 1024..2048,
-            block_io: Arc::new(Guest::new()),
+            block_io: Arc::new(Guest::default()),
         };
 
         // No coverage before region
@@ -1307,7 +1317,7 @@ mod test {
         read_only_parent_init_value: u8,
     ) -> Result<()> {
         volume.activate(0).await?;
-        assert_eq!(volume.get_block_size().await?, 512);
+        assert_eq!(volume.get_block_size(), 512);
         assert_eq!(block_size, 512);
         assert_eq!(volume.total_size().await?, 4096);
 

@@ -54,6 +54,9 @@ pub struct Opt {
     #[clap(long, action)]
     control: Option<SocketAddr>,
 
+    #[clap(long, action)]
+    block_size: usize,
+
     // crudd-specific options
     /// Number of bytes to read or write. If omitted, will be bounded by the
     /// region size and input/output stream automatically
@@ -103,7 +106,7 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         return Ok(());
     }
 
-    let native_block_size = crucible.get_block_size().await?;
+    let native_block_size = crucible.get_block_size();
 
     // Check that the read is fully within the region
     if opt.byte_offset + num_bytes > volume_size {
@@ -321,7 +324,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         return Ok(());
     }
 
-    let native_block_size = crucible.get_block_size().await?;
+    let native_block_size = crucible.get_block_size();
 
     // Check that the write is fully within the region
     if opt.byte_offset + num_bytes > volume_size {
@@ -487,7 +490,7 @@ async fn main() -> Result<()> {
     };
 
     // TODO: volumes?
-    let guest = Arc::new(Guest::new());
+    let guest = Arc::new(Guest::new(opt.block_size));
 
     tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
     eprintln!("Crucible runtime is spawned");

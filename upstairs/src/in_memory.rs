@@ -46,10 +46,6 @@ impl BlockIO for InMemoryBlockIO {
         Ok(inner.bytes.len() as u64)
     }
 
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        Ok(self.block_size)
-    }
-
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
@@ -122,5 +118,11 @@ impl BlockIO for InMemoryBlockIO {
             up_count: 0,
             ds_count: 0,
         })
+    }
+}
+
+impl SyncBlockIO for InMemoryBlockIO {
+    fn get_block_size(&self) -> u64 {
+        self.block_size
     }
 }

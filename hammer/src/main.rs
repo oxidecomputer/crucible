@@ -58,6 +58,9 @@ pub struct Opt {
     // Start upstairs control http server
     #[clap(long, action)]
     control: Option<SocketAddr>,
+
+    #[clap(long, action)]
+    block_size: usize,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -131,7 +134,7 @@ async fn main() -> Result<()> {
          * We create this here instead of inside up_main() so we can use
          * the methods provided by guest to interact with Crucible.
          */
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(opt.block_size));
 
         tokio::spawn(up_main(
             crucible_opts.clone(),

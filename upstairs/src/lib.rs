@@ -72,7 +72,7 @@ use async_trait::async_trait;
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.
 #[async_trait]
-pub trait BlockIO: Sync {
+pub trait BlockIO: SyncBlockIO + Sync {
     async fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
@@ -81,9 +81,6 @@ pub trait BlockIO: Sync {
 
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
-
-    /// Return the block size - this should never change at runtime!
-    async fn get_block_size(&self) -> Result<u64, CrucibleError>;
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError>;
 
@@ -125,7 +122,7 @@ pub trait BlockIO: Sync {
         &self,
         offset: u64,
     ) -> Result<Block, CrucibleError> {
-        let bs = self.get_block_size().await?;
+        let bs = self.get_block_size();
 
         if (offset % bs) != 0 {
             crucible_bail!(OffsetUnaligned);
@@ -144,10 +141,6 @@ pub trait BlockIO: Sync {
         offset: u64,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        if !self.query_is_active().await? {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         self.read(self.byte_offset_to_block(offset).await?, data)
             .await
     }
@@ -157,10 +150,6 @@ pub trait BlockIO: Sync {
         offset: u64,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        if !self.query_is_active().await? {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         self.write(self.byte_offset_to_block(offset).await?, data)
             .await
     }
@@ -176,6 +165,14 @@ pub trait BlockIO: Sync {
 
         self.activate(gen).await
     }
+}
+
+/// The async_trait decorator on BlockIO does not support some functions being
+/// synchronous, so the SyncBlockIO trait is here to separate out sync
+/// functions.
+pub trait SyncBlockIO: Sync {
+    /// Return the block size - this should never change at runtime!
+    fn get_block_size(&self) -> u64;
 }
 
 pub type CrucibleBlockIOFuture<'a> = Pin<
@@ -6598,13 +6595,15 @@ pub struct Guest {
      */
     bw_tokens: Mutex<usize>, // bytes
     bw_limit: Option<usize>, // bytes per second
+
+    block_size: usize,
 }
 
 /*
  * These methods are how to add or checking for new work on the Guest struct
  */
 impl Guest {
-    pub fn new() -> Guest {
+    pub fn new(block_size: usize) -> Guest {
         Guest {
             /*
              * Incoming I/O requests are added to this queue.
@@ -6630,6 +6629,8 @@ impl Guest {
 
             bw_tokens: Mutex::new(0),
             bw_limit: None,
+
+            block_size,
         }
     }
 
@@ -6874,15 +6875,6 @@ impl BlockIO for Guest {
         Ok(result)
     }
 
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        let data = Arc::new(Mutex::new(0));
-        let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-        self.send(size_query).await.wait().await?;
-
-        let result = *data.lock().await;
-        Ok(result)
-    }
-
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         let data = Arc::new(Mutex::new(Uuid::default()));
         let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
@@ -6897,7 +6889,10 @@ impl BlockIO for Guest {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
+        // In order to preserve insertion order, it's important that the first
+        // await be on send()!
+
+        let bs = self.get_block_size();
 
         if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
@@ -6916,7 +6911,9 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
+        // In order to preserve insertion order, it's important that the first
+        // await be on send()!
+        let bs = self.get_block_size();
 
         if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
@@ -6935,7 +6932,9 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
+        // In order to preserve insertion order, it's important that the first
+        // await be on send()!
+        let bs = self.get_block_size();
 
         if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
@@ -6953,6 +6952,8 @@ impl BlockIO for Guest {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
+        // In order to preserve insertion order, it's important that the first
+        // await be on send()!
         Ok(self
             .send(BlockOp::Flush { snapshot_details })
             .await
@@ -6977,6 +6978,12 @@ impl BlockIO for Guest {
     }
 }
 
+impl SyncBlockIO for Guest {
+    fn get_block_size(&self) -> u64 {
+        self.block_size as u64
+    }
+}
+
 /*
  * Work Queue Counts, for debug ShowWork IO type
  */
@@ -6988,7 +6995,7 @@ pub struct WQCounts {
 
 impl Default for Guest {
     fn default() -> Self {
-        Self::new()
+        Self::new(512)
     }
 }
 
