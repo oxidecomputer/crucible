@@ -378,7 +378,10 @@ impl WriteLog {
             res = false;
         }
         if update {
-            println!("Update block {} to {}", index, new_max);
+            println!(
+                "Update block {} to {} (min:{} max:{} res:{}",
+                index, new_max, min, max, res
+            );
             self.count_cur[index] = new_max;
         }
         res
@@ -857,7 +860,10 @@ async fn verify_volume(
 ) -> Result<()> {
     assert_eq!(ri.write_log.len(), ri.total_blocks);
 
-    println!("Read and Verify all blocks (0..{})", ri.total_blocks);
+    println!(
+        "Read and Verify all blocks (0..{} range:{})",
+        ri.total_blocks, range
+    );
 
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
@@ -894,9 +900,9 @@ async fn verify_volume(
             ValidateStatus::Bad => {
                 pb.finish_with_message("Error");
                 bail!(
-                    "Error in range {} -> {}",
+                    "Error in block range {} -> {}",
                     block_index,
-                    block_index + io_sz
+                    block_index + next_io_blocks
                 );
             }
             ValidateStatus::InRange => {
@@ -904,7 +910,7 @@ async fn verify_volume(
                     {}
                 } else {
                     pb.finish_with_message("Error");
-                    bail!("Error at {}", block_index);
+                    bail!("Error at block {}", block_index);
                 }
             }
             ValidateStatus::Good => {}
@@ -1928,12 +1934,14 @@ async fn repair_workload(
     // Any state coming in should have been verified, so we can
     // consider the current write log to be the minimum possible values.
     ri.write_log.commit();
-    let mut futureslist = Vec::new();
     // TODO: Allow user to request r/w/f percentage (how???)
     // We want at least one write, otherwise there will be nothing to
     // repair.
     let mut one_write = false;
+    // These help the printlns use the minimum white space
     let count_width = count.to_string().len();
+    let block_width = ri.total_blocks.to_string().len();
+    let size_width = (10 * ri.block_size).to_string().len();
     for c in 1..=count {
         let op = rng.gen_range(0..10);
         // Make sure the last few commands are not a flush
@@ -1945,8 +1953,7 @@ async fn repair_workload(
                 count,
                 width = count_width,
             );
-            let future = guest.flush(None);
-            futureslist.push(future);
+            guest.flush(None).await?;
             // Commit the current write log because we know this flush
             // will make it out on at least two DS, so any writes before this
             // point should also be persistent.
@@ -1985,36 +1992,39 @@ async fn repair_workload(
                 let data = Bytes::from(vec);
 
                 println!(
-                    "{:>0width$}/{:>0width$} Write at block {:5}, len:{:7}",
+                    "{:>0width$}/{:>0width$} Write \
+                    block {:>bw$}  len {:>sw$}  data:{:>3}",
                     c,
                     count,
                     offset.value,
                     data.len(),
+                    data[1],
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
-                let future = guest.write(offset, data);
-                futureslist.push(future);
+                guest.write(offset, data).await?;
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{:>0width$}/{:>0width$} Read  at block {:5}, len:{:7}",
+                    "{:>0width$}/{:>0width$} Read  \
+                    block {:>bw$}  len {:>sw$}",
                     c,
                     count,
                     offset.value,
                     data.len().await,
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
-                let future = guest.read(offset, data.clone());
-                futureslist.push(future);
+                guest.read(offset, data.clone()).await?;
             }
         }
     }
-    println!("loop over {} futures", futureslist.len());
-    crucible::join_all(futureslist).await?;
-
+    guest.show_work().await?;
     Ok(())
 }
 
@@ -2269,7 +2279,7 @@ async fn biggest_io_workload(
  * sending jobs to the downstairs, creating dependencys that it will
  * eventually resolve.
  *
- * TODO: Make this test use the global write count.
+ * TODO: Make this test use the global write count, but remember, async.
  */
 async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let final_offset = ri.total_size - ri.block_size;
