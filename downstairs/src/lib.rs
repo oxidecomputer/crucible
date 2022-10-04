@@ -2307,15 +2307,19 @@ pub async fn start_downstairs(
         IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
     };
 
-    if let Err(e) = repair::repair_main(&d, repair_address).await {
-        // TODO tear down other things if repair server can't be started?
-        bail!("got {:?} from repair main", e);
-    }
+    let repair_listener = match repair::repair_main(&d, repair_address).await {
+        Err(e) => {
+            // TODO tear down other things if repair server can't be started?
+            bail!("got {:?} from repair main", e);
+        }
+
+        Ok(socket_addr) => socket_addr,
+    };
 
     {
         let mut ds = d.lock().await;
-        ds.repair_address = Some(repair_address);
-        println!("Using repair address: {:?}", repair_address);
+        ds.repair_address = Some(repair_listener);
+        println!("Using repair address: {:?}", repair_listener);
     }
 
     // Optionally require SSL connections

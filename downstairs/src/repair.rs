@@ -44,7 +44,7 @@ fn build_api() -> ApiDescription<FileServerContext> {
 pub async fn repair_main(
     ds: &Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
-) -> Result<(), String> {
+) -> Result<SocketAddr, String> {
     /*
      * We must specify a configuration with a bind address.
      */
@@ -87,6 +87,7 @@ pub async fn repair_main(
     let server = HttpServerStarter::new(&config_dropshot, api, context, &log)
         .map_err(|error| format!("failed to create server: {}", error))?
         .start();
+    let local_addr = server.local_addr();
 
     tokio::spawn(async move {
         /*
@@ -97,7 +98,7 @@ pub async fn repair_main(
         server.await
     });
 
-    Ok(())
+    Ok(local_addr)
 }
 
 #[derive(Deserialize, JsonSchema)]
