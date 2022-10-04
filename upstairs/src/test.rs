@@ -3841,7 +3841,6 @@ mod up_test {
     #[tokio::test]
     async fn test_no_iop_limit() -> Result<()> {
         let guest = Guest::new();
-        guest.set_active().await;
 
         assert!(guest.consume_req().await.is_none());
 
@@ -3882,7 +3881,6 @@ mod up_test {
     #[tokio::test]
     async fn test_set_iop_limit() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
         guest.set_iop_limit(16000, 2);
 
         assert!(guest.consume_req().await.is_none());
@@ -3938,7 +3936,6 @@ mod up_test {
     #[tokio::test]
     async fn test_flush_does_not_consume_iops() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         // Set 0 as IOP limit
         guest.set_iop_limit(16000, 0);
@@ -3972,7 +3969,6 @@ mod up_test {
     #[tokio::test]
     async fn test_set_bw_limit() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
         guest.set_bw_limit(1024 * 1024); // 1 KiB
 
         assert!(guest.consume_req().await.is_none());
@@ -4028,7 +4024,6 @@ mod up_test {
     #[tokio::test]
     async fn test_flush_does_not_consume_bw() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         // Set 0 as bandwidth limit
         guest.set_bw_limit(0);
@@ -4062,7 +4057,6 @@ mod up_test {
     #[tokio::test]
     async fn test_iop_and_bw_limit() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         guest.set_iop_limit(16384, 500); // 1 IOP is 16 KiB
         guest.set_bw_limit(6400 * 1024); // 16384 B * 400 = 6400 KiB/s
@@ -4176,7 +4170,6 @@ mod up_test {
     #[tokio::test]
     async fn test_impossible_io() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         guest.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
         guest.set_bw_limit(1024 * 1024); // 1 KiB
