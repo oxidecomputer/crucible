@@ -45,7 +45,7 @@ usdt = "0.3.2"
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }
 aes-gcm-siv = "0.10.3"
 rand_chacha = "0.3.1"
-reqwest = { version = "0.11.11", features = ["default", "blocking" ] }
+reqwest = { version = "0.11.12", features = ["default", "blocking" ] }
 
 [dependencies.slog]
 version = "2.7"
