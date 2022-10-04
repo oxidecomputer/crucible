@@ -13,7 +13,7 @@ dsc-client = { path = "../dsc-client" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 rand = "0.8.5"
 rand_chacha = "0.3.1"
-schemars = { version = "0.8.10", features = [ "uuid" ] }
+schemars = { version = "0.8.11", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
 statistical = "1.0.0"
 tokio = { version = "1.21.0", features = ["full"] }
