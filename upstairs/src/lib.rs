@@ -896,7 +896,7 @@ where
 
                         negotiated = 1;
 
-                        up.ds_repair_address(
+                        up.ds_set_repair_address(
                             up_coms.client_id, repair_addr,
                         ).await;
 
@@ -5563,7 +5563,7 @@ impl Upstairs {
         Ok(notify_guest)
     }
 
-    async fn ds_repair_address(&self, client_id: u8, addr: SocketAddr) {
+    async fn ds_set_repair_address(&self, client_id: u8, addr: SocketAddr) {
         let mut ds = self.downstairs.lock().await;
         ds.ds_repair.insert(client_id, addr);
     }
