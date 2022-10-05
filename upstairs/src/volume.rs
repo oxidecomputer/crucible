@@ -531,7 +531,7 @@ impl BlockIO for Volume {
 
         let affected_sub_volumes = self.sub_volumes_for_lba_range(
             offset.value,
-            data.len().await as u64 / self.block_size,
+            data.len() as u64 / self.block_size,
         );
 
         // TODO parallel dispatch!
@@ -653,7 +653,7 @@ impl BlockIO for Volume {
             data_index += sz;
         }
 
-        assert_eq!(data.len().await, data_index);
+        assert_eq!(data.len(), data_index);
 
         cdt::volume__read__done!(|| (cc, self.uuid));
         Ok(())

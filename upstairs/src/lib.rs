@@ -82,6 +82,7 @@ pub trait BlockIO: Sync {
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
 
+    /// Return the block size - this should never change at runtime!
     async fn get_block_size(&self) -> Result<u64, CrucibleError>;
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError>;
@@ -4497,7 +4498,7 @@ impl Upstairs {
         let nwo = extent_from_offset(
             *ddef,
             offset,
-            Block::from_bytes(data.len().await, &ddef),
+            Block::from_bytes(data.len(), &ddef),
         );
 
         /*
@@ -6060,10 +6061,12 @@ impl fmt::Display for AckStatus {
  * Provides a shared Buffer that Read operations will write into.
  *
  * Originally BytesMut was used here, but it didn't guarantee that memory
- * was shared between cloned BytesMut objects.
+ * was shared between cloned BytesMut objects. Additionally, we added the
+ * idea of ownership and that necessitated another field.
  */
 #[derive(Clone, Debug)]
 pub struct Buffer {
+    len: usize,
     data: Arc<Mutex<Vec<u8>>>,
     owned: Arc<Mutex<Vec<bool>>>,
 }
@@ -6072,6 +6075,7 @@ impl Buffer {
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
         let len = vec.len();
         Buffer {
+            len,
             data: Arc::new(Mutex::new(vec)),
             owned: Arc::new(Mutex::new(vec![false; len])),
         }
@@ -6079,6 +6083,7 @@ impl Buffer {
 
     pub fn new(len: usize) -> Buffer {
         Buffer {
+            len,
             data: Arc::new(Mutex::new(vec![0; len])),
             owned: Arc::new(Mutex::new(vec![false; len])),
         }
@@ -6093,12 +6098,12 @@ impl Buffer {
         Buffer::from_vec(vec)
     }
 
-    pub async fn len(&self) -> usize {
-        self.data.lock().await.len()
+    pub fn len(&self) -> usize {
+        self.len
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.len().await == 0
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub async fn as_vec(&self) -> MutexGuard<'_, Vec<u8>> {
@@ -6114,18 +6119,18 @@ impl Buffer {
 async fn test_buffer_len() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 #[tokio::test]
 async fn test_buffer_len_after_clone() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 
     let new_buffer = data.clone();
-    assert_eq!(new_buffer.len().await, READ_SIZE);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(new_buffer.len(), READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 #[tokio::test]
@@ -6135,7 +6140,7 @@ async fn test_buffer_len_after_clone() {
 async fn test_buffer_len_index_overflow() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 
     let mut vec = data.as_vec().await;
     assert_eq!(vec.len(), 512);
@@ -6149,7 +6154,7 @@ async fn test_buffer_len_index_overflow() {
 async fn test_buffer_len_over_block_size() {
     const READ_SIZE: usize = 600;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 /*
@@ -6232,7 +6237,7 @@ impl BlockOp {
     pub async fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
             BlockOp::Read { offset: _, data } => {
-                Some(ceiling_div!(data.len().await, iop_sz))
+                Some(ceiling_div!(data.len(), iop_sz))
             }
             BlockOp::Write { offset: _, data } => {
                 Some(ceiling_div!(data.len(), iop_sz))
@@ -6252,7 +6257,7 @@ impl BlockOp {
     // Return the total size of this BlockOp
     pub async fn sz(&self) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => Some(data.len().await),
+            BlockOp::Read { offset: _, data } => Some(data.len()),
             BlockOp::Write { offset: _, data } => Some(data.len()),
             _ => None,
         }
@@ -6570,10 +6575,6 @@ impl GuestWork {
 #[derive(Debug)]
 pub struct Guest {
     /*
-     * Set to true when Upstairs reports as active.
-     */
-    active: Mutex<bool>,
-    /*
      * New requests from outside go onto this VecDeque. The notify is how
      * the submission task tells the listening task that new work has been
      * added.
@@ -6618,7 +6619,6 @@ pub struct Guest {
 impl Guest {
     pub fn new() -> Guest {
         Guest {
-            active: Mutex::new(false),
             /*
              * Incoming I/O requests are added to this queue.
              */
@@ -6809,22 +6809,7 @@ impl Guest {
         self.notify.notify_one();
     }
 
-    pub async fn set_active(&self) {
-        let mut active = self.active.lock().await;
-        *active = true;
-    }
-
-    pub async fn is_active(&self) -> bool {
-        // A Guest is active if it's seen the Upstairs return that it's active
-        let active = self.active.lock().await;
-        *active
-    }
-
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
         self.send(extent_query).await.wait().await?;
@@ -6834,9 +6819,6 @@ impl Guest {
     }
 
     pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
@@ -6851,12 +6833,7 @@ impl Guest {
     }
 
     pub async fn commit(&self) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         self.send(BlockOp::Commit).await.wait().await.unwrap();
-
         Ok(())
     }
 }
@@ -6875,7 +6852,6 @@ impl BlockIO for Guest {
         loop {
             if self.query_is_active().await? {
                 println!("This guest Upstairs is now active");
-                self.set_active().await;
                 return Ok(());
             } else {
                 println!(
@@ -6886,16 +6862,10 @@ impl BlockIO for Guest {
         }
     }
 
+    /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        // Disable any more IO from this guest and deactivate the downstairs.
-        // We can't deactivate if we are not yet active.
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let waiter = self.send(BlockOp::Deactivate).await;
         waiter.wait().await?;
-
         Ok(())
     }
 
@@ -6909,10 +6879,6 @@ impl BlockIO for Guest {
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
         self.send(size_query).await.wait().await?;
@@ -6922,10 +6888,6 @@ impl BlockIO for Guest {
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryBlockSize { data: data.clone() };
         self.send(size_query).await.wait().await?;
@@ -6948,13 +6910,9 @@ impl BlockIO for Guest {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let bs = self.get_block_size().await?;
 
-        if (data.len().await % bs as usize) != 0 {
+        if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
         }
 
@@ -6971,10 +6929,6 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
@@ -6994,10 +6948,6 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
@@ -7016,10 +6966,6 @@ impl BlockIO for Guest {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         Ok(self
             .send(BlockOp::Flush { snapshot_details })
             .await
@@ -7028,12 +6974,8 @@ impl BlockIO for Guest {
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        if !self.is_active().await {
-            println!("Request for work from inactive upstairs");
-            // XXX Test access is allowed for now, but not forever.
-            //return Err(CrucibleError::UpstairsInactive);
-        }
-
+        // Note: for this implementation, BlockOp::ShowWork will be sent and
+        // processed by the Upstairs even if it isn't active.
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
@@ -7368,6 +7310,7 @@ async fn process_new_io(
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {
+            // TODO should this first check if the Upstairs is active?
             *data.lock().await = WQCounts {
                 up_count: up.guest.guest_work.lock().await.active.len(),
                 ds_count: up.downstairs.lock().await.active.len(),
@@ -7375,6 +7318,7 @@ async fn process_new_io(
             req.send_ok().await;
         }
         BlockOp::ShowWork { data } => {
+            // TODO should this first check if the Upstairs is active?
             *data.lock().await = show_all_work(up).await;
             req.send_ok().await;
         }
