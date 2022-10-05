@@ -783,6 +783,10 @@ where
         + std::marker::Send
         + 'static,
 {
+    // In this function, repair address should exist, and shouldn't change. Grab
+    // it here.
+    let repair_addr = ads.lock().await.repair_address.unwrap();
+
     let mut negotiated = 0;
     let mut upstairs_connection: Option<UpstairsConnection> = None;
 
@@ -946,7 +950,7 @@ where
                             upstairs_connection.unwrap());
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::YesItsMe { version: 1, repair_addr: ads.lock().await.repair_address.unwrap() }).await?;
+                        fw.send(Message::YesItsMe { version: 1, repair_addr }).await?;
                     }
                     Some(Message::PromoteToActive {
                         upstairs_id,
