@@ -1252,7 +1252,7 @@ async fn generic_workload(
                     c,
                     count,
                     offset.value,
-                    data.len().await,
+                    data.len(),
                     width = count_width,
                 );
                 guest.read(offset, data.clone()).await?;
@@ -1686,11 +1686,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     let vec: Vec<u8> = vec![255; length];
     let data = crucible::Buffer::from_vec(vec);
 
-    println!(
-        "Read  at block {:5}, len:{:7}",
-        offset.value,
-        data.len().await
-    );
+    println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     guest.read(offset, data.clone()).await?;
 
     let dl = data.as_vec().await.to_vec();
@@ -2016,7 +2012,7 @@ async fn repair_workload(
                     c,
                     count,
                     offset.value,
-                    data.len().await,
+                    data.len(),
                     width = count_width,
                     bw = block_width,
                     sw = size_width,
@@ -2324,7 +2320,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     my_count,
                     ioc,
                     my_offset,
-                    data.len().await
+                    data.len()
                 );
                 let future = guest.read_from_byte_offset(my_offset, data);
                 futureslist.push(future);
