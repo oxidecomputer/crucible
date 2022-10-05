@@ -671,6 +671,13 @@ where
         + std::marker::Send
         + 'static,
 {
+    // Clear this Downstair's repair address, and let the YesItsMe set it. This
+    // works if this Downstairs is new, reconnecting, or was replaced entirely -
+    // the repair address could have changed in any of these cases.
+    up.ds_clear_repair_address(up_coms.client_id).await;
+
+    // If this Downstairs is returning from being disconnected, we need to call
+    // re_new.
     {
         let mut ds = up.downstairs.lock().await;
         let my_state = ds.ds_state[up_coms.client_id as usize];
@@ -706,6 +713,7 @@ where
             ds.re_new(up_coms.client_id);
         }
     }
+
     let mut self_promotion = false;
 
     /*
@@ -5566,6 +5574,11 @@ impl Upstairs {
     async fn ds_set_repair_address(&self, client_id: u8, addr: SocketAddr) {
         let mut ds = self.downstairs.lock().await;
         ds.ds_repair.insert(client_id, addr);
+    }
+
+    async fn ds_clear_repair_address(&self, client_id: u8) {
+        let mut ds = self.downstairs.lock().await;
+        ds.ds_repair.remove(&client_id);
     }
 }
 
