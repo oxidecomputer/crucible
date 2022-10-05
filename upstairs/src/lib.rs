@@ -671,6 +671,41 @@ where
         + std::marker::Send
         + 'static,
 {
+    {
+        let mut ds = up.downstairs.lock().await;
+        let my_state = ds.ds_state[up_coms.client_id as usize];
+
+        info!(
+            up.log,
+            "[{}] Proc runs for {} in state {:?}",
+            up_coms.client_id,
+            target,
+            my_state,
+        );
+
+        // XXX Move this all to some state check place?
+        if my_state != DsState::New
+            && my_state != DsState::Disconnected
+            && my_state != DsState::Failed
+            && my_state != DsState::Offline
+        {
+            panic!(
+                "[{}] failed proc with state {:?}",
+                up_coms.client_id, my_state
+            );
+        }
+
+        /*
+         * This is only applicable for a downstairs that is returning from
+         * being disconnected. Mark any in progress jobs since the
+         * last good flush back to New, as we have reconnected to
+         * this downstairs and will need to replay any work that we
+         * were holding that we did not flush.
+         */
+        if my_state == DsState::Offline {
+            ds.re_new(up_coms.client_id);
+        }
+    }
     let mut self_promotion = false;
 
     /*
@@ -861,43 +896,9 @@ where
 
                         negotiated = 1;
 
-                        up.ds_repair_address(up_coms.client_id, repair_addr).await;
-
-                        // If this downstairs is returning, then attempt repair
-                        {
-                            let mut ds = up.downstairs.lock().await;
-                            let my_state = ds.ds_state[up_coms.client_id as usize];
-                            info!(
-                                up.log,
-                                "[{}] Proc runs for {} in state {:?} repair at: {:?}",
-                                up_coms.client_id,
-                                target,
-                                my_state,
-                                ds.repair_addr(up_coms.client_id),
-                            );
-                            // XXX Move this all to some state check place?
-                            if my_state != DsState::New
-                                && my_state != DsState::Disconnected
-                                && my_state != DsState::Failed
-                                && my_state != DsState::Offline
-                            {
-                                panic!(
-                                    "[{}] failed proc with state {:?}",
-                                    up_coms.client_id, my_state
-                                );
-                            }
-
-                            /*
-                             * This is only applicable for a downstairs that is returning
-                             * from being disconnected.  Mark any in progress jobs since the
-                             * last good flush back to New, as we have reconnected to this
-                             * downstairs and will need to replay any work that we were
-                             * holding that we did not flush.
-                             */
-                            if my_state == DsState::Offline {
-                                ds.re_new(up_coms.client_id);
-                            }
-                        }
+                        up.ds_repair_address(
+                            up_coms.client_id, repair_addr,
+                        ).await;
 
                         /*
                          * We only set guest_io_ready after all three downstairs
