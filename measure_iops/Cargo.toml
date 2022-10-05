@@ -11,6 +11,6 @@ clap = { version = "3.2", features = ["derive"] }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 rand = "0.8.5"
-tokio = { version = "1.21.0", features = ["full"] }
+tokio = { version = "1.21.2", features = ["full"] }
 statistical = "1.0.0"
 uuid = "1"
