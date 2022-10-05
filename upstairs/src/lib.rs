@@ -3778,14 +3778,6 @@ impl Upstairs {
          */
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
-        /*
-         * The repair port is the downstairs target port + 4000
-         * XXX How do we advertise/enforce this?
-         */
-        #[cfg(not(test))]
-        for addr in opt.target.iter() {
-            assert!(addr.port() < u16::MAX - 4000);
-        }
 
         // create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
