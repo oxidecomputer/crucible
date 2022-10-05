@@ -870,6 +870,7 @@ async fn verify_volume(
         .template(
             "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
         )
+        .unwrap()
         .progress_chars("#>-"));
 
     let io_sz = 100;
@@ -1143,6 +1144,7 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         .template(
             "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
         )
+        .unwrap()
         .progress_chars("#>-"));
 
     let io_sz = 100;
