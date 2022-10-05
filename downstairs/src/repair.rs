@@ -40,7 +40,7 @@ fn build_api() -> ApiDescription<FileServerContext> {
     api
 }
 
-/// Returns Ok if everything launched ok, Err otherwise
+/// Returns Ok(listen address) if everything launched ok, Err otherwise
 pub async fn repair_main(
     ds: &Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
