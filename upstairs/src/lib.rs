@@ -6961,6 +6961,8 @@ impl BlockIO for Guest {
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+        // Note: for this implementation, BlockOp::ShowWork will be sent and
+        // processed by the Upstairs even if it isn't active.
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
@@ -7295,6 +7297,7 @@ async fn process_new_io(
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {
+            // TODO should this first check if the Upstairs is active?
             *data.lock().await = WQCounts {
                 up_count: up.guest.guest_work.lock().await.active.len(),
                 ds_count: up.downstairs.lock().await.active.len(),
@@ -7302,6 +7305,7 @@ async fn process_new_io(
             req.send_ok().await;
         }
         BlockOp::ShowWork { data } => {
+            // TODO should this first check if the Upstairs is active?
             *data.lock().await = show_all_work(up).await;
             req.send_ok().await;
         }
