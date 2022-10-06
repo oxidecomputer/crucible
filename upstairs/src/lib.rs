@@ -2834,41 +2834,64 @@ impl Downstairs {
         // 1) remove block context rows and cause a denial of service, or
         // 2) roll back a block by writing an old data and block context
 
+        // In the encrypted case, blocks that have not yet been written to will
+        // have no block context rows in the database.
+
+        if response.block_contexts.is_empty()
+            && response.data[..].iter().all(|&x| x == 0)
+        {
+            return Ok(None);
+        }
+
         // check integrity hashes - make sure at least one is correct.
         let mut valid_hash = None;
 
-        if !response.block_contexts.is_empty() {
-            let mut successful_hash = false;
+        let mut successful_hash = false;
 
-            let computed_hash = integrity_hash(&[&response.data[..]]);
+        let computed_hash = integrity_hash(&[&response.data[..]]);
 
-            // The most recent hash is probably going to be the right one.
+        // The most recent hash is probably going to be the right one.
+        for context in response.block_contexts.iter().rev() {
+            if computed_hash == context.hash {
+                successful_hash = true;
+                valid_hash = Some(context.hash);
+                break;
+            }
+        }
+
+        // If there was a write of unencrypted data to a previously unwritten
+        // block but the Downstairs crashed before the extent was flushed, then:
+        //
+        // 1. successful_hash will be false, as the for loop above iterates over
+        //    response.block_contexts but won't find a hash that matches
+        //
+        // 2. this block will be blank
+        //
+        // if the above case matches, return that the blank block is valid.
+
+        if !successful_hash
+            && !response.block_contexts.is_empty()
+            && response.data[..].iter().all(|&x| x == 0)
+        {
+            warn!(
+                log,
+                "block {} in extent {} is a blank block that was written \
+                to but not flushed",
+                response.offset.value,
+                response.eid,
+            );
+            return Ok(None);
+        }
+
+        if !successful_hash {
+            // No integrity hash was correct for this response
+            error!(log, "No match computed hash:0x{:x}", computed_hash,);
             for context in response.block_contexts.iter().rev() {
-                if computed_hash == context.hash {
-                    successful_hash = true;
-                    valid_hash = Some(context.hash);
-                    break;
-                }
+                error!(log, "No match          hash:0x{:x}", context.hash);
             }
+            error!(log, "Data from hash: {:?}", response.data);
 
-            if !successful_hash {
-                // No integrity hash was correct for this response
-                error!(log, "No match computed hash:0x{:x}", computed_hash,);
-                for context in response.block_contexts.iter().rev() {
-                    error!(log, "No match          hash:0x{:x}", context.hash);
-                }
-                error!(log, "Data from hash: {:?}", response.data);
-
-                return Err(CrucibleError::HashMismatch);
-            }
-        } else {
-            // No hashes in response!
-            //
-            // Either this is a read of an unwritten block, or an attacker
-            // removed the hashes from the db.
-            //
-            // XXX if it's not a blank block, we may be under attack?
-            assert!(response.data[..].iter().all(|&x| x == 0));
+            return Err(CrucibleError::HashMismatch);
         }
 
         Ok(valid_hash)

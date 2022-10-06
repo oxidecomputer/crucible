@@ -745,6 +745,41 @@ mod up_test {
     }
 
     #[test]
+    pub fn test_upstairs_validate_unencrypted_read_response_blank_block_before_flush(
+    ) -> Result<()> {
+        use rand::{thread_rng, Rng};
+
+        let mut data = BytesMut::with_capacity(512);
+        data.resize(512, 0u8);
+
+        // Create the read response
+        let mut read_response = ReadResponse {
+            eid: 0,
+            offset: Block::new_512(0),
+            data: data.clone(),
+            block_contexts: vec![
+                // This BlockContext would be from a write
+                BlockContext {
+                    hash: thread_rng().gen(),
+                    encryption_context: None,
+                },
+            ],
+        };
+
+        // Validate it
+        let successful_hash = Downstairs::validate_unencrypted_read_response(
+            &mut read_response,
+            &csl(),
+        )?;
+
+        // The above function will return None for a blank block
+        assert_eq!(successful_hash, None);
+        assert_eq!(data, vec![0u8; 512]);
+
+        Ok(())
+    }
+
+    #[test]
     pub fn test_upstairs_validate_unencrypted_read_response_multiple_contexts(
     ) -> Result<()> {
         use rand::{thread_rng, Rng};
