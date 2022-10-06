@@ -2965,8 +2965,10 @@ impl Downstairs {
                     // failed, continue to the next contexts. the current
                     // hashing algorithm (xxHash) is not a cryptographic hash
                     // and is only u64, so collisions are not impossible.
-                    error!(log, "Decryption failed even though integrity hash \
-                        matched!");
+                    info!(
+                        log,
+                        "Decryption failed even though integrity hash matched!"
+                    );
                 }
             }
         }
