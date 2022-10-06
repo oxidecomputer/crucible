@@ -2822,13 +2822,18 @@ impl Downstairs {
 
     /// Returns:
     /// - Ok(Some(valid_hash)) where the integrity hash matches
-    /// - Ok(None) where there is no integrity hash in the response and the
-    ///   block is all 0
+    /// - Ok(None) if block has not yet been written to
     /// - Err otherwise
     fn validate_unencrypted_read_response(
         response: &mut ReadResponse,
         log: &Logger,
     ) -> Result<Option<u64>, CrucibleError> {
+        // XXX because we don't have block generation numbers, an attacker
+        // downstairs could:
+        //
+        // 1) remove block context rows and cause a denial of service, or
+        // 2) roll back a block by writing an old data and block context
+
         // check integrity hashes - make sure at least one is correct.
         let mut valid_hash = None;
 
@@ -2871,8 +2876,7 @@ impl Downstairs {
 
     /// Returns:
     /// - Ok(Some(valid_hash)) for successfully decrypted data
-    /// - Ok(None) if there were no block contexts, or if there were no
-    ///   encryption contexts in any block context, and block was all 0
+    /// - Ok(None) if block has not yet been written to
     /// - Err otherwise
     ///
     /// The return value of this will be stored with the job, and compared
@@ -2885,26 +2889,15 @@ impl Downstairs {
         // XXX because we don't have block generation numbers, an attacker
         // downstairs could:
         //
-        // 1) remove encryption context and cause a denial of service, or
-        // 2) roll back a block by writing an old data and encryption context
-        //
-        // check that this read response contains block contexts that contain
-        // (at least one) encryption context.
+        // 1) remove block context rows and cause a denial of service, or
+        // 2) roll back a block by writing an old data and block context
+
+        // In the encrypted case, blocks that have not yet been written to will
+        // have no block context rows in the database.
 
         if response.block_contexts.is_empty()
-            || response
-                .block_contexts
-                .iter()
-                .all(|ctx| ctx.encryption_context.is_none())
+            && response.data[..].iter().all(|&x| x == 0)
         {
-            // No block context(s), or no block context contained an encryption
-            // context, in the response!
-            //
-            // Either this is a read of an unwritten block, or an attacker
-            // removed the encryption contexts from the db.
-            //
-            // XXX if it's not a blank block, we may be under attack?
-            assert!(response.data[..].iter().all(|&x| x == 0));
             return Ok(None);
         }
 
@@ -2972,6 +2965,34 @@ impl Downstairs {
                     );
                 }
             }
+        }
+
+        // If there was a write of encrypted data to a previously unwritten
+        // block but the Downstairs crashed before the extent was flushed, then:
+        //
+        // 1. successful_hash and successful_decryption will both be false, as
+        //    the for loop above iterates over response.block_contexts but won't
+        //    find a hash that matches
+        //
+        // 2. this block will be blank
+        //
+        // at this point, decryption was attempted on the block contexts
+        // with encryption contexts. if the above case matches, return that
+        // the blank block is valid.
+
+        if !successful_hash
+            && !successful_decryption
+            && !response.block_contexts.is_empty()
+            && response.data[..].iter().all(|&x| x == 0)
+        {
+            warn!(
+                log,
+                "block {} in extent {} is a blank block that was written \
+                to but not flushed",
+                response.offset.value,
+                response.eid,
+            );
+            return Ok(None);
         }
 
         if !successful_hash {
