@@ -230,8 +230,10 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                 eid,
                 offset,
                 data: buffer.freeze(),
-                encryption_context: None,
-                hash: integrity_hash(&[data]),
+                block_context: BlockContext {
+                    hash: integrity_hash(&[data]),
+                    encryption_context: None,
+                },
             });
 
             pos.advance(len);
@@ -3437,10 +3439,10 @@ mod test {
                 assert_eq!(responses.len(), 1);
 
                 let response = &responses[0];
-                assert_eq!(response.hashes.len(), 1);
+                assert_eq!(response.hashes().len(), 1);
                 assert_eq!(
                     integrity_hash(&[&response.data[..]]),
-                    response.hashes[0],
+                    response.hashes()[0],
                 );
 
                 read_data.extend_from_slice(&response.data[..]);

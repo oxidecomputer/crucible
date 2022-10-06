@@ -1240,8 +1240,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1592,8 +1594,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1607,8 +1611,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1747,8 +1753,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1877,8 +1885,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1892,8 +1902,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2384,8 +2396,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2456,8 +2470,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2598,8 +2614,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2779,8 +2797,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -3707,11 +3727,12 @@ mod up_test {
             offset: request.offset,
 
             data: BytesMut::from(&data[..]),
-            encryption_contexts: vec![crucible_protocol::EncryptionContext {
-                nonce,
-                tag,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash,
             }],
-            hashes: vec![hash],
         }]);
 
         let result =
@@ -3756,10 +3777,10 @@ mod up_test {
             offset: request.offset,
 
             data: BytesMut::from(&data[..]),
-            encryption_contexts: vec![],
-            hashes: vec![
-                10000, // junk hash
-            ],
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash: 10000, // junk hash,
+            }],
         }]);
 
         let result =
@@ -3816,13 +3837,12 @@ mod up_test {
             offset: request.offset,
 
             data: BytesMut::from(&data[..]),
-            encryption_contexts: vec![crucible_protocol::EncryptionContext {
-                nonce,
-                tag,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash: 10000, // junk hash,
             }],
-            hashes: vec![
-                10000, // junk hash
-            ],
         }]);
 
         let result =
@@ -4254,8 +4274,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4338,8 +4360,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4488,8 +4512,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4596,8 +4622,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4656,8 +4684,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
