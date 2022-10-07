@@ -2834,8 +2834,8 @@ impl Downstairs {
         // 1) remove block context rows and cause a denial of service, or
         // 2) roll back a block by writing an old data and block context
 
-        // In the encrypted case, blocks that have not yet been written to will
-        // have no block context rows in the database.
+        // In the unencrypted case, blocks that have not yet been written to
+        // will have no block context rows in the database.
 
         if response.block_contexts.is_empty()
             && response.data[..].iter().all(|&x| x == 0)
