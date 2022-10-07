@@ -135,10 +135,8 @@ impl Volume {
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
-        tokio::spawn(async move {
-            // XXX result eaten here!
-            let _ = up_main(opts, gen, guest_clone, producer_registry).await;
-        });
+        let _join_handle =
+            up_main(opts, gen, guest_clone, producer_registry).await?;
 
         guest.activate(gen).await?;
 

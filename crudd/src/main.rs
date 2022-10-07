@@ -492,7 +492,8 @@ async fn main() -> Result<()> {
     // TODO: volumes?
     let guest = Arc::new(Guest::new(opt.block_size));
 
-    tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
+    let _join_handle =
+        up_main(crucible_opts, opt.gen, guest.clone(), None).await?;
     eprintln!("Crucible runtime is spawned");
 
     // IO time

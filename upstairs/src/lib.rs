@@ -669,17 +669,25 @@ where
         + std::marker::Send
         + 'static,
 {
+    // Clear this Downstair's repair address, and let the YesItsMe set it. This
+    // works if this Downstairs is new, reconnecting, or was replaced entirely -
+    // the repair address could have changed in any of these cases.
+    up.ds_clear_repair_address(up_coms.client_id).await;
+
+    // If this Downstairs is returning from being disconnected, we need to call
+    // re_new.
     {
         let mut ds = up.downstairs.lock().await;
         let my_state = ds.ds_state[up_coms.client_id as usize];
+
         info!(
             up.log,
-            "[{}] Proc runs for {} in state {:?} repair at: {:?}",
+            "[{}] Proc runs for {} in state {:?}",
             up_coms.client_id,
             target,
             my_state,
-            ds.repair_addr(up_coms.client_id),
         );
+
         // XXX Move this all to some state check place?
         if my_state != DsState::New
             && my_state != DsState::Disconnected
@@ -693,11 +701,11 @@ where
         }
 
         /*
-         * This is only applicable for a downstairs that is returning
-         * from being disconnected.  Mark any in progress jobs since the
-         * last good flush back to New, as we have reconnected to this
-         * downstairs and will need to replay any work that we were
-         * holding that we did not flush.
+         * This is only applicable for a downstairs that is returning from
+         * being disconnected. Mark any in progress jobs since the
+         * last good flush back to New, as we have reconnected to
+         * this downstairs and will need to replay any work that we
+         * were holding that we did not flush.
          */
         if my_state == DsState::Offline {
             ds.re_new(up_coms.client_id);
@@ -874,7 +882,7 @@ where
                             up.encrypted(),
                         );
                     }
-                    Some(Message::YesItsMe { version }) => {
+                    Some(Message::YesItsMe { version, repair_addr }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
@@ -891,7 +899,13 @@ where
                             ).await;
                             bail!("expected version 1, got {}", version);
                         }
+
                         negotiated = 1;
+
+                        up.ds_set_repair_address(
+                            up_coms.client_id, repair_addr,
+                        ).await;
+
                         /*
                          * We only set guest_io_ready after all three downstairs
                          * have gone active, which means the upstairs did
@@ -2186,9 +2200,10 @@ struct Downstairs {
      * UUID for each downstairs, index by client ID
      */
     ds_uuid: HashMap<u8, Uuid>,
+
     /*
      * The IP:Port for repair when contacting the downstairs, hashed by
-     * the client index the upstairs gives it..
+     * the client index the upstairs gives it.
      */
     ds_repair: HashMap<u8, SocketAddr>,
 
@@ -2246,20 +2261,10 @@ struct Downstairs {
 }
 
 impl Downstairs {
-    fn new(target: Vec<SocketAddr>, log: Logger) -> Self {
-        // Fill the repair hashmap based on the
-        // addresses from each downstairs.
-        let mut ds_repair = HashMap::new();
-        for (i, addr) in target.iter().enumerate() {
-            assert!(addr.port() < u16::MAX - REPAIR_PORT_OFFSET);
-            let port = addr.port() + REPAIR_PORT_OFFSET;
-            let repair_addr = SocketAddr::new(addr.ip(), port);
-            ds_repair.insert(i as u8, repair_addr);
-        }
-
+    fn new(log: Logger) -> Self {
         Self {
             ds_uuid: HashMap::new(),
-            ds_repair,
+            ds_repair: HashMap::new(),
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
@@ -2431,6 +2436,7 @@ impl Downstairs {
             );
         }
     }
+
     /*
      * Given a client ID, return the SocketAddr for repair to use.
      */
@@ -2817,22 +2823,28 @@ impl Downstairs {
         }
     }
 
+    /// Returns:
+    /// - Ok(Some(valid_hash)) where the integrity hash matches
+    /// - Ok(None) where there is no integrity hash in the response and the
+    ///   block is all 0
+    /// - Err otherwise
     fn validate_unencrypted_read_response(
         response: &mut ReadResponse,
         log: &Logger,
     ) -> Result<Option<u64>, CrucibleError> {
         // check integrity hashes - make sure at least one is correct.
-        let mut vh = None;
-        if !response.hashes.is_empty() {
+        let mut valid_hash = None;
+
+        if !response.block_contexts.is_empty() {
             let mut successful_hash = false;
 
             let computed_hash = integrity_hash(&[&response.data[..]]);
 
             // The most recent hash is probably going to be the right one.
-            for hash in response.hashes.iter().rev() {
-                if computed_hash == *hash {
+            for context in response.block_contexts.iter().rev() {
+                if computed_hash == context.hash {
                     successful_hash = true;
-                    vh = Some(*hash);
+                    valid_hash = Some(context.hash);
                     break;
                 }
             }
@@ -2840,8 +2852,8 @@ impl Downstairs {
             if !successful_hash {
                 // No integrity hash was correct for this response
                 error!(log, "No match computed hash:0x{:x}", computed_hash,);
-                for hash in response.hashes.iter().rev() {
-                    error!(log, "No match          hash:0x{:x}", hash);
+                for context in response.block_contexts.iter().rev() {
+                    error!(log, "No match          hash:0x{:x}", context.hash);
                 }
                 error!(log, "Data from hash: {:?}", response.data);
 
@@ -2857,9 +2869,17 @@ impl Downstairs {
             assert!(response.data[..].iter().all(|&x| x == 0));
         }
 
-        Ok(vh)
+        Ok(valid_hash)
     }
 
+    /// Returns:
+    /// - Ok(Some(valid_hash)) for successfully decrypted data
+    /// - Ok(None) if there were no block contexts, or if there were no
+    ///   encryption contexts in any block context, and block was all 0
+    /// - Err otherwise
+    ///
+    /// The return value of this will be stored with the job, and compared
+    /// between each read.
     fn validate_encrypted_read_response(
         response: &mut ReadResponse,
         encryption_context: &Arc<EncryptionContext>,
@@ -2871,107 +2891,126 @@ impl Downstairs {
         // 1) remove encryption context and cause a denial of service, or
         // 2) roll back a block by writing an old data and encryption context
         //
-        // check for response encryption contexts here
-        let mut vh = None;
-        if !response.encryption_contexts.is_empty() {
-            let mut successful_decryption = false;
-            let mut successful_hash = false;
+        // check that this read response contains block contexts that contain
+        // (at least one) encryption context.
 
-            // Attempt decryption with each encryption context, and fail if all
-            // do not work. The most recent encryption context will most likely
-            // be the correct one so start there.
-            let encryption_context_iter =
-                response.encryption_contexts.iter().enumerate().rev();
-
-            // Hashes and encryption contexts are written out at the same time
-            // (in the same transaction) therefore there should be the same
-            // number of them.
-            assert_eq!(
-                response.encryption_contexts.len(),
-                response.hashes.len(),
-            );
-
-            for (i, ctx) in encryption_context_iter {
-                // Validate integrity hash before decryption
-                let computed_hash = integrity_hash(&[
-                    &ctx.nonce[..],
-                    &ctx.tag[..],
-                    &response.data[..],
-                ]);
-
-                if computed_hash == response.hashes[i] {
-                    successful_hash = true;
-                    vh = Some(computed_hash);
-
-                    // Now that the integrity hash was verified, attempt
-                    // decryption.
-                    //
-                    // Note: decrypt_in_place does not overwrite the buffer if
-                    // it fails, otherwise we would need to copy here. There's a
-                    // unit test to validate this behaviour.
-                    let decryption_result = encryption_context
-                        .decrypt_in_place(
-                            &mut response.data[..],
-                            Nonce::from_slice(&ctx.nonce[..]),
-                            Tag::from_slice(&ctx.tag[..]),
-                        );
-
-                    if decryption_result.is_ok() {
-                        successful_decryption = true;
-                        break;
-                    } else {
-                        // Because hashes, nonces, and tags are committed to
-                        // disk every time there is a Crucible write, but data
-                        // is only committed to disk when there's a Crucible
-                        // flush, only one hash + nonce + tag + data combination
-                        // will be correct. Due to the fact that nonces are
-                        // random for each write, even if the Guest wrote the
-                        // same data block 100 times, only one index will be
-                        // valid.
-                        //
-                        // if the computed integrity hash matched but decryption
-                        // failed, bail out here.
-                        break;
-                    }
-                }
-            }
-
-            if !successful_hash {
-                error!(log, "No match for encrypted computed hash");
-                for (i, ctx) in response.encryption_contexts.iter().enumerate()
-                {
-                    let computed_hash = integrity_hash(&[
-                        &ctx.nonce[..],
-                        &ctx.tag[..],
-                        &response.data[..],
-                    ]);
-                    error!(
-                        log,
-                        "Expected: 0x{:x} != Computed: 0x{:x}",
-                        response.hashes[i],
-                        computed_hash
-                    );
-                }
-                // no hash was correct
-                return Err(CrucibleError::HashMismatch);
-            } else if !successful_decryption {
-                // no hash + encryption context combination decrypted this block
-                error!(log, "Decryption failed with correct hash");
-                return Err(CrucibleError::DecryptionError);
-            } else {
-                // Ok!
-            }
-        } else {
-            // No encryption context in the response!
+        if response.block_contexts.is_empty()
+            || response
+                .block_contexts
+                .iter()
+                .all(|ctx| ctx.encryption_context.is_none())
+        {
+            // No block context(s), or no block context contained an encryption
+            // context, in the response!
             //
             // Either this is a read of an unwritten block, or an attacker
             // removed the encryption contexts from the db.
             //
             // XXX if it's not a blank block, we may be under attack?
             assert!(response.data[..].iter().all(|&x| x == 0));
+            return Ok(None);
         }
 
-        Ok(vh)
+        let mut valid_hash = None;
+
+        let mut successful_decryption = false;
+        let mut successful_hash = false;
+
+        // Attempt decryption with each encryption context, and fail if all
+        // do not work. The most recent encryption context will most likely
+        // be the correct one so start there.
+        for ctx in response.block_contexts.iter().rev() {
+            let block_encryption_ctx =
+                if let Some(block_encryption_ctx) = &ctx.encryption_context {
+                    block_encryption_ctx
+                } else {
+                    // this block context is missing an encryption context!
+                    // continue to see if another block context has a valid one.
+                    continue;
+                };
+
+            // Validate integrity hash before decryption
+            let computed_hash = integrity_hash(&[
+                &block_encryption_ctx.nonce[..],
+                &block_encryption_ctx.tag[..],
+                &response.data[..],
+            ]);
+
+            if computed_hash == ctx.hash {
+                successful_hash = true;
+                valid_hash = Some(ctx.hash);
+
+                // Now that the integrity hash was verified, attempt
+                // decryption.
+                //
+                // Note: decrypt_in_place does not overwrite the buffer if
+                // it fails, otherwise we would need to copy here. There's a
+                // unit test to validate this behaviour.
+                let decryption_result = encryption_context.decrypt_in_place(
+                    &mut response.data[..],
+                    Nonce::from_slice(&block_encryption_ctx.nonce[..]),
+                    Tag::from_slice(&block_encryption_ctx.tag[..]),
+                );
+
+                if decryption_result.is_ok() {
+                    successful_decryption = true;
+                    break;
+                } else {
+                    // Because hashes, nonces, and tags are committed to
+                    // disk every time there is a Crucible write, but data
+                    // is only committed to disk when there's a Crucible
+                    // flush, only one hash + nonce + tag + data combination
+                    // will be correct. Due to the fact that nonces are
+                    // random for each write, even if the Guest wrote the
+                    // same data block 100 times, only one index will be
+                    // valid.
+                    //
+                    // if the computed integrity hash matched but decryption
+                    // failed, continue to the next contexts. the current
+                    // hashing algorithm (xxHash) is not a cryptographic hash
+                    // and is only u64, so collisions are not impossible.
+                    warn!(
+                        log,
+                        "Decryption failed even though integrity hash matched!"
+                    );
+                }
+            }
+        }
+
+        if !successful_hash {
+            error!(log, "No match for integrity hash");
+            for ctx in response.block_contexts.iter() {
+                let block_encryption_ctx = if let Some(block_encryption_ctx) =
+                    &ctx.encryption_context
+                {
+                    block_encryption_ctx
+                } else {
+                    error!(log, "missing encryption context!");
+                    continue;
+                };
+
+                let computed_hash = integrity_hash(&[
+                    &block_encryption_ctx.nonce[..],
+                    &block_encryption_ctx.tag[..],
+                    &response.data[..],
+                ]);
+                error!(
+                    log,
+                    "Expected: 0x{:x} != Computed: 0x{:x}",
+                    ctx.hash,
+                    computed_hash
+                );
+            }
+            // no hash was correct
+            Err(CrucibleError::HashMismatch)
+        } else if !successful_decryption {
+            // no hash + encryption context combination decrypted this block
+            error!(log, "Decryption failed with correct hash");
+            Err(CrucibleError::DecryptionError)
+        } else {
+            // Ok!
+            Ok(valid_hash)
+        }
     }
 
     /**
@@ -3769,14 +3808,6 @@ impl Upstairs {
          */
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
-        /*
-         * The repair port is the downstairs target port + 4000
-         * XXX How do we advertise/enforce this?
-         */
-        #[cfg(not(test))]
-        for addr in opt.target.iter() {
-            assert!(addr.port() < u16::MAX - 4000);
-        }
 
         // create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
@@ -3809,10 +3840,7 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(
-                opt.target.clone(),
-                log.clone(),
-            )),
+            downstairs: Mutex::new(Downstairs::new(log.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
@@ -4419,8 +4447,10 @@ impl Upstairs {
                 eid,
                 offset: bo,
                 data: sub_data,
-                encryption_context,
-                hash,
+                block_context: BlockContext {
+                    hash,
+                    encryption_context,
+                },
             });
 
             cur_offset += byte_len;
@@ -5565,6 +5595,16 @@ impl Upstairs {
 
         Ok(notify_guest)
     }
+
+    async fn ds_set_repair_address(&self, client_id: u8, addr: SocketAddr) {
+        let mut ds = self.downstairs.lock().await;
+        ds.ds_repair.insert(client_id, addr);
+    }
+
+    async fn ds_clear_repair_address(&self, client_id: u8) {
+        let mut ds = self.downstairs.lock().await;
+        ds.ds_repair.remove(&client_id);
+    }
 }
 
 #[derive(Debug)]
@@ -6370,7 +6410,8 @@ impl GtoS {
 
                         for i in &response.data {
                             vec[offset] = *i;
-                            owned_vec[offset] = !response.hashes.is_empty();
+                            owned_vec[offset] =
+                                !response.block_contexts.is_empty();
                             offset += 1;
                         }
                     }
@@ -7516,17 +7557,18 @@ async fn up_listen(
 }
 
 /*
- * This is the main upstairs task that starts all the other async
- * tasks.  The final step is to call up_listen() which will coordinate
- * the connection to the downstairs and start listening for incoming
- * IO from the guest when the time is ready.
+ * This is the main upstairs task that starts all the other async tasks. The
+ * final step is to call up_listen() which will coordinate the connection to
+ * the downstairs and start listening for incoming IO from the guest when the
+ * time is ready. It will return Ok with a join handle if every required task
+ * was successfully launched, and Err otherwise.
  */
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
-) -> Result<()> {
+) -> Result<tokio::task::JoinHandle<()>> {
     register_probes().unwrap();
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator)
@@ -7662,22 +7704,20 @@ pub async fn up_main(
             info!(upi.log, "Control HTTP task finished with {:?}", r);
         });
     }
-    /*
-     * The final step is to call this function to wait for our downstairs
-     * tasks to connect to their respective downstairs instance.
-     * Once connected, we then take work requests from the guest and
-     * submit them into the upstairs
-     */
-    up_listen(
-        &up,
-        dst,
-        ds_status_rx,
-        ds_reconcile_done_rx,
-        opt.flush_timeout,
-    )
-    .await;
 
-    Ok(())
+    let flush_timeout = opt.flush_timeout;
+    let join_handle = tokio::spawn(async move {
+        /*
+         * The final step is to call this function to wait for our downstairs
+         * tasks to connect to their respective downstairs instance.
+         * Once connected, we then take work requests from the guest and
+         * submit them into the upstairs
+         */
+        up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx, flush_timeout)
+            .await
+    });
+
+    Ok(join_handle)
 }
 
 /*

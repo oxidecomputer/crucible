@@ -96,7 +96,8 @@ async fn main() -> Result<()> {
      */
     let guest = Arc::new(Guest::new(opt.block_size));
 
-    tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), None));
+    let _join_handle =
+        up_main(crucible_opts, opt.gen, guest.clone(), None).await?;
     println!("Crucible runtime is spawned");
 
     // NBD server
