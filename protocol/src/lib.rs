@@ -141,6 +141,7 @@ pub enum Message {
     },
     YesItsMe {
         version: u32,
+        repair_addr: SocketAddr,
     },
 
     // Reasons to reject the initial negotiation
@@ -611,7 +612,10 @@ mod tests {
 
     #[test]
     fn rt_yes_its_me() -> Result<()> {
-        let input = Message::YesItsMe { version: 20000 };
+        let input = Message::YesItsMe {
+            version: 20000,
+            repair_addr: "127.0.0.1:123".parse().unwrap(),
+        };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

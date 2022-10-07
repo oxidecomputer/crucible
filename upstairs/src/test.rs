@@ -1007,8 +1007,7 @@ mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
-        let target = vec![];
-        let mut ds = Downstairs::new(target, csl());
+        let mut ds = Downstairs::new(csl());
 
         let id = ds.next_id();
 
@@ -3799,8 +3798,7 @@ mod up_test {
     #[test]
     fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let target = vec![];
-        let mut ds = Downstairs::new(target, csl());
+        let mut ds = Downstairs::new(csl());
         let next_id = ds.next_id();
 
         let request = ReadRequest {

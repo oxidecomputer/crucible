@@ -520,7 +520,8 @@ async fn main() -> Result<()> {
         pr = None;
     }
 
-    tokio::spawn(up_main(crucible_opts, opt.gen, guest.clone(), pr));
+    let _join_handle =
+        up_main(crucible_opts, opt.gen, guest.clone(), pr).await?;
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
