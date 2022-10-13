@@ -36,6 +36,14 @@ for bin in $cds $ct $ch $dsc; do
     fi
 done
 
+# Control-C to cleanup.
+trap ctrl_c INT
+function ctrl_c() {
+	echo "Stopping at your request"
+    ${dsc} cmd shutdown
+    exit 1
+}
+
 # Downstairs regions go in this directory
 testdir="/var/tmp/test_up"
 if [[ -d ${testdir} ]]; then
@@ -79,6 +87,7 @@ dsc_output="${test_output_dir}/dsc-out.txt"
 dsc_args+=( --cleanup --create )
 dsc_args+=( --extent-size 10 --extent-count 5 )
 dsc_args+=( --output-dir "$dsc_output_dir" )
+dsc_args+=( --ds-bin "$cds" )
 
 # Note, this should match the default for DSC
 port_base=8810
