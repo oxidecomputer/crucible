@@ -98,6 +98,15 @@ dsc_pid=$!
 sleep 2
 if ! pgrep -P $dsc_pid > /dev/null; then
     echo "Gosh diddly darn it, dsc at $dsc_pid did not start"
+    echo downstairs:
+    ps -ef | grep downstairs
+    echo dsc:
+    ps -ef | grep dsc
+    echo files:
+    ls -l /tmp/test_up
+    ls -l /tmp/test_up/dsc
+    echo cat:
+    cat /tmp/test_up/dsc-out.txt
     exit 1
 fi
 
