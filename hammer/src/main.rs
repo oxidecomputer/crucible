@@ -59,7 +59,7 @@ pub struct Opt {
     #[clap(long, action)]
     control: Option<SocketAddr>,
 
-    #[clap(long, action)]
+    #[clap(long, default_value = "512", action)]
     block_size: usize,
 }
 

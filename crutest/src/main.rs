@@ -180,7 +180,7 @@ pub struct Opt {
     #[clap(long, global = true, action)]
     uuid: Option<Uuid>,
 
-    #[clap(long, action)]
+    #[clap(long, default_value = "512", action)]
     block_size: usize,
 }
 
