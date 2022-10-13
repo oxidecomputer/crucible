@@ -634,54 +634,6 @@ mod up_test {
         Ok(())
     }
 
-    // Validate that reading a blank block works, even if there are more than
-    // one block contexts (this can occur if there was a crash before the data
-    // was flushed to disk)
-    #[test]
-    pub fn test_upstairs_validate_encrypted_read_response_blank_block_before_flush(
-    ) -> Result<()> {
-        // Set up the encryption context
-        use rand::{thread_rng, Rng};
-        let mut key = vec![0u8; 32];
-        thread_rng().fill(&mut key[..]);
-        let context = EncryptionContext::new(key.clone(), 512);
-
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: data.clone(),
-            block_contexts: vec![
-                // This BlockContext would be from a write
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: thread_rng().gen::<[u8; 12]>().to_vec(),
-                            tag: thread_rng().gen::<[u8; 16]>().to_vec(),
-                        },
-                    ),
-                },
-            ],
-        };
-
-        // Validate it
-        let successful_hash = Downstairs::validate_encrypted_read_response(
-            &mut read_response,
-            &Arc::new(context),
-            &csl(),
-        )?;
-
-        // The above function will return None for a blank block
-        assert_eq!(successful_hash, None);
-        assert_eq!(data, vec![0u8; 512]);
-
-        Ok(())
-    }
-
     #[test]
     pub fn test_upstairs_validate_unencrypted_read_response() -> Result<()> {
         use rand::{thread_rng, Rng};
@@ -740,41 +692,6 @@ mod up_test {
 
         assert_eq!(successful_hash, None);
         assert_eq!(read_response.data, original_data);
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_upstairs_validate_unencrypted_read_response_blank_block_before_flush(
-    ) -> Result<()> {
-        use rand::{thread_rng, Rng};
-
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: data.clone(),
-            block_contexts: vec![
-                // This BlockContext would be from a write
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: None,
-                },
-            ],
-        };
-
-        // Validate it
-        let successful_hash = Downstairs::validate_unencrypted_read_response(
-            &mut read_response,
-            &csl(),
-        )?;
-
-        // The above function will return None for a blank block
-        assert_eq!(successful_hash, None);
-        assert_eq!(data, vec![0u8; 512]);
 
         Ok(())
     }
