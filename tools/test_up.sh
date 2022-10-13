@@ -28,13 +28,15 @@ fi
 cds="$BINDIR/crucible-downstairs"
 ct="$BINDIR/crutest"
 ch="$BINDIR/crucible-hammer"
-for bin in $cds $ct $ch; do
+dsc="$BINDIR/dsc"
+for bin in $cds $ct $ch $dsc; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
     fi
 done
 
+# Downstairs regions go in this directory
 testdir="/var/tmp/test_up"
 if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
@@ -42,17 +44,25 @@ fi
 
 # Store log files we want to keep in /tmp/*.txt as this is what
 # buildomat will look for and archive
-log_prefix="/tmp/test_up"
+test_output_dir="/tmp/test_up"
+rm -rf ${test_output_dir} 2> /dev/null
+mkdir -p ${test_output_dir}
+
+log_prefix="${test_output_dir}/test_up"
 fail_log="${log_prefix}_fail.txt"
 rm -f "$fail_log"
 
 args=()
+dsc_args=()
 
 case ${1} in
     "unencrypted")
         ;;
     "encrypted")
-        args+=( --key "$(openssl rand -base64 32)" )
+        ssl_key=$(openssl rand -base64 32)
+        echo "Upstairs using SSL key: $ssl_key"
+        args+=( --key "$ssl_key" )
+        dsc_args+=( --encrypted )
         ;;
     *)
         echo "Usage: $0 encrypted|unencrypted"
@@ -61,38 +71,38 @@ case ${1} in
         ;;
 esac
 
-uuidprefix="12345678-1234-1234-1234-00000000"
-downstairs=()
-port_base=8810
-
 echo "Creating and starting three downstairs"
+dsc_output_dir="${test_output_dir}/dsc"
+mkdir -p ${dsc_output_dir}
+dsc_output="${test_output_dir}/dsc-out.txt"
+
+dsc_args+=( --cleanup --create )
+dsc_args+=( --extent-size 10 --extent-count 5 )
+dsc_args+=( --output-dir "$dsc_output_dir" )
+
+# Note, this should match the default for DSC
+port_base=8810
+# Build the upstairs args
 for (( i = 0; i < 3; i++ )); do
     (( port_step = i * 10 ))
     (( port = port_base + port_step ))
-    dir="${testdir}/$port"
-    uuid="${uuidprefix}${port}"
     args+=( -t "127.0.0.1:$port" )
-    outfile="${log_prefix}-downstairs-${port}-out.txt"
-    set -o errexit
-    case ${1} in
-        "unencrypted")
-            echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 | tee "$outfile"
-            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10| tee -a "$outfile"
-            ;;
-        "encrypted")
-            echo "$cds" create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true | tee "$outfile"
-            ${cds} create -u "$uuid" -d "$dir" --extent-count 5 --extent-size 10 --encrypted=true | tee -a "$outfile"
-            ;;
-    esac
-    echo "Downstairs output log at $outfile"
-    echo "$cds" run -p "$port" -d "$dir" | tee -a "$outfile"
-    ${cds} run -p "$port" -d "$dir" >> "$outfile" 2>&1 &
-    downstairs[$i]=$!
-    set +o errexit
 done
 
+dsc_args+=( --region-dir "$testdir" )
+echo "dsc output goes to $dsc_output"
+echo "${dsc}" start "${dsc_args[@]}" > "$dsc_output"
+"${dsc}" start "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
+dsc_pid=$!
+
+sleep 2
+if ! pgrep -P $dsc_pid > /dev/null; then
+    echo "Gosh diddly darn it, dsc at $dsc_pid did not start"
+    exit 1
+fi
+
 echo ""
-echo "Begin tests"
+echo "Begin tests, output goes to ${log_prefix}_out.txt"
 res=0
 test_list="span big dep deactivate balloon"
 for tt in ${test_list}; do
@@ -133,6 +143,7 @@ else
 fi
 
 echo "Copy the $port file"
+
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
@@ -151,8 +162,21 @@ fi
 echo ""
 
 echo Kill the current downstairs
-ds_pid=$(pgrep -U "$(id -u)" -f "run -p $port")
-kill "$ds_pid"
+if ! "$dsc" cmd disable-restart-all; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed repair test part 1, disable auto restart"
+    echo "Failed repair test part 1, disable auto restart" >> "$fail_log"
+    echo
+fi
+
+if ! "$dsc" cmd stop -c 2; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed repair test part 1, stopping downstairs 2"
+    echo "Failed repair test part 1, stopping downstairs 2" >> "$fail_log"
+    echo
+fi
 
 echo rm -rf "${testdir:?}/${port:?}"
 echo "Now put back the original so we have a mismatch"
@@ -160,11 +184,15 @@ echo mv "${testdir}/previous" "${testdir}/${port}"
 rm -rf "${testdir:?}/${port:?}"
 mv "${testdir}/previous" "${testdir}/${port}"
 
-outfile="${log_prefix}-downstairs-${port}-out.txt"
 echo "Restart downstairs with old directory"
-echo "$cds" run -p "$port" -d "${testdir}/$port"
-${cds} run -p "$port" -d "${testdir}/$port" >> "$outfile" 2>&1 &
-downstairs[4]=$!
+
+if ! "$dsc" cmd start -c 2; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed repair test part 1, starting downstairs 2"
+    echo "Failed repair test part 1, starting downstairs 2" >> "$fail_log"
+    echo
+fi
 
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
@@ -241,11 +269,16 @@ if ! "$cds" dump "${dump_args[@]}" -b 20 ; then
 else
     echo "dump block test passed"
 fi
+
+# Tests done, shut down the downstairs.
 echo "Upstairs tests have completed, stopping all downstairs"
-for pid in ${downstairs[*]}; do
-    kill $pid >/dev/null 2>&1
-    wait $pid
-done
+if ! "$dsc" cmd shutdown; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed dsc shutdown"
+    echo "Failed dsc shutdown" >> "$fail_log"
+    echo
+fi
 
 echo ""
 if [[ $res != 0 ]]; then
