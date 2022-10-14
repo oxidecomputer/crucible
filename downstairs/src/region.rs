@@ -3243,8 +3243,14 @@ mod test {
     #[test]
     fn test_flush_removes_partial_writes() -> Result<()> {
         // Validate that incorrect context rows are removed by a flush so that a
-        // repair will get rid of partial writes' block context rows (this is
-        // necessary for write_unwritten to work after a crash).
+        // repair will get rid of partial writes' block context rows. This is
+        // necessary for write_unwritten to work after a crash.
+        //
+        // Specifically, this test checks for the case where we had a brand new
+        // block and a write to that blocks that failed such that only the
+        // write's block context was persisted, leaving the data all zeros. In
+        // this case, there is no data, so we should remove the invalid block
+        // context row.
 
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options())?;
