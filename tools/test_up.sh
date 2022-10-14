@@ -67,9 +67,9 @@ case ${1} in
     "unencrypted")
         ;;
     "encrypted")
-        ssl_key=$(openssl rand -base64 32)
-        echo "Upstairs using SSL key: $ssl_key"
-        args+=( --key "$ssl_key" )
+        upstairs_key=$(openssl rand -base64 32)
+        echo "Upstairs using key: $upstairs_key"
+        args+=( --key "$upstairs_key" )
         dsc_args+=( --encrypted )
         ;;
     *)
