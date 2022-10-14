@@ -9,9 +9,8 @@ set -o pipefail
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
-    pkill -f -U "$(id -u)" crucible-downstairs
-    if [[ -n "$dsc_pid" ]]; then
-        kill "$dsc_pid"
+    if [[ -n "$fds" ]]; then
+        "$dsc" cmd shutdown
     fi
     exit 1
 }
@@ -27,21 +26,24 @@ function perf_round() {
     es=$1
     ec=$2
     # Args for crutest.  Using the default IP:port for dsc
-    args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 16000 -q"
+    args="-g 1 -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 16000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
-    "$dsc" start --create --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec" &
+    "$dsc" create --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec"
+    "$dsc" start --ds-bin "$downstairs" &
     dsc_pid=$!
     sleep 5
-    pfiles $dsc_pid > /dev/null
+    if ! pgrep -P $dsc_pid; then
+        echo "Failed to start dsc"
+        exit 1
+    fi
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
     echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
-    pkill -f -U "$(id -u)" crucible-downstairs
-    kill $dsc_pid || true
-    wait $dsc_pid || true
+    "$dsc" cmd shutdown
+    unset dsc_pid
 }
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
