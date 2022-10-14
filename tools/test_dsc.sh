@@ -114,11 +114,13 @@ rm -rf ${testdir} ${r1} ${r2} ${r3}
 
 echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
-    --region-dir "$testdir" | tee "$outfile"
+    --region-dir "$testdir" \
+    --encrypted | tee "$outfile"
 
 ${dsc} create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
-    --region-dir "$testdir" | tee -a "$outfile"
+    --region-dir "$testdir" \
+    --encrypted | tee -a "$outfile"
 
 echo "Running dsc:"
 echo "${dsc}" start --ds-bin "$downstairs" \
