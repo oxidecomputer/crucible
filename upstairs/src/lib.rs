@@ -2863,10 +2863,14 @@ impl Downstairs {
                 return Err(CrucibleError::HashMismatch);
             }
         } else {
-            // No hashes in response!
+            // No block context(s) in the response!
             //
             // Either this is a read of an unwritten block, or an attacker
-            // removed the hashes from the db.
+            // removed the hashes from the db. Because the Upstairs will perform
+            // reconciliation before activating, and because the final step of
+            // reconciliation is a flush (which will remove block contexts that
+            // do not match with the extent data), we should never expect to see
+            // this case unless this is a blank block.
             //
             // XXX if it's not a blank block, we may be under attack?
             assert!(response.data[..].iter().all(|&x| x == 0));
@@ -2877,8 +2881,7 @@ impl Downstairs {
 
     /// Returns:
     /// - Ok(Some(valid_hash)) for successfully decrypted data
-    /// - Ok(None) if there were no block contexts, or if there were no
-    ///   encryption contexts in any block context, and block was all 0
+    /// - Ok(None) if there were no block contexts and block was all 0
     /// - Err otherwise
     ///
     /// The return value of this will be stored with the job, and compared
@@ -2897,17 +2900,15 @@ impl Downstairs {
         // check that this read response contains block contexts that contain
         // (at least one) encryption context.
 
-        if response.block_contexts.is_empty()
-            || response
-                .block_contexts
-                .iter()
-                .all(|ctx| ctx.encryption_context.is_none())
-        {
-            // No block context(s), or no block context contained an encryption
-            // context, in the response!
+        if response.block_contexts.is_empty() {
+            // No block context(s) in the response!
             //
             // Either this is a read of an unwritten block, or an attacker
-            // removed the encryption contexts from the db.
+            // removed the encryption contexts from the db. Because the Upstairs
+            // will perform reconciliation before activating, and because the
+            // final step of reconciliation is a flush (which will remove block
+            // contexts that do not match with the extent data), we should never
+            // expect to see this case unless this is a blank block.
             //
             // XXX if it's not a blank block, we may be under attack?
             assert!(response.data[..].iter().all(|&x| x == 0));
@@ -2929,6 +2930,8 @@ impl Downstairs {
                 } else {
                     // this block context is missing an encryption context!
                     // continue to see if another block context has a valid one.
+                    //
+                    // XXX should this be an error instead?
                     continue;
                 };
 

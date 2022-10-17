@@ -238,6 +238,8 @@ impl Inner {
         &mut self,
         block_contexts: &[&DownstairsBlockContext],
     ) -> Result<()> {
+        self.set_dirty()?;
+
         let tx = self.metadb.transaction()?;
 
         for block_context in block_contexts {
@@ -3234,6 +3236,81 @@ mod test {
         }
 
         assert_eq!(buffer, read_from_region);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_flush_removes_partial_writes() -> Result<()> {
+        // Validate that incorrect context rows are removed by a flush so that a
+        // repair will get rid of partial writes' block context rows. This is
+        // necessary for write_unwritten to work after a crash.
+        //
+        // Specifically, this test checks for the case where we had a brand new
+        // block and a write to that blocks that failed such that only the
+        // write's block context was persisted, leaving the data all zeros. In
+        // this case, there is no data, so we should remove the invalid block
+        // context row.
+
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        // A write of some sort only wrote a block context row
+
+        {
+            let ext = &region.extents[0];
+            let mut inner = ext.inner();
+            inner.set_block_contexts(&[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 1024,
+                },
+                block: 0,
+                on_disk_hash: 65536,
+            }])?;
+        }
+
+        region.region_flush(1, 1, &None, 123)?;
+
+        // Verify no block context rows exist
+
+        {
+            let ext = &region.extents[0];
+            let inner = ext.inner();
+            assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+        }
+
+        // Assert write unwritten will write to the first block
+
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+
+        region.region_write(
+            &[crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            }],
+            124,
+            true, // only_write_unwritten
+        )?;
+
+        let responses = region.region_read(
+            &[crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            }],
+            125,
+        )?;
+
+        let response = &responses[0];
+
+        assert_eq!(response.data.to_vec(), vec![0x55; 512]);
 
         Ok(())
     }
