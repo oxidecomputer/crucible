@@ -1007,8 +1007,7 @@ mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
-        let target = vec![];
-        let mut ds = Downstairs::new(target, csl());
+        let mut ds = Downstairs::new(csl());
 
         let id = ds.next_id();
 
@@ -1240,8 +1239,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1592,8 +1593,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1607,8 +1610,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1747,8 +1752,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1877,8 +1884,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -1892,8 +1901,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2384,8 +2395,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2456,8 +2469,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2598,8 +2613,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -2779,8 +2796,10 @@ mod up_test {
                 eid: 0,
                 offset: Block::new_512(7),
                 data: Bytes::from(vec![1]),
-                encryption_context: None,
-                hash: 0,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
             }],
             is_write_unwritten,
         );
@@ -3707,11 +3726,12 @@ mod up_test {
             offset: request.offset,
 
             data: BytesMut::from(&data[..]),
-            encryption_contexts: vec![crucible_protocol::EncryptionContext {
-                nonce,
-                tag,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash,
             }],
-            hashes: vec![hash],
         }]);
 
         let result =
@@ -3756,10 +3776,10 @@ mod up_test {
             offset: request.offset,
 
             data: BytesMut::from(&data[..]),
-            encryption_contexts: vec![],
-            hashes: vec![
-                10000, // junk hash
-            ],
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash: 10000, // junk hash,
+            }],
         }]);
 
         let result =
@@ -3778,8 +3798,7 @@ mod up_test {
     #[test]
     fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let target = vec![];
-        let mut ds = Downstairs::new(target, csl());
+        let mut ds = Downstairs::new(csl());
         let next_id = ds.next_id();
 
         let request = ReadRequest {
@@ -3816,13 +3835,12 @@ mod up_test {
             offset: request.offset,
 
             data: BytesMut::from(&data[..]),
-            encryption_contexts: vec![crucible_protocol::EncryptionContext {
-                nonce,
-                tag,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash: 10000, // junk hash,
             }],
-            hashes: vec![
-                10000, // junk hash
-            ],
         }]);
 
         let result =
@@ -3841,7 +3859,6 @@ mod up_test {
     #[tokio::test]
     async fn test_no_iop_limit() -> Result<()> {
         let guest = Guest::new();
-        guest.set_active().await;
 
         assert!(guest.consume_req().await.is_none());
 
@@ -3882,7 +3899,6 @@ mod up_test {
     #[tokio::test]
     async fn test_set_iop_limit() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
         guest.set_iop_limit(16000, 2);
 
         assert!(guest.consume_req().await.is_none());
@@ -3938,7 +3954,6 @@ mod up_test {
     #[tokio::test]
     async fn test_flush_does_not_consume_iops() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         // Set 0 as IOP limit
         guest.set_iop_limit(16000, 0);
@@ -3972,7 +3987,6 @@ mod up_test {
     #[tokio::test]
     async fn test_set_bw_limit() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
         guest.set_bw_limit(1024 * 1024); // 1 KiB
 
         assert!(guest.consume_req().await.is_none());
@@ -4028,7 +4042,6 @@ mod up_test {
     #[tokio::test]
     async fn test_flush_does_not_consume_bw() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         // Set 0 as bandwidth limit
         guest.set_bw_limit(0);
@@ -4062,7 +4075,6 @@ mod up_test {
     #[tokio::test]
     async fn test_iop_and_bw_limit() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         guest.set_iop_limit(16384, 500); // 1 IOP is 16 KiB
         guest.set_bw_limit(6400 * 1024); // 16384 B * 400 = 6400 KiB/s
@@ -4176,7 +4188,6 @@ mod up_test {
     #[tokio::test]
     async fn test_impossible_io() -> Result<()> {
         let mut guest = Guest::new();
-        guest.set_active().await;
 
         guest.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
         guest.set_bw_limit(1024 * 1024); // 1 KiB
@@ -4261,8 +4272,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4345,8 +4358,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4495,8 +4510,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4603,8 +4620,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );
@@ -4663,8 +4682,10 @@ mod up_test {
                     eid: 0,
                     offset: Block::new_512(7),
                     data: Bytes::from(vec![1]),
-                    encryption_context: None,
-                    hash: 0,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 0,
+                    },
                 }],
                 false,
             );

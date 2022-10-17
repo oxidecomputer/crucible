@@ -82,6 +82,7 @@ pub trait BlockIO: Sync {
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
 
+    /// Return the block size - this should never change at runtime!
     async fn get_block_size(&self) -> Result<u64, CrucibleError>;
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError>;
@@ -671,17 +672,25 @@ where
         + std::marker::Send
         + 'static,
 {
+    // Clear this Downstair's repair address, and let the YesItsMe set it. This
+    // works if this Downstairs is new, reconnecting, or was replaced entirely -
+    // the repair address could have changed in any of these cases.
+    up.ds_clear_repair_address(up_coms.client_id).await;
+
+    // If this Downstairs is returning from being disconnected, we need to call
+    // re_new.
     {
         let mut ds = up.downstairs.lock().await;
         let my_state = ds.ds_state[up_coms.client_id as usize];
+
         info!(
             up.log,
-            "[{}] Proc runs for {} in state {:?} repair at: {:?}",
+            "[{}] Proc runs for {} in state {:?}",
             up_coms.client_id,
             target,
             my_state,
-            ds.repair_addr(up_coms.client_id),
         );
+
         // XXX Move this all to some state check place?
         if my_state != DsState::New
             && my_state != DsState::Disconnected
@@ -695,11 +704,11 @@ where
         }
 
         /*
-         * This is only applicable for a downstairs that is returning
-         * from being disconnected.  Mark any in progress jobs since the
-         * last good flush back to New, as we have reconnected to this
-         * downstairs and will need to replay any work that we were
-         * holding that we did not flush.
+         * This is only applicable for a downstairs that is returning from
+         * being disconnected. Mark any in progress jobs since the
+         * last good flush back to New, as we have reconnected to
+         * this downstairs and will need to replay any work that we
+         * were holding that we did not flush.
          */
         if my_state == DsState::Offline {
             ds.re_new(up_coms.client_id);
@@ -879,7 +888,7 @@ where
                             up.encrypted(),
                         );
                     }
-                    Some(Message::YesItsMe { version }) => {
+                    Some(Message::YesItsMe { version, repair_addr }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
@@ -896,7 +905,13 @@ where
                             ).await;
                             bail!("expected version 1, got {}", version);
                         }
+
                         negotiated = 1;
+
+                        up.ds_set_repair_address(
+                            up_coms.client_id, repair_addr,
+                        ).await;
+
                         /*
                          * We only set guest_io_ready after all three downstairs
                          * have gone active, which means the upstairs did
@@ -2192,9 +2207,10 @@ struct Downstairs {
      * UUID for each downstairs, index by client ID
      */
     ds_uuid: HashMap<u8, Uuid>,
+
     /*
      * The IP:Port for repair when contacting the downstairs, hashed by
-     * the client index the upstairs gives it..
+     * the client index the upstairs gives it.
      */
     ds_repair: HashMap<u8, SocketAddr>,
 
@@ -2252,20 +2268,10 @@ struct Downstairs {
 }
 
 impl Downstairs {
-    fn new(target: Vec<SocketAddr>, log: Logger) -> Self {
-        // Fill the repair hashmap based on the
-        // addresses from each downstairs.
-        let mut ds_repair = HashMap::new();
-        for (i, addr) in target.iter().enumerate() {
-            assert!(addr.port() < u16::MAX - REPAIR_PORT_OFFSET);
-            let port = addr.port() + REPAIR_PORT_OFFSET;
-            let repair_addr = SocketAddr::new(addr.ip(), port);
-            ds_repair.insert(i as u8, repair_addr);
-        }
-
+    fn new(log: Logger) -> Self {
         Self {
             ds_uuid: HashMap::new(),
-            ds_repair,
+            ds_repair: HashMap::new(),
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
@@ -2437,6 +2443,7 @@ impl Downstairs {
             );
         }
     }
+
     /*
      * Given a client ID, return the SocketAddr for repair to use.
      */
@@ -2823,22 +2830,28 @@ impl Downstairs {
         }
     }
 
+    /// Returns:
+    /// - Ok(Some(valid_hash)) where the integrity hash matches
+    /// - Ok(None) where there is no integrity hash in the response and the
+    ///   block is all 0
+    /// - Err otherwise
     fn validate_unencrypted_read_response(
         response: &mut ReadResponse,
         log: &Logger,
     ) -> Result<Option<u64>, CrucibleError> {
         // check integrity hashes - make sure at least one is correct.
-        let mut vh = None;
-        if !response.hashes.is_empty() {
+        let mut valid_hash = None;
+
+        if !response.block_contexts.is_empty() {
             let mut successful_hash = false;
 
             let computed_hash = integrity_hash(&[&response.data[..]]);
 
             // The most recent hash is probably going to be the right one.
-            for hash in response.hashes.iter().rev() {
-                if computed_hash == *hash {
+            for context in response.block_contexts.iter().rev() {
+                if computed_hash == context.hash {
                     successful_hash = true;
-                    vh = Some(*hash);
+                    valid_hash = Some(context.hash);
                     break;
                 }
             }
@@ -2846,8 +2859,8 @@ impl Downstairs {
             if !successful_hash {
                 // No integrity hash was correct for this response
                 error!(log, "No match computed hash:0x{:x}", computed_hash,);
-                for hash in response.hashes.iter().rev() {
-                    error!(log, "No match          hash:0x{:x}", hash);
+                for context in response.block_contexts.iter().rev() {
+                    error!(log, "No match          hash:0x{:x}", context.hash);
                 }
                 error!(log, "Data from hash: {:?}", response.data);
 
@@ -2863,9 +2876,17 @@ impl Downstairs {
             assert!(response.data[..].iter().all(|&x| x == 0));
         }
 
-        Ok(vh)
+        Ok(valid_hash)
     }
 
+    /// Returns:
+    /// - Ok(Some(valid_hash)) for successfully decrypted data
+    /// - Ok(None) if there were no block contexts, or if there were no
+    ///   encryption contexts in any block context, and block was all 0
+    /// - Err otherwise
+    ///
+    /// The return value of this will be stored with the job, and compared
+    /// between each read.
     fn validate_encrypted_read_response(
         response: &mut ReadResponse,
         encryption_context: &Arc<EncryptionContext>,
@@ -2877,107 +2898,126 @@ impl Downstairs {
         // 1) remove encryption context and cause a denial of service, or
         // 2) roll back a block by writing an old data and encryption context
         //
-        // check for response encryption contexts here
-        let mut vh = None;
-        if !response.encryption_contexts.is_empty() {
-            let mut successful_decryption = false;
-            let mut successful_hash = false;
+        // check that this read response contains block contexts that contain
+        // (at least one) encryption context.
 
-            // Attempt decryption with each encryption context, and fail if all
-            // do not work. The most recent encryption context will most likely
-            // be the correct one so start there.
-            let encryption_context_iter =
-                response.encryption_contexts.iter().enumerate().rev();
-
-            // Hashes and encryption contexts are written out at the same time
-            // (in the same transaction) therefore there should be the same
-            // number of them.
-            assert_eq!(
-                response.encryption_contexts.len(),
-                response.hashes.len(),
-            );
-
-            for (i, ctx) in encryption_context_iter {
-                // Validate integrity hash before decryption
-                let computed_hash = integrity_hash(&[
-                    &ctx.nonce[..],
-                    &ctx.tag[..],
-                    &response.data[..],
-                ]);
-
-                if computed_hash == response.hashes[i] {
-                    successful_hash = true;
-                    vh = Some(computed_hash);
-
-                    // Now that the integrity hash was verified, attempt
-                    // decryption.
-                    //
-                    // Note: decrypt_in_place does not overwrite the buffer if
-                    // it fails, otherwise we would need to copy here. There's a
-                    // unit test to validate this behaviour.
-                    let decryption_result = encryption_context
-                        .decrypt_in_place(
-                            &mut response.data[..],
-                            Nonce::from_slice(&ctx.nonce[..]),
-                            Tag::from_slice(&ctx.tag[..]),
-                        );
-
-                    if decryption_result.is_ok() {
-                        successful_decryption = true;
-                        break;
-                    } else {
-                        // Because hashes, nonces, and tags are committed to
-                        // disk every time there is a Crucible write, but data
-                        // is only committed to disk when there's a Crucible
-                        // flush, only one hash + nonce + tag + data combination
-                        // will be correct. Due to the fact that nonces are
-                        // random for each write, even if the Guest wrote the
-                        // same data block 100 times, only one index will be
-                        // valid.
-                        //
-                        // if the computed integrity hash matched but decryption
-                        // failed, bail out here.
-                        break;
-                    }
-                }
-            }
-
-            if !successful_hash {
-                error!(log, "No match for encrypted computed hash");
-                for (i, ctx) in response.encryption_contexts.iter().enumerate()
-                {
-                    let computed_hash = integrity_hash(&[
-                        &ctx.nonce[..],
-                        &ctx.tag[..],
-                        &response.data[..],
-                    ]);
-                    error!(
-                        log,
-                        "Expected: 0x{:x} != Computed: 0x{:x}",
-                        response.hashes[i],
-                        computed_hash
-                    );
-                }
-                // no hash was correct
-                return Err(CrucibleError::HashMismatch);
-            } else if !successful_decryption {
-                // no hash + encryption context combination decrypted this block
-                error!(log, "Decryption failed with correct hash");
-                return Err(CrucibleError::DecryptionError);
-            } else {
-                // Ok!
-            }
-        } else {
-            // No encryption context in the response!
+        if response.block_contexts.is_empty()
+            || response
+                .block_contexts
+                .iter()
+                .all(|ctx| ctx.encryption_context.is_none())
+        {
+            // No block context(s), or no block context contained an encryption
+            // context, in the response!
             //
             // Either this is a read of an unwritten block, or an attacker
             // removed the encryption contexts from the db.
             //
             // XXX if it's not a blank block, we may be under attack?
             assert!(response.data[..].iter().all(|&x| x == 0));
+            return Ok(None);
         }
 
-        Ok(vh)
+        let mut valid_hash = None;
+
+        let mut successful_decryption = false;
+        let mut successful_hash = false;
+
+        // Attempt decryption with each encryption context, and fail if all
+        // do not work. The most recent encryption context will most likely
+        // be the correct one so start there.
+        for ctx in response.block_contexts.iter().rev() {
+            let block_encryption_ctx =
+                if let Some(block_encryption_ctx) = &ctx.encryption_context {
+                    block_encryption_ctx
+                } else {
+                    // this block context is missing an encryption context!
+                    // continue to see if another block context has a valid one.
+                    continue;
+                };
+
+            // Validate integrity hash before decryption
+            let computed_hash = integrity_hash(&[
+                &block_encryption_ctx.nonce[..],
+                &block_encryption_ctx.tag[..],
+                &response.data[..],
+            ]);
+
+            if computed_hash == ctx.hash {
+                successful_hash = true;
+                valid_hash = Some(ctx.hash);
+
+                // Now that the integrity hash was verified, attempt
+                // decryption.
+                //
+                // Note: decrypt_in_place does not overwrite the buffer if
+                // it fails, otherwise we would need to copy here. There's a
+                // unit test to validate this behaviour.
+                let decryption_result = encryption_context.decrypt_in_place(
+                    &mut response.data[..],
+                    Nonce::from_slice(&block_encryption_ctx.nonce[..]),
+                    Tag::from_slice(&block_encryption_ctx.tag[..]),
+                );
+
+                if decryption_result.is_ok() {
+                    successful_decryption = true;
+                    break;
+                } else {
+                    // Because hashes, nonces, and tags are committed to
+                    // disk every time there is a Crucible write, but data
+                    // is only committed to disk when there's a Crucible
+                    // flush, only one hash + nonce + tag + data combination
+                    // will be correct. Due to the fact that nonces are
+                    // random for each write, even if the Guest wrote the
+                    // same data block 100 times, only one index will be
+                    // valid.
+                    //
+                    // if the computed integrity hash matched but decryption
+                    // failed, continue to the next contexts. the current
+                    // hashing algorithm (xxHash) is not a cryptographic hash
+                    // and is only u64, so collisions are not impossible.
+                    warn!(
+                        log,
+                        "Decryption failed even though integrity hash matched!"
+                    );
+                }
+            }
+        }
+
+        if !successful_hash {
+            error!(log, "No match for integrity hash");
+            for ctx in response.block_contexts.iter() {
+                let block_encryption_ctx = if let Some(block_encryption_ctx) =
+                    &ctx.encryption_context
+                {
+                    block_encryption_ctx
+                } else {
+                    error!(log, "missing encryption context!");
+                    continue;
+                };
+
+                let computed_hash = integrity_hash(&[
+                    &block_encryption_ctx.nonce[..],
+                    &block_encryption_ctx.tag[..],
+                    &response.data[..],
+                ]);
+                error!(
+                    log,
+                    "Expected: 0x{:x} != Computed: 0x{:x}",
+                    ctx.hash,
+                    computed_hash
+                );
+            }
+            // no hash was correct
+            Err(CrucibleError::HashMismatch)
+        } else if !successful_decryption {
+            // no hash + encryption context combination decrypted this block
+            error!(log, "Decryption failed with correct hash");
+            Err(CrucibleError::DecryptionError)
+        } else {
+            // Ok!
+            Ok(valid_hash)
+        }
     }
 
     /**
@@ -3775,14 +3815,6 @@ impl Upstairs {
          */
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
-        /*
-         * The repair port is the downstairs target port + 4000
-         * XXX How do we advertise/enforce this?
-         */
-        #[cfg(not(test))]
-        for addr in opt.target.iter() {
-            assert!(addr.port() < u16::MAX - 4000);
-        }
 
         // create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
@@ -3815,10 +3847,7 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(
-                opt.target.clone(),
-                log.clone(),
-            )),
+            downstairs: Mutex::new(Downstairs::new(log.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(def),
             encryption_context,
@@ -4425,8 +4454,10 @@ impl Upstairs {
                 eid,
                 offset: bo,
                 data: sub_data,
-                encryption_context,
-                hash,
+                block_context: BlockContext {
+                    hash,
+                    encryption_context,
+                },
             });
 
             cur_offset += byte_len;
@@ -4498,7 +4529,7 @@ impl Upstairs {
         let nwo = extent_from_offset(
             *ddef,
             offset,
-            Block::from_bytes(data.len().await, &ddef),
+            Block::from_bytes(data.len(), &ddef),
         );
 
         /*
@@ -5589,6 +5620,16 @@ impl Upstairs {
 
         Ok(notify_guest)
     }
+
+    async fn ds_set_repair_address(&self, client_id: u8, addr: SocketAddr) {
+        let mut ds = self.downstairs.lock().await;
+        ds.ds_repair.insert(client_id, addr);
+    }
+
+    async fn ds_clear_repair_address(&self, client_id: u8) {
+        let mut ds = self.downstairs.lock().await;
+        ds.ds_repair.remove(&client_id);
+    }
 }
 
 #[derive(Debug)]
@@ -6069,10 +6110,12 @@ impl fmt::Display for AckStatus {
  * Provides a shared Buffer that Read operations will write into.
  *
  * Originally BytesMut was used here, but it didn't guarantee that memory
- * was shared between cloned BytesMut objects.
+ * was shared between cloned BytesMut objects. Additionally, we added the
+ * idea of ownership and that necessitated another field.
  */
 #[derive(Clone, Debug)]
 pub struct Buffer {
+    len: usize,
     data: Arc<Mutex<Vec<u8>>>,
     owned: Arc<Mutex<Vec<bool>>>,
 }
@@ -6081,6 +6124,7 @@ impl Buffer {
     pub fn from_vec(vec: Vec<u8>) -> Buffer {
         let len = vec.len();
         Buffer {
+            len,
             data: Arc::new(Mutex::new(vec)),
             owned: Arc::new(Mutex::new(vec![false; len])),
         }
@@ -6088,6 +6132,7 @@ impl Buffer {
 
     pub fn new(len: usize) -> Buffer {
         Buffer {
+            len,
             data: Arc::new(Mutex::new(vec![0; len])),
             owned: Arc::new(Mutex::new(vec![false; len])),
         }
@@ -6102,12 +6147,12 @@ impl Buffer {
         Buffer::from_vec(vec)
     }
 
-    pub async fn len(&self) -> usize {
-        self.data.lock().await.len()
+    pub fn len(&self) -> usize {
+        self.len
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.len().await == 0
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub async fn as_vec(&self) -> MutexGuard<'_, Vec<u8>> {
@@ -6123,18 +6168,18 @@ impl Buffer {
 async fn test_buffer_len() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 #[tokio::test]
 async fn test_buffer_len_after_clone() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 
     let new_buffer = data.clone();
-    assert_eq!(new_buffer.len().await, READ_SIZE);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(new_buffer.len(), READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 #[tokio::test]
@@ -6144,7 +6189,7 @@ async fn test_buffer_len_after_clone() {
 async fn test_buffer_len_index_overflow() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 
     let mut vec = data.as_vec().await;
     assert_eq!(vec.len(), 512);
@@ -6158,7 +6203,7 @@ async fn test_buffer_len_index_overflow() {
 async fn test_buffer_len_over_block_size() {
     const READ_SIZE: usize = 600;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len().await, READ_SIZE);
+    assert_eq!(data.len(), READ_SIZE);
 }
 
 /*
@@ -6241,7 +6286,7 @@ impl BlockOp {
     pub async fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
             BlockOp::Read { offset: _, data } => {
-                Some(ceiling_div!(data.len().await, iop_sz))
+                Some(ceiling_div!(data.len(), iop_sz))
             }
             BlockOp::Write { offset: _, data } => {
                 Some(ceiling_div!(data.len(), iop_sz))
@@ -6261,7 +6306,7 @@ impl BlockOp {
     // Return the total size of this BlockOp
     pub async fn sz(&self) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => Some(data.len().await),
+            BlockOp::Read { offset: _, data } => Some(data.len()),
             BlockOp::Write { offset: _, data } => Some(data.len()),
             _ => None,
         }
@@ -6390,7 +6435,8 @@ impl GtoS {
 
                         for i in &response.data {
                             vec[offset] = *i;
-                            owned_vec[offset] = !response.hashes.is_empty();
+                            owned_vec[offset] =
+                                !response.block_contexts.is_empty();
                             offset += 1;
                         }
                     }
@@ -6579,10 +6625,6 @@ impl GuestWork {
 #[derive(Debug)]
 pub struct Guest {
     /*
-     * Set to true when Upstairs reports as active.
-     */
-    active: Mutex<bool>,
-    /*
      * New requests from outside go onto this VecDeque. The notify is how
      * the submission task tells the listening task that new work has been
      * added.
@@ -6627,7 +6669,6 @@ pub struct Guest {
 impl Guest {
     pub fn new() -> Guest {
         Guest {
-            active: Mutex::new(false),
             /*
              * Incoming I/O requests are added to this queue.
              */
@@ -6818,22 +6859,7 @@ impl Guest {
         self.notify.notify_one();
     }
 
-    pub async fn set_active(&self) {
-        let mut active = self.active.lock().await;
-        *active = true;
-    }
-
-    pub async fn is_active(&self) -> bool {
-        // A Guest is active if it's seen the Upstairs return that it's active
-        let active = self.active.lock().await;
-        *active
-    }
-
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
         self.send(extent_query).await.wait().await?;
@@ -6843,9 +6869,6 @@ impl Guest {
     }
 
     pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
@@ -6860,12 +6883,7 @@ impl Guest {
     }
 
     pub async fn commit(&self) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         self.send(BlockOp::Commit).await.wait().await.unwrap();
-
         Ok(())
     }
 }
@@ -6884,7 +6902,6 @@ impl BlockIO for Guest {
         loop {
             if self.query_is_active().await? {
                 println!("This guest Upstairs is now active");
-                self.set_active().await;
                 return Ok(());
             } else {
                 println!(
@@ -6895,16 +6912,10 @@ impl BlockIO for Guest {
         }
     }
 
+    /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        // Disable any more IO from this guest and deactivate the downstairs.
-        // We can't deactivate if we are not yet active.
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let waiter = self.send(BlockOp::Deactivate).await;
         waiter.wait().await?;
-
         Ok(())
     }
 
@@ -6918,10 +6929,6 @@ impl BlockIO for Guest {
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
         self.send(size_query).await.wait().await?;
@@ -6931,10 +6938,6 @@ impl BlockIO for Guest {
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryBlockSize { data: data.clone() };
         self.send(size_query).await.wait().await?;
@@ -6957,13 +6960,9 @@ impl BlockIO for Guest {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let bs = self.get_block_size().await?;
 
-        if (data.len().await % bs as usize) != 0 {
+        if (data.len() % bs as usize) != 0 {
             crucible_bail!(DataLenUnaligned);
         }
 
@@ -6980,10 +6979,6 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
@@ -7003,10 +6998,6 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
@@ -7025,10 +7016,6 @@ impl BlockIO for Guest {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        if !self.is_active().await {
-            return Err(CrucibleError::UpstairsInactive);
-        }
-
         Ok(self
             .send(BlockOp::Flush { snapshot_details })
             .await
@@ -7037,12 +7024,8 @@ impl BlockIO for Guest {
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        if !self.is_active().await {
-            println!("Request for work from inactive upstairs");
-            // XXX Test access is allowed for now, but not forever.
-            //return Err(CrucibleError::UpstairsInactive);
-        }
-
+        // Note: for this implementation, BlockOp::ShowWork will be sent and
+        // processed by the Upstairs even if it isn't active.
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
@@ -7377,6 +7360,7 @@ async fn process_new_io(
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {
+            // TODO should this first check if the Upstairs is active?
             *data.lock().await = WQCounts {
                 up_count: up.guest.guest_work.lock().await.active.len(),
                 ds_count: up.downstairs.lock().await.active.len(),
@@ -7384,6 +7368,7 @@ async fn process_new_io(
             req.send_ok().await;
         }
         BlockOp::ShowWork { data } => {
+            // TODO should this first check if the Upstairs is active?
             *data.lock().await = show_all_work(up).await;
             req.send_ok().await;
         }
@@ -7587,17 +7572,18 @@ async fn up_listen(
 }
 
 /*
- * This is the main upstairs task that starts all the other async
- * tasks.  The final step is to call up_listen() which will coordinate
- * the connection to the downstairs and start listening for incoming
- * IO from the guest when the time is ready.
+ * This is the main upstairs task that starts all the other async tasks. The
+ * final step is to call up_listen() which will coordinate the connection to
+ * the downstairs and start listening for incoming IO from the guest when the
+ * time is ready. It will return Ok with a join handle if every required task
+ * was successfully launched, and Err otherwise.
  */
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
-) -> Result<()> {
+) -> Result<tokio::task::JoinHandle<()>> {
     register_probes().unwrap();
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator)
@@ -7733,22 +7719,20 @@ pub async fn up_main(
             info!(upi.log, "Control HTTP task finished with {:?}", r);
         });
     }
-    /*
-     * The final step is to call this function to wait for our downstairs
-     * tasks to connect to their respective downstairs instance.
-     * Once connected, we then take work requests from the guest and
-     * submit them into the upstairs
-     */
-    up_listen(
-        &up,
-        dst,
-        ds_status_rx,
-        ds_reconcile_done_rx,
-        opt.flush_timeout,
-    )
-    .await;
 
-    Ok(())
+    let flush_timeout = opt.flush_timeout;
+    let join_handle = tokio::spawn(async move {
+        /*
+         * The final step is to call this function to wait for our downstairs
+         * tasks to connect to their respective downstairs instance.
+         * Once connected, we then take work requests from the guest and
+         * submit them into the upstairs
+         */
+        up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx, flush_timeout)
+            .await
+    });
+
+    Ok(join_handle)
 }
 
 /*

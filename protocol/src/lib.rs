@@ -17,26 +17,8 @@ pub struct Write {
     pub eid: u64,
     pub offset: Block,
     pub data: bytes::Bytes,
-    pub encryption_context: Option<EncryptionContext>,
 
-    /*
-     * If this is a non-encrypted write, then the integrity hasher has the
-     * data as an input:
-     *
-     *   let hasher = Hasher()
-     *   hasher.write(&data)
-     *   hash = hasher.digest()
-     *
-     * If this is an encrypted write, then the integrity hasher has the
-     * nonce, then tag, then data written to it.
-     *
-     *   let hasher = Hasher()
-     *   hasher.write(&nonce)
-     *   hasher.write(&tag)
-     *   hasher.write(&data)
-     *   hash = hasher.digest()
-     */
-    pub hash: u64,
+    pub block_context: BlockContext,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -53,8 +35,45 @@ pub struct ReadResponse {
     pub offset: Block,
 
     pub data: bytes::BytesMut,
-    pub encryption_contexts: Vec<EncryptionContext>,
-    pub hashes: Vec<u64>,
+    pub block_contexts: Vec<BlockContext>,
+}
+
+impl ReadResponse {
+    pub fn hashes(&self) -> Vec<u64> {
+        self.block_contexts.iter().map(|x| x.hash).collect()
+    }
+
+    pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
+        self.block_contexts
+            .iter()
+            .map(|x| x.encryption_context.as_ref())
+            .collect()
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct BlockContext {
+    /// If this is a non-encrypted write, then the integrity hasher has the
+    /// data as an input:
+    ///
+    ///   let hasher = Hasher()
+    ///   hasher.write(&data)
+    ///   hash = hasher.digest()
+    ///
+    /// If this is an encrypted write, then the integrity hasher has the
+    /// nonce, then tag, then data written to it.
+    ///
+    ///   let hasher = Hasher()
+    ///   hasher.write(&nonce)
+    ///   hasher.write(&tag)
+    ///   hasher.write(&data)
+    ///   hash = hasher.digest()
+    ///
+    /// The hash is performed **after** encryption so that the downstairs can
+    /// verify it without the key.
+    pub hash: u64,
+
+    pub encryption_context: Option<EncryptionContext>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -79,8 +98,7 @@ impl ReadResponse {
             eid: request.eid,
             offset: request.offset,
             data,
-            encryption_contexts: vec![],
-            hashes: vec![],
+            block_contexts: vec![],
         }
     }
 
@@ -92,8 +110,10 @@ impl ReadResponse {
             eid: request.eid,
             offset: request.offset,
             data: BytesMut::from(data),
-            encryption_contexts: vec![],
-            hashes: vec![crucible_common::integrity_hash(&[data])],
+            block_contexts: vec![BlockContext {
+                hash: crucible_common::integrity_hash(&[data]),
+                encryption_context: None,
+            }],
         }
     }
 }
@@ -121,6 +141,7 @@ pub enum Message {
     },
     YesItsMe {
         version: u32,
+        repair_addr: SocketAddr,
     },
 
     // Reasons to reject the initial negotiation
@@ -332,11 +353,13 @@ impl CrucibleEncoder {
                 data.resize(sz, 1);
                 bytes::Bytes::from(data)
             },
-            encryption_context: Some(EncryptionContext {
-                nonce: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                tag: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            }),
-            hash: 0,
+            block_context: BlockContext {
+                hash: 0,
+                encryption_context: Some(EncryptionContext {
+                    nonce: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    tag: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                }),
+            },
         }
     }
 
@@ -589,7 +612,10 @@ mod tests {
 
     #[test]
     fn rt_yes_its_me() -> Result<()> {
-        let input = Message::YesItsMe { version: 20000 };
+        let input = Message::YesItsMe {
+            version: 20000,
+            repair_addr: "127.0.0.1:123".parse().unwrap(),
+        };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

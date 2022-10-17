@@ -65,6 +65,10 @@ enum Action {
         )]
         ds_bin: String,
 
+        /// If the regions will require encryption.
+        #[clap(long, action)]
+        encrypted: bool,
+
         /// The extent size for the region
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
@@ -157,6 +161,10 @@ enum Action {
             action
         )]
         ds_bin: String,
+
+        /// (Only used when creating) If the regions will require encryption.
+        #[clap(long, action)]
+        encrypted: bool,
 
         /// If creating, the extent size for the region
         #[clap(long, default_value = "100", action)]
@@ -415,6 +423,7 @@ impl DscInfo {
         extent_size: u64,
         extent_count: u64,
         block_size: u32,
+        encrypted: bool,
     ) -> Result<()> {
         for ds_id in 0..3 {
             let _ = self
@@ -424,6 +433,7 @@ impl DscInfo {
                     extent_count,
                     block_size,
                     false,
+                    encrypted,
                 )
                 .await
                 .unwrap();
@@ -435,8 +445,6 @@ impl DscInfo {
     /**
      * Create a region as part of the region set at the given port with
      * the provided extent size and count.
-     *
-     * TODO: Add encryption option
      */
     async fn create_ds_region(
         &self,
@@ -445,6 +453,7 @@ impl DscInfo {
         extent_count: u64,
         block_size: u32,
         quiet: bool,
+        encrypted: bool,
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
@@ -458,20 +467,25 @@ impl DscInfo {
         let block_size = format!("{}", block_size);
         let uuid = format!("12345678-0000-0000-0000-{:012}", port);
         let start = std::time::Instant::now();
+        let mut cmd_args = vec![
+            "create",
+            "-d",
+            &new_region_dir,
+            "--uuid",
+            &uuid,
+            "--extent-count",
+            &extent_count,
+            "--extent-size",
+            &extent_size,
+            "--block-size",
+            &block_size,
+        ];
+        if encrypted {
+            cmd_args.push("--encrypted");
+        }
+
         let output = Command::new(rs.ds_bin.clone())
-            .args(&[
-                "create",
-                "-d",
-                &new_region_dir,
-                "--uuid",
-                &uuid,
-                "--extent-count",
-                &extent_count,
-                "--extent-size",
-                &extent_size,
-                "--block-size",
-                &block_size,
-            ])
+            .args(&cmd_args)
             .output()
             .await
             .unwrap();
@@ -1118,7 +1132,14 @@ async fn loop_create_test(
     let mut times = Vec::new();
     for _ in 0..5 {
         let ct = dsci
-            .create_ds_region(0, extent_size, extent_count, block_size, true)
+            .create_ds_region(
+                0,
+                extent_size,
+                extent_count,
+                block_size,
+                true,
+                false,
+            )
             .await?;
         times.push(ct);
         dsci.delete_ds_region(0)?;
@@ -1174,7 +1195,7 @@ async fn single_create_test(
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
     let ct = dsci
-        .create_ds_region(0, extent_size, extent_count, block_size, true)
+        .create_ds_region(0, extent_size, extent_count, block_size, true, false)
         .await?;
 
     let size = region_si(extent_size, extent_count, block_size);
@@ -1328,6 +1349,7 @@ fn main() -> Result<()> {
             block_size,
             cleanup,
             ds_bin,
+            encrypted,
             extent_size,
             extent_count,
             output_dir,
@@ -1344,6 +1366,7 @@ fn main() -> Result<()> {
                 extent_size,
                 extent_count,
                 block_size,
+                encrypted,
             ))
         }
         Action::RegionPerf {
@@ -1364,6 +1387,7 @@ fn main() -> Result<()> {
             control,
             create,
             ds_bin,
+            encrypted,
             extent_size,
             extent_count,
             output_dir,
@@ -1390,6 +1414,7 @@ fn main() -> Result<()> {
                     extent_size,
                     extent_count,
                     block_size,
+                    encrypted,
                 ))?;
             } else {
                 dsci.generate_region_set()?;

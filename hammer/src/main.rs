@@ -133,12 +133,13 @@ async fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        tokio::spawn(up_main(
+        let _join_handle = up_main(
             crucible_opts.clone(),
-            opt.gen,
+            opt.gen, // XXX increase gen per upstairs
             guest.clone(),
             None,
-        )); // XXX increase gen per upstairs
+        )
+        .await?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);
