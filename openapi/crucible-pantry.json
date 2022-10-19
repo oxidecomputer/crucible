@@ -4,7 +4,80 @@
     "title": "Crucible Pantry",
     "version": "0.0.0"
   },
-  "paths": {},
+  "paths": {
+    "/crucible/pantry/0/volume/{id}": {
+      "post": {
+        "summary": "Construct a volume from a VolumeConstructionRequest, storing the result in",
+        "description": "the Pantry.",
+        "operationId": "attach",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachResult"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Flush and close a volume, removing it from the Pantry",
+        "operationId": "detach",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
   "components": {
     "responses": {
       "Error": {
@@ -19,6 +92,81 @@
       }
     },
     "schemas": {
+      "AttachRequest": {
+        "type": "object",
+        "properties": {
+          "volume_construction_request": {
+            "$ref": "#/components/schemas/VolumeConstructionRequest"
+          }
+        },
+        "required": [
+          "volume_construction_request"
+        ]
+      },
+      "AttachResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "CrucibleOpts": {
+        "type": "object",
+        "properties": {
+          "cert_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "control": {
+            "nullable": true,
+            "type": "string"
+          },
+          "flush_timeout": {
+            "nullable": true,
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "nullable": true,
+            "type": "string"
+          },
+          "key_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "lossy": {
+            "type": "boolean"
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "root_cert_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "target": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "lossy",
+          "read_only",
+          "target"
+        ]
+      },
       "Error": {
         "description": "Error information from a response.",
         "type": "object",
@@ -36,6 +184,138 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "VolumeConstructionRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "read_only_parent": {
+                "nullable": true,
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/VolumeConstructionRequest"
+                  }
+                ]
+              },
+              "sub_volumes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/VolumeConstructionRequest"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "volume"
+                ]
+              }
+            },
+            "required": [
+              "block_size",
+              "id",
+              "sub_volumes",
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "url"
+                ]
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_size",
+              "id",
+              "type",
+              "url"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "gen": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "opts": {
+                "$ref": "#/components/schemas/CrucibleOpts"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "region"
+                ]
+              }
+            },
+            "required": [
+              "block_size",
+              "gen",
+              "opts",
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "path": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              }
+            },
+            "required": [
+              "block_size",
+              "id",
+              "path",
+              "type"
+            ]
+          }
         ]
       }
     }

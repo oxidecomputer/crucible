@@ -1,14 +1,12 @@
 // Copyright 2022 Oxide Computer Company
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use dropshot::{ConfigLogging, ConfigLoggingLevel};
-use slog::{error, info, o, warn, Logger};
-use std::collections::HashSet;
+use slog::{info, o};
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const PROG: &str = "crucible-pantry";
@@ -70,7 +68,7 @@ async fn main() -> Result<()> {
 }
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
-    let api = server::make_api()?;
+    let api = server::make_api().map_err(|e| anyhow!(e))?;
     api.openapi("Crucible Pantry", "0.0.0").write(f)?;
     Ok(())
 }
