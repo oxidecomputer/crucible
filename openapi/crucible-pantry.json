@@ -76,6 +76,44 @@
           }
         }
       }
+    },
+    "/crucible/pantry/0/volume/{id}/import_from_url": {
+      "post": {
+        "summary": "Import data from a URL",
+        "operationId": "import_from_url",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportFromUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -184,6 +222,17 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "ImportFromUrlRequest": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
         ]
       },
       "VolumeConstructionRequest": {

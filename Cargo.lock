@@ -753,10 +753,14 @@ dependencies = [
  "crucible",
  "crucible-client-types",
  "crucible-downstairs",
+ "crucible-pantry",
+ "crucible-pantry-client",
  "futures",
  "futures-core",
  "httptest",
  "rand 0.8.5",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "uuid 1.0.0",
@@ -817,6 +821,21 @@ dependencies = [
  "slog",
  "subprocess",
  "tokio",
+ "uuid 1.0.0",
+]
+
+[[package]]
+name = "crucible-pantry-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "percent-encoding",
+ "progenitor",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
  "uuid 1.0.0",
 ]
 

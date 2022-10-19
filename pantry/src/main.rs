@@ -2,17 +2,11 @@
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use dropshot::{ConfigLogging, ConfigLoggingLevel};
-use slog::{info, o};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-const PROG: &str = "crucible-pantry";
-
-mod pantry;
-mod server;
+use crucible_pantry::*;
 
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible volume maintenance agent")]
@@ -51,18 +45,12 @@ async fn main() -> Result<()> {
             write_openapi(&mut f)
         }
         Args::Run { listen } => {
-            let log = ConfigLogging::StderrTerminal {
-                level: ConfigLoggingLevel::Info,
-            }
-            .to_logger(PROG)?;
+            let (log, pantry) = initialize_pantry().await?;
 
-            info!(log, "listen IP: {:?}", listen);
+            let (_, join_handle) =
+                server::run_server(&log, listen, pantry).await?;
 
-            let pan = Arc::new(pantry::Pantry::new(
-                log.new(o!("component" => "datafile")),
-            )?);
-
-            server::run_server(&log, listen, pan).await
+            join_handle.await?.map_err(|e| anyhow!(e))
         }
     }
 }

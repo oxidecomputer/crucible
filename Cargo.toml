@@ -17,6 +17,7 @@ members = [
     "nbd_server",
     "package",
     "pantry",
+    "pantry-client",
     "protocol",
     "repair-client",
     "smf",

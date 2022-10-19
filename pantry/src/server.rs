@@ -10,12 +10,13 @@ use dropshot::endpoint;
 use dropshot::HttpError;
 use dropshot::HttpResponseDeleted;
 use dropshot::HttpResponseOk;
+use dropshot::HttpResponseUpdatedNoContent;
 use dropshot::Path as TypedPath;
 use dropshot::RequestContext;
 use dropshot::TypedBody;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{o, Logger};
+use slog::{info, o, Logger};
 
 use crucible::VolumeConstructionRequest;
 
@@ -57,6 +58,33 @@ async fn attach(
     Ok(HttpResponseOk(AttachResult { id: path.id }))
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct ImportFromUrlRequest {
+    pub url: String,
+}
+
+/// Import data from a URL
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/import_from_url",
+}]
+async fn import_from_url(
+    rc: Arc<RequestContext<Arc<Pantry>>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<ImportFromUrlRequest>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    pantry
+        .import_from_url(path.id.clone(), body.url)
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseUpdatedNoContent())
+}
+
 /// Flush and close a volume, removing it from the Pantry
 #[endpoint {
     method = DELETE,
@@ -81,6 +109,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     let mut api = dropshot::ApiDescription::new();
 
     api.register(attach)?;
+    api.register(import_from_url)?;
     api.register(detach)?;
 
     Ok(api)
@@ -90,7 +119,7 @@ pub async fn run_server(
     log: &Logger,
     bind_address: SocketAddr,
     df: Arc<Pantry>,
-) -> Result<()> {
+) -> Result<(SocketAddr, tokio::task::JoinHandle<Result<(), String>>)> {
     let api = make_api().map_err(|e| anyhow!(e))?;
 
     let server = dropshot::HttpServerStarter::new(
@@ -107,7 +136,10 @@ pub async fn run_server(
     .map_err(|e| anyhow!("creating server: {:?}", e))?
     .start();
 
-    server
-        .await
-        .map_err(|e| anyhow!("starting server: {:?}", e))
+    let local_addr = server.local_addr();
+    info!(log, "listen IP: {:?}", local_addr);
+
+    let join_handle = tokio::spawn(async move { server.await });
+
+    Ok((local_addr, join_handle))
 }

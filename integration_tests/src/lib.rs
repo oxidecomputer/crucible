@@ -11,6 +11,7 @@ mod test {
     use crucible::{Bytes, *};
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
+    use crucible_pantry_client::Client as CruciblePantryClient;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
@@ -29,20 +30,34 @@ mod test {
             address: IpAddr,
             encrypted: bool,
             read_only: bool,
+            big: bool,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = create_region(
-                512, /* block_size */
-                tempdir.path().to_path_buf(),
-                5, /* extent_size */
-                2, /* extent_count */
-                Uuid::new_v4(),
-                encrypted,
-            )?;
+            let _region = if big {
+                // create a 50 MB region
+                create_region(
+                    512, /* block_size */
+                    tempdir.path().to_path_buf(),
+                    512, /* extent_size */
+                    188, /* extent_count */
+                    Uuid::new_v4(),
+                    encrypted,
+                )?
+            } else {
+                // create a 5120b region
+                create_region(
+                    512, /* block_size */
+                    tempdir.path().to_path_buf(),
+                    5, /* extent_size */
+                    2, /* extent_count */
+                    Uuid::new_v4(),
+                    encrypted,
+                )?
+            };
 
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
@@ -107,16 +122,26 @@ mod test {
     }
 
     impl TestDownstairsSet {
+        /// Spin off three downstairs, with a 5120b region
+        pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
+            TestDownstairsSet::new_with_flag(read_only, false).await
+        }
+
+        /// Spin off three downstairs, with a 50 MB region
+        pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
+            TestDownstairsSet::new_with_flag(read_only, true).await
+        }
+
         /// Spin off three downstairs
-        pub async fn new(read_only: bool) -> Result<TestDownstairsSet> {
+        pub async fn new_with_flag(read_only: bool, big: bool) -> Result<TestDownstairsSet> {
             let downstairs1 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only)
+                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
                     .await?;
             let downstairs2 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only)
+                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
                     .await?;
             let downstairs3 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only)
+                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
                     .await?;
 
             // Generate random data for our key
@@ -175,7 +200,7 @@ mod test {
         // Test a simple single layer volume with a read, write, read
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -223,14 +248,14 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_two_layers() -> Result<()> {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(opts, false).await
     }
 
     #[tokio::test]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(opts, true).await
     }
@@ -315,7 +340,7 @@ mod test {
     async fn integration_test_three_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in memory block io full of 11
@@ -403,7 +428,7 @@ mod test {
     async fn integration_test_url() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let server = Server::run();
@@ -478,7 +503,7 @@ mod test {
         // Just do a read of a new volume.
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(true).await?;
+        let tds = TestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -525,7 +550,7 @@ mod test {
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -594,7 +619,7 @@ mod test {
         // Should result in:
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -665,7 +690,7 @@ mod test {
         // |ABBBBBBBBBB|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -738,14 +763,14 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -820,14 +845,14 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -924,14 +949,14 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1002,7 +1027,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(opts, false).await
     }
@@ -1010,7 +1035,7 @@ mod test {
     #[tokio::test]
     async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
     {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(opts, true).await
     }
@@ -1096,7 +1121,7 @@ mod test {
         //     |1111111111|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1168,7 +1193,7 @@ mod test {
         //     |1111155555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1261,7 +1286,7 @@ mod test {
         //     |1121100300|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1345,7 +1370,7 @@ mod test {
         // SV  |5555555555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1436,14 +1461,14 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1557,14 +1582,14 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 0,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1660,7 +1685,7 @@ mod test {
     async fn integration_test_multi_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(true).await?;
+        let tds = TestDownstairsSet::small(true).await?;
         let mut opts = tds.opts();
 
         let vcr_1: VolumeConstructionRequest =
@@ -1734,7 +1759,7 @@ mod test {
         // SV  |55555-----|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
@@ -1786,7 +1811,7 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::new(false).await?;
+        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume
@@ -1847,7 +1872,7 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::new(false).await?;
+        let top_layer_tds = TestDownstairsSet::small(false).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
@@ -1933,7 +1958,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -1976,7 +2001,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin up three read-only downstairs
-        let tds = TestDownstairsSet::new(true).await?;
+        let tds = TestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2011,7 +2036,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2084,7 +2109,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2142,7 +2167,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2201,7 +2226,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2258,7 +2283,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2315,7 +2340,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2360,6 +2385,64 @@ mod test {
             vec![0x99_u8; BLOCK_SIZE],
             dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
         );
+
+        Ok(())
+    }
+
+    // The following tests are for the Pantry
+    #[tokio::test]
+    async fn test_pantry_import_from_url() -> Result<()> {
+        // Test write_unwritten and read work as expected,
+        // Have the IO span an extent boundary.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        // Start the pantry
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        let client = CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client.attach(&volume_id.to_string(), &crucible_pantry_client::types::AttachRequest {
+            // the type here is crucible_pantry_client::types::VolumeConstructionRequest, not
+            // crucible::VolumeConstructionRequest, but they are the same thing! take a trip
+            // through JSON to get to the right type
+            volume_construction_request: serde_json::from_str(
+                &serde_json::to_string(&vcr)?,
+            )?,
+        }).await?;
+
+        client.import_from_url(
+            &volume_id.to_string(),
+            &crucible_pantry_client::types::ImportFromUrlRequest {
+                // XXX should have some local thing instead?
+                url: "https://oxide-omicron-build.s3.amazonaws.com/alpine.iso".to_string(),
+            },
+        ).await?;
+
+        client.detach(&volume_id.to_string()).await?;
 
         Ok(())
     }
