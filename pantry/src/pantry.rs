@@ -55,11 +55,21 @@ impl Pantry {
         }
 
         // If no entry exists, then add one
-        info!(self.log, "constructing volume {}", volume_id);
+        info!(
+            self.log,
+            "no entry exists for volume {}, constructing...", volume_id
+        );
 
         let volume =
             Volume::construct(volume_construction_request.clone(), None)
                 .await?;
+
+        info!(self.log, "volume {} constructed ok", volume_id);
+
+        // XXX activation number going away?
+        volume.activate(0).await?;
+
+        info!(self.log, "volume {} activated ok", volume_id);
 
         entries.insert(
             volume_id.clone(),
