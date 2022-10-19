@@ -1,5 +1,5 @@
-use slog::Logger;
 use anyhow::Result;
+use slog::Logger;
 
 pub struct Pantry {
     log: Logger,

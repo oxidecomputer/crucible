@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 const PROG: &str = "crucible-pantry";
 
-mod server;
 mod pantry;
+mod server;
 
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible volume maintenance agent")]
@@ -52,9 +52,7 @@ async fn main() -> Result<()> {
                 .open(output)?;
             write_openapi(&mut f)
         }
-        Args::Run {
-            listen,
-        } => {
+        Args::Run { listen } => {
             let log = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
             }
@@ -97,6 +95,9 @@ mod tests {
         let errors = openapi_lint::validate(&spec);
         assert!(errors.is_empty(), "{}", errors.join("\n\n"));
 
-        expectorate::assert_contents("../openapi/crucible-pantry.json", &actual);
+        expectorate::assert_contents(
+            "../openapi/crucible-pantry.json",
+            &actual,
+        );
     }
 }
