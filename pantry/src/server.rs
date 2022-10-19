@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use slog::{o, Logger};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::result::Result as SResult;
 use std::sync::Arc;
 
 pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>> {
@@ -30,7 +29,8 @@ pub async fn run_server(
     let server = dropshot::HttpServerStarter::new(
         &dropshot::ConfigDropshot {
             bind_address,
-            request_body_max_bytes: 512 * 1024,
+            // max import is 512k bytes, plus room for metadata
+            request_body_max_bytes: 1024 + 512 * 1024,
             ..Default::default()
         },
         api,
