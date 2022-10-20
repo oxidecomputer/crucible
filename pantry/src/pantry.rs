@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -175,8 +176,10 @@ impl PantryEntry {
 pub struct Pantry {
     pub log: Logger,
 
-    /// Store a Volume Construction Request and Volume, indexed by id.
-    entries: Mutex<BTreeMap<String, PantryEntry>>,
+    /// Store a Volume Construction Request and Volume, indexed by id. Use this
+    /// Mutex -> Arc<Mutex> structure in order for multiple requests to act on
+    /// multiple PantryEntry objects at the same time.
+    entries: Mutex<BTreeMap<String, Arc<Mutex<PantryEntry>>>>,
 }
 
 impl Pantry {
@@ -194,16 +197,34 @@ impl Pantry {
     ) -> Result<()> {
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get(&volume_id) {
+            let entry = entry.lock().await;
+
             // This function must be idempotent for the same inputs. If an entry
             // at this ID exists already, compare the existing volume
             // construction request, and return either Ok or conflict
             if entry.volume_construction_request == volume_construction_request
             {
-                info!(self.log, "volume {} already an entry, and has same volume construction request, returning OK", volume_id);
+                info!(
+                    self.log,
+                    "volume {} already an entry, and has same volume \
+                    construction request, returning OK",
+                    volume_id,
+                );
+
                 return Ok(());
             } else {
-                warn!(self.log, "volume {} already an entry, but has different volume construction request, bailing!", volume_id);
-                bail!("Existing entry for {} with different volume construction request!", volume_id);
+                warn!(
+                    self.log,
+                    "volume {} already an entry, but has different volume \
+                    construction request, bailing!",
+                    volume_id,
+                );
+
+                bail!(
+                    "Existing entry for {} with different volume construction \
+                    request!",
+                    volume_id,
+                );
             }
         }
 
@@ -226,15 +247,35 @@ impl Pantry {
 
         entries.insert(
             volume_id.clone(),
-            PantryEntry {
+            Arc::new(Mutex::new(PantryEntry {
                 volume,
                 volume_construction_request,
-            },
+            })),
         );
 
         info!(self.log, "volume {} constructed and inserted ok", volume_id);
 
         Ok(())
+    }
+
+    pub async fn entry(
+        &self,
+        volume_id: String,
+    ) -> Result<Arc<Mutex<PantryEntry>>, HttpError> {
+        let entries = self.entries.lock().await;
+        match entries.get(&volume_id) {
+            Some(entry) => {
+                let entry = entry.clone();
+                drop(entries);
+                Ok(entry)
+            }
+
+            None => {
+                warn!(self.log, "{} not in pantry", volume_id,);
+
+                Err(HttpError::for_not_found(None, volume_id))
+            }
+        }
     }
 
     pub async fn import_from_url(
@@ -243,26 +284,15 @@ impl Pantry {
         url: String,
         expected_digest: Option<ExpectedDigest>,
     ) -> Result<(), HttpError> {
-        let entries = self.entries.lock().await;
-        match entries.get(&volume_id) {
-            Some(entry) => {
-                entry.import_from_url(url, expected_digest).await.map_err(
-                    |e| HttpError::for_internal_error(e.to_string()),
-                )?;
+        let entry = self.entry(volume_id).await?;
+        entry
+            .lock()
+            .await
+            .import_from_url(url, expected_digest)
+            .await
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-                Ok(())
-            }
-
-            None => {
-                warn!(
-                    self.log,
-                    "attempting to import_from_url for non-existent {}",
-                    volume_id,
-                );
-
-                Err(HttpError::for_not_found(None, volume_id))
-            }
-        }
+        Ok(())
     }
 
     pub async fn snapshot(
@@ -270,25 +300,15 @@ impl Pantry {
         volume_id: String,
         snapshot_id: String,
     ) -> Result<(), HttpError> {
-        let entries = self.entries.lock().await;
-        match entries.get(&volume_id) {
-            Some(entry) => {
-                entry.snapshot(snapshot_id).await.map_err(|e| {
-                    HttpError::for_internal_error(e.to_string())
-                })?;
+        let entry = self.entry(volume_id).await?;
+        entry
+            .lock()
+            .await
+            .snapshot(snapshot_id)
+            .await
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-                Ok(())
-            }
-
-            None => {
-                warn!(
-                    self.log,
-                    "attempting to snapshot for non-existent {}", volume_id,
-                );
-
-                Err(HttpError::for_not_found(None, volume_id))
-            }
-        }
+        Ok(())
     }
 
     pub async fn bulk_write(
@@ -297,31 +317,23 @@ impl Pantry {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<(), HttpError> {
-        let entries = self.entries.lock().await;
-        match entries.get(&volume_id) {
-            Some(entry) => {
-                entry.bulk_write(offset, data).await.map_err(|e| {
-                    HttpError::for_internal_error(e.to_string())
-                })?;
+        let entry = self.entry(volume_id).await?;
+        entry
+            .lock()
+            .await
+            .bulk_write(offset, data)
+            .await
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-                Ok(())
-            }
-
-            None => {
-                warn!(
-                    self.log,
-                    "attempting to bulk_write for non-existent {}", volume_id,
-                );
-
-                Err(HttpError::for_not_found(None, volume_id))
-            }
-        }
+        Ok(())
     }
 
     pub async fn detach(&self, volume_id: String) -> Result<()> {
         let mut entries = self.entries.lock().await;
         match entries.get(&volume_id) {
             Some(entry) => {
+                let entry = entry.lock().await;
+
                 // Attempt a flush. If this errors, return that to the caller as
                 // an internal error. If it succeeds, remove the entry.
                 info!(
@@ -329,6 +341,14 @@ impl Pantry {
                     "detach calling flush for volume {}", volume_id
                 );
                 entry.volume.flush(None).await?;
+
+                info!(
+                    self.log,
+                    "detach calling deactivate for volume {}", volume_id
+                );
+                entry.volume.deactivate().await?;
+
+                drop(entry);
 
                 info!(
                     self.log,
