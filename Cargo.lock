@@ -801,6 +801,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap 3.2.1",
  "crucible",

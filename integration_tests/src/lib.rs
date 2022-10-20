@@ -2636,4 +2636,178 @@ mod test {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_pantry_bulk_write() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Start the pantry, then use it to bulk_write in data
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        for i in 0..10 {
+            client
+                .bulk_write(
+                    &volume_id.to_string(),
+                    &crucible_pantry_client::types::BulkWriteRequest {
+                        offset: i * 512,
+                        base64_encoded_data: base64::encode(vec![i as u8; 512]),
+                    },
+                )
+                .await?;
+        }
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Attach, validate bulk write worked
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer = Buffer::new(5120);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        let buffer_data = &*buffer.as_vec().await;
+
+        for i in 0..10 {
+            let start = i * 512;
+            let end = (i + 1) * 512;
+            assert_eq!(vec![i as u8; 512], buffer_data[start..end]);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_bulk_write_max_chunk_size() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Start the pantry, then use it to bulk_write in data
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        client
+            .bulk_write(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkWriteRequest {
+                    offset: 0,
+                    base64_encoded_data: base64::encode(
+                        vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE]
+                    ),
+                },
+            )
+            .await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Attach, validate bulk write worked
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer =
+            Buffer::new(crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert_eq!(
+            vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
+            *buffer.as_vec().await
+        );
+
+        Ok(())
+    }
 }

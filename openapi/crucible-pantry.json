@@ -77,6 +77,44 @@
         }
       }
     },
+    "/crucible/pantry/0/volume/{id}/bulk_write": {
+      "post": {
+        "summary": "Bulk write data into a volume at a specified offset",
+        "operationId": "bulk_write",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/crucible/pantry/0/volume/{id}/import_from_url": {
       "post": {
         "summary": "Import data from a URL into a volume",
@@ -188,6 +226,23 @@
         },
         "required": [
           "id"
+        ]
+      },
+      "BulkWriteRequest": {
+        "type": "object",
+        "properties": {
+          "base64_encoded_data": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "base64_encoded_data",
+          "offset"
         ]
       },
       "CrucibleOpts": {

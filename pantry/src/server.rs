@@ -112,6 +112,38 @@ async fn snapshot(
     Ok(HttpResponseUpdatedNoContent())
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct BulkWriteRequest {
+    pub offset: u64,
+
+    pub base64_encoded_data: String,
+}
+
+/// Bulk write data into a volume at a specified offset
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/bulk_write",
+}]
+async fn bulk_write(
+    rc: Arc<RequestContext<Arc<Pantry>>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<BulkWriteRequest>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    let data = base64::decode(body.base64_encoded_data)
+        .map_err(|e| HttpError::for_bad_request(None, e.to_string()))?;
+
+    pantry
+        .bulk_write(path.id.clone(), body.offset, data)
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseUpdatedNoContent())
+}
+
 /// Flush and close a volume, removing it from the Pantry
 #[endpoint {
     method = DELETE,
@@ -138,6 +170,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     api.register(attach)?;
     api.register(import_from_url)?;
     api.register(snapshot)?;
+    api.register(bulk_write)?;
     api.register(detach)?;
 
     Ok(api)
@@ -153,8 +186,10 @@ pub async fn run_server(
     let server = dropshot::HttpServerStarter::new(
         &dropshot::ConfigDropshot {
             bind_address,
-            // max import is 512k bytes, plus room for metadata
-            request_body_max_bytes: 1024 + 512 * 1024,
+            // max import, multiplied by worst case base64 overhead, plus room
+            // for metadata
+            request_body_max_bytes: 1024
+                + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
             ..Default::default()
         },
         api,

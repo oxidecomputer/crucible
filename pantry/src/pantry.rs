@@ -24,6 +24,8 @@ pub struct PantryEntry {
 }
 
 impl PantryEntry {
+    pub const MAX_CHUNK_SIZE: usize = 512 * 1024;
+
     pub async fn import_from_url(&self, url: String) -> Result<()> {
         // validate the URL can be reached, and grab the content length
         let dur = std::time::Duration::from_secs(5);
@@ -59,10 +61,10 @@ impl PantryEntry {
 
         // import chunks into the volume
         let volume_block_size = self.volume.get_block_size().await?;
-        const MAX_CHUNK_SIZE: usize = 512 * 1024;
-        for chunk in (0..request_total_size).step_by(MAX_CHUNK_SIZE) {
+        for chunk in (0..request_total_size).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
-            let end = std::cmp::min(start + MAX_CHUNK_SIZE, request_total_size);
+            let end =
+                std::cmp::min(start + Self::MAX_CHUNK_SIZE, request_total_size);
 
             let response = client
                 .get(&url)
@@ -82,7 +84,7 @@ impl PantryEntry {
             let content_length = usize::from_str(content_length.to_str()?)?;
 
             assert_eq!(content_length, end - start);
-            assert!(content_length <= MAX_CHUNK_SIZE);
+            assert!(content_length <= Self::MAX_CHUNK_SIZE);
             assert!(content_length % volume_block_size as usize == 0);
 
             let bytes = response.bytes().await?;
@@ -110,6 +112,22 @@ impl PantryEntry {
             .flush(Some(SnapshotDetails {
                 snapshot_name: snapshot_id,
             }))
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn bulk_write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
+        if data.len() > Self::MAX_CHUNK_SIZE {
+            bail!(
+                "data len {} over max chunk size{}!",
+                data.len(),
+                Self::MAX_CHUNK_SIZE
+            );
+        }
+
+        self.volume
+            .write_to_byte_offset(offset, data.into())
             .await?;
 
         Ok(())
@@ -228,6 +246,33 @@ impl Pantry {
                 warn!(
                     self.log,
                     "attempting to snapshot for non-existent {}", volume_id,
+                );
+
+                Err(HttpError::for_not_found(None, volume_id))
+            }
+        }
+    }
+
+    pub async fn bulk_write(
+        &self,
+        volume_id: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<(), HttpError> {
+        let entries = self.entries.lock().await;
+        match entries.get(&volume_id) {
+            Some(entry) => {
+                entry.bulk_write(offset, data).await.map_err(|e| {
+                    HttpError::for_internal_error(e.to_string())
+                })?;
+
+                Ok(())
+            }
+
+            None => {
+                warn!(
+                    self.log,
+                    "attempting to bulk_write for non-existent {}", volume_id,
                 );
 
                 Err(HttpError::for_not_found(None, volume_id))
