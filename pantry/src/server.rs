@@ -83,8 +83,6 @@ async fn import_from_url(
     let body = body.into_inner();
     let pantry = rc.context();
 
-    eprintln!("import with {} {:?}", body.url, body.expected_digest);
-
     pantry
         .import_from_url(path.id.clone(), body.url, body.expected_digest)
         .await
