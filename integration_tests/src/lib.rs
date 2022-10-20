@@ -2569,4 +2569,71 @@ mod test {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_pantry_snapshot() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Start the pantry, then use it to snapshot
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        client
+            .snapshot(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::SnapshotRequest {
+                    snapshot_id: "testpost".to_string(),
+                },
+            )
+            .await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        Ok(())
+    }
 }

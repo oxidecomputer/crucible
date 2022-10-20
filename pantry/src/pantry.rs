@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 
 use crucible::Block;
 use crucible::BlockIO;
+use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
 
@@ -100,6 +101,16 @@ impl PantryEntry {
         // flush
 
         self.volume.flush(None).await?;
+
+        Ok(())
+    }
+
+    pub async fn snapshot(&self, snapshot_id: String) -> Result<()> {
+        self.volume
+            .flush(Some(SnapshotDetails {
+                snapshot_name: snapshot_id,
+            }))
+            .await?;
 
         Ok(())
     }
@@ -191,6 +202,32 @@ impl Pantry {
                     self.log,
                     "attempting to import_from_url for non-existent {}",
                     volume_id,
+                );
+
+                Err(HttpError::for_not_found(None, volume_id))
+            }
+        }
+    }
+
+    pub async fn snapshot(
+        &self,
+        volume_id: String,
+        snapshot_id: String,
+    ) -> Result<(), HttpError> {
+        let entries = self.entries.lock().await;
+        match entries.get(&volume_id) {
+            Some(entry) => {
+                entry.snapshot(snapshot_id).await.map_err(|e| {
+                    HttpError::for_internal_error(e.to_string())
+                })?;
+
+                Ok(())
+            }
+
+            None => {
+                warn!(
+                    self.log,
+                    "attempting to snapshot for non-existent {}", volume_id,
                 );
 
                 Err(HttpError::for_not_found(None, volume_id))

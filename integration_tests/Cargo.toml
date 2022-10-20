@@ -9,7 +9,7 @@ edition = "2018"
 anyhow = "1"
 bytes = "1"
 crucible = { path = "../upstairs" }
-crucible-downstairs = { path = "../downstairs" }
+crucible-downstairs = { path = "../downstairs" } # importantly, don't use features = ["zfs_snapshot"] here, this will cause cleanup issues
 crucible-client-types = { path = "../crucible-client-types" }
 crucible-pantry = { path = "../pantry" }
 crucible-pantry-client = { path = "../pantry-client" }

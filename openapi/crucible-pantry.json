@@ -79,7 +79,7 @@
     },
     "/crucible/pantry/0/volume/{id}/import_from_url": {
       "post": {
-        "summary": "Import data from a URL",
+        "summary": "Import data from a URL into a volume",
         "operationId": "import_from_url",
         "parameters": [
           {
@@ -97,6 +97,44 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ImportFromUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/snapshot": {
+      "post": {
+        "summary": "Take a snapshot of a volume",
+        "operationId": "snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotRequest"
               }
             }
           },
@@ -233,6 +271,17 @@
         },
         "required": [
           "url"
+        ]
+      },
+      "SnapshotRequest": {
+        "type": "object",
+        "properties": {
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id"
         ]
       },
       "VolumeConstructionRequest": {

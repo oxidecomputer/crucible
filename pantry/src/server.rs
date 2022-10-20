@@ -63,7 +63,7 @@ struct ImportFromUrlRequest {
     pub url: String,
 }
 
-/// Import data from a URL
+/// Import data from a URL into a volume
 #[endpoint {
     method = POST,
     path = "/crucible/pantry/0/volume/{id}/import_from_url",
@@ -79,6 +79,33 @@ async fn import_from_url(
 
     pantry
         .import_from_url(path.id.clone(), body.url)
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SnapshotRequest {
+    pub snapshot_id: String,
+}
+
+/// Take a snapshot of a volume
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/snapshot",
+}]
+async fn snapshot(
+    rc: Arc<RequestContext<Arc<Pantry>>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<SnapshotRequest>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    pantry
+        .snapshot(path.id.clone(), body.snapshot_id)
         .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
@@ -110,6 +137,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
 
     api.register(attach)?;
     api.register(import_from_url)?;
+    api.register(snapshot)?;
     api.register(detach)?;
 
     Ok(api)
