@@ -58,6 +58,55 @@ async fn attach(
     Ok(HttpResponseOk(AttachResult { id: path.id }))
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct JobPath {
+    pub id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct JobPollResponse {
+    pub job_is_finished: bool,
+}
+
+/// Poll to see if a Pantry background job is done
+#[endpoint {
+    method = GET,
+    path = "/crucible/pantry/0/job/{id}/is_finished",
+}]
+async fn is_job_finished(
+    rc: Arc<RequestContext<Arc<Pantry>>>,
+    path: TypedPath<JobPath>,
+) -> Result<HttpResponseOk<JobPollResponse>, HttpError> {
+    let path = path.into_inner();
+    let pantry = rc.context();
+
+    let job_is_finished = pantry.is_job_finished(path.id).await?;
+
+    Ok(HttpResponseOk(JobPollResponse { job_is_finished }))
+}
+
+/// Block on returning a Pantry background job result, then return 200 OK if the
+/// job executed OK, 500 otherwise.
+#[endpoint {
+    method = GET,
+    path = "/crucible/pantry/0/job/{id}/ok",
+}]
+async fn job_result_ok(
+    rc: Arc<RequestContext<Arc<Pantry>>>,
+    path: TypedPath<JobPath>,
+) -> Result<HttpResponseOk<()>, HttpError> {
+    let path = path.into_inner();
+    let pantry = rc.context();
+
+    let job_result = pantry.get_job_result(path.id).await?;
+
+    match job_result {
+        Ok(_) => Ok(HttpResponseOk(())),
+
+        Err(e) => Err(HttpError::for_internal_error(e.to_string())),
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub enum ExpectedDigest {
     Sha256(String),
@@ -69,6 +118,11 @@ struct ImportFromUrlRequest {
     pub expected_digest: Option<ExpectedDigest>,
 }
 
+#[derive(Serialize, JsonSchema)]
+struct ImportFromUrlResponse {
+    pub job_id: String,
+}
+
 /// Import data from a URL into a volume
 #[endpoint {
     method = POST,
@@ -78,17 +132,17 @@ async fn import_from_url(
     rc: Arc<RequestContext<Arc<Pantry>>>,
     path: TypedPath<VolumePath>,
     body: TypedBody<ImportFromUrlRequest>,
-) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+) -> Result<HttpResponseOk<ImportFromUrlResponse>, HttpError> {
     let path = path.into_inner();
     let body = body.into_inner();
     let pantry = rc.context();
 
-    pantry
+    let job_id = pantry
         .import_from_url(path.id.clone(), body.url, body.expected_digest)
         .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-    Ok(HttpResponseUpdatedNoContent())
+    Ok(HttpResponseOk(ImportFromUrlResponse { job_id }))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -174,6 +228,8 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     let mut api = dropshot::ApiDescription::new();
 
     api.register(attach)?;
+    api.register(is_job_finished)?;
+    api.register(job_result_ok)?;
     api.register(import_from_url)?;
     api.register(snapshot)?;
     api.register(bulk_write)?;

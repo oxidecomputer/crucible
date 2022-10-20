@@ -2395,7 +2395,7 @@ mod test {
     // The following tests are for the Pantry
 
     #[tokio::test]
-    async fn test_pantry_import_from_url_alpine_iso() -> Result<()> {
+    async fn test_pantry_import_from_url_ovmf() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
@@ -2446,16 +2446,16 @@ mod test {
             .await?;
 
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+        let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
 
-        // ${base_url}/alpine-virt-3.16.0-x86_64.iso.sha256
         let sha256_digest =
-            "ba8007f74f9b54fbae3b2520da577831b4834778a498d732f091260c61aa7ca1";
+            "319d678f093c43502ca360911d52b475dea7fa6dcd962150c84fff18f5b32221";
 
-        client
+        let response = client
             .import_from_url(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::ImportFromUrlRequest {
-                    url: format!("{}/alpine.iso", base_url),
+                    url: url.clone(),
                     expected_digest: Some(
                         crucible_pantry_client::types::ExpectedDigest {
                             sha256: sha256_digest.to_string(),
@@ -2465,13 +2465,53 @@ mod test {
             )
             .await?;
 
+        while !client
+            .is_job_finished(&response.job_id)
+            .await?
+            .job_is_finished
+        {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        client.job_result_ok(&response.job_id).await?;
+
         client.detach(&volume_id.to_string()).await?;
+
+        // read the data to verify import
+
+        let dur = std::time::Duration::from_secs(5);
+        let client = reqwest::ClientBuilder::new()
+            .connect_timeout(dur)
+            .timeout(dur)
+            .build()?;
+
+        let bytes = client.get(&url).send().await?.bytes().await?;
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer = Buffer::new(bytes.len());
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert!(bytes.len() % BLOCK_SIZE == 0);
+
+        for i in (0..bytes.len()).step_by(BLOCK_SIZE) {
+            let start = i;
+            let end = i + BLOCK_SIZE;
+            assert_eq!(
+                bytes[..][start..end],
+                buffer.as_vec().await[start..end]
+            );
+            eprintln!("{} {} ok", start, end);
+        }
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_pantry_import_from_url_alpine_iso_bad_digest() -> Result<()> {
+    async fn test_pantry_import_from_url_ovmf_bad_digest() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
@@ -2525,13 +2565,13 @@ mod test {
 
         // not the actual digest!
         let sha256_digest =
-            "ba8007f74f9b50000000000000007831b4834778a498d732f091260c61aa7ca1";
+            "00000000000000000000000000000000000000000000000000000000f5b32221";
 
-        let result = client
+        let response = client
             .import_from_url(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::ImportFromUrlRequest {
-                    url: format!("{}/alpine.iso", base_url),
+                    url: format!("{}/OVMF_CODE_20220922.fd", base_url),
                     expected_digest: Some(
                         crucible_pantry_client::types::ExpectedDigest {
                             sha256: sha256_digest.to_string(),
@@ -2539,9 +2579,17 @@ mod test {
                     ),
                 },
             )
-            .await;
+            .await?;
 
-        assert!(result.is_err());
+        while !client
+            .is_job_finished(&response.job_id)
+            .await?
+            .job_is_finished
+        {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        assert!(client.job_result_ok(&response.job_id).await.is_err());
 
         client.detach(&volume_id.to_string()).await?;
 
@@ -2635,7 +2683,7 @@ mod test {
             )
             .await?;
 
-        client
+        let response = client
             .import_from_url(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::ImportFromUrlRequest {
@@ -2644,6 +2692,9 @@ mod test {
                 },
             )
             .await?;
+
+        // Test not polling here
+        client.job_result_ok(&response.job_id).await?;
 
         client.detach(&volume_id.to_string()).await?;
 

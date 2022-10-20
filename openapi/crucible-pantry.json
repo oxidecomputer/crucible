@@ -5,6 +5,81 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/crucible/pantry/0/job/{id}/is_finished": {
+      "get": {
+        "summary": "Poll to see if a Pantry background job is done",
+        "operationId": "is_job_finished",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobPollResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/job/{id}/ok": {
+      "get": {
+        "summary": "Block on returning a Pantry background job result, then return 200 OK if the",
+        "description": "job executed OK, 500 otherwise.",
+        "operationId": "job_result_ok",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Null",
+                  "type": "string",
+                  "enum": [
+                    null
+                  ]
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/crucible/pantry/0/volume/{id}": {
       "post": {
         "summary": "Construct a volume from a VolumeConstructionRequest, storing the result in",
@@ -141,8 +216,15 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "resource updated"
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportFromUrlResponse"
+                }
+              }
+            }
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -350,6 +432,28 @@
         },
         "required": [
           "url"
+        ]
+      },
+      "ImportFromUrlResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      },
+      "JobPollResponse": {
+        "type": "object",
+        "properties": {
+          "job_is_finished": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "job_is_finished"
         ]
       },
       "SnapshotRequest": {

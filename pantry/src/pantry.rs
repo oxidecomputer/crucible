@@ -14,8 +14,9 @@ use slog::info;
 use slog::warn;
 use slog::Logger;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
-use crucible::Block;
 use crucible::BlockIO;
 use crucible::SnapshotDetails;
 use crucible::Volume;
@@ -112,13 +113,7 @@ impl PantryEntry {
             }
 
             self.volume
-                .write(
-                    Block::new(
-                        start as u64,
-                        volume_block_size.trailing_zeros(),
-                    ),
-                    bytes,
-                )
+                .write_to_byte_offset(start as u64, bytes)
                 .await?;
         }
 
@@ -180,6 +175,10 @@ pub struct Pantry {
     /// Mutex -> Arc<Mutex> structure in order for multiple requests to act on
     /// multiple PantryEntry objects at the same time.
     entries: Mutex<BTreeMap<String, Arc<Mutex<PantryEntry>>>>,
+
+    /// Pantry can run background jobs on Volumes, and currently running jobs
+    /// are stored here.
+    jobs: Mutex<BTreeMap<String, JoinHandle<Result<()>>>>,
 }
 
 impl Pantry {
@@ -187,6 +186,7 @@ impl Pantry {
         Ok(Pantry {
             log,
             entries: Mutex::new(BTreeMap::default()),
+            jobs: Mutex::new(BTreeMap::default()),
         })
     }
 
@@ -271,9 +271,51 @@ impl Pantry {
             }
 
             None => {
-                warn!(self.log, "{} not in pantry", volume_id,);
+                warn!(self.log, "volume {} not in pantry", volume_id);
 
                 Err(HttpError::for_not_found(None, volume_id))
+            }
+        }
+    }
+
+    pub async fn is_job_finished(
+        &self,
+        job_id: String,
+    ) -> Result<bool, HttpError> {
+        let jobs = self.jobs.lock().await;
+        match jobs.get(&job_id) {
+            Some(join_handle) => Ok(join_handle.is_finished()),
+
+            None => {
+                warn!(self.log, "job {} not a pantry job", job_id);
+
+                Err(HttpError::for_not_found(None, job_id.to_string()))
+            }
+        }
+    }
+
+    pub async fn get_job_result(
+        &self,
+        job_id: String,
+    ) -> Result<Result<()>, HttpError> {
+        let mut jobs = self.jobs.lock().await;
+
+        // Remove the job from the list of jobs, then await on the join handle.
+        // If this errors, then the job has failed in some way, so don't leave
+        // it in the list of jobs.
+        match jobs.remove(&job_id) {
+            Some(join_handle) => {
+                let result = join_handle.await.map_err(|e| {
+                    HttpError::for_internal_error(e.to_string())
+                })?;
+                jobs.remove(&job_id);
+                Ok(result)
+            }
+
+            None => {
+                warn!(self.log, "job {} not a pantry job", job_id);
+
+                Err(HttpError::for_not_found(None, job_id.to_string()))
             }
         }
     }
@@ -283,16 +325,23 @@ impl Pantry {
         volume_id: String,
         url: String,
         expected_digest: Option<ExpectedDigest>,
-    ) -> Result<(), HttpError> {
+    ) -> Result<String, HttpError> {
         let entry = self.entry(volume_id).await?;
-        entry
-            .lock()
-            .await
-            .import_from_url(url, expected_digest)
-            .await
-            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        let entry = entry.clone();
 
-        Ok(())
+        let join_handle = tokio::spawn(async move {
+            entry
+                .lock()
+                .await
+                .import_from_url(url, expected_digest)
+                .await
+        });
+
+        let mut jobs = self.jobs.lock().await;
+        let job_id = Uuid::new_v4().to_string();
+        jobs.insert(job_id.clone(), join_handle);
+
+        Ok(job_id)
     }
 
     pub async fn snapshot(
@@ -328,6 +377,8 @@ impl Pantry {
         Ok(())
     }
 
+    // XXX should this unconditionally detach? separate into PantryEntry
+    // function
     pub async fn detach(&self, volume_id: String) -> Result<()> {
         let mut entries = self.entries.lock().await;
         match entries.get(&volume_id) {
