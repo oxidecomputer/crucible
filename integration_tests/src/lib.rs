@@ -38,7 +38,7 @@ mod test {
                 .tempdir()?;
 
             let _region = if big {
-                // create a 50 MB region
+                // create a 47 MB region
                 create_region(
                     512, /* block_size */
                     tempdir.path().to_path_buf(),
@@ -2953,4 +2953,140 @@ mod test {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_pantry_scrub() -> Result<()> {
+        // Test scrubbing the OVMF image from a URL
+        // XXX httptest::Server does not support range requests, otherwise that
+        // should be used here instead.
+
+        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+        let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
+
+        let data = {
+            let dur = std::time::Duration::from_secs(5);
+            let client = reqwest::ClientBuilder::new()
+                .connect_timeout(dur)
+                .timeout(dur)
+                .build()?;
+
+            client.get(&url).send().await?.bytes().await?
+        };
+
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct (with a
+        // read-only parent pointing to the random data above)
+
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts: opts.clone(),
+                    gen: 0,
+                }],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Url {
+                        id: Uuid::new_v4(),
+                        block_size: BLOCK_SIZE as u64,
+                        url: url.clone(),
+                    }
+                )),
+            };
+
+        // Verify contents match data on init
+        {
+            let volume = Volume::construct(vcr.clone(), None).await?;
+            volume.activate(1).await?;
+
+            let buffer = Buffer::new(data.len());
+            volume
+                .read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )
+                .await?;
+
+            assert_eq!(data, *buffer.as_vec().await);
+
+            volume.deactivate().await?;
+
+            drop(volume);
+        }
+
+        // Start the pantry, then use it to scrub
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        let response = client.scrub(&volume_id.to_string()).await?;
+
+        while !client.is_job_finished(&response.job_id).await?.job_is_finished {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        client.job_result_ok(&response.job_id).await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Drop the read only parent from the volume construction request
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Attach, validate random data got imported
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(2).await?;
+
+        let buffer = Buffer::new(data.len());
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert_eq!(data, *buffer.as_vec().await);
+
+        Ok(())
+    }
 }
+

@@ -235,6 +235,41 @@
         }
       }
     },
+    "/crucible/pantry/0/volume/{id}/scrub": {
+      "post": {
+        "summary": "Scrub the volume (copy blocks from read-only parent to subvolumes)",
+        "operationId": "scrub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScrubResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/crucible/pantry/0/volume/{id}/snapshot": {
       "post": {
         "summary": "Take a snapshot of a volume",
@@ -454,6 +489,17 @@
         },
         "required": [
           "job_is_finished"
+        ]
+      },
+      "ScrubResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
         ]
       },
       "SnapshotRequest": {

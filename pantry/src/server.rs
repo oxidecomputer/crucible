@@ -204,6 +204,31 @@ async fn bulk_write(
     Ok(HttpResponseUpdatedNoContent())
 }
 
+#[derive(Serialize, JsonSchema)]
+struct ScrubResponse {
+    pub job_id: String,
+}
+
+/// Scrub the volume (copy blocks from read-only parent to subvolumes)
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/scrub",
+}]
+async fn scrub(
+    rc: Arc<RequestContext<Arc<Pantry>>>,
+    path: TypedPath<VolumePath>,
+) -> Result<HttpResponseOk<ScrubResponse>, HttpError> {
+    let path = path.into_inner();
+    let pantry = rc.context();
+
+    let job_id = pantry
+        .scrub(path.id.clone())
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseOk(ScrubResponse { job_id }))
+}
+
 /// Flush and close a volume, removing it from the Pantry
 #[endpoint {
     method = DELETE,
@@ -233,6 +258,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     api.register(import_from_url)?;
     api.register(snapshot)?;
     api.register(bulk_write)?;
+    api.register(scrub)?;
     api.register(detach)?;
 
     Ok(api)

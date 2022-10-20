@@ -166,6 +166,11 @@ impl PantryEntry {
         Ok(())
     }
 
+    pub async fn scrub(&self) -> Result<()> {
+        self.volume.scrub().await?;
+        Ok(())
+    }
+
     pub async fn detach(&self) -> Result<()> {
         self.volume.flush(None).await?;
         self.volume.deactivate().await?;
@@ -381,6 +386,28 @@ impl Pantry {
             .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub async fn scrub(
+        &self,
+        volume_id: String,
+    ) -> Result<String, HttpError> {
+        let entry = self.entry(volume_id).await?;
+        let entry = entry.clone();
+
+        let join_handle = tokio::spawn(async move {
+            entry
+                .lock()
+                .await
+                .scrub()
+                .await
+        });
+
+        let mut jobs = self.jobs.lock().await;
+        let job_id = Uuid::new_v4().to_string();
+        jobs.insert(job_id.clone(), join_handle);
+
+        Ok(job_id)
     }
 
     /// Remove an entry from the pantry, and detach it. If detach fails, the
