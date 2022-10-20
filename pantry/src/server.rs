@@ -58,9 +58,15 @@ async fn attach(
     Ok(HttpResponseOk(AttachResult { id: path.id }))
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub enum ExpectedDigest {
+    Sha256(String),
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct ImportFromUrlRequest {
     pub url: String,
+    pub expected_digest: Option<ExpectedDigest>,
 }
 
 /// Import data from a URL into a volume
@@ -77,8 +83,10 @@ async fn import_from_url(
     let body = body.into_inner();
     let pantry = rc.context();
 
+    eprintln!("import with {} {:?}", body.url, body.expected_digest);
+
     pantry
-        .import_from_url(path.id.clone(), body.url)
+        .import_from_url(path.id.clone(), body.url, body.expected_digest)
         .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 

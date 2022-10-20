@@ -7,6 +7,8 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 use dropshot::HttpError;
+use sha2::Digest;
+use sha2::Sha256;
 use slog::info;
 use slog::warn;
 use slog::Logger;
@@ -18,6 +20,8 @@ use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
 
+use crate::server::ExpectedDigest;
+
 pub struct PantryEntry {
     volume: Volume,
     volume_construction_request: VolumeConstructionRequest,
@@ -26,7 +30,11 @@ pub struct PantryEntry {
 impl PantryEntry {
     pub const MAX_CHUNK_SIZE: usize = 512 * 1024;
 
-    pub async fn import_from_url(&self, url: String) -> Result<()> {
+    pub async fn import_from_url(
+        &self,
+        url: String,
+        expected_digest: Option<ExpectedDigest>,
+    ) -> Result<()> {
         // validate the URL can be reached, and grab the content length
         let dur = std::time::Duration::from_secs(5);
         let client = reqwest::ClientBuilder::new()
@@ -59,7 +67,16 @@ impl PantryEntry {
             );
         }
 
-        // import chunks into the volume
+        // import chunks into the volume, optionally hashing the bytes for later
+        // matching against the expected digest
+        let mut hasher = if let Some(ref expected_digest) = expected_digest {
+            match expected_digest {
+                ExpectedDigest::Sha256(_) => Some(Sha256::new()),
+            }
+        } else {
+            None
+        };
+
         let volume_block_size = self.volume.get_block_size().await?;
         for chunk in (0..request_total_size).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
@@ -89,6 +106,10 @@ impl PantryEntry {
 
             let bytes = response.bytes().await?;
 
+            if let Some(ref mut hasher) = hasher {
+                hasher.update(&bytes);
+            }
+
             self.volume
                 .write(
                     Block::new(
@@ -103,6 +124,22 @@ impl PantryEntry {
         // flush
 
         self.volume.flush(None).await?;
+
+        if let Some(hasher) = hasher {
+            let digest = hex::encode(hasher.finalize());
+
+            match expected_digest.unwrap() {
+                ExpectedDigest::Sha256(expected_digest) => {
+                    if expected_digest != digest {
+                        bail!(
+                            "sha256 digest mismatch! expected {}, saw {}",
+                            expected_digest,
+                            digest,
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -204,13 +241,14 @@ impl Pantry {
         &self,
         volume_id: String,
         url: String,
+        expected_digest: Option<ExpectedDigest>,
     ) -> Result<(), HttpError> {
         let entries = self.entries.lock().await;
         match entries.get(&volume_id) {
             Some(entry) => {
-                entry.import_from_url(url).await.map_err(|e| {
-                    HttpError::for_internal_error(e.to_string())
-                })?;
+                entry.import_from_url(url, expected_digest).await.map_err(
+                    |e| HttpError::for_internal_error(e.to_string()),
+                )?;
 
                 Ok(())
             }

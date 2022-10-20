@@ -2445,12 +2445,103 @@ mod test {
             )
             .await?;
 
-        client.import_from_url(
-            &volume_id.to_string(),
-            &crucible_pantry_client::types::ImportFromUrlRequest {
-                url: "https://oxide-omicron-build.s3.amazonaws.com/alpine.iso".to_string(),
-            },
-        ).await?;
+        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+
+        // ${base_url}/alpine-virt-3.16.0-x86_64.iso.sha256
+        let sha256_digest =
+            "ba8007f74f9b54fbae3b2520da577831b4834778a498d732f091260c61aa7ca1";
+
+        client
+            .import_from_url(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::ImportFromUrlRequest {
+                    url: format!("{}/alpine.iso", base_url),
+                    expected_digest: Some(
+                        crucible_pantry_client::types::ExpectedDigest {
+                            sha256: sha256_digest.to_string(),
+                        },
+                    ),
+                },
+            )
+            .await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_import_from_url_alpine_iso_bad_digest() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        // Start the pantry
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+
+        // not the actual digest!
+        let sha256_digest =
+            "ba8007f74f9b50000000000000007831b4834778a498d732f091260c61aa7ca1";
+
+        let result = client
+            .import_from_url(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::ImportFromUrlRequest {
+                    url: format!("{}/alpine.iso", base_url),
+                    expected_digest: Some(
+                        crucible_pantry_client::types::ExpectedDigest {
+                            sha256: sha256_digest.to_string(),
+                        },
+                    ),
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
 
         client.detach(&volume_id.to_string()).await?;
 
@@ -2549,6 +2640,7 @@ mod test {
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::ImportFromUrlRequest {
                     url: server.url("/img.raw").to_string(),
+                    expected_digest: None,
                 },
             )
             .await?;

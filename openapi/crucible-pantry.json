@@ -317,9 +317,33 @@
           "request_id"
         ]
       },
+      "ExpectedDigest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "Sha256": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Sha256"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
       "ImportFromUrlRequest": {
         "type": "object",
         "properties": {
+          "expected_digest": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedDigest"
+              }
+            ]
+          },
           "url": {
             "type": "string"
           }
