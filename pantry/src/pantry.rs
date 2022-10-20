@@ -67,7 +67,7 @@ impl PantryEntry {
                 .get(&url)
                 .header(
                     reqwest::header::RANGE,
-                    format!("bytes={}-{}", start, end-1),
+                    format!("bytes={}-{}", start, end - 1),
                 )
                 .send()
                 .await?;
