@@ -165,6 +165,12 @@ impl PantryEntry {
 
         Ok(())
     }
+
+    pub async fn detach(&self) -> Result<()> {
+        self.volume.flush(None).await?;
+        self.volume.deactivate().await?;
+        Ok(())
+    }
 }
 
 /// Pantry stores opened Volumes in-memory
@@ -377,35 +383,19 @@ impl Pantry {
         Ok(())
     }
 
-    // XXX should this unconditionally detach? separate into PantryEntry
-    // function
+    /// Remove an entry from the pantry, and detach it. If detach fails, the
+    /// entry is still gone but this function will return an error.
     pub async fn detach(&self, volume_id: String) -> Result<()> {
         let mut entries = self.entries.lock().await;
-        match entries.get(&volume_id) {
-            Some(entry) => {
-                let entry = entry.lock().await;
 
-                // Attempt a flush. If this errors, return that to the caller as
-                // an internal error. If it succeeds, remove the entry.
-                info!(
-                    self.log,
-                    "detach calling flush for volume {}", volume_id
-                );
-                entry.volume.flush(None).await?;
+        info!(self.log, "detach removing entry for volume {}", volume_id);
 
-                info!(
-                    self.log,
-                    "detach calling deactivate for volume {}", volume_id
-                );
-                entry.volume.deactivate().await?;
-
+        match entries.remove(&volume_id) {
+            Some(guard) => {
+                let entry = guard.lock().await;
+                info!(self.log, "detaching volume {}", volume_id);
+                entry.detach().await?;
                 drop(entry);
-
-                info!(
-                    self.log,
-                    "detach removing entry for volume {}", volume_id
-                );
-                entries.remove(&volume_id);
             }
 
             None => {
