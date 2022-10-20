@@ -388,20 +388,12 @@ impl Pantry {
         Ok(())
     }
 
-    pub async fn scrub(
-        &self,
-        volume_id: String,
-    ) -> Result<String, HttpError> {
+    pub async fn scrub(&self, volume_id: String) -> Result<String, HttpError> {
         let entry = self.entry(volume_id).await?;
         let entry = entry.clone();
 
-        let join_handle = tokio::spawn(async move {
-            entry
-                .lock()
-                .await
-                .scrub()
-                .await
-        });
+        let join_handle =
+            tokio::spawn(async move { entry.lock().await.scrub().await });
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();

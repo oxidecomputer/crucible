@@ -2996,7 +2996,7 @@ mod test {
                         id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
                         url: url.clone(),
-                    }
+                    },
                 )),
             };
 
@@ -3052,7 +3052,11 @@ mod test {
 
         let response = client.scrub(&volume_id.to_string()).await?;
 
-        while !client.is_job_finished(&response.job_id).await?.job_is_finished {
+        while !client
+            .is_job_finished(&response.job_id)
+            .await?
+            .job_is_finished
+        {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
@@ -3089,4 +3093,3 @@ mod test {
         Ok(())
     }
 }
-
