@@ -17,4 +17,4 @@ service_name = "crucible-pantry"
 zone = true
 [[package.crucible-pantry.paths]]
 from = "pantry/smf"
-to = "/var/svc/manifest/site/crucible"
+to = "/var/svc/manifest/site/crucible-pantry"
