@@ -847,8 +847,11 @@ where
                  * activate and this downstairs was not connected at that
                  * time.
                  */
-                info!(up.log, "[{}] client got ds_active_rx, promote!",
-                    up_coms.client_id
+                info!(
+                    up.log,
+                    "[{}] client got ds_active_rx, promote! session {}",
+                    up_coms.client_id,
+                    up.session_id,
                 );
                 self_promotion = true;
                 fw.send(Message::PromoteToActive {
@@ -923,8 +926,9 @@ where
                              */
                             info!(
                                 up.log,
-                                "[{}] upstairs guest_io_ready=TRUE, promote!",
-                                up_coms.client_id
+                                "[{}] upstairs guest_io_ready=TRUE, promote! session {}",
+                                up_coms.client_id,
+                                up.session_id,
                             );
                             self_promotion = true;
                             fw.send(Message::PromoteToActive {
@@ -951,7 +955,7 @@ where
                             if up.is_active_requested().await {
                                 info!(
                                     up.log,
-                                    "[{}] client is_active_req TRUE, promote! {}",
+                                    "[{}] client is_active_req TRUE, promote! session {}",
                                     up_coms.client_id,
                                     up.session_id,
                                 );
@@ -1665,7 +1669,7 @@ where
                         new_session_id,
                         new_gen,
                     }) => {
-                        warn!(
+                        info!(
                             up.log,
                             "[{}] {} ({}) reconcile saw YouAreNoLongerActive {:?} {:?} {}",
                             up_coms.client_id,
@@ -3277,7 +3281,7 @@ impl Downstairs {
                             job.state,
                         );
                         if job.replay {
-                            info!(self.log, "{} REPLAY", msg);
+                            info!(self.log, "REPLAY {}", msg);
                         } else {
                             panic!("{}", msg);
                         }
@@ -3911,7 +3915,7 @@ impl Upstairs {
         active.set_active()?;
         info!(
             self.log,
-            "{} is now active for session {}", self.uuid, self.session_id
+            "{} is now active with session: {}", self.uuid, self.session_id
         );
         Ok(())
     }
@@ -3926,7 +3930,7 @@ impl Upstairs {
         active.up_state = UpState::Initializing;
         info!(
             self.log,
-            "{} set inactive for session {}", self.uuid, self.session_id
+            "{} set inactive, session {}", self.uuid, self.session_id
         );
     }
 
@@ -4612,8 +4616,9 @@ impl Upstairs {
 
         info!(
             self.log,
-            "[{}] Gone missing, transition from {:?} to {:?}",
+            "[{}] {} Gone missing, transition from {:?} to {:?}",
             client_id,
+            self.uuid,
             current,
             new_state,
         );
@@ -4632,7 +4637,12 @@ impl Upstairs {
     async fn ds_is_replay(&self, client_id: u8) -> bool {
         let mut ds = self.downstairs.lock().await;
         if ds.ds_state[client_id as usize] == DsState::Replay {
-            info!(self.log, "[{}] Transition from Replay to Active", client_id);
+            info!(
+                self.log,
+                "[{}] {} Transition from Replay to Active",
+                client_id,
+                self.uuid
+            );
             ds.ds_state[client_id as usize] = DsState::Active;
             return true;
         }
@@ -4664,9 +4674,10 @@ impl Upstairs {
     ) {
         info!(
             self.log,
-            "[{}] {} {:?} {:?} {:?} ds_transition to {:?}",
+            "[{}] {} ({}) {:?} {:?} {:?} ds_transition to {:?}",
             client_id,
             self.uuid,
+            self.session_id,
             ds.ds_state[0],
             ds.ds_state[1],
             ds.ds_state[2],
@@ -5253,7 +5264,12 @@ impl Upstairs {
                     *s = DsState::Active;
                 }
                 active.set_active()?;
-                info!(self.log, "{} Set Active", self.uuid);
+                info!(
+                    self.log,
+                    "{} is now active with session: {}",
+                    self.uuid,
+                    self.session_id
+                );
                 self.stats.add_activation().await;
             }
         } else {
@@ -5282,6 +5298,12 @@ impl Upstairs {
                     *s = DsState::Active;
                 }
                 active.set_active()?;
+                info!(
+                    self.log,
+                    "{} is now active with session: {}",
+                    self.uuid,
+                    self.session_id
+                );
                 self.stats.add_activation().await;
                 info!(self.log, "{} Set Active after no repair", self.uuid);
             }
