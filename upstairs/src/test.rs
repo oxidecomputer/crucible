@@ -5252,11 +5252,16 @@ mod up_test {
     async fn test_deps_writes_depend_on_overlapping_writes() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 -> write @ 0
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | W     | 0
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5267,6 +5272,7 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 1
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5291,15 +5297,17 @@ mod up_test {
     async fn test_deps_writes_depend_on_overlapping_writes_chain() {
         // Test that the following job dependency graph is made:
         //
-        //           -> write @ 0 ->
-        // write @ 0                 write @ 0
-        //           -------------->
-        //
-        // TODO: it would be nicer if it was just a straight line
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | W     | 0
+        //   2 | W     | 0,1
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5310,6 +5318,7 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 1
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5320,6 +5329,7 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 2
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5348,11 +5358,17 @@ mod up_test {
     async fn test_deps_writes_depend_on_overlapping_writes_and_flushes() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 -> flush -> write @ 0
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | FFFFF | 0
+        //   2 | W     | 1
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5363,8 +5379,10 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 1
         upstairs.submit_flush(None, None).await.unwrap();
 
+        // op 2
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5390,13 +5408,21 @@ mod up_test {
     async fn test_deps_all_writes_depend_on_flushes() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 ->       -> write @ 3
-        // write @ 1 -> flush -> write @ 4
-        // write @ 2 ->       -> write @ 5
+        //          block
+        // op# | 0 1 2 3 4 5 | deps
+        // ----|-------------|-----
+        //   0 | W           |
+        //   1 |   W         |
+        //   2 |     W       |
+        //   3 | FFFFFFFFFFF | 0,1,2
+        //   4 |       W     | 3
+        //   5 |         W   | 3
+        //   6 |           W | 3
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // ops 0 to 2
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5409,8 +5435,10 @@ mod up_test {
                 .unwrap();
         }
 
+        // op 3
         upstairs.submit_flush(None, None).await.unwrap();
 
+        // ops 4 to 6
         for i in 3..6 {
             upstairs
                 .submit_write(
@@ -5447,13 +5475,18 @@ mod up_test {
     async fn test_deps_little_writes_depend_on_big_write() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0,1,2 -> write @ 0
-        //               -> write @ 1
-        //               -> write @ 2
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W W W |
+        //   1 | W     | 0
+        //   2 |   W   | 0
+        //   3 |     W | 0
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5464,6 +5497,7 @@ mod up_test {
             .await
             .unwrap();
 
+        // ops 1 to 3
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5493,22 +5527,21 @@ mod up_test {
     async fn test_deps_little_writes_depend_on_big_write_chain() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0,1,2 -> write @ 0 -> write @ 0
-        //               -------------->
-        //               -> write @ 1 -> write @ 1
-        //               -------------->
-        //               -> write @ 2 -> write @ 2
-        //               -------------->
-        //
-        // TODO it would be nicer if this was
-        //
-        // write @ 0,1,2 -> write @ 0 -> write @ 0
-        //               -> write @ 1 -> write @ 1
-        //               -> write @ 2 -> write @ 2
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W W W |
+        //   1 | W     | 0
+        //   2 |   W   | 0
+        //   3 |     W | 0
+        //   4 | W     | 0,1
+        //   5 |   W   | 0,2
+        //   6 |     W | 0,3
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5519,6 +5552,7 @@ mod up_test {
             .await
             .unwrap();
 
+        // ops 1 to 3
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5531,6 +5565,7 @@ mod up_test {
                 .unwrap();
         }
 
+        // ops 4 to 6
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5573,13 +5608,18 @@ mod up_test {
     async fn test_deps_big_write_depends_on_little_writes() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 ->
-        // write @ 1 -> write @ 0,1,2
-        // write @ 2 ->
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 |   W   |
+        //   2 |     W |
+        //   3 | W W W |
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // ops 0 to 2
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5592,6 +5632,7 @@ mod up_test {
                 .unwrap();
         }
 
+        // op 3
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5622,11 +5663,16 @@ mod up_test {
     async fn test_deps_read_depends_on_write() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 -> read @ 0
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | R     |
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5637,6 +5683,7 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 1
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512), None)
             .await
@@ -5656,13 +5703,18 @@ mod up_test {
     async fn test_deps_big_read_depends_on_little_writes() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 -> read @ 0,1
-        // write @ 1 ->
-        // write @ 2
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 |   W   |
+        //   2 |     W |
+        //   3 | R R   | 0,1
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // ops 0 to 2
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5675,6 +5727,7 @@ mod up_test {
                 .unwrap();
         }
 
+        // op 3
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512 * 2), None)
             .await
@@ -5700,19 +5753,24 @@ mod up_test {
     async fn test_deps_read_no_depend_on_read() {
         // Test that the following job dependency graph is made:
         //
-        // read @ 0
-        // read @ 0
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | R     |
+        //   1 | R     |
         //
         // (aka two reads don't depend on each other)
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512), None)
             .await
             .unwrap();
 
+        // op 1
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512), None)
             .await
@@ -5732,12 +5790,17 @@ mod up_test {
     async fn test_deps_multiple_reads_depend_on_write() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 -> read @ 0
-        //           -> read @ 0
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | R     | 0
+        //   2 | R     | 0
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5748,11 +5811,13 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 1
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512), None)
             .await
             .unwrap();
 
+        // op 2
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512), None)
             .await
@@ -5773,12 +5838,17 @@ mod up_test {
     async fn test_deps_read_does_not_depend_on_flush() {
         // Test that the following job dependency graph is made:
         //
-        // write @ 0 ---------> read @ 0
-        //           -> flush
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | FFFFF | 0
+        //   2 | R     | 0
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs
             .submit_write(
                 Block::new_512(0),
@@ -5789,8 +5859,10 @@ mod up_test {
             .await
             .unwrap();
 
+        // op 1
         upstairs.submit_flush(None, None).await.unwrap();
 
+        // op 2
         upstairs
             .submit_read(Block::new_512(0), Buffer::new(512 * 2), None)
             .await
@@ -5841,12 +5913,25 @@ mod up_test {
         //       -> write ->       -> write ->
         //       ---------->       -> write ->
         //                         ---------->
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | FFFFF |
+        //   1 | W     | 0
+        //   2 |   W   | 0
+        //   3 | FFFFF | 0,1,2
+        //   4 | W     | 3
+        //   5 |   W   | 3
+        //   6 |     W | 3
+        //   7 | FFFFF | 3,4,5,6
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
 
+        // op 0
         upstairs.submit_flush(None, None).await.unwrap();
 
+        // ops 1 to 2
         for i in 0..2 {
             upstairs
                 .submit_write(
@@ -5859,8 +5944,10 @@ mod up_test {
                 .unwrap();
         }
 
+        // op 3
         upstairs.submit_flush(None, None).await.unwrap();
 
+        // ops 4 to 6
         for i in 0..3 {
             upstairs
                 .submit_write(
@@ -5873,6 +5960,7 @@ mod up_test {
                 .unwrap();
         }
 
+        // op 7
         upstairs.submit_flush(None, None).await.unwrap();
 
         let ds = upstairs.downstairs.lock().await;
@@ -5881,22 +5969,22 @@ mod up_test {
             keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 8);
 
-        assert!(jobs[0].work.deps().is_empty()); // flush
+        assert!(jobs[0].work.deps().is_empty()); // flush (op 0)
 
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // write
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[0].ds_id]); // write
+        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // write (op 1)
+        assert_eq!(jobs[2].work.deps(), &vec![jobs[0].ds_id]); // write (op 2)
 
         assert_eq!(
-            hashset(jobs[3].work.deps()), // flush
+            hashset(jobs[3].work.deps()), // flush (op 3)
             hashset(&[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]),
         );
 
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]);
-        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]);
-        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]);
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write (op 4)
+        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write (op 5)
+        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write (op 6)
 
         assert_eq!(
-            hashset(jobs[7].work.deps()), // flush
+            hashset(jobs[7].work.deps()), // flush (op 7)
             hashset(&[
                 jobs[3].ds_id,
                 jobs[4].ds_id,

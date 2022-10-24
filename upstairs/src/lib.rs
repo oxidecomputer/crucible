@@ -4405,6 +4405,20 @@ impl Upstairs {
          * - ignore everything that happened before the last flush
          * - writes have to depend on the last flush completing
          * - any overlap of impacted blocks requires a dependency
+         *
+         * TODO: scanning backwards, any overlap of impacted blocks will
+         * create a dependency. take this an example:
+         *
+         *       block
+         * op# | 0 1 2 | deps
+         * ----|-------------
+         *   0 | W     |
+         *   1 | W     | 0
+         *   2 | W     | 0,1
+         *
+         * op 2 depends on both op 1 and op 0. if dependencies are transitive
+         * with an existing job, it would be nice if those were removed from
+         * this job's dependencies.
          */
         let mut dep: Vec<u64> = Vec::with_capacity(200); // max in-flight jobs
 
@@ -4584,6 +4598,20 @@ impl Upstairs {
          * - reads do not depend on flushes, only writes (because flushes do
          *   not modify data!)
          * - any overlap of impacted blocks requires a dependency
+         *
+         * TODO: scanning backwards, any overlap of impacted blocks will
+         * create a dependency. take this an example:
+         *
+         *       block
+         * op# | 0 1 2 | deps
+         * ----|-------------
+         *   0 | R     |
+         *   1 | R     | 0
+         *   2 | R     | 0,1
+         *
+         * op 2 depends on both op 1 and op 0. if dependencies are transitive
+         * with an existing job, it would be nice if those were removed from
+         * this job's dependencies.
          */
         let mut dep: Vec<u64> = Vec::with_capacity(200); // max in-flight jobs
 
