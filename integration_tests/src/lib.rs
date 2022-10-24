@@ -18,13 +18,13 @@ mod test {
     use tempfile::*;
     use uuid::*;
 
-/*
-    use std::collections::HashSet;
+    /*
+        use std::collections::HashSet;
 
-    lazy_static! {
-        static ref PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
-    }
-*/
+        lazy_static! {
+            static ref PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
+        }
+    */
     // Create a simple logger
     fn csl() -> Logger {
         let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());

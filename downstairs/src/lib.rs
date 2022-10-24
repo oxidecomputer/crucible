@@ -2383,7 +2383,7 @@ pub async fn start_downstairs(
         let mut ds = d.lock().await;
         ds.address = Some(local_addr);
     }
-    println!("Using address: {:?}", local_addr);
+    info!(log, "Using address: {:?}", local_addr);
 
     let repair_address = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
@@ -2393,18 +2393,16 @@ pub async fn start_downstairs(
     let dss = d.clone();
     let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
 
-    let repair_listener = match repair::repair_main(
-        &dss,
-        repair_address,
-        &repair_log
-    ).await {
-        Err(e) => {
-            // TODO tear down other things if repair server can't be started?
-            bail!("got {:?} from repair main", e);
-        }
+    let repair_listener =
+        match repair::repair_main(&dss, repair_address, &repair_log).await {
+            Err(e) => {
+                // TODO tear down other things if repair server can't be
+                // started?
+                bail!("got {:?} from repair main", e);
+            }
 
-        Ok(socket_addr) => socket_addr,
-    };
+            Ok(socket_addr) => socket_addr,
+        };
 
     {
         let mut ds = d.lock().await;
@@ -2441,7 +2439,7 @@ pub async fn start_downstairs(
          * it and wait for another connection. Downstairs can handle
          * multiple Upstairs connecting but only one active one.
          */
-        println!("listening on {}", listen_on);
+        info!(log, "listening on {}", listen_on);
         loop {
             let (sock, raddr) = listener.accept().await?;
 
@@ -2452,7 +2450,7 @@ pub async fn start_downstairs(
                 WrappedStream::Https(match ssl_acceptor.accept(sock).await {
                     Ok(v) => v,
                     Err(e) => {
-                        println!(
+                        warn!(
                             "rejecting connection from {:?}: {:?}",
                             raddr, e,
                         );
@@ -2463,7 +2461,7 @@ pub async fn start_downstairs(
                 WrappedStream::Http(sock)
             };
 
-            println!("accepted connection from {:?}", raddr);
+            info!("accepted connection from {:?}", raddr);
             {
                 /*
                  * Add one to the counter every time we have a connection
@@ -2477,9 +2475,15 @@ pub async fn start_downstairs(
 
             tokio::spawn(async move {
                 if let Err(e) = proc_stream(&mut dd, stream).await {
-                    error!(dd.lock().await.log, "connection({}): {:?}", raddr, e);
+                    error!(
+                        dd.lock().await.log,
+                        "connection({}): {:?}", raddr, e
+                    );
                 } else {
-                    info!(dd.lock().await.log, "connection({}): all done", raddr);
+                    info!(
+                        dd.lock().await.log,
+                        "connection({}): all done", raddr
+                    );
                 }
             });
         }

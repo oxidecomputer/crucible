@@ -3304,7 +3304,7 @@ mod test {
         // context row.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
 
         // A write of some sort only wrote a block context row
