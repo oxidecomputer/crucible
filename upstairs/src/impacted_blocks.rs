@@ -121,8 +121,7 @@ pub fn extent_from_offset(
         /*
          * XXX We only support a single region (downstairs). When we grow to
          * support a LBA size that is larger than a single region, then we
-         * will need to write more code. But - that code may live
-         * upstairs?
+         * will need to write more code.
          */
         let eid: u64 = o / ddef.extent_size().value;
         assert!((eid as u32) < ddef.extent_count());
