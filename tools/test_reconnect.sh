@@ -54,8 +54,17 @@ if ! "$crucible_test" fill "${args[@]}" -q \
     ${dsc} cmd shutdown
 fi
 
+# Tell dsc to restart downstairs.
+if ! "$dsc" cmd enable-restart-all; then
+    echo "Failed to enable auto-restart on dsc"
+    exit 1
+fi
+
 # Allow the downstairs to start restarting now.
-${dsc} cmd enable-random-stop
+if ! ${dsc} cmd enable-random-stop; then
+    echo "Failed to enable random-stop on dsc"
+    exit 1
+fi
 sleep 5
 
 # Now run the quick crucible client test in a loop

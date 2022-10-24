@@ -931,6 +931,7 @@ enum DownstairsState {
     Running,
     Exit,
     Error,
+    Failed,
 }
 
 /// Downstairs actions.
@@ -1029,7 +1030,7 @@ async fn ds_start_monitor(
     // Start by starting.
     let mut cmd = start_ds(&ds, &tx).await;
 
-    let mut keep_running = true;
+    let mut keep_running = false;
     let mut start_once = false;
     let mut stop_notify = true;
     loop {
@@ -1079,11 +1080,22 @@ async fn ds_start_monitor(
                     Ok(status) => {
                         // Only notify we are down once,
                         if stop_notify {
-                            println!("[{}] Exited with: {}", ds.port, status);
+                            println!("[{}] Exited with: {:?}", ds.port, status);
+                                let state = {
+                                    if status.code().is_some() {
+                                    // There was a problem in the downstairs,
+                                    // don't restart even if it was requested.
+                                    keep_running = false;
+                                    start_once = false;
+                                    DownstairsState::Failed
+                                } else {
+                                    DownstairsState::Exit
+                                }
+                            };
                             let _ = tx.send(MonitorInfo {
                                 port: ds.port,
                                 client_id: ds.client_id,
-                                state: DownstairsState::Exit,
+                                state,
                                 pid: cmd.id(),
                             }).await;
                             stop_notify = false;

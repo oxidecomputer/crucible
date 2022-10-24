@@ -37,6 +37,10 @@ function perf_round() {
         echo "Failed to start dsc"
         exit 1
     fi
+    if ! "$dsc" cmd disable-restart-all; then
+        echo "Failed to disable auto-restart on dsc"
+        exit 1
+    fi
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
     echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"

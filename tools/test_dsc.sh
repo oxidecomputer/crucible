@@ -121,6 +121,12 @@ ${dsc} create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
     --region-dir "$testdir" \
     --encrypted | tee -a "$outfile"
+if [[ $? -ne 0 ]]; then
+    # If this fails, then all the rest is going to fail as well.
+    echo "Failed to create regions for dsc" | tee -a "$fail_log"
+    cleanup
+    exit 1
+fi
 
 echo "Running dsc:"
 echo "${dsc}" start --ds-bin "$downstairs" \
@@ -134,6 +140,10 @@ dsc_pid=$!
 
 echo "dsc running at: $dsc_pid  log at $outfile"
 sleep 3
+if ! pgrep -P $dsc_pid; then
+    echo "Failed to start dsc"
+    exit 1
+fi
 
 # Some common flags for all to use.  If we need to break out the port or
 # build specific URLs for endpoints, then we can do that here, but I'm
@@ -142,11 +152,10 @@ sleep 3
 curl_flags="-o /dev/null -s "
 dsc_url="http://127.0.0.1:9998/"
 
-echo "Test start/all"
-hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"start/all)
-echo hc is:  "$hc"
-if [[ "$hc" -ne 204 ]]; then
-    echo "Failed to start all" | tee -a "$fail_log"
+echo "Enable automatic restart on all downstairs"
+echo "${dsc}" cmd enable-restart-all
+if ! "${dsc}" cmd enable-restart-all; then
+    echo "Failed to enable auto restart" | tee -a "$fail_log"
     (( res += 1 ))
 fi
 
