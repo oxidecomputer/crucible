@@ -2379,11 +2379,11 @@ pub async fn start_downstairs(
     // Establish a listen server on the port.
     let listener = TcpListener::bind(&listen_on).await?;
     let local_addr = listener.local_addr()?;
-	{
+    {
         let mut ds = d.lock().await;
         ds.address = Some(local_addr);
     }
-	println!("Using address: {:?}", local_addr);
+    println!("Using address: {:?}", local_addr);
 
     let repair_address = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
@@ -2395,7 +2395,7 @@ pub async fn start_downstairs(
 
     let repair_listener = match repair::repair_main(
         &dss,
-        repair_address
+        repair_address,
         &repair_log
     ).await {
         Err(e) => {
@@ -2477,9 +2477,9 @@ pub async fn start_downstairs(
 
             tokio::spawn(async move {
                 if let Err(e) = proc_stream(&mut dd, stream).await {
-                	error!(dd.lock().await.log, "connection({}): {:?}", raddr, e);
+                    error!(dd.lock().await.log, "connection({}): {:?}", raddr, e);
                 } else {
-                	info!(dd.lock().await.log, "connection({}): all done", raddr);
+                    info!(dd.lock().await.log, "connection({}): all done", raddr);
                 }
             });
         }
