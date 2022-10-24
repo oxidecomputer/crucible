@@ -2,11 +2,16 @@
 
 use super::*;
 
+struct Inner {
+    bytes: Vec<u8>,
+    owned: Vec<bool>,
+}
+
+/// Implement BlockIO for a block of memory
 pub struct InMemoryBlockIO {
     uuid: Uuid,
     block_size: u64,
-    bytes: Mutex<Vec<u8>>,
-    owned: Mutex<Vec<bool>>,
+    inner: Mutex<Inner>,
 }
 
 impl InMemoryBlockIO {
@@ -14,104 +19,105 @@ impl InMemoryBlockIO {
         Self {
             uuid: id,
             block_size,
-            bytes: Mutex::new(vec![0; total_size]),
-            owned: Mutex::new(vec![false; total_size]),
+            inner: Mutex::new(Inner {
+                bytes: vec![0; total_size],
+                owned: vec![false; total_size],
+            }),
         }
     }
 }
 
+#[async_trait]
 impl BlockIO for InMemoryBlockIO {
-    fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
         Ok(())
     }
 
-    fn deactivate(&self) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate()
+    async fn deactivate(&self) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
-    fn query_is_active(&self) -> Result<bool, CrucibleError> {
+    async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         Ok(true)
     }
 
-    fn total_size(&self) -> Result<u64, CrucibleError> {
-        Ok(self.bytes.lock().unwrap().len() as u64)
+    async fn total_size(&self) -> Result<u64, CrucibleError> {
+        let inner = self.inner.lock().await;
+        Ok(inner.bytes.len() as u64)
     }
 
-    fn get_block_size(&self) -> Result<u64, CrucibleError> {
+    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         Ok(self.block_size)
     }
 
-    fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
+    async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         Ok(self.uuid)
     }
 
-    fn read(
+    async fn read(
         &self,
         offset: Block,
         data: Buffer,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut data_vec = data.as_vec();
-        let mut owned_vec = data.owned_vec();
+    ) -> Result<(), CrucibleError> {
+        let inner = self.inner.lock().await;
 
-        let bytes = self.bytes.lock().unwrap();
-        let owned = self.owned.lock().unwrap();
+        let mut data_vec = data.as_vec().await;
+        let mut owned_vec = data.owned_vec().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
         for i in 0..data_vec.len() {
-            data_vec[i] = bytes[start + i];
-            owned_vec[i] = owned[start + i];
+            data_vec[i] = inner.bytes[start + i];
+            owned_vec[i] = inner.owned[start + i];
         }
 
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn write(
+    async fn write(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut bytes = self.bytes.lock().unwrap();
-        let mut owned = self.owned.lock().unwrap();
+    ) -> Result<(), CrucibleError> {
+        let mut inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
         for i in 0..data.len() {
-            bytes[start + i] = data[i];
-            owned[start + i] = true;
+            inner.bytes[start + i] = data[i];
+            inner.owned[start + i] = true;
         }
 
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn write_unwritten(
+    async fn write_unwritten(
         &self,
         offset: Block,
         data: Bytes,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        let mut bytes = self.bytes.lock().unwrap();
-        let mut owned = self.owned.lock().unwrap();
+    ) -> Result<(), CrucibleError> {
+        let mut inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
         for i in 0..data.len() {
-            if !owned[start + i] {
-                bytes[start + i] = data[i];
-                owned[start + i] = true;
+            if !inner.owned[start + i] {
+                inner.bytes[start + i] = data[i];
+                inner.owned[start + i] = true;
             }
         }
 
-        BlockReqWaiter::immediate()
+        Ok(())
     }
 
-    fn flush(
+    async fn flush(
         &self,
         _snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<BlockReqWaiter, CrucibleError> {
-        BlockReqWaiter::immediate()
+    ) -> Result<(), CrucibleError> {
+        Ok(())
     }
 
-    fn show_work(&self) -> Result<WQCounts, CrucibleError> {
+    async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,

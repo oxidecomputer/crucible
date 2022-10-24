@@ -222,7 +222,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
         let mut writes = vec![];
-        for (eid, offset) in extent_from_offset(rm, offset, nblocks)? {
+        for (eid, offset) in extent_from_offset(rm, offset, nblocks) {
             let len = Block::new_with_ddef(1, &region.def());
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
@@ -233,8 +233,10 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                 eid,
                 offset,
                 data: buffer.freeze(),
-                encryption_context: None,
-                hash: integrity_hash(&[data]),
+                block_context: BlockContext {
+                    hash: integrity_hash(&[data]),
+                    encryption_context: None,
+                },
             });
 
             pos.advance(len);
@@ -791,6 +793,10 @@ where
         + std::marker::Send
         + 'static,
 {
+    // In this function, repair address should exist, and shouldn't change. Grab
+    // it here.
+    let repair_addr = ads.lock().await.repair_address.unwrap();
+
     let mut negotiated = 0;
     let mut upstairs_connection: Option<UpstairsConnection> = None;
 
@@ -962,7 +968,7 @@ where
                             upstairs_connection.unwrap());
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::YesItsMe { version: 1 }).await?;
+                        fw.send(Message::YesItsMe { version: 1, repair_addr }).await?;
                     }
                     Some(Message::PromoteToActive {
                         upstairs_id,
@@ -1335,6 +1341,8 @@ pub struct Downstairs {
     dss: DsStatOuter,
     read_only: bool,
     encrypted: bool,
+    pub address: Option<SocketAddr>,
+    pub repair_address: Option<SocketAddr>,
     log: Logger,
 }
 
@@ -1360,6 +1368,8 @@ impl Downstairs {
             dss,
             read_only,
             encrypted,
+            address: None,
+            repair_address: None,
             log,
         }
     }
@@ -2318,15 +2328,21 @@ pub fn build_downstairs_for_region(
     ))))
 }
 
+/// Returns Ok if everything spawned ok, Err otherwise
+///
+/// Return Ok(main task join handle) if all the necessary tasks spawned
+/// successfully, and Err otherwise.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_downstairs(
     d: Arc<Mutex<Downstairs>>,
     address: IpAddr,
     oximeter: Option<SocketAddr>,
     port: u16,
+    rport: u16,
     cert_pem: Option<String>,
     key_pem: Option<String>,
     root_cert_pem: Option<String>,
-) -> Result<()> {
+) -> Result<tokio::task::JoinHandle<Result<()>>> {
     if let Some(oximeter) = oximeter {
         let dssw = d.lock().await;
         let dss = dssw.dss.clone();
@@ -2352,32 +2368,51 @@ pub async fn start_downstairs(
         });
     }
 
-    // Start the repair server on the same address at port + REPAIR_PORT_OFFSET
-    let rport = port + REPAIR_PORT_OFFSET;
-    let repair_address = match address {
-        IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
-        IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
-    };
-    let dss = d.clone();
-    let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
-    tokio::spawn(async move {
-        let s = repair::repair_main(&dss, repair_address, &repair_log).await;
-        error!(repair_log, "Got {:?} from repair main", s);
-    });
+    // Setup a log for this task
+    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
 
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
         IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), port),
     };
 
-    // Setup a log for this task
-    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
-    /*
-     * Establish a listen server on the port.
-     */
-    info!(log, "Using address: {:?}", listen_on);
+    // Establish a listen server on the port.
     let listener = TcpListener::bind(&listen_on).await?;
+    let local_addr = listener.local_addr()?;
+	{
+        let mut ds = d.lock().await;
+        ds.address = Some(local_addr);
+    }
+	println!("Using address: {:?}", local_addr);
 
+    let repair_address = match address {
+        IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
+        IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
+    };
+
+    let dss = d.clone();
+    let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
+
+    let repair_listener = match repair::repair_main(
+        &dss,
+        repair_address
+        &repair_log
+    ).await {
+        Err(e) => {
+            // TODO tear down other things if repair server can't be started?
+            bail!("got {:?} from repair main", e);
+        }
+
+        Ok(socket_addr) => socket_addr,
+    };
+
+    {
+        let mut ds = d.lock().await;
+        ds.repair_address = Some(repair_listener);
+    }
+    info!(log, "Using repair address: {:?}", repair_listener);
+
+    // Optionally require SSL connections
     let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
         let key_pem_path = key_pem.unwrap();
         let root_cert_pem_path = root_cert_pem.unwrap();
@@ -2399,52 +2434,58 @@ pub async fn start_downstairs(
         None
     };
 
-    /*
-     * We now loop listening for a connection from the Upstairs.
-     * When we get one, we then spawn the proc() function to handle
-     * it and wait for another connection. Downstairs can handle
-     * multiple Upstairs connecting but only one active one.
-     */
-    info!(log, "listening on {}", listen_on);
-    loop {
-        let (sock, raddr) = listener.accept().await?;
+    let join_handle = tokio::spawn(async move {
+        /*
+         * We now loop listening for a connection from the Upstairs.
+         * When we get one, we then spawn the proc() function to handle
+         * it and wait for another connection. Downstairs can handle
+         * multiple Upstairs connecting but only one active one.
+         */
+        println!("listening on {}", listen_on);
+        loop {
+            let (sock, raddr) = listener.accept().await?;
 
-        let stream: WrappedStream = if let Some(ssl_acceptor) = &ssl_acceptor {
-            let ssl_acceptor = ssl_acceptor.clone();
-            WrappedStream::Https(match ssl_acceptor.accept(sock).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(
-                        log,
-                        "rejecting connection from {:?}: {:?}", raddr, e,
-                    );
-                    continue;
-                }
-            })
-        } else {
-            WrappedStream::Http(sock)
-        };
-
-        info!(log, "accepted connection from {:?}", raddr);
-        {
-            /*
-             * Add one to the counter every time we have a connection
-             * from an upstairs
-             */
-            let mut ds = d.lock().await;
-            ds.dss.add_connection().await;
-        }
-
-        let mut dd = d.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = proc_stream(&mut dd, stream).await {
-                error!(dd.lock().await.log, "connection({}): {:?}", raddr, e);
+            let stream: WrappedStream = if let Some(ssl_acceptor) =
+                &ssl_acceptor
+            {
+                let ssl_acceptor = ssl_acceptor.clone();
+                WrappedStream::Https(match ssl_acceptor.accept(sock).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!(
+                            "rejecting connection from {:?}: {:?}",
+                            raddr, e,
+                        );
+                        continue;
+                    }
+                })
             } else {
-                info!(dd.lock().await.log, "connection({}): all done", raddr);
+                WrappedStream::Http(sock)
+            };
+
+            println!("accepted connection from {:?}", raddr);
+            {
+                /*
+                 * Add one to the counter every time we have a connection
+                 * from an upstairs
+                 */
+                let mut ds = d.lock().await;
+                ds.dss.add_connection().await;
             }
-        });
-    }
+
+            let mut dd = d.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = proc_stream(&mut dd, stream).await {
+                	error!(dd.lock().await.log, "connection({}): {:?}", raddr, e);
+                } else {
+                	info!(dd.lock().await.log, "connection({}): all done", raddr);
+                }
+            });
+        }
+    });
+
+    Ok(join_handle)
 }
 
 #[cfg(test)]
@@ -3530,10 +3571,10 @@ mod test {
                 assert_eq!(responses.len(), 1);
 
                 let response = &responses[0];
-                assert_eq!(response.hashes.len(), 1);
+                assert_eq!(response.hashes().len(), 1);
                 assert_eq!(
                     integrity_hash(&[&response.data[..]]),
-                    response.hashes[0],
+                    response.hashes()[0],
                 );
 
                 read_data.extend_from_slice(&response.data[..]);

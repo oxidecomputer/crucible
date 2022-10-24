@@ -65,6 +65,10 @@ enum Action {
         )]
         ds_bin: String,
 
+        /// If the regions will require encryption.
+        #[clap(long, action)]
+        encrypted: bool,
+
         /// The extent size for the region
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
@@ -157,6 +161,10 @@ enum Action {
             action
         )]
         ds_bin: String,
+
+        /// (Only used when creating) If the regions will require encryption.
+        #[clap(long, action)]
+        encrypted: bool,
 
         /// If creating, the extent size for the region
         #[clap(long, default_value = "100", action)]
@@ -415,6 +423,7 @@ impl DscInfo {
         extent_size: u64,
         extent_count: u64,
         block_size: u32,
+        encrypted: bool,
     ) -> Result<()> {
         for ds_id in 0..3 {
             let _ = self
@@ -424,6 +433,7 @@ impl DscInfo {
                     extent_count,
                     block_size,
                     false,
+                    encrypted,
                 )
                 .await
                 .unwrap();
@@ -435,8 +445,6 @@ impl DscInfo {
     /**
      * Create a region as part of the region set at the given port with
      * the provided extent size and count.
-     *
-     * TODO: Add encryption option
      */
     async fn create_ds_region(
         &self,
@@ -445,6 +453,7 @@ impl DscInfo {
         extent_count: u64,
         block_size: u32,
         quiet: bool,
+        encrypted: bool,
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
@@ -458,20 +467,25 @@ impl DscInfo {
         let block_size = format!("{}", block_size);
         let uuid = format!("12345678-0000-0000-0000-{:012}", port);
         let start = std::time::Instant::now();
+        let mut cmd_args = vec![
+            "create",
+            "-d",
+            &new_region_dir,
+            "--uuid",
+            &uuid,
+            "--extent-count",
+            &extent_count,
+            "--extent-size",
+            &extent_size,
+            "--block-size",
+            &block_size,
+        ];
+        if encrypted {
+            cmd_args.push("--encrypted");
+        }
+
         let output = Command::new(rs.ds_bin.clone())
-            .args(&[
-                "create",
-                "-d",
-                &new_region_dir,
-                "--uuid",
-                &uuid,
-                "--extent-count",
-                &extent_count,
-                "--extent-size",
-                &extent_size,
-                "--block-size",
-                &block_size,
-            ])
+            .args(&cmd_args)
             .output()
             .await
             .unwrap();
@@ -1118,7 +1132,14 @@ async fn loop_create_test(
     let mut times = Vec::new();
     for _ in 0..5 {
         let ct = dsci
-            .create_ds_region(0, extent_size, extent_count, block_size, true)
+            .create_ds_region(
+                0,
+                extent_size,
+                extent_count,
+                block_size,
+                true,
+                false,
+            )
             .await?;
         times.push(ct);
         dsci.delete_ds_region(0)?;
@@ -1174,7 +1195,7 @@ async fn single_create_test(
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
     let ct = dsci
-        .create_ds_region(0, extent_size, extent_count, block_size, true)
+        .create_ds_region(0, extent_size, extent_count, block_size, true, false)
         .await?;
 
     let size = region_si(extent_size, extent_count, block_size);
@@ -1328,6 +1349,7 @@ fn main() -> Result<()> {
             block_size,
             cleanup,
             ds_bin,
+            encrypted,
             extent_size,
             extent_count,
             output_dir,
@@ -1344,6 +1366,7 @@ fn main() -> Result<()> {
                 extent_size,
                 extent_count,
                 block_size,
+                encrypted,
             ))
         }
         Action::RegionPerf {
@@ -1364,6 +1387,7 @@ fn main() -> Result<()> {
             control,
             create,
             ds_bin,
+            encrypted,
             extent_size,
             extent_count,
             output_dir,
@@ -1390,6 +1414,7 @@ fn main() -> Result<()> {
                     extent_size,
                     extent_count,
                     block_size,
+                    encrypted,
                 ))?;
             } else {
                 dsci.generate_region_set()?;
@@ -1441,7 +1466,7 @@ mod test {
         let r1 = tempdir().unwrap().as_ref().to_path_buf();
         let r2 = tempdir().unwrap().as_ref().to_path_buf();
         let r3 = tempdir().unwrap().as_ref().to_path_buf();
-        let region_vec = vec![r1.clone(), r2.clone(), r3.clone()];
+        let region_vec = vec![r1, r2, r3];
         let (tx, _) = watch::channel(0);
         let res = DscInfo::new(
             ds_bin,
@@ -1466,16 +1491,9 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let r1 = tempdir().unwrap().as_ref().to_path_buf();
         let r2 = tempdir().unwrap().as_ref().to_path_buf();
-        let region_vec = vec![r1.clone(), r2.clone()];
+        let region_vec = vec![r1, r2];
         let (tx, _) = watch::channel(0);
-        let res = DscInfo::new(
-            ds_bin,
-            dir.clone(),
-            region_vec.clone(),
-            tx,
-            true,
-            8810,
-        );
+        let res = DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810);
         assert!(res.is_err());
     }
 
@@ -1491,14 +1509,7 @@ mod test {
         let r4 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1, r2, r3, r4];
         let (tx, _) = watch::channel(0);
-        let res = DscInfo::new(
-            ds_bin,
-            dir.clone(),
-            region_vec.clone(),
-            tx,
-            true,
-            8810,
-        );
+        let res = DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810);
         assert!(res.is_err());
     }
 
@@ -1511,7 +1522,7 @@ mod test {
         let (tx, _) = watch::channel(0);
         let res = DscInfo::new(
             "/dev/null".to_string(),
-            dir.clone(),
+            dir,
             region_vec,
             tx,
             true,
@@ -1529,7 +1540,7 @@ mod test {
 
         let output_dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_dir = tempdir().unwrap().as_ref().to_path_buf();
-        let region_vec = vec![region_dir.clone()];
+        let region_vec = vec![region_dir];
         // First create the new directories.
         let (tx, _) = watch::channel(0);
         DscInfo::new(
@@ -1556,8 +1567,7 @@ mod test {
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
         let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
-                .unwrap();
+            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810).unwrap();
 
         let res = dsci.delete_ds_region(0);
         println!("res is {:?}", res);
@@ -1576,15 +1586,12 @@ mod test {
         let region_vec = vec![r1.clone(), r2, r3];
         let (tx, _) = watch::channel(0);
         let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
-                .unwrap();
+            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810).unwrap();
 
         // Manually create the first region directory.
-        let ds_region_dir = port_to_region(
-            r1.clone().into_os_string().into_string().unwrap(),
-            8810,
-        )
-        .unwrap();
+        let ds_region_dir =
+            port_to_region(r1.into_os_string().into_string().unwrap(), 8810)
+                .unwrap();
         fs::create_dir_all(&ds_region_dir).unwrap();
         let res = dsci.delete_ds_region(1);
         assert!(res.is_err());
@@ -1604,15 +1611,9 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci = DscInfo::new(
-            ds_bin,
-            dir.clone(),
-            region_vec.clone(),
-            tx,
-            true,
-            8810,
-        )
-        .unwrap();
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
+                .unwrap();
 
         // Manually create the region directory.  We have to convert the
         // PathBuf back into a string.
@@ -1634,15 +1635,9 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci = DscInfo::new(
-            ds_bin,
-            dir.clone(),
-            region_vec.clone(),
-            tx,
-            true,
-            8810,
-        )
-        .unwrap();
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
+                .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the region set.  We have to convert the
@@ -1670,15 +1665,9 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci = DscInfo::new(
-            ds_bin,
-            dir.clone(),
-            region_vec.clone(),
-            tx,
-            true,
-            8810,
-        )
-        .unwrap();
+        let dsci =
+            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810)
+                .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the 2/3 of the region set.

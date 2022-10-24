@@ -329,16 +329,20 @@ async fn main() -> Result<()> {
                 Some(log),
             )?;
 
-            start_downstairs(
+            let downstairs_join_handle = start_downstairs(
                 d,
                 address,
                 oximeter,
                 port,
+                // TODO accept as an argument?
+                port + crucible_common::REPAIR_PORT_OFFSET,
                 cert_pem,
                 key_pem,
                 root_cert_pem,
             )
-            .await
+            .await?;
+
+            downstairs_join_handle.await?
         }
         Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {

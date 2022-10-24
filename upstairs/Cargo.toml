@@ -14,6 +14,8 @@ asm = ["usdt/asm"]
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1.57"
+async-recursion = "1.0.0"
 base64 = "0.13.0"
 bytes = "1"
 chrono = { version = "0.4.22", features = [ "serde" ] }
@@ -28,13 +30,13 @@ oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch =
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 rand = "0.8.5"
 ringbuffer = "0.8"
-schemars = { version = "0.8.10", features = [ "uuid1" ] }
+schemars = { version = "0.8.11", features = [ "uuid1" ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slog-async = "2.7"
 slog-dtrace = "0.2"
 slog-term = "2.7"
-tokio = { version = "1.21.0", features = ["full"] }
+tokio = { version = "1.21.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 tokio-rustls = { version = "0.23.4" }
 toml = "0.5"
@@ -43,7 +45,7 @@ usdt = "0.3.2"
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }
 aes-gcm-siv = "0.10.3"
 rand_chacha = "0.3.1"
-reqwest = { version = "0.11.11", features = ["default", "blocking" ] }
+reqwest = { version = "0.11.12", features = ["default", "blocking" ] }
 
 [dependencies.slog]
 version = "2.7"

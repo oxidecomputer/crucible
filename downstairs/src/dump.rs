@@ -395,9 +395,9 @@ fn color_vec(compare: &[u64]) -> Vec<u8> {
     colors
 }
 
-fn return_status_letters<T, U: std::cmp::PartialEq>(
-    items: &[T],
-    accessor: fn(&T) -> &U,
+fn return_status_letters<'a, T, U: std::cmp::PartialEq>(
+    items: &'a [T],
+    accessor: fn(&'a T) -> U,
     nc: bool,
 ) -> ([String; 3], bool) {
     let mut status_letters = vec![String::new(); 3];
@@ -502,11 +502,7 @@ fn show_extent(
     }
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^2}", format!("E{}", index));
-    }
-    print!(" ");
-    for (index, _) in region_dir.iter().enumerate() {
-        print!(" {0:^2}", format!("H{}", index));
+        print!(" {0:^2}", format!("C{}", index));
     }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
@@ -521,9 +517,7 @@ fn show_extent(
     for block in 0..blocks_per_extent {
         let mut data_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
-        let mut encryption_context_columns: [String; 3] =
-            ["".to_string(), "".to_string(), "".to_string()];
-        let mut hash_columns: [String; 3] =
+        let mut block_context_columns: [String; 3] =
             ["".to_string(), "".to_string(), "".to_string()];
 
         /*
@@ -572,26 +566,17 @@ fn show_extent(
             data_columns[dir_index] = status_letters[dir_index].to_string();
         }
 
-        // then, compare encryption_context_columns
-        let (status_letters, ec_different) =
-            return_status_letters(&dvec, |x| &x.encryption_contexts, nc);
+        // then, compare block_context_columns
+        let (status_letters, bc_different) =
+            return_status_letters(&dvec, |x| &x.block_contexts, nc);
 
-        // Print nonce status letters
+        // Print block context status letters
         for dir_index in 0..dir_count {
-            encryption_context_columns[dir_index] =
+            block_context_columns[dir_index] =
                 status_letters[dir_index].to_string();
         }
 
-        // then, compare hashes
-        let (status_letters, hashes_different) =
-            return_status_letters(&dvec, |x| &x.hashes, nc);
-
-        // Print hash status letters
-        for dir_index in 0..dir_count {
-            hash_columns[dir_index] = status_letters[dir_index].to_string();
-        }
-
-        let different = data_different || ec_different || hashes_different;
+        let different = data_different || bc_different;
 
         // Now that we have collected all the results, print them
         let real_block = (blocks_per_extent * cmp_extent as u64) + block;
@@ -602,11 +587,7 @@ fn show_extent(
                 print!("  {}", column);
             }
             print!(" ");
-            for column in encryption_context_columns.iter().take(dir_count) {
-                print!("  {}", column);
-            }
-            print!(" ");
-            for column in hash_columns.iter().take(dir_count) {
+            for column in block_context_columns.iter().take(dir_count) {
                 print!("  {}", column);
             }
 
@@ -706,10 +687,10 @@ fn show_extent_block(
     }
 
     /*
-     * Compare encryption contexts
+     * Compare block contexts
      */
     let (_, different) =
-        return_status_letters(&dvec, |x| &x.encryption_contexts, nc);
+        return_status_letters(&dvec, |x| &x.block_contexts, nc);
 
     if !only_show_differences || different {
         /*
@@ -724,7 +705,7 @@ fn show_extent_block(
 
             max_nonce_depth = std::cmp::max(
                 max_nonce_depth,
-                response.encryption_contexts.len(),
+                response.encryption_contexts().len(),
             );
         }
         if !only_show_differences {
@@ -747,12 +728,17 @@ fn show_extent_block(
             let mut all_same_len = true;
             let mut nonces = Vec::with_capacity(dir_count);
             for response in dvec.iter() {
-                let ctxs = &response.encryption_contexts;
+                let ctxs = response.encryption_contexts();
                 print!(
                     "{:^24} ",
                     if depth < ctxs.len() {
-                        nonces.push(&ctxs[depth].nonce);
-                        hex::encode(&ctxs[depth].nonce)
+                        if let Some(ec) = ctxs[depth] {
+                            nonces.push(&ec.nonce);
+                            hex::encode(&ec.nonce)
+                        } else {
+                            all_same_len = false;
+                            "".to_string()
+                        }
                     } else {
                         all_same_len = false;
                         "".to_string()
@@ -778,7 +764,7 @@ fn show_extent_block(
 
             max_tag_depth = std::cmp::max(
                 max_tag_depth,
-                response.encryption_contexts.len(),
+                response.encryption_contexts().len(),
             );
         }
         if !only_show_differences {
@@ -801,12 +787,17 @@ fn show_extent_block(
             let mut all_same_len = true;
             let mut tags = Vec::with_capacity(dir_count);
             for response in dvec.iter() {
-                let ctxs = &response.encryption_contexts;
+                let ctxs = response.encryption_contexts();
                 print!(
                     "{:^32} ",
                     if depth < ctxs.len() {
-                        tags.push(&ctxs[depth].tag);
-                        hex::encode(&ctxs[depth].tag)
+                        if let Some(ec) = ctxs[depth] {
+                            tags.push(&ec.tag);
+                            hex::encode(&ec.tag)
+                        } else {
+                            all_same_len = false;
+                            "".to_string()
+                        }
                     } else {
                         all_same_len = false;
                         "".to_string()
@@ -824,7 +815,7 @@ fn show_extent_block(
     /*
      * Compare integrity hashes
      */
-    let (_, different) = return_status_letters(&dvec, |x| &x.hashes, nc);
+    let (_, different) = return_status_letters(&dvec, |x| x.hashes(), nc);
 
     if !only_show_differences || different {
         /*
@@ -838,7 +829,7 @@ fn show_extent_block(
             print!("{:^16} ", dir_index);
 
             max_hash_depth =
-                std::cmp::max(max_hash_depth, response.hashes.len());
+                std::cmp::max(max_hash_depth, response.hashes().len());
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -862,9 +853,9 @@ fn show_extent_block(
             for response in dvec.iter() {
                 print!(
                     "{:^16} ",
-                    if depth < response.hashes.len() {
-                        hashes.push(&response.hashes[depth]);
-                        hex::encode(&response.hashes[depth].to_le_bytes())
+                    if depth < response.hashes().len() {
+                        hashes.push(response.hashes()[depth]);
+                        hex::encode(response.hashes()[depth].to_le_bytes())
                     } else {
                         all_same_len = false;
                         "".to_string()

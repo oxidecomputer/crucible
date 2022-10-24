@@ -21,6 +21,5 @@ slog-async = "2.7"
 slog-dtrace = "0.2"
 slog-term = "2.7"
 tempfile = "3.3.0"
-tokio = { version = "1.21.0", features = ["full"] }
+tokio = { version = "1.21.2", features = ["full"] }
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }
-lazy_static = "1.4.0"

@@ -11,6 +11,16 @@
 #: ]
 #:
 #: [[publish]]
+#: series = "nightly-image"
+#: name = "crucible-nightly.tar.gz"
+#: from_output = "/out/crucible-nightly.tar.gz"
+#:
+#: [[publish]]
+#: series = "nightly-image"
+#: name = "crucible-nightly.sha256.txt"
+#: from_output = "/out/crucible-nightly.sha256.txt"
+#:
+#: [[publish]]
 #: series = "image"
 #: name = "crucible.tar.gz"
 #: from_output = "/out/crucible.tar.gz"
@@ -45,15 +55,39 @@ for s in tools/test_perf.sh; do
 	cp "$s" /work/scripts/
 done
 
+# Make the top level /out directory
+pfexec mkdir -p /out
+pfexec chown "$UID" /out
+
+# Make the crucible package image
 banner image
 ptime -m cargo run --bin crucible-package
 
 banner contents
 tar tvfz out/crucible.tar.gz
+mv out/crucible.tar.gz /out/crucible.tar.gz
+
+# Build the nightly archive file which should include all the scripts
+# and binaries needed to run the nightly test.
+# This needs the ./out directory created above
+banner nightly
+
+tar cavf out/crucible-nightly.tar.gz \
+    target/release/crutest \
+    target/release/crucible-downstairs \
+    target/release/crucible-hammer \
+    target/release/dsc \
+    tools/downstairs_daemon.sh \
+    tools/hammer_loop.sh \
+    tools/test_reconnect.sh \
+    tools/test_repair.sh \
+    tools/test_restart_repair.sh \
+    tools/test_nightly.sh
 
 banner copy
-pfexec mkdir -p /out
-pfexec chown "$UID" /out
-mv out/crucible.tar.gz /out/crucible.tar.gz
+mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
+
+banner checksum
 cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
+digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt

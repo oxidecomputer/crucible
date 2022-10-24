@@ -38,11 +38,12 @@ fn build_api() -> ApiDescription<FileServerContext> {
     api
 }
 
+/// Returns Ok(listen address) if everything launched ok, Err otherwise
 pub async fn repair_main(
     ds: &Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
     log: &Logger,
-) -> Result<(), String> {
+) -> Result<SocketAddr, String> {
     /*
      * We must specify a configuration with a bind address.
      */
@@ -74,12 +75,18 @@ pub async fn repair_main(
     let server = HttpServerStarter::new(&config_dropshot, api, context, log)
         .map_err(|error| format!("failed to create server: {}", error))?
         .start();
+    let local_addr = server.local_addr();
 
-    /*
-     * Wait for the server to stop.  Note that there's not any code to shut
-     * down this server, so we should never get past this point.
-     */
-    server.await
+    tokio::spawn(async move {
+        /*
+         * Wait for the server to stop.  Note that there's not any code to
+         * shut down this server, so we should never get past this
+         * point.
+         */
+        server.await
+    });
+
+    Ok(local_addr)
 }
 
 #[derive(Deserialize, JsonSchema)]

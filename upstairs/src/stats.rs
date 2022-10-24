@@ -86,27 +86,27 @@ impl UpStatOuter {
     // When an operation happens that we wish to record in Oximeter,
     // one of these methods will be called.  Each method will get the
     // correct field of UpCountStat to record the update.
-    pub fn add_activation(&self) {
-        let mut ups = self.up_stat_wrap.lock().unwrap();
+    pub async fn add_activation(&self) {
+        let mut ups = self.up_stat_wrap.lock().await;
         let datum = ups.activated_count.datum_mut();
         *datum += 1;
     }
-    pub fn add_write(&self, bytes: i64) {
-        let mut ups = self.up_stat_wrap.lock().unwrap();
+    pub async fn add_write(&self, bytes: i64) {
+        let mut ups = self.up_stat_wrap.lock().await;
         let datum = ups.write_bytes.datum_mut();
         *datum += bytes;
         let datum = ups.write_count.datum_mut();
         *datum += 1;
     }
-    pub fn add_read(&self, bytes: i64) {
-        let mut ups = self.up_stat_wrap.lock().unwrap();
+    pub async fn add_read(&self, bytes: i64) {
+        let mut ups = self.up_stat_wrap.lock().await;
         let datum = ups.read_bytes.datum_mut();
         *datum += bytes;
         let datum = ups.read_count.datum_mut();
         *datum += 1;
     }
-    pub fn add_flush(&self) {
-        let mut ups = self.up_stat_wrap.lock().unwrap();
+    pub async fn add_flush(&self) {
+        let mut ups = self.up_stat_wrap.lock().await;
         let datum = ups.flush_count.datum_mut();
         *datum += 1;
     }
@@ -121,7 +121,9 @@ impl Producer for UpStatOuter {
     fn produce(
         &mut self,
     ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, MetricsError> {
-        let ups = self.up_stat_wrap.lock().unwrap();
+        let ups = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.up_stat_wrap.lock())
+        });
 
         let mut data = Vec::with_capacity(6);
         let name = ups.stat_name;

@@ -29,7 +29,9 @@ export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
 ct="$BINDIR/crutest"
-for bin in $cds $ct; do
+dsc="$BINDIR/dsc"
+
+for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
         exit 1
@@ -42,14 +44,14 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
-verify_file=/tmp/repair_test_verify.data
-test_log=/tmp/verify_out.txt
+verify_file=/tmp/test_repair_verify.data
+test_log=/tmp/test_repair_out.txt
 ds_log_prefix=/tmp/test_repair_ds
 
 dump_args=()
 while getopts 'N' opt; do
 	case "$opt" in
-		N)  echo "more dump args"
+		N)  echo "Turn off color for downstairs dump"
             dump_args+=(" --no-color")
             ;;
         *)
@@ -60,20 +62,22 @@ while getopts 'N' opt; do
 	esac
 done
 
-# This is temporary hack until dsc is able to do this
-uuidprefix="12345678-1234-1234-1234-00000000"
-port_base=8810
-args=()
-for (( i = 0; i < 3; i++ )); do
-    (( port_step = i * 10 )) || true
-    (( port = port_base + port_step )) || true
-    dir="${testdir}/$port"
-    dump_args+=( -d "$dir" )
-    uuid="${uuidprefix}${port}"
-    args+=( -t "127.0.0.1:$port" )
-    echo "$cds" create -u "$uuid" -d "$dir" --extent-count 30 --extent-size 20
-    ${cds} create -u "$uuid" -d "$dir" --extent-count 30 --extent-size 20
-done
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 30 --extent-size 20 --region-dir "$testdir"; then
+    echo "Failed to create region"
+    exit 1
+fi
+# Build the arg list for both dump and the client.
+# This is improving, but still a bit hacky.  The port numbers here
+# are the same as what DSC uses by default.  If either side changes, then
+# the other will need to be update manually.
+target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
+dump_args+=" -d ${testdir}/8810 -d ${testdir}/8820 -d ${testdir}/8830"
+
+if pgrep -fl -U "$(id -u)" "$cds"; then
+    echo "Downstairs already running" >&2
+    echo Run: pkill -f -U "$(id -u)" "$cds" >&2
+    exit 1
+fi
 
 # Start all three downstairs
 ${cds} run -d "${testdir}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
@@ -90,18 +94,19 @@ if [[ "$os_name" == 'Darwin' ]]; then
     codesign -s - -f "$ct"
 fi
 
-target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
-
 # Do initial volume population.
-if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q
+generation=1
+echo "$ct with $target_args  $dump_args $ds0_pid $ds1_pid $ds2_pid"
+if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q -g "$generation"
 then
     echo "ERROR: Exit on initial fill"
     cleanup
     exit 1
 fi
+(( generation += 1))
 
 # Start loop
-for (( i = 0; i < 20; i += 1 )); do
+for (( i = 0; i < 100; i += 1 )); do
 
     choice=$((RANDOM % 3))
     echo ""
@@ -126,12 +131,13 @@ for (( i = 0; i < 20; i += 1 )); do
         ds2_pid=$!
     fi
 
-    if ! ${ct} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30
+    if ! ${ct} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30 -g "$generation"
     then
         echo "Exit on repair fail, loop: $i, choice: $choice"
         cleanup
         exit 1
     fi
+    (( generation += 1))
 
     echo ""
     # Stop --lossy downstairs so it can't complete all its IOs
@@ -149,8 +155,8 @@ for (( i = 0; i < 20; i += 1 )); do
     # Did we get any mismatches?
     # We || true because dump will return non-zero when it finds
     # a mismatch
-    echo "Current downstairs dump:"
-    ${cds} dump ${dump_args[@]} || true
+    echo "Current downstairs dump: da:${dump_args}"
+    ${cds} dump ${dump_args} || true
     echo "On loop $i"
 
     echo ""
@@ -167,14 +173,15 @@ for (( i = 0; i < 20; i += 1 )); do
     fi
 
     echo "Verifying data now"
-    echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q > "$test_log"
-    if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q >> "$test_log"
+    echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" > "$test_log"
+    if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" >> "$test_log" 2>&1
     then
         echo "Exit on verify fail, loop: $i, choice: $choice"
         echo "Check $test_log for details"
         cleanup
         exit 1
     fi
+    (( generation += 1))
 
     echo "Loop: $i  Downstairs dump after verify (and repair):"
     ${cds} dump ${dump_args[@]}

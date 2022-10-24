@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tokio::runtime::Builder;
 use uuid::Uuid;
 
 use crucible::*;
@@ -72,7 +71,8 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let opt = opts()?;
 
     if opt.num_upstairs == 0 {
@@ -111,18 +111,6 @@ fn main() -> Result<()> {
     }
 
     /*
-     * Crucible needs a runtime as it will create several async tasks to
-     * handle adding new IOs, communication with the three downstairs
-     * instances, and completing IOs.
-     */
-    let runtime = Builder::new_multi_thread()
-        .worker_threads(10)
-        .thread_name("crucible-tokio")
-        .enable_all()
-        .build()
-        .unwrap();
-
-    /*
      * If any of our async tasks in our runtime panic, then we should
      * exit the program right away.
      */
@@ -145,12 +133,13 @@ fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        runtime.spawn(up_main(
+        let _join_handle = up_main(
             crucible_opts.clone(),
-            opt.gen,
+            opt.gen, // XXX increase gen per upstairs
             guest.clone(),
             None,
-        )); // XXX increase gen per upstairs
+        )
+        .await?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);
@@ -163,10 +152,14 @@ fn main() -> Result<()> {
     let handoff_amount = rounds / opt.num_upstairs;
     let mut cpf_idx = 0;
 
-    println!("Handing off to CPF {}", cpf_idx);
-    cpfs[cpf_idx].activate(generation_number)?;
+    println!("Initial Handing off to CPF {}", cpf_idx);
+    cpfs[cpf_idx].activate(generation_number).await?;
     generation_number += 1;
-    println!("Handed off to CPF {} {:?}", cpf_idx, cpfs[cpf_idx].uuid());
+    println!(
+        "Initial Hand off to CPF {} {:?}",
+        cpf_idx,
+        cpfs[cpf_idx].uuid()
+    );
 
     if opt.verify_isolation {
         println!("clearing...");
@@ -190,13 +183,18 @@ fn main() -> Result<()> {
             cpf_idx = idx / handoff_amount;
             assert!(cpf_idx != 0);
 
-            println!("Handing off to CPF {}", cpf_idx);
+            println!("Round {} Handing off to CPF {}", idx, cpf_idx);
 
             let cpf = &mut cpfs[cpf_idx];
-            cpf.activate(generation_number)?;
+            cpf.activate(generation_number).await?;
             generation_number += 1;
 
-            println!("Handed off to CPF {} {:?}", cpf_idx, cpf.uuid());
+            println!(
+                "Round {} Handed off to CPF {} {:?}",
+                idx,
+                cpf_idx,
+                cpf.uuid()
+            );
 
             cpf
         } else {
@@ -288,12 +286,12 @@ fn main() -> Result<()> {
 
     loop {
         let cpf = &mut cpfs[cpf_idx];
-        let wc = cpf.show_work()?;
+        let wc = cpf.show_work().await?;
         println!("Up:{} ds:{}", wc.up_count, wc.ds_count);
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 
     Ok(())

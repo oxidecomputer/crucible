@@ -38,6 +38,15 @@ pub struct Extent {
     inner: Option<Mutex<Inner>>,
 }
 
+/// BlockContext, with the addition of block index and on_disk_hash
+#[derive(Clone)]
+pub struct DownstairsBlockContext {
+    pub block_context: BlockContext,
+
+    pub block: u64,
+    pub on_disk_hash: u64,
+}
+
 #[derive(Debug)]
 pub struct Inner {
     file: File,
@@ -129,61 +138,31 @@ impl Inner {
         Ok(())
     }
 
-    /// For a given block range, return all encryption contexts since the last
-    /// flush. `get_hashes` returns a `Vec<Vec<u64>>` of length equal to
-    /// `count`. Each `Vec<u64>` inside this parent Vec contains all
-    /// contexts for a single block, ordered so the latest context is last.
-    /// If the region is not using encryption, the inner Vecs will all be
-    /// empty, but the outer Vec will still be of length `count`.
-    fn get_encryption_contexts(
+    /// For a given block range, return all context rows since the last flush.
+    /// `get_block_contexts` returns a `Vec<Vec<DownstairsBlockContext>>` of
+    /// length equal to `count`. Each `Vec<DownstairsBlockContext>` inside this
+    /// parent Vec contains all contexts for a single block.
+    fn get_block_contexts(
         &self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<EncryptionContext>>> {
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = "SELECT block, nonce, tag FROM encryption_context \
+        let stmt =
+            "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
              WHERE block BETWEEN ?1 AND ?2 \
-             ORDER BY counter ASC";
+             ORDER BY ROWID ASC";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
         let stmt_iter =
             stmt.query_map(params![block, block + count - 1], |row| {
-                let block: u64 = row.get(0)?;
-                let nonce: Vec<u8> = row.get(1)?;
-                let tag: Vec<u8> = row.get(2)?;
-                Ok((block, nonce, tag))
-            })?;
-
-        let mut results = Vec::with_capacity(count as usize);
-        for _i in 0..count {
-            results.push(Vec::new());
-        }
-
-        for row in stmt_iter {
-            let (row_block, nonce, tag) = row?;
-            results[(row_block - block) as usize]
-                .push(EncryptionContext { nonce, tag });
-        }
-
-        Ok(results)
-    }
-
-    /// For a given block range, return all hashes since the last flush.
-    /// `get_hashes` returns a `Vec<Vec<u64>>` of length equal to `count`. Each
-    /// `Vec<u64>` inside this parent Vec contains all hashes for a single
-    /// block, ordered so the latest hash is last.
-    pub fn get_hashes(&self, block: u64, count: u64) -> Result<Vec<Vec<u64>>> {
-        // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
-        let stmt = "SELECT block, hash FROM integrity_hashes \
-             WHERE block BETWEEN ?1 AND ?2 \
-             ORDER BY counter ASC";
-        let mut stmt = self.metadb.prepare_cached(stmt)?;
-
-        let stmt_iter =
-            stmt.query_map(params![block, block + count - 1], |row| {
-                let block: u64 = row.get(0)?;
+                let block_index: u64 = row.get(0)?;
                 let hash: Vec<u8> = row.get(1)?;
-                Ok((block, hash))
+                let nonce: Option<Vec<u8>> = row.get(2)?;
+                let tag: Option<Vec<u8>> = row.get(3)?;
+                let on_disk_hash: Vec<u8> = row.get(4)?;
+
+                Ok((block_index, hash, nonce, tag, on_disk_hash))
             })?;
 
         let mut results = Vec::with_capacity(count as usize);
@@ -192,39 +171,59 @@ impl Inner {
         }
 
         for row in stmt_iter {
-            let (row_block, hash) = row?;
-            assert_eq!(hash.len(), 8);
-            results[(row_block - block) as usize]
-                .push(u64::from_le_bytes(hash[..].try_into()?));
+            let (block_index, hash, nonce, tag, on_disk_hash) = row?;
+
+            let encryption_context = if let Some(nonce) = nonce {
+                tag.map(|tag| EncryptionContext { nonce, tag })
+            } else {
+                None
+            };
+
+            let ctx = DownstairsBlockContext {
+                block_context: BlockContext {
+                    hash: u64::from_le_bytes(hash[..].try_into()?),
+                    encryption_context,
+                },
+                block: block_index,
+                on_disk_hash: u64::from_le_bytes(on_disk_hash[..].try_into()?),
+            };
+
+            results[(ctx.block - block) as usize].push(ctx);
         }
 
         Ok(results)
     }
 
     /*
-     * Given a (block, nonce, tag), append an encryption context row.
-     *
-     * For the params, keep a list of references so that copying is
-     * minimized.
+     * Append a block context row.
      */
-    pub fn tx_set_encryption_context(
+    pub fn tx_set_block_context(
         tx: &rusqlite::Transaction,
-        encryption_context_params: &(u64, &EncryptionContext),
+        block_context: &DownstairsBlockContext,
     ) -> Result<()> {
-        let (block, encryption_context) = encryption_context_params;
-
         let stmt =
-            "INSERT INTO encryption_context (counter, block, nonce, tag) \
-             VALUES ( \
-                 (SELECT IFNULL(MAX(counter), 0) + 1 FROM encryption_context WHERE block=?1), \
-                 ?1, ?2, ?3 \
-             )";
+            "INSERT INTO block_context (block, hash, nonce, tag, on_disk_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5)";
+
+        let (nonce, tag) = if let Some(encryption_context) =
+            &block_context.block_context.encryption_context
+        {
+            (
+                Some(&encryption_context.nonce),
+                Some(&encryption_context.tag),
+            )
+        } else {
+            (None, None)
+        };
 
         let rows_affected = tx.prepare_cached(stmt)?.execute(params![
-            block,
-            &encryption_context.nonce,
-            &encryption_context.tag
+            block_context.block,
+            block_context.block_context.hash.to_le_bytes(),
+            nonce,
+            tag,
+            block_context.on_disk_hash.to_le_bytes(),
         ])?;
+
         assert_eq!(rows_affected, 1);
 
         Ok(())
@@ -235,140 +234,44 @@ impl Inner {
     }
 
     #[cfg(test)]
-    fn set_encryption_context(
+    fn set_block_contexts(
         &mut self,
-        encryption_context_params: &[(u64, &EncryptionContext)],
+        block_contexts: &[&DownstairsBlockContext],
+    ) -> Result<()> {
+        self.set_dirty()?;
+
+        let tx = self.metadb.transaction()?;
+
+        for block_context in block_contexts {
+            Self::tx_set_block_context(&tx, block_context)?;
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    /*
+     * Get rid of all block context rows except those that match the on-disk
+     * hash that is computed after a flush.
+     */
+    fn truncate_encryption_contexts_and_hashes(
+        &mut self,
+        extent_block_indexes_and_hashes: Vec<(usize, u64)>,
     ) -> Result<()> {
         let tx = self.metadb.transaction()?;
 
-        for tuple in encryption_context_params {
-            Self::tx_set_encryption_context(&tx, tuple)?;
+        let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
+
+        for (block, on_disk_hash) in extent_block_indexes_and_hashes {
+            let _rows_affected = tx
+                .prepare_cached(stmt)?
+                .execute(params![block, on_disk_hash.to_le_bytes()])?;
         }
 
         tx.commit()?;
 
         Ok(())
-    }
-
-    /*
-     * Given a (block, hash), append a hash row.
-     */
-    pub fn tx_set_hash(
-        tx: &rusqlite::Transaction,
-        hash_params: &(u64, u64),
-    ) -> Result<()> {
-        let (block, hash) = hash_params;
-
-        let stmt =
-            "INSERT INTO integrity_hashes (counter, block, hash) \
-             VALUES ( \
-                 (SELECT IFNULL(MAX(counter), 0) + 1 FROM integrity_hashes WHERE block=?1), \
-                 ?1, ?2 \
-             )";
-
-        let rows_affected = tx
-            .prepare_cached(stmt)?
-            .execute(params![block, &hash.to_le_bytes()])?;
-        assert_eq!(rows_affected, 1);
-
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn set_hashes(&mut self, hash_params: &[(u64, u64)]) -> Result<()> {
-        let tx = self.metadb.transaction()?;
-
-        for tuple in hash_params {
-            Self::tx_set_hash(&tx, tuple)?;
-        }
-
-        tx.commit()?;
-
-        Ok(())
-    }
-
-    /*
-     * Get rid of all but most recent encryption context and hash for each
-     * block.
-     */
-    fn truncate_encryption_contexts_and_hashes(&mut self) -> Result<()> {
-        let tx = self.metadb.transaction()?;
-
-        // Clear encryption context
-        let stmt = "DELETE FROM encryption_context WHERE ROWID not in \
-             (select ROWID from \
-                 (select ROWID,block,MAX(counter) \
-                  from encryption_context group by block\
-                 ) \
-             )";
-
-        let _rows_affected = tx.prepare_cached(stmt)?.execute([])?;
-
-        let _rows_affected = tx
-            .prepare_cached("UPDATE encryption_context SET counter = 0")?
-            .execute([])?;
-
-        // Clear integrity hash
-        let stmt = "DELETE FROM integrity_hashes WHERE ROWID not in \
-             (select ROWID from \
-                 (select ROWID,block,MAX(counter) \
-                  from integrity_hashes group by block \
-                 ) \
-             )";
-
-        let _rows_affected = tx.prepare_cached(stmt)?.execute([])?;
-
-        let _rows_affected = tx
-            .prepare_cached("UPDATE integrity_hashes SET counter = 0")?
-            .execute([])?;
-
-        tx.commit()?;
-
-        Ok(())
-    }
-
-    /*
-     * In order to unit test truncate_encryption_contexts_and_hashes, return
-     * blocks and counters.
-     */
-    #[cfg(test)]
-    fn get_blocks_and_counters_for_encryption_context(
-        &mut self,
-    ) -> Result<Vec<(u64, u64)>> {
-        let mut stmt = self
-            .metadb
-            .prepare_cached("SELECT block, counter FROM encryption_context")?;
-
-        let stmt_iter =
-            stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        let mut results = Vec::new();
-
-        for row in stmt_iter {
-            results.push(row?);
-        }
-
-        Ok(results)
-    }
-
-    #[cfg(test)]
-    fn get_blocks_and_counters_for_hashes(
-        &mut self,
-    ) -> Result<Vec<(u64, u64)>> {
-        let mut stmt = self
-            .metadb
-            .prepare_cached("SELECT block, counter FROM integrity_hashes")?;
-
-        let stmt_iter =
-            stmt.query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        let mut results = Vec::new();
-
-        for row in stmt_iter {
-            results.push(row?);
-        }
-
-        Ok(results)
     }
 }
 
@@ -808,23 +711,28 @@ impl Extent {
                 params!["dirty", meta.dirty],
             )?;
 
+            // Within an extent, store a context row for each block.
+            //
+            // The Upstairs will send either an integrity hash, or an integrity
+            // hash along with some encryption context (a nonce and tag).
+            //
+            // The Downstairs will have to record multiple context rows for each
+            // block, because while what is committed to sqlite is durable (due
+            // to the write-ahead logging and the fact that we set PRAGMA
+            // SYNCHRONOUS), what is written to the extent file is not durable
+            // until a flush of that file is performed.
+            //
+            // Any of the context rows written between flushes could be valid
+            // until we call flush and remove context rows where the integrity
+            // hash does not match what was actually flushed to disk.
             metadb.execute(
-                "CREATE TABLE encryption_context (
-                    counter INTEGER,
-                    block INTEGER,
-                    nonce BLOB NOT NULL,
-                    tag BLOB NOT NULL,
-                    PRIMARY KEY (block, counter)
-                )",
-                [],
-            )?;
-
-            metadb.execute(
-                "CREATE TABLE integrity_hashes (
-                    counter INTEGER,
+                "CREATE TABLE block_context (
                     block INTEGER,
                     hash BLOB NOT NULL,
-                    PRIMARY KEY (block, counter)
+                    nonce BLOB,
+                    tag BLOB,
+                    on_disk_hash BLOB NOT NULL,
+                    PRIMARY KEY (block, hash, nonce, tag, on_disk_hash)
                 )",
                 [],
             )?;
@@ -970,11 +878,7 @@ impl Extent {
             inner.file.read_exact(&mut read_buffer)?;
 
             // Query the block metadata
-            let enc_ctxts = inner.get_encryption_contexts(
-                first_req.offset.value,
-                n_contiguous_requests as u64,
-            )?;
-            let hashes = inner.get_hashes(
+            let block_contexts = inner.get_block_contexts(
                 first_req.offset.value,
                 n_contiguous_requests as u64,
             )?;
@@ -986,18 +890,17 @@ impl Extent {
             // (equal to n_contiguous_requests) so zipping is fine
             let resp_iter =
                 responses[resp_run_start..][..n_contiguous_requests].iter_mut();
-            let enc_iter = enc_ctxts.into_iter();
-            let hash_iter = hashes.into_iter();
+            let ctx_iter = block_contexts.into_iter();
             let data_iter = read_buffer.chunks_exact(self.block_size as usize);
 
             // We could make this a little cleaner if we pulled in itertools and
             // used multizip from that, but i don't think it's worth it.
-            for (((resp, r_encs), r_hashes), r_data) in
-                resp_iter.zip(enc_iter).zip(hash_iter).zip(data_iter)
+            for ((resp, r_ctx), r_data) in
+                resp_iter.zip(ctx_iter).zip(data_iter)
             {
                 // Shove everything into the response
-                resp.encryption_contexts = r_encs;
-                resp.hashes = r_hashes;
+                resp.block_contexts =
+                    r_ctx.into_iter().map(|x| x.block_context).collect();
 
                 // XXX if resp.data was Bytes instead of BytesMut we could avoid
                 // a copy here and instead assign it to a frozen subslice.
@@ -1127,13 +1030,13 @@ impl Extent {
                 // Query hashes for the write range.
                 // TODO we should consider adding a query that doesnt actually
                 // give us back the data, just checks for its presence.
-                let hashes = inner.get_hashes(
+                let block_contexts = inner.get_block_contexts(
                     first_write.offset.value,
                     n_contiguous_writes as u64,
                 )?;
 
-                for (i, block_hashes) in hashes.iter().enumerate() {
-                    if !block_hashes.is_empty() {
+                for (i, block_contexts) in block_contexts.iter().enumerate() {
+                    if !block_contexts.is_empty() {
                         let _ = writes_to_skip
                             .insert(i as u64 + first_write.offset.value);
                     }
@@ -1158,14 +1061,14 @@ impl Extent {
                 continue;
             }
 
-            if let Some(encryption_context) = &write.encryption_context {
-                Inner::tx_set_encryption_context(
-                    &tx,
-                    &(write.offset.value, encryption_context),
-                )?;
-            }
-
-            Inner::tx_set_hash(&tx, &(write.offset.value, write.hash))?;
+            Inner::tx_set_block_context(
+                &tx,
+                &DownstairsBlockContext {
+                    block_context: write.block_context.clone(),
+                    block: write.offset.value,
+                    on_disk_hash: integrity_hash(&[&write.data[..]]),
+                },
+            )?;
         }
         tx.commit()?;
 
@@ -1257,11 +1160,30 @@ impl Extent {
             );
         }
 
-        /*
-         * Clear old encryption contexts and hashes. In order to be crash
-         * consistent, only perform this after the extent fsync is done.
-         */
-        inner.truncate_encryption_contexts_and_hashes()?;
+        // Clear old block contexts. In order to be crash consistent, only
+        // perform this after the extent fsync is done. Read each block in the
+        // extent and find out the integrity hash. Then, remove all block
+        // context rows where the integrity hash does not match.
+
+        let total_bytes: usize =
+            self.extent_size.value as usize * self.block_size as usize;
+        let mut extent_data: Vec<u8> = vec![0; total_bytes];
+
+        inner.file.seek(SeekFrom::Start(0))?;
+        inner.file.read_exact(&mut extent_data)?;
+
+        let extent_block_indexes_and_hashes = extent_data
+            .chunks(self.block_size as usize)
+            .enumerate()
+            .map(|(i, data)| (i, integrity_hash(&[data])))
+            .collect();
+
+        inner.truncate_encryption_contexts_and_hashes(
+            extent_block_indexes_and_hashes,
+        )?;
+
+        // Reset the file's seek offset to 0, and set the flush number and gen
+        // number
 
         inner.file.seek(SeekFrom::Start(0))?;
 
@@ -1733,18 +1655,19 @@ impl Region {
         writes: &[crucible_protocol::Write],
     ) -> Result<(), CrucibleError> {
         for write in writes {
-            let computed_hash =
-                if let Some(encryption_context) = &write.encryption_context {
-                    integrity_hash(&[
-                        &encryption_context.nonce[..],
-                        &encryption_context.tag[..],
-                        &write.data[..],
-                    ])
-                } else {
-                    integrity_hash(&[&write.data[..]])
-                };
+            let computed_hash = if let Some(encryption_context) =
+                &write.block_context.encryption_context
+            {
+                integrity_hash(&[
+                    &encryption_context.nonce[..],
+                    &encryption_context.tag[..],
+                    &write.data[..],
+                ])
+            } else {
+                integrity_hash(&[&write.data[..]])
+            };
 
-            if computed_hash != write.hash {
+            if computed_hash != write.block_context.hash {
                 error!(self.log, "Failed write hash validation");
                 crucible_bail!(HashMismatch);
             }
@@ -2940,7 +2863,7 @@ mod test {
     }
 
     #[test]
-    fn encryption_context() -> Result<()> {
+    fn block_context() -> Result<()> {
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
@@ -2950,75 +2873,150 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_contexts(0, 1)?[0].is_empty());
-        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's context
 
-        inner.set_encryption_context(&[(
-            0,
-            &EncryptionContext {
-                nonce: [1, 2, 3].to_vec(),
-                tag: [4, 5, 6, 7].to_vec(),
+        inner.set_block_contexts(&[&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: Some(EncryptionContext {
+                    nonce: [1, 2, 3].to_vec(),
+                    tag: [4, 5, 6, 7].to_vec(),
+                }),
+                hash: 123,
             },
-        )])?;
+            block: 0,
+            on_disk_hash: 456,
+        }])?;
 
-        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
-        assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
-        assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            vec![4, 5, 6, 7]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 123);
+        assert_eq!(ctxs[0].on_disk_hash, 456);
 
         // Block 1 should still be blank
 
-        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set and verify a new context for block 0
 
         let blob1 = rand::thread_rng().gen::<[u8; 32]>();
         let blob2 = rand::thread_rng().gen::<[u8; 32]>();
 
-        inner.set_encryption_context(&[(
-            0,
-            &EncryptionContext {
-                nonce: blob1.to_vec(),
-                tag: blob2.to_vec(),
+        inner.set_block_contexts(&[&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: Some(EncryptionContext {
+                    nonce: blob1.to_vec(),
+                    tag: blob2.to_vec(),
+                }),
+                hash: 1024,
             },
-        )])?;
+            block: 0,
+            on_disk_hash: 65536,
+        }])?;
 
-        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 2);
 
-        assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
-        assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
+        // First context didn't change
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            vec![4, 5, 6, 7]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 123);
+        assert_eq!(ctxs[0].on_disk_hash, 456);
 
-        assert_eq!(ctxs[1].nonce, blob1);
-        assert_eq!(ctxs[1].tag, blob2);
+        // Second context was appended
+        assert_eq!(
+            ctxs[1]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            blob1
+        );
+        assert_eq!(
+            ctxs[1]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            blob2
+        );
+        assert_eq!(ctxs[1].block_context.hash, 1024);
+        assert_eq!(ctxs[1].on_disk_hash, 65536);
 
-        // "Flush", so only the latest should remain.
-        inner.truncate_encryption_contexts_and_hashes()?;
+        // "Flush", so only the rows that match should remain.
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)])?;
 
-        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
-        assert_eq!(ctxs[0].nonce, blob1);
-        assert_eq!(ctxs[0].tag, blob2);
-
-        // Assert counters were reset to zero
-        for (_block, counter) in
-            inner.get_blocks_and_counters_for_encryption_context()?
-        {
-            assert_eq!(counter, 0);
-        }
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            blob1
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            blob2
+        );
+        assert_eq!(ctxs[0].block_context.hash, 1024);
+        assert_eq!(ctxs[0].on_disk_hash, 65536);
 
         Ok(())
     }
 
     #[test]
-    fn multiple_encryption_context() -> Result<()> {
+    fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(1)?;
@@ -3028,131 +3026,186 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_encryption_contexts(0, 1)?[0].is_empty());
-        assert!(inner.get_encryption_contexts(1, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
-        // Set and verify block 0's and 1's context
+        // Set block 0's and 1's context
 
-        inner.set_encryption_context(&[
-            (
-                0,
-                &EncryptionContext {
-                    nonce: [1, 2, 3].to_vec(),
-                    tag: [4, 5, 6, 7].to_vec(),
+        inner.set_block_contexts(&[
+            &DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: [1, 2, 3].to_vec(),
+                        tag: [4, 5, 6, 7].to_vec(),
+                    }),
+                    hash: 123,
                 },
-            ),
-            (
-                1,
-                &EncryptionContext {
-                    nonce: [4, 5, 6].to_vec(),
-                    tag: [8, 9, 0, 1].to_vec(),
+                block: 0,
+                on_disk_hash: 456,
+            },
+            &DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: [4, 5, 6].to_vec(),
+                        tag: [8, 9, 0, 1].to_vec(),
+                    }),
+                    hash: 9999,
                 },
-            ),
+                block: 1,
+                on_disk_hash: 1234567890,
+            },
         ])?;
 
-        let ctxs = inner.get_encryption_contexts(0, 1)?[0].clone();
+        // Verify block 0's context
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
-        assert_eq!(ctxs[0].nonce, vec![1, 2, 3]);
-        assert_eq!(ctxs[0].tag, vec![4, 5, 6, 7]);
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            vec![4, 5, 6, 7]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 123);
+        assert_eq!(ctxs[0].on_disk_hash, 456);
 
-        let ctxs = inner.get_encryption_contexts(1, 1)?[0].clone();
+        // Verify block 1's context
+
+        let ctxs = inner.get_block_contexts(1, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
 
-        assert_eq!(ctxs[0].nonce, vec![4, 5, 6]);
-        assert_eq!(ctxs[0].tag, vec![8, 9, 0, 1]);
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            vec![4, 5, 6]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            vec![8, 9, 0, 1]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 9999);
+        assert_eq!(ctxs[0].on_disk_hash, 1234567890);
 
-        Ok(())
-    }
+        // Return both block 0's and block 1's context, and verify
 
-    #[test]
-    fn hashes() -> Result<()> {
-        let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let ctxs = inner.get_block_contexts(0, 2)?;
 
-        let ext = &region.extents[0];
-        let mut inner = ext.inner();
+        assert_eq!(ctxs[0].len(), 1);
+        assert_eq!(
+            ctxs[0][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ctxs[0][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            vec![4, 5, 6, 7]
+        );
+        assert_eq!(ctxs[0][0].block_context.hash, 123);
+        assert_eq!(ctxs[0][0].on_disk_hash, 456);
 
-        // Hashes for blocks 0 and 1 should start blank
+        assert_eq!(ctxs[1].len(), 1);
+        assert_eq!(
+            ctxs[1][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            vec![4, 5, 6]
+        );
+        assert_eq!(
+            ctxs[1][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            vec![8, 9, 0, 1]
+        );
+        assert_eq!(ctxs[1][0].block_context.hash, 9999);
+        assert_eq!(ctxs[1][0].on_disk_hash, 1234567890);
 
-        assert!(inner.get_hashes(0, 1)?[0].is_empty());
-        assert!(inner.get_hashes(1, 1)?[0].is_empty());
+        // Append a whole bunch of block context rows
 
-        // Set and verify block 0's hash
-
-        inner.set_hashes(&[(0, 23874612987634)])?;
-
-        let hashes = inner.get_hashes(0, 1)?[0].clone();
-
-        assert_eq!(hashes.len(), 1);
-
-        assert_eq!(hashes[0], 23874612987634);
-
-        // Block 1 should still be blank
-
-        assert!(inner.get_hashes(1, 1)?[0].is_empty());
-
-        // Set and verify a new hash for block 0
-
-        let blob1 = rand::thread_rng().gen::<u64>();
-
-        inner.set_hashes(&[(0, blob1)])?;
-
-        let hashes = inner.get_hashes(0, 1)?[0].clone();
-
-        assert_eq!(hashes.len(), 2);
-
-        assert_eq!(hashes[0], 23874612987634);
-        assert_eq!(hashes[1], blob1);
-
-        // "Flush", so only the latest should remain.
-        inner.truncate_encryption_contexts_and_hashes()?;
-
-        let hashes = inner.get_hashes(0, 1)?[0].clone();
-
-        assert_eq!(hashes.len(), 1);
-
-        assert_eq!(hashes[0], blob1);
-
-        // Assert counters were reset to zero
-        for (_block, counter) in inner.get_blocks_and_counters_for_hashes()? {
-            assert_eq!(counter, 0);
+        for i in 0..10 {
+            inner.set_block_contexts(&[
+                &DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: Some(EncryptionContext {
+                            nonce: rand::thread_rng()
+                                .gen::<[u8; 32]>()
+                                .to_vec(),
+                            tag: rand::thread_rng().gen::<[u8; 32]>().to_vec(),
+                        }),
+                        hash: rand::thread_rng().gen::<u64>(),
+                    },
+                    block: 0,
+                    on_disk_hash: i,
+                },
+                &DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: Some(EncryptionContext {
+                            nonce: rand::thread_rng()
+                                .gen::<[u8; 32]>()
+                                .to_vec(),
+                            tag: rand::thread_rng().gen::<[u8; 32]>().to_vec(),
+                        }),
+                        hash: rand::thread_rng().gen::<u64>(),
+                    },
+                    block: 1,
+                    on_disk_hash: i,
+                },
+            ])?;
         }
 
-        Ok(())
-    }
+        let ctxs = inner.get_block_contexts(0, 2)?;
+        assert_eq!(ctxs[0].len(), 11);
+        assert_eq!(ctxs[1].len(), 11);
 
-    #[test]
-    fn multiple_hashes() -> Result<()> {
-        let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        // "Flush", so only the rows that match the on-disk hash should remain.
 
-        let ext = &region.extents[0];
-        let mut inner = ext.inner();
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 6), (1, 7)])?;
 
-        // Hashes for blocks 0 and 1 should start blank
+        let ctxs = inner.get_block_contexts(0, 2)?;
 
-        assert!(inner.get_hashes(0, 1)?[0].is_empty());
-        assert!(inner.get_hashes(1, 1)?[0].is_empty());
+        assert_eq!(ctxs[0].len(), 1);
+        assert_eq!(ctxs[0][0].on_disk_hash, 6);
 
-        // Set and verify block 0's and 1's context
-
-        inner
-            .set_hashes(&[(0, 0xbd1f97574fa0c3f4), (1, 0xa040b75cd3c96fff)])?;
-
-        let hashes = inner.get_hashes(0, 1)?[0].clone();
-
-        assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0], 0xbd1f97574fa0c3f4);
-
-        let hashes = inner.get_hashes(1, 1)?[0].clone();
-
-        assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0], 0xa040b75cd3c96fff);
+        assert_eq!(ctxs[1].len(), 1);
+        assert_eq!(ctxs[1][0].on_disk_hash, 7);
 
         Ok(())
     }
@@ -3190,8 +3243,10 @@ mod test {
                 eid,
                 offset,
                 data,
-                encryption_context: None,
-                hash,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
             });
         }
 
@@ -3237,6 +3292,81 @@ mod test {
     }
 
     #[test]
+    fn test_flush_removes_partial_writes() -> Result<()> {
+        // Validate that incorrect context rows are removed by a flush so that a
+        // repair will get rid of partial writes' block context rows. This is
+        // necessary for write_unwritten to work after a crash.
+        //
+        // Specifically, this test checks for the case where we had a brand new
+        // block and a write to that blocks that failed such that only the
+        // write's block context was persisted, leaving the data all zeros. In
+        // this case, there is no data, so we should remove the invalid block
+        // context row.
+
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options())?;
+        region.extend(1)?;
+
+        // A write of some sort only wrote a block context row
+
+        {
+            let ext = &region.extents[0];
+            let mut inner = ext.inner();
+            inner.set_block_contexts(&[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 1024,
+                },
+                block: 0,
+                on_disk_hash: 65536,
+            }])?;
+        }
+
+        region.region_flush(1, 1, &None, 123)?;
+
+        // Verify no block context rows exist
+
+        {
+            let ext = &region.extents[0];
+            let inner = ext.inner();
+            assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+        }
+
+        // Assert write unwritten will write to the first block
+
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+
+        region.region_write(
+            &[crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            }],
+            124,
+            true, // only_write_unwritten
+        )?;
+
+        let responses = region.region_read(
+            &[crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            }],
+            125,
+        )?;
+
+        let response = &responses[0];
+
+        assert_eq!(response.data.to_vec(), vec![0x55; 512]);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_ok_hash_ok() -> Result<()> {
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options(), csl())?;
@@ -3249,13 +3379,15 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 5061083712412462836,
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 5061083712412462836,
+                },
             }];
 
         region.region_write(&writes, 0, false)?;
@@ -3281,13 +3413,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 4798852240582462654, // Hash for all 9's
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9's
+                },
             }];
 
         region.region_write(&writes, 0, true)?;
@@ -3305,7 +3439,7 @@ mod test {
         )?;
 
         assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].hashes.len(), 1);
+        assert_eq!(responses[0].hashes().len(), 1);
         assert_eq!(responses[0].data[..], [9u8; 512][..]);
 
         Ok(())
@@ -3330,13 +3464,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 4798852240582462654, // Hash for all 9s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9's
+                },
             }];
 
         region.region_write(&writes, 0, false)?;
@@ -3348,13 +3484,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 5061083712412462836, // hash for all 1s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 5061083712412462836, // hash for all 1s
+                },
             }];
         // Do the write again, but with only_write_unwritten set now.
         region.region_write(&writes, 1, true)?;
@@ -3368,7 +3506,7 @@ mod test {
         // We should still have one response.
         assert_eq!(responses.len(), 1);
         // Hash should be just 1
-        assert_eq!(responses[0].hashes.len(), 1);
+        assert_eq!(responses[0].hashes().len(), 1);
         // Data should match first write
         assert_eq!(responses[0].data[..], [9u8; 512][..]);
 
@@ -3395,13 +3533,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 4798852240582462654, // Hash for all 9s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
             }];
 
         region.region_write(&writes, 0, true)?;
@@ -3426,13 +3566,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 5061083712412462836, // hash for all 1s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 5061083712412462836, // hash for all 1s
+                },
             }];
 
         // Do the write again, but with only_write_unwritten set now.
@@ -3452,7 +3594,7 @@ mod test {
         // We should still have one response.
         assert_eq!(responses.len(), 1);
         // Hash should be just 1
-        assert_eq!(responses[0].hashes.len(), 1);
+        assert_eq!(responses[0].hashes().len(), 1);
         // Data should match first write
         assert_eq!(responses[0].data[..], [9u8; 512][..]);
 
@@ -3494,8 +3636,10 @@ mod test {
                 eid,
                 offset,
                 data,
-                encryption_context: None,
-                hash,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
             });
         }
 
@@ -3564,13 +3708,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 4798852240582462654, // Hash for all 9s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
             }];
 
         // Now write just one block
@@ -3597,8 +3743,10 @@ mod test {
                 eid,
                 offset,
                 data,
-                encryption_context: None,
-                hash,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
             });
         }
 
@@ -3674,13 +3822,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 4798852240582462654, // Hash for all 9s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s,
+                },
             }];
 
         // Now write just to the second block.
@@ -3707,8 +3857,10 @@ mod test {
                 eid,
                 offset,
                 data,
-                encryption_context: None,
-                hash,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
             });
         }
 
@@ -3788,13 +3940,15 @@ mod test {
                 eid,
                 offset,
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 4798852240582462654, // Hash for all 9s
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
             }];
 
         // Now write just to the second block.
@@ -3822,8 +3976,10 @@ mod test {
                 eid,
                 offset,
                 data,
-                encryption_context: None,
-                hash,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
             });
         }
 
@@ -3892,13 +4048,15 @@ mod test {
                     eid,
                     offset,
                     data: data.freeze(),
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: vec![1, 2, 3],
-                            tag: vec![4, 5, 6],
-                        },
-                    ),
-                    hash: 4798852240582462654, // Hash for all 9s
+                    block_context: BlockContext {
+                        encryption_context: Some(
+                            crucible_protocol::EncryptionContext {
+                                nonce: vec![1, 2, 3],
+                                tag: vec![4, 5, 6],
+                            },
+                        ),
+                        hash: 4798852240582462654, // Hash for all 9s
+                    },
                 }];
 
             // Now write just one block
@@ -3926,8 +4084,10 @@ mod test {
                 eid,
                 offset,
                 data,
-                encryption_context: None,
-                hash,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
             });
         }
 
@@ -3982,13 +4142,15 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
                 data: data.freeze(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
-                    },
-                ),
-                hash: 2398419238764,
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 2398419238764,
+                },
             }];
 
         let result = region.region_write(&writes, 0, false);
@@ -4022,7 +4184,7 @@ mod test {
         )?;
 
         assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].hashes.len(), 0);
+        assert_eq!(responses[0].hashes().len(), 0);
         assert_eq!(responses[0].data[..], [0u8; 512][..]);
 
         Ok(())
