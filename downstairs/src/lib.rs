@@ -2452,8 +2452,7 @@ pub async fn start_downstairs(
                     Err(e) => {
                         warn!(
                             log,
-                            "rejecting connection from {:?}: {:?}",
-                            raddr, e,
+                            "rejecting connection from {:?}: {:?}", raddr, e,
                         );
                         continue;
                     }
