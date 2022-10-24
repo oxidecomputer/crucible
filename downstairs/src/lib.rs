@@ -2451,6 +2451,7 @@ pub async fn start_downstairs(
                     Ok(v) => v,
                     Err(e) => {
                         warn!(
+                            log,
                             "rejecting connection from {:?}: {:?}",
                             raddr, e,
                         );
@@ -2461,7 +2462,7 @@ pub async fn start_downstairs(
                 WrappedStream::Http(sock)
             };
 
-            info!("accepted connection from {:?}", raddr);
+            info!(log, "accepted connection from {:?}", raddr);
             {
                 /*
                  * Add one to the counter every time we have a connection
