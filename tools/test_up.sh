@@ -119,6 +119,13 @@ if ! pgrep -P $dsc_pid > /dev/null; then
     exit 1
 fi
 
+# We don't want auto-restart of downstairs, so be sure that is not enabled.
+echo "Disable automatic restart on all downstairs"
+if ! "${dsc}" cmd disable-restart-all; then
+    echo "Failed to disable auto restart"
+    exit 1
+fi
+
 echo ""
 echo "Begin tests, output goes to ${log_prefix}_out.txt"
 res=0

@@ -423,7 +423,8 @@
           "Starting",
           "Running",
           "Exit",
-          "Error"
+          "Error",
+          "Failed"
         ]
       },
       "Error": {
