@@ -23,11 +23,14 @@ use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
+use slog::{error, info, o, warn, Drain, Logger};
+use slog_dtrace::{with_drain, ProbeRegistration};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
+use usdt::register_probes;
 use uuid::Uuid;
 
 pub mod admin;
@@ -516,12 +519,16 @@ where
             flush_number,
             gen_number,
         } => {
-            println!(
-                "{} Flush extent {} with f:{} g:{}",
-                repair_id, extent_id, flush_number, gen_number
-            );
             let msg = {
                 let d = ad.lock().await;
+                info!(
+                    d.log,
+                    "{} Flush extent {} with f:{} g:{}",
+                    repair_id,
+                    extent_id,
+                    flush_number,
+                    gen_number
+                );
                 match d.region.region_flush_extent(
                     *extent_id,
                     *flush_number,
@@ -546,9 +553,9 @@ where
             repair_id,
             extent_id,
         } => {
-            println!("{} Close extent {}", repair_id, extent_id);
             let msg = {
                 let mut d = ad.lock().await;
+                info!(d.log, "{} Close extent {}", repair_id, extent_id);
                 match d.region.extents.get_mut(*extent_id) {
                     Some(ext) => {
                         ext.close()?;
@@ -574,16 +581,17 @@ where
             source_repair_address,
             dest_clients,
         } => {
-            println!(
-                "{} Repair extent {} source:[{}] {:?} dest:{:?}",
-                repair_id,
-                extent_id,
-                source_client_id,
-                source_repair_address,
-                dest_clients
-            );
             let msg = {
                 let mut d = ad.lock().await;
+                info!(
+                    d.log,
+                    "{} Repair extent {} source:[{}] {:?} dest:{:?}",
+                    repair_id,
+                    extent_id,
+                    source_client_id,
+                    source_repair_address,
+                    dest_clients
+                );
                 match d
                     .region
                     .repair_extent(*extent_id, *source_repair_address)
@@ -607,9 +615,9 @@ where
             repair_id,
             extent_id,
         } => {
-            println!("{} Reopen extent {}", repair_id, extent_id);
             let msg = {
                 let mut d = ad.lock().await;
+                info!(d.log, "{} Reopen extent {}", repair_id, extent_id);
                 match d.region.reopen_extent(*extent_id) {
                     Ok(()) => Message::RepairAckId {
                         repair_id: *repair_id,
@@ -796,6 +804,7 @@ where
         channel::<UpstairsConnection>(1);
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
+    let log = ads.lock().await.log.new(o!("task" => "proc".to_string()));
     /*
      * See the comment in the proc() function on the upstairs side that
      * describes how this negotiation takes place.
@@ -849,7 +858,9 @@ where
                         // this one did (and before this one completed
                         // negotiation)
                         let upstairs_connection = upstairs_connection.unwrap();
-                        println!("Another upstairs {:?} promoted to active, \
+                        warn!(
+                            log,
+                            "Another upstairs {:?} promoted to active, \
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
@@ -877,18 +888,22 @@ where
                         let mut ds = ads.lock().await;
 
                         if let Some(upstairs_connection) = upstairs_connection {
-                            println!(
+                            info!(
+                                log,
                                 "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_connection, ds.jobs(upstairs_connection).await?,
+                                upstairs_connection,
+                                ds.jobs(upstairs_connection).await?,
                             );
 
                             if ds.is_active(upstairs_connection) {
-                                println!("upstairs {:?} was previously \
+                                info!(
+                                    log,
+                                    "upstairs {:?} was previously \
                                     active, clearing", upstairs_connection);
                                 ds.clear_active(upstairs_connection).await?;
                             }
                         } else {
-                            println!("unknown upstairs disconnected");
+                            info!(log, "unknown upstairs disconnected");
                         }
 
                         return Ok(());
@@ -948,7 +963,8 @@ where
                             session_id,
                             gen,
                         });
-                        println!("upstairs {:?} connected",
+                        info!(
+                            log, "upstairs {:?} connected",
                             upstairs_connection.unwrap());
 
                         let mut fw = fw.lock().await;
@@ -991,10 +1007,11 @@ where
                             // generation number` upstairs). update generation
                             // number here.
                             if upstairs_connection.gen != gen {
-                                println!(
+                                warn!(
+                                    log,
                                     "warning: generation number at \
-                                    negotiation was {} and {} at activation, \
-                                    updating",
+                                    negotiation was {} and {} at \
+                                    activation, updating",
                                     upstairs_connection.gen,
                                     gen,
                                 );
@@ -1004,6 +1021,7 @@ where
 
                             {
                                 let mut ds = ads.lock().await;
+
                                 ds.promote_to_active(
                                     *upstairs_connection,
                                     another_upstairs_active_tx.clone()
@@ -1047,7 +1065,9 @@ where
                                 upstairs_connection.unwrap(),
                             ).await?;
                             work.last_flush = last_flush_number;
-                            println!("Set last flush {}", last_flush_number);
+                            info!(
+                                log,
+                                "Set last flush {}", last_flush_number);
                         }
 
                         let mut fw = fw.lock().await;
@@ -1086,14 +1106,17 @@ where
                          */
                     }
                     Some(_msg) => {
-                        println!("Ignored message received during negotiation");
+                        warn!(
+                            log,
+                            "Ignored message received during negotiation"
+                        );
                     }
                 }
             }
         }
     }
 
-    println!("Downstairs has completed Negotiation");
+    info!(log, "Downstairs has completed Negotiation");
     assert!(upstairs_connection.is_some());
     let upstairs_connection = upstairs_connection.unwrap();
 
@@ -1121,6 +1144,8 @@ where
         + 'static,
 {
     let mut lossy_interval = deadline_secs(5);
+    // Create the log for this task to use.
+    let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
 
     // XXX flow control size to double what Upstairs has for upper limit?
     let (_job_channel_tx, job_channel_rx) = channel(200);
@@ -1172,11 +1197,7 @@ where
             Ok(())
         })
     };
-
-    let lossy = {
-        let ds = ads.lock().await;
-        ds.lossy
-    };
+    let lossy = ads.lock().await.lossy;
 
     tokio::pin!(dw_task);
     tokio::pin!(pf_task);
@@ -1240,7 +1261,9 @@ where
                     Some(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did
-                        println!("Another upstairs {:?} promoted to active, \
+                        warn!(
+                            log,
+                            "Another upstairs {:?} promoted to active, \
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
@@ -1263,13 +1286,14 @@ where
                         // Upstairs disconnected
                         let mut ds = ads.lock().await;
 
-                        println!(
+                        warn!(
+                            log,
                             "upstairs {:?} disconnected, {} jobs left",
                             upstairs_connection, ds.jobs(upstairs_connection).await?,
                         );
 
                         if ds.is_active(upstairs_connection) {
-                            println!("upstairs {:?} was previously \
+                            warn!(log, "upstairs {:?} was previously \
                                 active, clearing", upstairs_connection);
                             ds.clear_active(upstairs_connection).await?;
                         }
@@ -1319,6 +1343,7 @@ pub struct Downstairs {
     encrypted: bool,
     pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
+    log: Logger,
 }
 
 impl Downstairs {
@@ -1328,6 +1353,7 @@ impl Downstairs {
         return_errors: bool,
         read_only: bool,
         encrypted: bool,
+        log: Logger,
     ) -> Self {
         let dss = DsStatOuter {
             ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
@@ -1344,6 +1370,7 @@ impl Downstairs {
             encrypted,
             address: None,
             repair_address: None,
+            log,
         }
     }
 
@@ -1387,9 +1414,11 @@ impl Downstairs {
     ) -> Result<MutexGuard<'_, Work>> {
         let upstairs_uuid = upstairs_connection.upstairs_id;
         if !self.active_upstairs.contains_key(&upstairs_uuid) {
-            println!(
+            warn!(
+                self.log,
                 "{:?} cannot grab work lock, {} is not active!",
-                upstairs_connection, upstairs_uuid,
+                upstairs_connection,
+                upstairs_uuid,
             );
 
             bail!(CrucibleError::UpstairsInactive);
@@ -1398,9 +1427,11 @@ impl Downstairs {
         let active_upstairs = self.active_upstairs.get(&upstairs_uuid).unwrap();
 
         if active_upstairs.upstairs_connection != upstairs_connection {
-            println!(
+            warn!(
+                self.log,
                 "{:?} cannot grab lock, does not match {:?}!",
-                upstairs_connection, active_upstairs.upstairs_connection,
+                upstairs_connection,
+                active_upstairs.upstairs_connection,
             );
 
             bail!(CrucibleError::UpstairsInactive)
@@ -1441,7 +1472,7 @@ impl Downstairs {
             };
 
             if is_write {
-                eprintln!("read-only but received write {:?}", work);
+                error!(self.log, "read-only but received write {:?}", work);
                 bail!(CrucibleError::ModifyingReadOnlyRegion);
             }
         }
@@ -1476,8 +1507,9 @@ impl Downstairs {
         ds_id: u64,
     ) -> Result<Option<u64>> {
         let job = {
+            let log = self.log.new(o!("role" => "work".to_string()));
             let mut work = self.work_lock(upstairs_connection).await?;
-            work.in_progress(ds_id)
+            work.in_progress(ds_id, log)
         };
 
         if let Some((job_id, upstairs_connection)) = job {
@@ -1528,10 +1560,10 @@ impl Downstairs {
                  * back to the upstairs.
                  */
                 let responses = if self.return_errors && random() && random() {
-                    println!("returning error on read!");
+                    warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
+                    error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region.region_read(requests, job_id)
@@ -1553,10 +1585,10 @@ impl Downstairs {
                  * back to the upstairs.
                  */
                 let result = if self.return_errors && random() && random() {
-                    println!("returning error on writeunwritten!");
+                    warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
+                    error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     // The region_write will handle what happens to each block
@@ -1576,10 +1608,10 @@ impl Downstairs {
                 writes,
             } => {
                 let result = if self.return_errors && random() && random() {
-                    println!("returning error on write!");
+                    warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
+                    error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region.region_write(writes, job_id, false)
@@ -1599,10 +1631,10 @@ impl Downstairs {
                 snapshot_details,
             } => {
                 let result = if self.return_errors && random() && random() {
-                    println!("returning error on flush!");
+                    warn!(self.log, "returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
-                    println!("Upstairs inactive error");
+                    error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region.region_flush(
@@ -1712,10 +1744,12 @@ impl Downstairs {
             {
                 let mut work = active_upstairs.work.lock().await;
 
-                println!(
+                info!(
+                    self.log,
                     "Signaling to {:?} thread that {:?} is being \
                     promoted (read-only)",
-                    active_upstairs.upstairs_connection, upstairs_connection,
+                    active_upstairs.upstairs_connection,
+                    upstairs_connection,
                 );
 
                 match futures::executor::block_on(
@@ -1729,9 +1763,11 @@ impl Downstairs {
                          * receiver will have closed and
                          * the above send will fail.
                          */
-                        println!(
+                        error!(
+                            self.log,
                             "Error while signaling to {:?} thread: {:?}",
-                            active_upstairs.upstairs_connection, e,
+                            active_upstairs.upstairs_connection,
+                            e,
                         );
                     }
                 }
@@ -1744,7 +1780,8 @@ impl Downstairs {
                 //
                 // TODO: Really work through this error case
                 if work.active.keys().len() > 0 {
-                    println!(
+                    warn!(
+                        self.log,
                         "Crucible Downstairs promoting {:?} to active, \
                         discarding {} jobs",
                         upstairs_connection,
@@ -1796,9 +1833,9 @@ impl Downstairs {
                     // Re-open any closed extents
                     self.region.reopen_all_extents()?;
 
-                    println!(
-                        "{:?} is now active (read-write)",
-                        upstairs_connection,
+                    info!(
+                        self.log,
+                        "{:?} is now active (read-write)", upstairs_connection,
                     );
 
                     Ok(())
@@ -1813,7 +1850,8 @@ impl Downstairs {
                         .unwrap();
                     let mut work = active_upstairs.work.lock().await;
 
-                    println!(
+                    warn!(
+                        self.log,
                         "Signaling to {:?} thread that {:?} is being \
                         promoted (read-write)",
                         active_upstairs.upstairs_connection,
@@ -1833,9 +1871,11 @@ impl Downstairs {
                              * receiver will have closed and
                              * the above send will fail.
                              */
-                            println!(
+                            error!(
+                                self.log,
                                 "Error while signaling to {:?} thread: {:?}",
-                                active_upstairs.upstairs_connection, e,
+                                active_upstairs.upstairs_connection,
+                                e,
                             );
                         }
                     }
@@ -1848,7 +1888,8 @@ impl Downstairs {
                     //
                     // TODO: Really work through this error case
                     if work.active.keys().len() > 0 {
-                        println!(
+                        warn!(
+                            self.log,
                             "Crucible Downstairs promoting {:?} to active, \
                             discarding {} jobs",
                             upstairs_connection,
@@ -1878,9 +1919,9 @@ impl Downstairs {
                     // Re-open any closed extents
                     self.region.reopen_all_extents()?;
 
-                    println!(
-                        "{:?} is now active (read-write)",
-                        upstairs_connection,
+                    info!(
+                        self.log,
+                        "{:?} is now active (read-write)", upstairs_connection,
                     );
 
                     Ok(())
@@ -2016,7 +2057,11 @@ impl Work {
      * we build or work list with the new_work fn above, but we drop and
      * re-aquire the Work mutex and things can change.
      */
-    fn in_progress(&mut self, ds_id: u64) -> Option<(u64, UpstairsConnection)> {
+    fn in_progress(
+        &mut self,
+        ds_id: u64,
+        log: Logger,
+    ) -> Option<(u64, UpstairsConnection)> {
         /*
          * Once we support multiple threads, we can obtain a ds_id that
          * looked valid when we made a list of jobs, but something
@@ -2062,7 +2107,8 @@ impl Work {
                     };
 
                     if print {
-                        println!(
+                        warn!(
+                            log,
                             "{} job {} for connection {:?} waiting on {} deps",
                             ds_id,
                             match &job.work {
@@ -2124,7 +2170,7 @@ impl Work {
              * invalid.  Check here to verify that this set of
              * downstairs tasks is no longer active.
              */
-            println!("This ID is no longer a valid job id");
+            warn!(log, "This ID is no longer a valid job id");
             None
         }
     }
@@ -2213,6 +2259,7 @@ pub fn create_region(
     extent_count: u64,
     uuid: Uuid,
     encrypted: bool,
+    log: Logger,
 ) -> Result<Region> {
     /*
      * Create the region options, then the region.
@@ -2224,22 +2271,46 @@ pub fn create_region(
     region_options.set_uuid(uuid);
     region_options.set_encrypted(encrypted);
 
-    let mut region = Region::create(&data, region_options)?;
+    let mut region = Region::create(&data, region_options, log)?;
     region.extend(extent_count as u32)?;
 
     Ok(region)
 }
 
+// Build the downstairs struct given a region directory and some additional
+// needed information.  If a logger is passed in, we will use that, otherwise
+// a logger will be created.
 pub fn build_downstairs_for_region(
     data: &Path,
     lossy: bool,
     return_errors: bool,
     read_only: bool,
+    log_request: Option<Logger>,
 ) -> Result<Arc<Mutex<Downstairs>>> {
-    let region = Region::open(&data, Default::default(), true, read_only)?;
+    let log = match log_request {
+        Some(log) => log,
+        None => {
+            // Register DTrace, and setup slog logging to use it.
+            register_probes().unwrap();
+            let decorator = slog_term::TermDecorator::new().build();
+            let drain = slog_term::FullFormat::new(decorator)
+                .build()
+                .filter_level(slog::Level::Info)
+                .fuse();
+            let drain = slog_async::Async::new(drain).build().fuse();
+            let (drain, registration) = with_drain(drain);
+            if let ProbeRegistration::Failed(ref e) = registration {
+                panic!("Failed to register probes: {:#?}", e);
+            }
+            Logger::root(drain.fuse(), o!())
+        }
+    };
+    let region =
+        Region::open(&data, Default::default(), true, read_only, &log)?;
 
-    println!("UUID: {:?}", region.def().uuid());
-    println!(
+    info!(log, "UUID: {:?}", region.def().uuid());
+    info!(
+        log,
         "Blocks per extent:{} Total Extents: {}",
         region.def().extent_size().value,
         region.def().extent_count(),
@@ -2253,6 +2324,7 @@ pub fn build_downstairs_for_region(
         return_errors,
         read_only,
         encrypted,
+        log,
     ))))
 }
 
@@ -2274,6 +2346,7 @@ pub async fn start_downstairs(
     if let Some(oximeter) = oximeter {
         let dssw = d.lock().await;
         let dss = dssw.dss.clone();
+        let log = dssw.log.new(o!("task" => "oximeter".to_string()));
 
         tokio::spawn(async move {
             let new_address = match address {
@@ -2285,13 +2358,18 @@ pub async fn start_downstairs(
                 }
             };
 
-            if let Err(e) = stats::ox_stats(dss, oximeter, new_address).await {
-                println!("ERROR: oximeter failed: {:?}", e);
+            if let Err(e) =
+                stats::ox_stats(dss, oximeter, new_address, &log).await
+            {
+                error!(log, "ERROR: oximeter failed: {:?}", e);
             } else {
-                println!("OK: oximeter all done");
+                warn!(log, "OK: oximeter all done");
             }
         });
     }
+
+    // Setup a log for this task
+    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
 
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
@@ -2301,32 +2379,36 @@ pub async fn start_downstairs(
     // Establish a listen server on the port.
     let listener = TcpListener::bind(&listen_on).await?;
     let local_addr = listener.local_addr()?;
-
     {
         let mut ds = d.lock().await;
         ds.address = Some(local_addr);
-        println!("Using address: {:?}", local_addr);
     }
+    info!(log, "Using address: {:?}", local_addr);
 
     let repair_address = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
         IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
     };
 
-    let repair_listener = match repair::repair_main(&d, repair_address).await {
-        Err(e) => {
-            // TODO tear down other things if repair server can't be started?
-            bail!("got {:?} from repair main", e);
-        }
+    let dss = d.clone();
+    let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
 
-        Ok(socket_addr) => socket_addr,
-    };
+    let repair_listener =
+        match repair::repair_main(&dss, repair_address, &repair_log).await {
+            Err(e) => {
+                // TODO tear down other things if repair server can't be
+                // started?
+                bail!("got {:?} from repair main", e);
+            }
+
+            Ok(socket_addr) => socket_addr,
+        };
 
     {
         let mut ds = d.lock().await;
         ds.repair_address = Some(repair_listener);
-        println!("Using repair address: {:?}", repair_listener);
     }
+    info!(log, "Using repair address: {:?}", repair_listener);
 
     // Optionally require SSL connections
     let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
@@ -2341,12 +2423,12 @@ pub async fn start_downstairs(
 
         let config = context.get_server_config()?;
 
-        println!("Configured SSL acceptor");
+        info!(log, "Configured SSL acceptor");
 
         Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
     } else {
         // unencrypted
-        println!("No SSL acceptor configured");
+        info!(log, "No SSL acceptor configured");
         None
     };
 
@@ -2357,7 +2439,7 @@ pub async fn start_downstairs(
          * it and wait for another connection. Downstairs can handle
          * multiple Upstairs connecting but only one active one.
          */
-        println!("listening on {}", listen_on);
+        info!(log, "listening on {}", listen_on);
         loop {
             let (sock, raddr) = listener.accept().await?;
 
@@ -2368,9 +2450,9 @@ pub async fn start_downstairs(
                 WrappedStream::Https(match ssl_acceptor.accept(sock).await {
                     Ok(v) => v,
                     Err(e) => {
-                        println!(
-                            "rejecting connection from {:?}: {:?}",
-                            raddr, e,
+                        warn!(
+                            log,
+                            "rejecting connection from {:?}: {:?}", raddr, e,
                         );
                         continue;
                     }
@@ -2379,7 +2461,7 @@ pub async fn start_downstairs(
                 WrappedStream::Http(sock)
             };
 
-            println!("accepted connection from {:?}", raddr);
+            info!(log, "accepted connection from {:?}", raddr);
             {
                 /*
                  * Add one to the counter every time we have a connection
@@ -2393,9 +2475,15 @@ pub async fn start_downstairs(
 
             tokio::spawn(async move {
                 if let Err(e) = proc_stream(&mut dd, stream).await {
-                    println!("ERROR: connection({}): {:?}", raddr, e);
+                    error!(
+                        dd.lock().await.log,
+                        "connection({}): {:?}", raddr, e
+                    );
                 } else {
-                    println!("OK: connection({}): all done", raddr);
+                    info!(
+                        dd.lock().await.log,
+                        "connection({}): all done", raddr
+                    );
                 }
             });
         }
@@ -2410,6 +2498,12 @@ mod test {
     use rand_chacha::ChaCha20Rng;
     use tempfile::tempdir;
     use tokio::sync::mpsc::error::TryRecvError;
+
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
 
     fn add_work(
         work: &mut Work,
@@ -2508,7 +2602,7 @@ mod test {
         new_work.sort_unstable();
 
         for new_id in new_work.iter() {
-            let job = work.in_progress(*new_id);
+            let job = work.in_progress(*new_id, csl());
             match job {
                 Some(job) => {
                     jobs.push(job.0);
@@ -2577,11 +2671,17 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(2)?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+        let ads = build_downstairs_for_region(
+            &path_dir,
+            false,
+            false,
+            false,
+            Some(csl()),
+        )?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3201,7 +3301,7 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(10)?;
 
         // create random file
@@ -3269,7 +3369,7 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(10)?;
 
         // create random file (100 fewer bytes than region size)
@@ -3351,7 +3451,7 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(10)?;
 
         // create random file (100 more bytes than region size)
@@ -3434,7 +3534,7 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(10)?;
 
         // create random file
@@ -3508,15 +3608,17 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(2)?;
 
         let path_dir = dir.as_ref().to_path_buf();
 
         build_downstairs_for_region(
-            &path_dir, false, // lossy
+            &path_dir,
+            false, // lossy
             false, // return_errors
             read_only,
+            Some(csl()),
         )
     }
 
@@ -3836,11 +3938,17 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(2)?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+        let ads = build_downstairs_for_region(
+            &path_dir,
+            false,
+            false,
+            false,
+            Some(csl()),
+        )?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -3922,11 +4030,17 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(2)?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+        let ads = build_downstairs_for_region(
+            &path_dir,
+            false,
+            false,
+            false,
+            Some(csl()),
+        )?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -4007,11 +4121,17 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options)?;
+        let mut region = Region::create(&dir, region_options, csl())?;
         region.extend(2)?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(&path_dir, false, false, false)?;
+        let ads = build_downstairs_for_region(
+            &path_dir,
+            false,
+            false,
+            false,
+            Some(csl()),
+        )?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {

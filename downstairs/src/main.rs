@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use slog::Drain;
+use slog::{info, o, Drain, Logger};
+use slog_dtrace::{with_drain, ProbeRegistration};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use usdt::register_probes;
@@ -189,6 +190,20 @@ async fn main() -> Result<()> {
      */
     let mut region;
 
+    // Register DTrace, and setup slog logging to use it.
+    register_probes().unwrap();
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator)
+        .build()
+        .filter_level(slog::Level::Info)
+        .fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let (drain, registration) = with_drain(drain);
+    if let ProbeRegistration::Failed(ref e) = registration {
+        panic!("Failed to register probes: {:#?}", e);
+    }
+    let log = Logger::root(drain.fuse(), o!());
+
     match args {
         Args::Create {
             block_size,
@@ -206,6 +221,7 @@ async fn main() -> Result<()> {
                 extent_count,
                 uuid,
                 encrypted,
+                log.clone(),
             )?;
 
             if let Some(ref ip) = import_path {
@@ -217,8 +233,9 @@ async fn main() -> Result<()> {
                 region.region_flush(1, 0, &None, 0)?;
             }
 
-            println!("UUID: {:?}", region.def().uuid());
-            println!(
+            info!(log, "UUID: {:?}", region.def().uuid());
+            info!(
+                log,
                 "Blocks per extent:{} Total Extents: {}",
                 region.def().extent_size().value,
                 region.def().extent_count(),
@@ -235,7 +252,14 @@ async fn main() -> Result<()> {
             if data.is_empty() {
                 bail!("Need at least one data directory to dump");
             }
-            dump_region(data, extent, block, only_show_differences, no_color)?;
+            dump_region(
+                data,
+                extent,
+                block,
+                only_show_differences,
+                no_color,
+                log,
+            )?;
             Ok(())
         }
         Args::Export {
@@ -245,8 +269,13 @@ async fn main() -> Result<()> {
             skip,
         } => {
             // Open Region read only
-            region =
-                region::Region::open(&data, Default::default(), true, true)?;
+            region = region::Region::open(
+                &data,
+                Default::default(),
+                true,
+                true,
+                &log,
+            )?;
 
             downstairs_export(&mut region, export_path, skip, count).unwrap();
             Ok(())
@@ -291,21 +320,13 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
-            match register_probes() {
-                Ok(()) => {
-                    println!("DTrace probes registered okay");
-                }
-                Err(e) => {
-                    println!("Error registering DTrace probes: {:?}", e);
-                }
-            }
-
             let read_only = mode == Mode::Ro;
             let d = build_downstairs_for_region(
                 &data,
                 lossy,
                 return_errors,
                 read_only,
+                Some(log),
             )?;
 
             let downstairs_join_handle = start_downstairs(
@@ -354,13 +375,6 @@ async fn main() -> Result<()> {
                     .try_init()
                     .expect("Error init tracing subscriber");
             }
-
-            // from https://docs.rs/slog/latest/slog/ - terminal out
-            let decorator = slog_term::TermDecorator::new().build();
-            let drain = slog_term::FullFormat::new(decorator).build().fuse();
-            let drain = slog_async::Async::new(drain).build().fuse();
-
-            let log = slog::Logger::root(drain, slog::o!());
 
             run_dropshot(bind_addr, &log).await
         }

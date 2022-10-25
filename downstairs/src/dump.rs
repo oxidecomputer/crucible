@@ -24,6 +24,7 @@ pub fn dump_region(
     block: Option<u64>,
     only_show_differences: bool,
     nc: bool,
+    log: Logger,
 ) -> Result<()> {
     if cmp_extent.is_some() && block.is_some() {
         bail!("Either a specific block, or a specific extent, not both");
@@ -44,7 +45,7 @@ pub fn dump_region(
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(&dir, Default::default(), false, true)?;
+        let region = Region::open(&dir, Default::default(), false, true, &log)?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -143,6 +144,7 @@ pub fn dump_region(
                 blocks_per_extent,
                 only_show_differences,
                 nc,
+                log,
             );
         }
 
@@ -153,6 +155,7 @@ pub fn dump_region(
             blocks_per_extent,
             only_show_differences,
             nc,
+            log,
         )?;
 
         return Ok(());
@@ -444,6 +447,7 @@ fn show_extent(
     blocks_per_extent: u64,
     only_show_differences: bool,
     nc: bool,
+    log: Logger,
 ) -> Result<()> {
     /*
      * First, print out the Generation number, the flush ID,
@@ -528,7 +532,8 @@ fn show_extent(
          */
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
-            let region = Region::open(&dir, Default::default(), false, true)?;
+            let region =
+                Region::open(&dir, Default::default(), false, true, &log)?;
 
             let mut responses = region.region_read(
                 &[ReadRequest {
@@ -617,6 +622,7 @@ fn show_extent_block(
     blocks_per_extent: u64,
     only_show_differences: bool,
     nc: bool,
+    log: Logger,
 ) -> Result<()> {
     let block_in_extent = block % blocks_per_extent;
     println!(
@@ -639,7 +645,7 @@ fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(&dir, Default::default(), false, true)?;
+        let region = Region::open(&dir, Default::default(), false, true, &log)?;
 
         let mut responses = region.region_read(
             &[ReadRequest {

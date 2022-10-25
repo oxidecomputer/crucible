@@ -65,6 +65,7 @@ pub async fn run_downstairs_for_region(
         run_params.lossy,
         run_params.return_errors,
         run_params.read_only,
+        None,
     )
     .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 

@@ -114,7 +114,8 @@ while getopts 'ru' opt; do
             echo "Run on start"
             ;;
         r)  release_build=1
-            echo "Building with release"
+            export BINDIR=${ROOT}/target/release
+            echo "Using $BINDIR for binaries"
             ;;
         *)  echo "Usage: $0 [-u]" >&2
             echo "u: Don't restart downstairs initially"
@@ -127,27 +128,13 @@ done
 # Remove all options passed by getopts options
 shift $((OPTIND-1))
 
-if pgrep -fl -U $(id -u) target/debug/crucible-downstairs; then
-    echo 'Some downstairs already running?' >&2
-    exit 1
-fi
-if pgrep -fl -U $(id -u) target/release/crucible-downstairs; then
-    echo 'Some downstairs already running?' >&2
-    exit 1
-fi
+export BINDIR=${BINDIR:-$ROOT/debug}
+cds="$BINDIR/crucible-downstairs"
+dsc="$BINDIR/dsc"
 
-if [[ release_build -eq 1 ]] ; then
-    if ! cargo build --release; then
-        echo "Initial Build failed, no tests ran"
-        exit 1
-    fi
-    cds="target/release/crucible-downstairs"
-else
-    if ! cargo build; then
-        echo "Initial Build failed, no tests ran"
-        exit 1
-    fi
-    cds="target/debug/crucible-downstairs"
+if pgrep -fl -U $(id -u) "$cds"; then
+    echo 'Some downstairs already running?' >&2
+    exit 1
 fi
 
 if [[ ! -f ${cds} ]]; then
@@ -173,7 +160,8 @@ for (( i = 0; i < 3; i++ )); do
     fi
 done
 if [[ missing -eq 1 ]]; then
-    if ! ./tools/create-generic-ds.sh; then
+    if ! "$dsc" create --region-dir ./var \
+            --block-size 512 --extent-size 100 --extent-count 20 ; then
         echo "Failed to create region directories"
         exit 1
     fi

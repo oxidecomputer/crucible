@@ -152,10 +152,14 @@ async fn main() -> Result<()> {
     let handoff_amount = rounds / opt.num_upstairs;
     let mut cpf_idx = 0;
 
-    println!("Handing off to CPF {}", cpf_idx);
+    println!("Initial Handing off to CPF {}", cpf_idx);
     cpfs[cpf_idx].activate(generation_number).await?;
     generation_number += 1;
-    println!("Handed off to CPF {} {:?}", cpf_idx, cpfs[cpf_idx].uuid());
+    println!(
+        "Initial Hand off to CPF {} {:?}",
+        cpf_idx,
+        cpfs[cpf_idx].uuid()
+    );
 
     if opt.verify_isolation {
         println!("clearing...");
@@ -179,13 +183,18 @@ async fn main() -> Result<()> {
             cpf_idx = idx / handoff_amount;
             assert!(cpf_idx != 0);
 
-            println!("Handing off to CPF {}", cpf_idx);
+            println!("Round {} Handing off to CPF {}", idx, cpf_idx);
 
             let cpf = &mut cpfs[cpf_idx];
             cpf.activate(generation_number).await?;
             generation_number += 1;
 
-            println!("Handed off to CPF {} {:?}", cpf_idx, cpf.uuid());
+            println!(
+                "Round {} Handed off to CPF {} {:?}",
+                idx,
+                cpf_idx,
+                cpf.uuid()
+            );
 
             cpf
         } else {
