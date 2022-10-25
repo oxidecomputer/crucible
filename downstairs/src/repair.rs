@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
-use dropshot::ConfigLogging;
-use dropshot::ConfigLoggingLevel;
 use dropshot::HttpError;
 use dropshot::HttpResponseOk;
 use dropshot::HttpServerStarter;
@@ -44,6 +42,7 @@ fn build_api() -> ApiDescription<FileServerContext> {
 pub async fn repair_main(
     ds: &Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
+    log: &Logger,
 ) -> Result<SocketAddr, String> {
     /*
      * We must specify a configuration with a bind address.
@@ -53,17 +52,6 @@ pub async fn repair_main(
         request_body_max_bytes: 1024,
         tls: None,
     };
-
-    /*
-     * For simplicity, configure an "info"-level logger that writes to
-     * stderr assuming that it's a terminal.
-     */
-    let config_logging = ConfigLogging::StderrTerminal {
-        level: ConfigLoggingLevel::Info,
-    };
-    let log = config_logging
-        .to_logger("example-basic")
-        .map_err(|error| format!("failed to create logger: {}", error))?;
 
     /*
      * Build a description of the API
@@ -80,11 +68,11 @@ pub async fn repair_main(
 
     let context = FileServerContext { region_dir };
 
-    println!("Repair listens on {}", addr);
+    info!(log, "Repair listens on {}", addr);
     /*
      * Set up the server.
      */
-    let server = HttpServerStarter::new(&config_dropshot, api, context, &log)
+    let server = HttpServerStarter::new(&config_dropshot, api, context, log)
         .map_err(|error| format!("failed to create server: {}", error))?
         .start();
     let local_addr = server.local_addr();
@@ -155,7 +143,6 @@ async fn get_extent_file(
 }
 
 async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
-    println!("Request for file {:?}", path);
     /*
      * Make sure our file is neither a link nor a directory.
      */
@@ -257,7 +244,6 @@ async fn extent_file_list(
         if fullname.exists() {
             files.push(file);
         } else if required {
-            println!("Needed file {} is missing", file);
             return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
         }
     }
@@ -282,6 +268,12 @@ mod test {
         region_options
     }
 
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
+
     #[tokio::test]
     async fn extent_expected_files() -> Result<()> {
         // Verify that the list of files returned for an extent matches
@@ -289,7 +281,7 @@ mod test {
         // the expected names of files here in that test, rather than
         // determine them through some programmatic means.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Determine the directory and name for expected extent files.
@@ -309,7 +301,7 @@ mod test {
         // what we expect. In this case we expect the extent data file and
         // the .db file, but not the .db-shm or .db-wal database files.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Determine the directory and name for expected extent files.
@@ -340,7 +332,7 @@ mod test {
         // We close the extent here first, and on illumos that behaves
         // a little different than elsewhere.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         let ext_one = &mut region.extents[1];
@@ -372,7 +364,7 @@ mod test {
         // Verify that we get an error if the expected extent.db file
         // is missing.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Determine the directory and name for expected extent files.
@@ -394,7 +386,7 @@ mod test {
         // Verify that we get an error if the expected extent file
         // is missing.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options())?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
         region.extend(3)?;
 
         // Determine the directory and name for expected extent files.

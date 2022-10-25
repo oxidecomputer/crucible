@@ -4179,7 +4179,7 @@ impl Upstairs {
                 Ok(())
             }
             UpState::Deactivating => {
-                info!(
+                warn!(
                     self.log,
                     "{} active denied while Deactivating", self.uuid
                 );

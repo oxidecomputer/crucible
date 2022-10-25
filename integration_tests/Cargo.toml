@@ -16,6 +16,10 @@ futures-core = "0.3"
 httptest = "0.15.4"
 base64 = "0.13"
 rand = "0.8.5"
+slog = "2.7"
+slog-async = "2.7"
+slog-dtrace = "0.2"
+slog-term = "2.7"
 tempfile = "3.3.0"
 tokio = { version = "1.21.2", features = ["full"] }
 uuid = { version = "1.0.0", features = [ "serde", "v4" ] }

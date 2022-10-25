@@ -14,8 +14,22 @@ mod test {
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
+    use slog::{o, Drain, Logger};
     use tempfile::*;
     use uuid::*;
+
+    /*
+        use std::collections::HashSet;
+
+        lazy_static! {
+            static ref PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
+        }
+    */
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
 
     #[allow(dead_code)]
     struct TestDownstairs {
@@ -42,6 +56,7 @@ mod test {
                 2, /* extent_count */
                 Uuid::new_v4(),
                 encrypted,
+                csl(),
             )?;
 
             let downstairs = build_downstairs_for_region(
@@ -49,6 +64,7 @@ mod test {
                 false, /* lossy */
                 false, /* return_errors */
                 read_only,
+                Some(csl()),
             )?;
 
             let _join_handle = start_downstairs(
@@ -76,6 +92,7 @@ mod test {
                 false, /* lossy */
                 false, /* return_errors */
                 true,
+                Some(csl()),
             )?;
 
             let _join_handle = start_downstairs(
@@ -1130,7 +1147,7 @@ mod test {
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // data as the scrubber has finished.
@@ -1210,7 +1227,7 @@ mod test {
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // unwritten data as the scrubber has finished.
@@ -1304,7 +1321,7 @@ mod test {
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume except where new writes have
         // landed
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1386,7 +1403,7 @@ mod test {
             .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1497,7 +1514,7 @@ mod test {
             .await?;
 
         // Call the scrubber
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
@@ -1629,7 +1646,7 @@ mod test {
             .await?;
 
         // Call the scrubber
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
@@ -1759,7 +1776,7 @@ mod test {
             .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub().await.unwrap();
+        volume.scrub(&csl()).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
