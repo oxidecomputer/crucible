@@ -5883,7 +5883,12 @@ mod up_test {
     async fn test_deps_flushes_depend_on_flushes() {
         // Test that the following job dependency graph is made:
         //
-        // flush -> flush -> flush
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | FFFFF |
+        //   1 | FFFFF | 0
+        //   2 | FFFFF | 1
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
