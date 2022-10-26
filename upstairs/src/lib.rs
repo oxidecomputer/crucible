@@ -6035,7 +6035,7 @@ impl IOop {
     }
 
     pub fn is_write(&self) -> bool {
-        matches!(self, IOop::Write { .. })
+        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
     }
 
     pub fn is_flush(&self) -> bool {

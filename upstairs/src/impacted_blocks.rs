@@ -55,6 +55,12 @@ impl ImpactedBlocks {
         false
     }
 
+    /// Return a list of impacted extents
+    #[cfg(test)]
+    pub fn extents(&self) -> Vec<&u64> {
+        self.blocks.keys().collect()
+    }
+
     /// Returns (extent id, block) tuples
     pub fn tuples(&self) -> Vec<(u64, Block)> {
         let mut result = Vec::with_capacity(self.len());
