@@ -4457,7 +4457,6 @@ impl Upstairs {
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.tuples().len());
 
-        /* Lock here, through both jobs submitted */
         for (eid, bo) in impacted_blocks.tuples() {
             let byte_len: usize = ddef.block_size() as usize;
 
