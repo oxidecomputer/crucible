@@ -5909,10 +5909,6 @@ mod up_test {
     async fn test_deps_flushes_depend_on_flushes_and_all_writes() {
         // Test that the following job dependency graph is made:
         //
-        // flush -> write -> flush -> write -> flush
-        //       -> write ->       -> write ->
-        //       ---------->       -> write ->
-        //                         ---------->
         //       block
         // op# | 0 1 2 | deps
         // ----|-------|-----
