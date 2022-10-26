@@ -4254,16 +4254,18 @@ impl Upstairs {
         cdt::gw__flush__start!(|| (gw_id));
 
         /*
-         * Walk the downstairs work active list, and pull out all the active
-         * jobs. Anything we have not submitted back to the guest.
+         * To build the dependency list for this flush, iterate from the end of
+         * the downstairs work active list in reverse order and check each job
+         * in that list to see if this new flush must depend on it.
          *
          * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But we must depend on the
-         * last flush - flush and gen numbers downstairs need to be sequential
-         * and the same for each downstairs.
+         * last flush will depend on jobs before it. But this flush must depend
+         * on the last flush - flush and gen numbers downstairs need to be
+         * sequential and the same for each downstairs.
          *
-         * We can safely ignore reads as they do not impact downstairs state,
-         * but flushes must depend on every write since the last flush.
+         * This flush does not have to depend on reads as they do not impact
+         * downstairs state, but must depend on every write since the last
+         * flush.
          */
         let num_jobs = downstairs.active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
@@ -4278,7 +4280,7 @@ impl Upstairs {
         {
             let job = &downstairs.active[job_id];
 
-            // Depend on the previous flush, but then bail out
+            // Depend on the last flush, but then bail out
             if job.work.is_flush() {
                 dep.push(**job_id);
                 break;
@@ -4398,17 +4400,20 @@ impl Upstairs {
         let mut cur_offset: usize = 0;
 
         /*
-         * Walk the downstairs work active list, and pull out all the active
-         * jobs (anything we have not submitted back to the guest). Construct
-         * a list of dependencies for this write based on the
+         * To build the dependency list for this write, iterate from the end of
+         * the downstairs work active list in reverse order and check each job
+         * in that list to see if this new write must depend on it.
+         *
+         * Construct a list of dependencies for this write based on the
          * following rules:
          *
          * - ignore everything that happened before the last flush
          * - writes have to depend on the last flush completing
          * - any overlap of impacted blocks requires a dependency
          *
-         * TODO: scanning backwards, any overlap of impacted blocks will
-         * create a dependency. take this an example:
+         * TODO: any overlap of impacted blocks will create a dependency. take
+         * this an example (this shows three writes, all to the same block,
+         * along with the dependency list for each write):
          *
          *       block
          * op# | 0 1 2 | deps
@@ -4592,28 +4597,16 @@ impl Upstairs {
         let next_id = downstairs.next_id();
 
         /*
-         * Walk the downstairs work active list, and pull out all the active
-         * jobs (anything we have not submitted back to the guest). Construct
-         * a list of dependencies for this read based on the
+         * To build the dependency list for this read, iterate from the end of
+         * the downstairs work active list in reverse order and check each job
+         * in that list to see if this new read must depend on it.
+         *
+         * Construct a list of dependencies for this read based on the
          * following rules:
          *
          * - reads do not depend on flushes, only writes (because flushes do
          *   not modify data!)
-         * - any overlap of impacted blocks requires a dependency
-         *
-         * TODO: scanning backwards, any overlap of impacted blocks will
-         * create a dependency. take this an example:
-         *
-         *       block
-         * op# | 0 1 2 | deps
-         * ----|-------------
-         *   0 | R     |
-         *   1 | R     | 0
-         *   2 | R     | 0,1
-         *
-         * op 2 depends on both op 1 and op 0. if dependencies are transitive
-         * with an existing job, it would be nice if those were removed from
-         * this job's dependencies.
+         * - any write with an overlap of impacted blocks requires a dependency
          */
         let num_jobs = downstairs.active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
