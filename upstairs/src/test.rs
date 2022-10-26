@@ -5247,6 +5247,37 @@ mod up_test {
     }
 
     // Job dependency tests
+    //
+    // Each job dependency test will include a chart of the operations and
+    // dependencies that are expected to be created through the submission of
+    // those operations. An example:
+    //
+    //             block
+    //    op# | 0 1 2 3 4 5 | deps
+    //    ----|-------------|-----
+    //      0 | W           |
+    //      1 |   W         |
+    //      2 |     W       |
+    //      3 | FFFFFFFFFFF | 0,1,2
+    //      4 |       W     | 3
+    //      5 |         W   | 3
+    //      6 |           W | 3
+    //
+    // The order of enqueued operations matches the op# column. In the above
+    // example, three writes were submitted, followed by a flush, followed by
+    // three more writes. There is only one operation per row.
+    //
+    // An operation marks what block it acts on in an extent (in the center
+    // column) with the type of operation it is: R is a read, W is a write, and
+    // Wu is a write unwritten. Flushes impact the whole extent and are marked
+    // with F across every block. If an operation covers more than one extent,
+    // it will have multiple columns titled 'block'.
+    //
+    // The deps column shows which operations this operation depends on -
+    // dependencies must run before the operation can run. If the column is
+    // empty, then the operation does not depend on any other operation. In the
+    // above example, operation 3 depends on operations 0, 1, and 2.
+    //
 
     #[tokio::test]
     async fn test_deps_writes_depend_on_overlapping_writes() {
