@@ -5645,7 +5645,7 @@ mod up_test {
         //   0 | W     |
         //   1 |   W   |
         //   2 |     W |
-        //   3 | W W W |
+        //   3 | W W W | 0,1,2
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
@@ -5698,7 +5698,7 @@ mod up_test {
         // op# | 0 1 2 | deps
         // ----|-------|-----
         //   0 | W     |
-        //   1 | R     |
+        //   1 | R     | 0
 
         let upstairs = make_upstairs();
         upstairs.set_active().await.unwrap();
