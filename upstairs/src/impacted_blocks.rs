@@ -92,16 +92,17 @@ impl ImpactedBlocks {
 /// Given an offset and number of blocks, compute a list of individually
 /// impacted blocks:
 ///
-///         |eid0                   |eid1
-///         |───────────────────────────────────────────────│
-///         ┌───────────────────────|───────────────────────┐
-///         │   |   |xxx|xxx|xxx|xxx|xxx|xxx|xxx|   |   |   │
-///         └───────────────────────|───────────────────────┘
-/// block#    0   1 | 2   3   4   5   0   1   2 | 3   4   5
-///                 |---------------------------|
-///                 offset                     offset + len
+///  |eid0                   |eid1
+///  |───────────────────────────────────────────────│
+///  ┌───────────────────────|───────────────────────┐
+///  │   |   |xxx|xxx|xxx|xxx|xxx|xxx|xxx|   |   |   │
+///  └───────────────────────|───────────────────────┘
+///    0   1 | 2   3   4   5   0   1   2 | 3   4   5
+///          |---------------------------|
+///          offset                     offset + len
 ///
-/// The example offset and length above spans 7 blocks over two extents.
+/// The example offset and length above spans 7 blocks over two extents (where
+/// the numbers at the bottom of the diagram are block numbers).
 ///
 /// Return an ImpactedBlocks object that stores which extents are impacted,
 /// along with the specific blocks in those extents. For the above example, the
@@ -111,7 +112,6 @@ impl ImpactedBlocks {
 ///    eid0 -> [2, 3, 4, 5],
 ///    eid1 -> [0, 1, 2],
 ///  }
-///
 pub fn extent_from_offset(
     ddef: RegionDefinition,
     offset: Block,
