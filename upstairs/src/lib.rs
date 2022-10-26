@@ -4265,7 +4265,8 @@ impl Upstairs {
          * We can safely ignore reads as they do not impact downstairs state,
          * but flushes must depend on every write since the last flush.
          */
-        let mut dep: Vec<u64> = Vec::with_capacity(200); // max in-flight jobs
+        let num_jobs = downstairs.active.keys().len();
+        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         for job_id in downstairs
             .active
@@ -4420,7 +4421,8 @@ impl Upstairs {
          * with an existing job, it would be nice if those were removed from
          * this job's dependencies.
          */
-        let mut dep: Vec<u64> = Vec::with_capacity(200); // max in-flight jobs
+        let num_jobs = downstairs.active.keys().len();
+        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
         for job_id in downstairs
@@ -4613,7 +4615,8 @@ impl Upstairs {
          * with an existing job, it would be nice if those were removed from
          * this job's dependencies.
          */
-        let mut dep: Vec<u64> = Vec::with_capacity(200); // max in-flight jobs
+        let num_jobs = downstairs.active.keys().len();
+        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
         for job_id in downstairs
