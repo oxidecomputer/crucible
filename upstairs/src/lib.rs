@@ -4258,9 +4258,9 @@ impl Upstairs {
          * jobs. Anything we have not submitted back to the guest.
          *
          * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But we must depend on
-         * the previous flush - flush and gen numbers downstairs need
-         * to be sequential and the same for each downstairs.
+         * last flush will depend on jobs before it. But we must depend on the
+         * last flush - flush and gen numbers downstairs need to be sequential
+         * and the same for each downstairs.
          *
          * We can safely ignore reads as they do not impact downstairs state,
          * but flushes must depend on every write since the last flush.
