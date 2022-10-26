@@ -4254,14 +4254,16 @@ impl Upstairs {
         cdt::gw__flush__start!(|| (gw_id));
 
         /*
-         * To build the dependency list for this flush, iterate from the end of
-         * the downstairs work active list in reverse order and check each job
-         * in that list to see if this new flush must depend on it.
+         * To build the dependency list for this flush, iterate from the end
+         * of the downstairs work active list in reverse order and
+         * check each job in that list to see if this new flush must
+         * depend on it.
          *
          * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But this flush must depend
-         * on the last flush - flush and gen numbers downstairs need to be
-         * sequential and the same for each downstairs.
+         * last flush will depend on jobs before it. But this flush must
+         * depend on the last flush - flush and gen numbers
+         * downstairs need to be sequential and the same for each
+         * downstairs.
          *
          * This flush does not have to depend on reads as they do not impact
          * downstairs state, but must depend on every write since the last
@@ -4400,9 +4402,10 @@ impl Upstairs {
         let mut cur_offset: usize = 0;
 
         /*
-         * To build the dependency list for this write, iterate from the end of
-         * the downstairs work active list in reverse order and check each job
-         * in that list to see if this new write must depend on it.
+         * To build the dependency list for this write, iterate from the end
+         * of the downstairs work active list in reverse order and
+         * check each job in that list to see if this new write must
+         * depend on it.
          *
          * Construct a list of dependencies for this write based on the
          * following rules:
@@ -4411,9 +4414,10 @@ impl Upstairs {
          * - writes have to depend on the last flush completing
          * - any overlap of impacted blocks requires a dependency
          *
-         * TODO: any overlap of impacted blocks will create a dependency. take
-         * this an example (this shows three writes, all to the same block,
-         * along with the dependency list for each write):
+         * TODO: any overlap of impacted blocks will create a dependency.
+         * take this an example (this shows three writes, all to the
+         * same block, along with the dependency list for each
+         * write):
          *
          *       block
          * op# | 0 1 2 | deps
@@ -4596,16 +4600,18 @@ impl Upstairs {
         let next_id = downstairs.next_id();
 
         /*
-         * To build the dependency list for this read, iterate from the end of
-         * the downstairs work active list in reverse order and check each job
-         * in that list to see if this new read must depend on it.
+         * To build the dependency list for this read, iterate from the end
+         * of the downstairs work active list in reverse order and
+         * check each job in that list to see if this new read must
+         * depend on it.
          *
          * Construct a list of dependencies for this read based on the
          * following rules:
          *
          * - reads do not depend on flushes, only writes (because flushes do
          *   not modify data!)
-         * - any write with an overlap of impacted blocks requires a dependency
+         * - any write with an overlap of impacted blocks requires a
+         *   dependency
          */
         let num_jobs = downstairs.active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
