@@ -24,6 +24,7 @@ pub use crucible_protocol::*;
 use anyhow::{anyhow, bail, Result};
 pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
+use itertools::Itertools;
 use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
@@ -65,6 +66,9 @@ pub use pseudo_file::CruciblePseudoFile;
 
 mod stats;
 pub use stats::*;
+
+mod impacted_blocks;
+pub use impacted_blocks::*;
 
 use async_trait::async_trait;
 
@@ -411,68 +415,6 @@ async fn process_message(
     }
 
     Ok(())
-}
-
-/*
- * Convert a virtual block offset and length into a Vec of tuples:
- *
- *     (Extent number (EID), Block offset)
- *
- * Each tuple represents the "address" of one block downstairs.
- */
-pub fn extent_from_offset(
-    ddef: RegionDefinition,
-    offset: Block,
-    num_blocks: Block,
-) -> Vec<(u64, Block)> {
-    assert!(num_blocks.value > 0);
-    assert!(
-        (offset.value + num_blocks.value)
-            <= (ddef.extent_size().value * ddef.extent_count() as u64)
-    );
-    assert_eq!(offset.block_size_in_bytes() as u64, ddef.block_size());
-
-    /*
-     *
-     *  |eid0                  |eid1
-     *  |────────────────────────────────────────────>│
-     *  ┌──────────────────────|──────────────────────┐
-     *  │                      |                      │
-     *  └──────────────────────|──────────────────────┘
-     *  |offset                                       |offset + len
-     */
-    let mut result = Vec::new();
-    let mut o: u64 = offset.value;
-    let mut blocks_left: u64 = num_blocks.value;
-
-    while blocks_left > 0 {
-        /*
-         * XXX We only support a single region (downstairs). When we grow to
-         * support a LBA size that is larger than a single region, then we
-         * will need to write more code. But - that code may live
-         * upstairs?
-         */
-        let eid: u64 = o / ddef.extent_size().value;
-        assert!((eid as u32) < ddef.extent_count());
-
-        let extent_offset: u64 = o % ddef.extent_size().value;
-        let sz: u64 = 1; // one block at a time
-
-        result.push((eid, Block::new_with_ddef(extent_offset, &ddef)));
-
-        match blocks_left.checked_sub(sz) {
-            Some(v) => {
-                blocks_left = v;
-            }
-            None => {
-                break;
-            }
-        }
-
-        o += sz;
-    }
-
-    result
 }
 
 /*
@@ -3420,27 +3362,32 @@ impl Downstairs {
 
     /**
      * This request is now complete on all peers, but is is ready to retire?
-     * Only when a flush is complete on all three do we check
-     * to see if we can remove the job.  When we remove a job, we
-     * also take all the previous jobs out of the queue as well.
-     * Double check that all previous jobs have finished and panic
-     * if not.
+     * Only when a flush is complete on all three downstairs do we check to
+     * see if we can remove jobs. Double check that all write jobs have
+     * finished and panic if not.
+     *
+     * Note we don't retire jobs until all three downstairs have returned
+     * from the same flush because the Upstairs replays all jobs since
+     * the last flush if a downstairs goes away and then comes back.
+     * This includes reads because they can be in the deps list for
+     * writes and if they aren't included in replay then the write will
+     * never start.
      */
     fn retire_check(&mut self, ds_id: u64) {
-        // Only a completed flush will remove work from the active queue.
         if !self.is_flush(ds_id).unwrap() {
             return;
         }
-        // Sort the job list, and retire all the work that is older than us.
+
+        // Only a completed flush will remove jobs from the active queue -
+        // currently we have to keep everything around for use during replay
         let wc = self.state_count(ds_id).unwrap();
         if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
 
-            /*
-             * Build the list of keys to iterate.  Don't bother to look
-             * at any key ids greater than our ds_id.
-             */
+            // Sort the job list, and retire all the jobs that happened before
+            // and including this flush.
+
             let mut kvec: Vec<u64> = self
                 .active
                 .keys()
@@ -3449,9 +3396,29 @@ impl Downstairs {
                 .collect::<Vec<u64>>();
 
             kvec.sort_unstable();
+
             for id in kvec.iter() {
+                // Remove everything before this flush
                 assert!(*id <= ds_id);
+
+                // Assert the job is actually done, then complete it
                 let wc = self.state_count(*id).unwrap();
+                let job = self.active.get(id).unwrap();
+
+                if wc.active > 0 && matches!(job.work, IOop::Read { .. }) {
+                    // Flushes do not depend on reads, so there's a special case
+                    // where all writes that a flush depends on have completed,
+                    // and we're retiring that flush, but there's still an
+                    // outstanding read result (one that does not overlap with
+                    // any write, or does overlap with a write and depends on
+                    // that write).
+                    //
+                    // Call continue here - some future flush will retire this
+                    // read, and in the case of replay we'll correctly replay it
+                    // and compare the read result and all that good stuff :)
+                    continue;
+                }
+
                 assert_eq!(wc.active, 0);
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(id));
@@ -4291,15 +4258,46 @@ impl Upstairs {
         cdt::gw__flush__start!(|| (gw_id));
 
         /*
-         * Walk the downstairs work active list, and pull out all the active
-         * jobs. Anything we have not submitted back to the guest.
+         * To build the dependency list for this flush, iterate from the end
+         * of the downstairs work active list in reverse order and
+         * check each job in that list to see if this new flush must
+         * depend on it.
          *
-         * TODO, we can go faster if we:
-         * 1. Ignore everything that was before and including the last flush.
-         * 2. Ignore reads.
+         * We can safely ignore everything before the last flush, because the
+         * last flush will depend on jobs before it. But this flush must
+         * depend on the last flush - flush and gen numbers
+         * downstairs need to be sequential and the same for each
+         * downstairs.
+         *
+         * This flush does not have to depend on reads as they do not impact
+         * downstairs state, but must depend on every write since the last
+         * flush.
          */
-        let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
-        dep.sort_unstable();
+        let num_jobs = downstairs.active.keys().len();
+        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
+
+        for job_id in downstairs
+            .active
+            .keys()
+            .sorted()
+            .collect::<Vec<&u64>>()
+            .iter()
+            .rev()
+        {
+            let job = &downstairs.active[job_id];
+
+            // Depend on the last flush, but then bail out
+            if job.work.is_flush() {
+                dep.push(**job_id);
+                break;
+            }
+
+            // Depend on all writes seen
+            if job.work.is_write() {
+                dep.push(**job_id);
+            }
+        }
+
         /*
          * TODO: Walk the list of guest work structs and build the same list
          * and make sure it matches.
@@ -4309,6 +4307,7 @@ impl Upstairs {
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
          */
+        let ddef = self.ddef.lock().await;
         let fl = create_flush(
             next_id,
             dep,
@@ -4316,6 +4315,7 @@ impl Upstairs {
             gw_id,
             self.get_generation().await,
             snapshot_details,
+            ImpactedBlocks::new(*ddef),
         );
 
         let mut sub = HashMap::new();
@@ -4377,7 +4377,7 @@ impl Upstairs {
          * and length may span two extents, and eventually XXX, two regions.
          */
         let ddef = self.ddef.lock().await;
-        let nwo = extent_from_offset(
+        let impacted_blocks = extent_from_offset(
             *ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
@@ -4405,14 +4405,67 @@ impl Upstairs {
         let next_id = downstairs.next_id();
         let mut cur_offset: usize = 0;
 
-        let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
-        dep.sort_unstable();
+        /*
+         * To build the dependency list for this write, iterate from the end
+         * of the downstairs work active list in reverse order and
+         * check each job in that list to see if this new write must
+         * depend on it.
+         *
+         * Construct a list of dependencies for this write based on the
+         * following rules:
+         *
+         * - ignore everything that happened before the last flush
+         * - writes have to depend on the last flush completing
+         * - any overlap of impacted blocks requires a dependency
+         *
+         * TODO: any overlap of impacted blocks will create a dependency.
+         * take this an example (this shows three writes, all to the
+         * same block, along with the dependency list for each
+         * write):
+         *
+         *       block
+         * op# | 0 1 2 | deps
+         * ----|-------------
+         *   0 | W     |
+         *   1 | W     | 0
+         *   2 | W     | 0,1
+         *
+         * op 2 depends on both op 1 and op 0. if dependencies are transitive
+         * with an existing job, it would be nice if those were removed from
+         * this job's dependencies.
+         */
+        let num_jobs = downstairs.active.keys().len();
+        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
+
+        // Search backwards in the list of active jobs
+        for job_id in downstairs
+            .active
+            .keys()
+            .sorted()
+            .collect::<Vec<&u64>>()
+            .iter()
+            .rev()
+        {
+            let job = &downstairs.active[job_id];
+
+            // Depend on the last flush, then break - flushes are a barrier for
+            // all writes.
+            if job.work.is_flush() {
+                dep.push(**job_id);
+                break;
+            }
+
+            // If this job impacts the same blocks as something already active,
+            // create a dependency.
+            if impacted_blocks.conflicts(&job.impacted_blocks) {
+                dep.push(**job_id);
+            }
+        }
 
         let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(nwo.len());
+            Vec::with_capacity(impacted_blocks.tuples().len());
 
-        /* Lock here, through both jobs submitted */
-        for (eid, bo) in nwo {
+        for (eid, bo) in impacted_blocks.tuples() {
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
@@ -4472,6 +4525,7 @@ impl Upstairs {
             gw_id,
             writes,
             is_write_unwritten,
+            impacted_blocks,
         );
 
         sub.insert(next_id, 0); // XXX does value here matter?
@@ -4529,7 +4583,7 @@ impl Upstairs {
          * and length may span many extents, and eventually, TODO, regions.
          */
         let ddef = self.ddef.lock().await;
-        let nwo = extent_from_offset(
+        let impacted_blocks = extent_from_offset(
             *ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
@@ -4550,21 +4604,62 @@ impl Upstairs {
         let next_id = downstairs.next_id();
 
         /*
-         * Now create a downstairs work job for each (eid, bo, len) returned
-         * from extent_from_offset
+         * To build the dependency list for this read, iterate from the end
+         * of the downstairs work active list in reverse order and
+         * check each job in that list to see if this new read must
+         * depend on it.
+         *
+         * Construct a list of dependencies for this read based on the
+         * following rules:
+         *
+         * - reads do not depend on flushes, only writes (because flushes do
+         *   not modify data!)
+         * - any write with an overlap of impacted blocks requires a
+         *   dependency
          */
-        let mut dep = downstairs.active.keys().cloned().collect::<Vec<u64>>();
-        dep.sort_unstable();
+        let num_jobs = downstairs.active.keys().len();
+        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
-        let mut requests: Vec<ReadRequest> = Vec::with_capacity(nwo.len());
+        // Search backwards in the list of active jobs
+        for job_id in downstairs
+            .active
+            .keys()
+            .sorted()
+            .collect::<Vec<&u64>>()
+            .iter()
+            .rev()
+        {
+            let job = &downstairs.active[job_id];
 
-        for (eid, bo) in nwo {
+            // If this is a write and it impacts the same blocks as something
+            // already active, create a dependency.
+            if job.work.is_write()
+                && impacted_blocks.conflicts(&job.impacted_blocks)
+            {
+                dep.push(**job_id);
+            }
+        }
+
+        /*
+         * Now create a downstairs work job for each (eid, bo) returned
+         * from extent_from_offset.
+         */
+        let mut requests: Vec<ReadRequest> =
+            Vec::with_capacity(impacted_blocks.len());
+
+        for (eid, bo) in impacted_blocks.tuples() {
             requests.push(ReadRequest { eid, offset: bo });
         }
 
         sub.insert(next_id, 0); // XXX does this value matter?
 
-        let wr = create_read_eob(next_id, dep.clone(), gw_id, requests);
+        let wr = create_read_eob(
+            next_id,
+            dep.clone(),
+            gw_id,
+            requests,
+            impacted_blocks,
+        );
 
         /*
          * New work created, add to the guest_work HM. New work must be put
@@ -5836,6 +5931,8 @@ struct DownstairsIO {
      */
     data: Option<Vec<ReadResponse>>,
     read_response_hashes: Vec<Option<u64>>,
+
+    impacted_blocks: ImpactedBlocks,
 }
 
 impl DownstairsIO {
@@ -5953,6 +6050,18 @@ impl IOop {
                 writes: _,
             } => dependencies,
         }
+    }
+
+    pub fn is_read(&self) -> bool {
+        matches!(self, IOop::Read { .. })
+    }
+
+    pub fn is_write(&self) -> bool {
+        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
+    }
+
+    pub fn is_flush(&self) -> bool {
+        matches!(self, IOop::Flush { .. })
     }
 }
 
@@ -7752,6 +7861,7 @@ fn create_write_eob(
     gw_id: u64,
     writes: Vec<crucible_protocol::Write>,
     is_write_unwritten: bool,
+    impacted_blocks: ImpactedBlocks,
 ) -> DownstairsIO {
     /*
      * Note to self:  Should the dependency list cover everything since
@@ -7783,6 +7893,7 @@ fn create_write_eob(
         replay: false,
         data: None,
         read_response_hashes: Vec::new(),
+        impacted_blocks,
     }
 }
 
@@ -7796,6 +7907,7 @@ fn create_read_eob(
     dependencies: Vec<u64>,
     gw_id: u64,
     requests: Vec<ReadRequest>,
+    impacted_blocks: ImpactedBlocks,
 ) -> DownstairsIO {
     let aread = IOop::Read {
         dependencies,
@@ -7816,6 +7928,7 @@ fn create_read_eob(
         replay: false,
         data: None,
         read_response_hashes: Vec::new(),
+        impacted_blocks,
     }
 }
 
@@ -7829,6 +7942,7 @@ fn create_flush(
     guest_id: u64,
     gen_number: u64,
     snapshot_details: Option<SnapshotDetails>,
+    impacted_blocks: ImpactedBlocks,
 ) -> DownstairsIO {
     let flush = IOop::Flush {
         dependencies,
@@ -7850,6 +7964,7 @@ fn create_flush(
         replay: false,
         data: None,
         read_response_hashes: Vec::new(),
+        impacted_blocks,
     }
 }
 
