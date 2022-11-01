@@ -1,7 +1,11 @@
 [package]
 name = "crucible-integration-tests"
 version = "0.1.0"
-authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer>", "James MacMahon <james@oxide.computer>"]
+authors = [
+    "Joshua M. Clulow <jmc@oxide.computer>",
+    "Alan Hanson <alan@oxide.computer>",
+    "James MacMahon <james@oxide.computer>"
+]
 license = "MPL-2.0"
 edition = "2018"
 
@@ -9,7 +13,9 @@ edition = "2018"
 anyhow = "1"
 bytes = "1"
 crucible = { path = "../upstairs" }
-crucible-downstairs = { path = "../downstairs" } # importantly, don't use features = ["zfs_snapshot"] here, this will cause cleanup issues
+# importantly, don't use features = ["zfs_snapshot"] here, this will cause
+# cleanup issues!
+crucible-downstairs = { path = "../downstairs" }
 crucible-client-types = { path = "../crucible-client-types" }
 crucible-pantry = { path = "../pantry" }
 crucible-pantry-client = { path = "../pantry-client" }
