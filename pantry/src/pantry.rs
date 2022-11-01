@@ -10,8 +10,8 @@ use anyhow::Result;
 use dropshot::HttpError;
 use sha2::Digest;
 use sha2::Sha256;
+use slog::error;
 use slog::info;
-use slog::warn;
 use slog::Logger;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -224,7 +224,7 @@ impl Pantry {
 
                 return Ok(());
             } else {
-                warn!(
+                error!(
                     self.log,
                     "volume {} already an entry, but has different volume \
                     construction request, bailing!",
@@ -282,7 +282,7 @@ impl Pantry {
             }
 
             None => {
-                warn!(self.log, "volume {} not in pantry", volume_id);
+                error!(self.log, "volume {} not in pantry", volume_id);
 
                 Err(HttpError::for_not_found(None, volume_id))
             }
@@ -298,7 +298,7 @@ impl Pantry {
             Some(join_handle) => Ok(join_handle.is_finished()),
 
             None => {
-                warn!(self.log, "job {} not a pantry job", job_id);
+                error!(self.log, "job {} not a pantry job", job_id);
 
                 Err(HttpError::for_not_found(None, job_id.to_string()))
             }
@@ -324,7 +324,7 @@ impl Pantry {
             }
 
             None => {
-                warn!(self.log, "job {} not a pantry job", job_id);
+                error!(self.log, "job {} not a pantry job", job_id);
 
                 Err(HttpError::for_not_found(None, job_id.to_string()))
             }
