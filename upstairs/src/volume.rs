@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Volume {
     uuid: Uuid,
 
@@ -24,9 +24,10 @@ pub struct Volume {
      * Each sub volume should be the same block size (unit is bytes)
      */
     block_size: u64,
-    count: AtomicU32,
+    count: Arc<AtomicU32>,
 }
 
+#[derive(Clone)]
 pub struct SubVolume {
     lba_range: Range<u64>,
     block_io: Arc<dyn BlockIO + Send + Sync>,
@@ -48,7 +49,7 @@ impl Volume {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -83,7 +84,7 @@ impl Volume {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -185,6 +186,11 @@ impl Volume {
         Ok(())
     }
 
+    // Check to see if this volume has a read only parent
+    pub fn has_read_only_parent(&self) -> bool {
+        self.read_only_parent.is_some()
+    }
+
     // Imagine three sub volumes:
     //
     //  0 -> Range(0, a)
@@ -264,6 +270,7 @@ impl Volume {
             info!(log, "Scrub for {} begins", self.uuid);
             info!(log, "Scrub with total_size:{:?} block_size:{:?}", ts, bs);
             let scrub_start = Instant::now();
+
             let start = read_only_parent.lba_range.start;
             let end = read_only_parent.lba_range.end;
 
@@ -351,6 +358,9 @@ impl Volume {
                     );
                     showat += showstep;
                 }
+                // Pause just a bit between IOs so we don't starve the guest
+                // TODO: More benchmarking to find a good value here.
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
 
             let total_time = scrub_start.elapsed();
@@ -1049,7 +1059,7 @@ mod test {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         assert_eq!(volume.total_size().await?, 512 * 1024);
@@ -1100,7 +1110,7 @@ mod test {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         // volume:       |--------|--------|--------|
@@ -1168,7 +1178,7 @@ mod test {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_none());
@@ -1200,7 +1210,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_some());
@@ -1570,8 +1580,11 @@ mod test {
         // the total volume size is 4096b
 
         let mut volume = Volume::new(BLOCK_SIZE);
+        assert!(!volume.has_read_only_parent());
         volume.add_subvolume(disk).await?;
+        assert!(!volume.has_read_only_parent());
         volume.add_read_only_parent(parent.clone()).await?;
+        assert!(volume.has_read_only_parent());
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume, 0x00).await?;
 
@@ -1766,7 +1779,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         volume.activate(0).await?;
@@ -1805,7 +1818,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         volume.activate(0).await.unwrap();
@@ -1839,7 +1852,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         volume.activate(0).await.unwrap();
