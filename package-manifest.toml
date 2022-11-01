@@ -9,3 +9,6 @@ to = "/var/svc/manifest/site/crucible"
 [[package.crucible.paths]]
 from = "agent/downstairs_method_script.sh"
 to = "/opt/oxide/crucible/bin/downstairs_method_script.sh"
+[[package.crucible.paths]]
+from = "agent/agent_method_script.sh"
+to = "/opt/oxide/crucible/bin/agent_method_script.sh"

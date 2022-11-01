@@ -4,7 +4,7 @@
 <service_bundle type='manifest' name='oxide-crucible-agent'>
 
 <service name='oxide/crucible/agent' type='service' version='1'>
-  <create_default_instance enabled='false' />
+  <create_default_instance enabled='true' />
 
   <!-- Run once we hit multi-user, so that the network and file systems have
     been set up. -->
@@ -14,13 +14,7 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/opt/oxide/crucible/bin/crucible-agent run
-      -D /opt/oxide/crucible/bin/crucible-downstairs
-      --dataset %{config/dataset}
-      -l %{config/listen}
-      -P %{config/portbase}
-      -p %{config/downstairs_prefix}
-      -s %{config/snapshot_prefix}'
+    exec='/opt/oxide/crucible/bin/agent_method_script.sh'
     timeout_seconds='30'
     />
 
@@ -31,8 +25,11 @@
   </property_group>
 
   <property_group name='config' type='application'>
+    <propval name='datalink' type='astring' value='unknown' />
+    <propval name='gateway' type='astring' value='unknown' />
     <propval name='dataset' type='astring' value='' />
-    <propval name='listen' type='astring' value='127.0.0.1:17000' />
+    <propval name='listen_addr' type='astring' value='127.0.0.1' />
+    <propval name='listen_port' type='astring' value='17000' />
     <propval name='uuid' type='astring' value='' />
     <propval name='nexus' type='astring' value='127.0.0.1:12221' />
     <propval name='portbase' type='astring' value='19000' />
