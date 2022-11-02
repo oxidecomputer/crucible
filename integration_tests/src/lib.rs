@@ -202,14 +202,14 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts,
-                    gen: 0,
+                    gen: 1,
                 }],
                 read_only_parent: None,
             };
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents are zero on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -279,10 +279,10 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
         volume.add_read_only_parent(in_memory_data.clone()).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents are 11 on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -364,7 +364,7 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts,
-                    gen: 0,
+                    gen: 1,
                 }],
                 read_only_parent: None,
             };
@@ -379,7 +379,7 @@ mod test {
             })
             .await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents are 11 on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -445,7 +445,7 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts,
-                    gen: 0,
+                    gen: 1,
                 }],
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Volume {
@@ -462,7 +462,7 @@ mod test {
             };
 
         let volume = Volume::construct(vcr, None).await?;
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Read one block: should be all 0xff
         let buffer = Buffer::new(BLOCK_SIZE);
@@ -507,13 +507,13 @@ mod test {
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
                         opts,
-                        gen: 0,
+                        gen: 1,
                     },
                 )),
             };
 
         let volume = Volume::construct(vcr, None).await?;
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Read one block: should be all 0x00
         let buffer = Buffer::new(BLOCK_SIZE);
@@ -552,14 +552,14 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts,
-                    gen: 0,
+                    gen: 1,
                 }],
                 read_only_parent: None,
             };
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Write data in
         volume
@@ -621,14 +621,14 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts,
-                    gen: 0,
+                    gen: 1,
                 }],
                 read_only_parent: None,
             };
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Write data in
         volume
@@ -692,14 +692,14 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts,
-                    gen: 0,
+                    gen: 1,
                 }],
                 read_only_parent: None,
             };
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Write data at block 0
         volume
@@ -760,14 +760,14 @@ mod test {
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
         let tds2 = TestDownstairsSet::new(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
 
         let vcr: VolumeConstructionRequest =
@@ -780,7 +780,7 @@ mod test {
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         let full_volume_size = BLOCK_SIZE * 20;
         // Write data in
@@ -842,14 +842,14 @@ mod test {
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
         let tds2 = TestDownstairsSet::new(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
 
         let vcr: VolumeConstructionRequest =
@@ -862,7 +862,7 @@ mod test {
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
         let full_volume_size = BLOCK_SIZE * 20;
 
         // Write data to last block of first vol, and first block of
@@ -946,14 +946,14 @@ mod test {
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
         let tds2 = TestDownstairsSet::new(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
 
         let vcr: VolumeConstructionRequest =
@@ -966,7 +966,7 @@ mod test {
 
         let volume = Arc::new(Volume::construct(vcr, None).await?);
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
         let full_volume_size = BLOCK_SIZE * 20;
 
         // Write data to last block of first vol, and first block of
@@ -1063,10 +1063,10 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify parent contents in one read
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1132,10 +1132,10 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents are 11 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1204,10 +1204,10 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents of RO parent are 1s at startup
         let buffer = Buffer::new(BLOCK_SIZE * 5);
@@ -1297,10 +1297,10 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // SV: |--2-------|
         volume
@@ -1381,10 +1381,10 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents are 11 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1458,14 +1458,14 @@ mod test {
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
         let tds2 = TestDownstairsSet::new(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
 
         let vcr: VolumeConstructionRequest =
@@ -1486,7 +1486,7 @@ mod test {
             })
             .await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Write data to last block of first vol, and first block of
         // second vol.
@@ -1579,14 +1579,14 @@ mod test {
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
         let tds2 = TestDownstairsSet::new(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
-            gen: 0,
+            gen: 1,
         });
 
         let vcr: VolumeConstructionRequest =
@@ -1607,7 +1607,7 @@ mod test {
             })
             .await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Write data to last block of first vol, and first block of
         // second vol, AKA write A.
@@ -1689,7 +1689,7 @@ mod test {
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
                         opts: opts.clone(),
-                        gen: 0,
+                        gen: 1,
                     },
                 )),
             };
@@ -1706,16 +1706,16 @@ mod test {
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
                         opts,
-                        gen: 0,
+                        gen: 1,
                     },
                 )),
             };
 
         let volume1 = Volume::construct(vcr_1, None).await?;
-        volume1.activate(0).await?;
+        volume1.activate(1).await?;
 
         let volume2 = Volume::construct(vcr_2, None).await?;
-        volume2.activate(0).await?;
+        volume2.activate(1).await?;
 
         // Read one block: should be all 0x00
         let buffer = Buffer::new(BLOCK_SIZE);
@@ -1755,9 +1755,9 @@ mod test {
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 0, None).await?;
+        volume.add_subvolume_create_guest(opts, 1, None).await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         // Verify contents are 00 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1807,10 +1807,10 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume
-            .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+            .add_subvolume_create_guest(test_downstairs_set.opts(), 1, None)
             .await?;
 
-        volume.activate(0).await?;
+        volume.activate(1).await?;
 
         let random_buffer = {
             let mut random_buffer =
@@ -1836,10 +1836,10 @@ mod test {
         {
             let mut volume = Volume::new(BLOCK_SIZE as u64);
             volume
-                .add_subvolume_create_guest(test_downstairs_set.opts(), 0, None)
+                .add_subvolume_create_guest(test_downstairs_set.opts(), 2, None)
                 .await?;
 
-            volume.activate(0).await?;
+            volume.activate(2).await?;
 
             let buffer = Buffer::new(volume.total_size().await? as usize);
             volume
@@ -1875,7 +1875,7 @@ mod test {
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
                     opts: top_layer_opts,
-                    gen: 0,
+                    gen: 3,
                 }],
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Volume {
@@ -1884,7 +1884,7 @@ mod test {
                         sub_volumes: vec![VolumeConstructionRequest::Region {
                             block_size: BLOCK_SIZE as u64,
                             opts: bottom_layer_opts,
-                            gen: 0,
+                            gen: 3,
                         }],
                         read_only_parent: None,
                     },
@@ -1892,7 +1892,7 @@ mod test {
             };
 
         let volume = Volume::construct(vcr, None).await?;
-        volume.activate(0).await?;
+        volume.activate(3).await?;
 
         // Validate that source blocks originally come from the read-only parent
         {
@@ -1958,7 +1958,7 @@ mod test {
 
         let _join_handle = up_main(opts, 0, gc, None).await?;
 
-        guest.activate(0).await?;
+        guest.activate(1).await?;
         guest.query_work_queue().await?;
 
         // Verify contents are zero on init
@@ -2002,7 +2002,7 @@ mod test {
         // Read-only Upstairs should return errors if writes are attempted.
         let _join_handle = up_main(opts, 0, gc, None).await?;
 
-        guest.activate(0).await?;
+        guest.activate(1).await?;
 
         // Expect an error attempting to write.
         let write_result = guest

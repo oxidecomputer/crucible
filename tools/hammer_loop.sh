@@ -33,8 +33,20 @@ if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 --extent-size 50;
     echo "Failed to create region"
     exit 1
 fi
+
+# Start up dsc, verify it really did start.
 "$dsc" start --ds-bin "$cds" &
 dsc_pid=$!
+sleep 5
+if ! pgrep -P $dsc_pid; then
+    echo "Failed to start dsc"
+    exit 1
+fi
+# Make sure automatic restart is not enabled.
+if ! "$dsc" cmd disable-restart-all; then
+    echo "Failed to disable auto-restart on dsc"
+    exit 1
+fi
 
 # Control-C to cleanup.
 trap ctrl_c INT
@@ -55,10 +67,10 @@ echo "" > ${loop_log}
 echo "starting Hammer test on $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-gen=0
+gen=1
 # This is held at 1 loop till we fix the #389 issue, or implement
 # generation numbers properly.
-for i in {1..2}
+for i in {1..20}
 do
     SECONDS=0
     echo "" > "$test_log"
@@ -73,6 +85,7 @@ do
         printf "[%03d] Error $result after %d:%02d\n" "$i" \
                 $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
         mv "$test_log" "$test_log".lastfail
+        echo "Failing test log at: $test_log.lastfail"
         break
     fi
     if grep -i panic "$test_log"; then
@@ -99,11 +112,10 @@ echo "Final results:" | tee -a ${loop_log}
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
 
 echo "Stopping dsc"
-kill $dsc_pid
+kill $dsc_pid 2> /dev/null
 wait $dsc_pid
 # Also remove any leftover downstairs
 if pgrep -fl -U "$(id -u)" "$cds" > /dev/null; then
-    echo "Removing any remaining downstairs processes"
     pkill -f -U "$(id -u)" "$cds"
 fi
 
