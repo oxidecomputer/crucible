@@ -1147,7 +1147,7 @@ mod test {
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // data as the scrubber has finished.
@@ -1227,7 +1227,7 @@ mod test {
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // unwritten data as the scrubber has finished.
@@ -1321,7 +1321,7 @@ mod test {
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume except where new writes have
         // landed
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1403,7 +1403,7 @@ mod test {
             .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1514,7 +1514,7 @@ mod test {
             .await?;
 
         // Call the scrubber
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
@@ -1646,7 +1646,7 @@ mod test {
             .await?;
 
         // Call the scrubber
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
@@ -1776,7 +1776,7 @@ mod test {
             .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub(&csl()).await.unwrap();
+        volume.scrub(&csl(), None, None).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);

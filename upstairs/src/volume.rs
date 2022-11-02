@@ -259,11 +259,35 @@ impl Volume {
     // Still TODO: here
     // If there is an error, how to we tell Nexus?
     // If we finish the scrub, how do we tell Nexus?
-    pub async fn scrub(&self, log: &Logger) -> Result<(), CrucibleError> {
+    pub async fn scrub(
+        &self,
+        log: &Logger,
+        start_delay: Option<u64>,
+        scrub_pause: Option<u64>,
+    ) -> Result<(), CrucibleError> {
         info!(log, "Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
         if let Some(ref read_only_parent) = self.read_only_parent {
+            // If requested, setup the pause between IOs as well as an initial
+            // waiting period before the scrubber starts.
+            let pause_millis = if let Some(scrub_pause) = scrub_pause {
+                scrub_pause
+            } else {
+                0
+            };
+
+            if let Some(start_delay) = start_delay {
+                info!(
+                    log,
+                    "Scrub pause {} seconds before starting", start_delay
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    start_delay,
+                ))
+                .await;
+            }
+
             let ts = read_only_parent.total_size().await?;
             let bs = read_only_parent.get_block_size().await? as usize;
 
@@ -281,11 +305,12 @@ impl Volume {
             let mut block_count = 262144 / bs;
             info!(
                 log,
-                "Scrub from block {:?} to {:?} in ({}) {:?} size IOs",
+                "Scrubs from block {:?} to {:?} in ({}) {:?} size IOs pm:{}",
                 start,
                 end,
                 block_count,
                 block_count * bs,
+                pause_millis,
             );
 
             let mut retries = 0;
@@ -360,16 +385,19 @@ impl Volume {
                 }
                 // Pause just a bit between IOs so we don't starve the guest
                 // TODO: More benchmarking to find a good value here.
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(Duration::from_millis(pause_millis)).await;
             }
 
             let total_time = scrub_start.elapsed();
             info!(
                 log,
-                "Scrub {} done in {} seconds. Retries:{}",
+                "Scrub {} done in {} seconds. Retries:{} scrub_size:{} size:{} pause_milli:{}",
                 self.uuid,
                 total_time.as_secs(),
                 retries,
+                block_count * bs,
+                end - start,
+                pause_millis,
             );
             self.flush(None).await?;
         } else {
