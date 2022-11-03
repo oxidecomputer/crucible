@@ -102,7 +102,16 @@ impl PantryEntry {
 
             let content_length = usize::from_str(content_length.to_str()?)?;
 
-            assert_eq!(content_length, end - start);
+            if content_length != (end - start) {
+                // the remote web server didn't honour the RANGE header!
+                bail!(
+                    "RANGE header bytes={}-{}, content length returned is {}!",
+                    start,
+                    end - 1,
+                    content_length,
+                );
+            }
+
             assert!(content_length <= Self::MAX_CHUNK_SIZE);
             assert!(content_length % volume_block_size as usize == 0);
 
