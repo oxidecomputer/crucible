@@ -16,6 +16,8 @@ members = [
     "measure_iops",
     "nbd_server",
     "package",
+    "pantry",
+    "pantry-client",
     "protocol",
     "repair-client",
     "smf",

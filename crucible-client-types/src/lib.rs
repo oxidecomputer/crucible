@@ -4,8 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
+
 #[allow(clippy::large_enum_variant)]
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
     Volume {
@@ -31,7 +32,9 @@ pub enum VolumeConstructionRequest {
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq,
+)]
 pub struct CrucibleOpts {
     pub id: Uuid,
     pub target: Vec<SocketAddr>,
