@@ -302,7 +302,7 @@ impl Volume {
             // 256 KiB IOs during the scrub. Here we select how many blocks
             // this is.
             // TODO: Determine if this value should be adjusted.
-            let mut block_count = 262144 / bs;
+            let mut block_count = 131072 / bs;
             info!(
                 log,
                 "Scrubs from block {:?} to {:?} in ({}) {:?} size IOs pm:{}",
