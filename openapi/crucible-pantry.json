@@ -1,0 +1,650 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Crucible Pantry",
+    "version": "0.0.0"
+  },
+  "paths": {
+    "/crucible/pantry/0/job/{id}/is_finished": {
+      "get": {
+        "summary": "Poll to see if a Pantry background job is done",
+        "operationId": "is_job_finished",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobPollResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/job/{id}/ok": {
+      "get": {
+        "summary": "Block on returning a Pantry background job result, then return 200 OK if the",
+        "description": "job executed OK, 500 otherwise.",
+        "operationId": "job_result_ok",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Null",
+                  "type": "string",
+                  "enum": [
+                    null
+                  ]
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}": {
+      "post": {
+        "summary": "Construct a volume from a VolumeConstructionRequest, storing the result in",
+        "description": "the Pantry.",
+        "operationId": "attach",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachResult"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Flush and close a volume, removing it from the Pantry",
+        "operationId": "detach",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/bulk_write": {
+      "post": {
+        "summary": "Bulk write data into a volume at a specified offset",
+        "operationId": "bulk_write",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/import_from_url": {
+      "post": {
+        "summary": "Import data from a URL into a volume",
+        "operationId": "import_from_url",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportFromUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportFromUrlResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/scrub": {
+      "post": {
+        "summary": "Scrub the volume (copy blocks from read-only parent to subvolumes)",
+        "operationId": "scrub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScrubResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/snapshot": {
+      "post": {
+        "summary": "Take a snapshot of a volume",
+        "operationId": "snapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AttachRequest": {
+        "type": "object",
+        "properties": {
+          "volume_construction_request": {
+            "$ref": "#/components/schemas/VolumeConstructionRequest"
+          }
+        },
+        "required": [
+          "volume_construction_request"
+        ]
+      },
+      "AttachResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "BulkWriteRequest": {
+        "type": "object",
+        "properties": {
+          "base64_encoded_data": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "base64_encoded_data",
+          "offset"
+        ]
+      },
+      "CrucibleOpts": {
+        "type": "object",
+        "properties": {
+          "cert_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "control": {
+            "nullable": true,
+            "type": "string"
+          },
+          "flush_timeout": {
+            "nullable": true,
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "nullable": true,
+            "type": "string"
+          },
+          "key_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "lossy": {
+            "type": "boolean"
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "root_cert_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "target": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "lossy",
+          "read_only",
+          "target"
+        ]
+      },
+      "Error": {
+        "description": "Error information from a response.",
+        "type": "object",
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "request_id"
+        ]
+      },
+      "ExpectedDigest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "Sha256": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Sha256"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ImportFromUrlRequest": {
+        "type": "object",
+        "properties": {
+          "expected_digest": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedDigest"
+              }
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "ImportFromUrlResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      },
+      "JobPollResponse": {
+        "type": "object",
+        "properties": {
+          "job_is_finished": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "job_is_finished"
+        ]
+      },
+      "ScrubResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      },
+      "SnapshotRequest": {
+        "type": "object",
+        "properties": {
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id"
+        ]
+      },
+      "VolumeConstructionRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "read_only_parent": {
+                "nullable": true,
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/VolumeConstructionRequest"
+                  }
+                ]
+              },
+              "sub_volumes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/VolumeConstructionRequest"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "volume"
+                ]
+              }
+            },
+            "required": [
+              "block_size",
+              "id",
+              "sub_volumes",
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "url"
+                ]
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_size",
+              "id",
+              "type",
+              "url"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "gen": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "opts": {
+                "$ref": "#/components/schemas/CrucibleOpts"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "region"
+                ]
+              }
+            },
+            "required": [
+              "block_size",
+              "gen",
+              "opts",
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "path": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              }
+            },
+            "required": [
+              "block_size",
+              "id",
+              "path",
+              "type"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

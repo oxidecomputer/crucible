@@ -30,6 +30,16 @@
 #: name = "crucible.sha256.txt"
 #: from_output = "/out/crucible.sha256.txt"
 #:
+#: [[publish]]
+#: series = "image"
+#: name = "crucible-pantry.tar.gz"
+#: from_output = "/out/crucible-pantry.tar.gz"
+#:
+#: [[publish]]
+#: series = "image"
+#: name = "crucible-pantry.sha256.txt"
+#: from_output = "/out/crucible-pantry.sha256.txt"
+#:
 
 set -o errexit
 set -o pipefail
@@ -59,13 +69,14 @@ done
 pfexec mkdir -p /out
 pfexec chown "$UID" /out
 
-# Make the crucible package image
+# Make the crucible package images
 banner image
 ptime -m cargo run --bin crucible-package
 
 banner contents
 tar tvfz out/crucible.tar.gz
-mv out/crucible.tar.gz /out/crucible.tar.gz
+tar tvfz out/crucible-pantry.tar.gz
+mv out/crucible.tar.gz out/crucible-pantry.tar.gz /out/
 
 # Build the nightly archive file which should include all the scripts
 # and binaries needed to run the nightly test.
@@ -90,4 +101,5 @@ mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
 banner checksum
 cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
+digest -a sha256 crucible-pantry.tar.gz > crucible-pantry.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt

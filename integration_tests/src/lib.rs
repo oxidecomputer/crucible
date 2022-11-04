@@ -11,6 +11,7 @@ mod test {
     use crucible::{Bytes, *};
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
+    use crucible_pantry_client::Client as CruciblePantryClient;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
@@ -18,13 +19,6 @@ mod test {
     use tempfile::*;
     use uuid::*;
 
-    /*
-        use std::collections::HashSet;
-
-        lazy_static! {
-            static ref PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
-        }
-    */
     // Create a simple logger
     fn csl() -> Logger {
         let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
@@ -43,21 +37,36 @@ mod test {
             address: IpAddr,
             encrypted: bool,
             read_only: bool,
+            big: bool,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = create_region(
-                512, /* block_size */
-                tempdir.path().to_path_buf(),
-                5, /* extent_size */
-                2, /* extent_count */
-                Uuid::new_v4(),
-                encrypted,
-                csl(),
-            )?;
+            let _region = if big {
+                // create a 47 MB region
+                create_region(
+                    512, /* block_size */
+                    tempdir.path().to_path_buf(),
+                    512, /* extent_size */
+                    188, /* extent_count */
+                    Uuid::new_v4(),
+                    encrypted,
+                    csl(),
+                )?
+            } else {
+                // create a 5120b region
+                create_region(
+                    512, /* block_size */
+                    tempdir.path().to_path_buf(),
+                    5, /* extent_size */
+                    2, /* extent_count */
+                    Uuid::new_v4(),
+                    encrypted,
+                    csl(),
+                )?
+            };
 
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
@@ -124,16 +133,29 @@ mod test {
     }
 
     impl TestDownstairsSet {
+        /// Spin off three downstairs, with a 5120b region
+        pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
+            TestDownstairsSet::new_with_flag(read_only, false).await
+        }
+
+        /// Spin off three downstairs, with a 50 MB region
+        pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
+            TestDownstairsSet::new_with_flag(read_only, true).await
+        }
+
         /// Spin off three downstairs
-        pub async fn new(read_only: bool) -> Result<TestDownstairsSet> {
+        pub async fn new_with_flag(
+            read_only: bool,
+            big: bool,
+        ) -> Result<TestDownstairsSet> {
             let downstairs1 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only)
+                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
                     .await?;
             let downstairs2 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only)
+                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
                     .await?;
             let downstairs3 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only)
+                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
                     .await?;
 
             // Generate random data for our key
@@ -192,7 +214,7 @@ mod test {
         // Test a simple single layer volume with a read, write, read
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -240,14 +262,14 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_two_layers() -> Result<()> {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(opts, false).await
     }
 
     #[tokio::test]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(opts, true).await
     }
@@ -332,7 +354,7 @@ mod test {
     async fn integration_test_three_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in memory block io full of 11
@@ -420,7 +442,7 @@ mod test {
     async fn integration_test_url() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let server = Server::run();
@@ -495,7 +517,7 @@ mod test {
         // Just do a read of a new volume.
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(true).await?;
+        let tds = TestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -542,7 +564,7 @@ mod test {
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -611,7 +633,7 @@ mod test {
         // Should result in:
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -682,7 +704,7 @@ mod test {
         // |ABBBBBBBBBB|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
@@ -755,14 +777,14 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -837,14 +859,14 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -941,14 +963,14 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1019,7 +1041,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(opts, false).await
     }
@@ -1027,7 +1049,7 @@ mod test {
     #[tokio::test]
     async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
     {
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(opts, true).await
     }
@@ -1113,7 +1135,7 @@ mod test {
         //     |1111111111|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1185,7 +1207,7 @@ mod test {
         //     |1111155555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1278,7 +1300,7 @@ mod test {
         //     |1121100300|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1362,7 +1384,7 @@ mod test {
         // SV  |5555555555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1453,14 +1475,14 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1574,14 +1596,14 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::new(false).await?;
+        let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::new(false).await?;
+        let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1677,7 +1699,7 @@ mod test {
     async fn integration_test_multi_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::new(true).await?;
+        let tds = TestDownstairsSet::small(true).await?;
         let mut opts = tds.opts();
 
         let vcr_1: VolumeConstructionRequest =
@@ -1751,7 +1773,7 @@ mod test {
         // SV  |55555-----|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
@@ -1803,7 +1825,7 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::new(false).await?;
+        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume
@@ -1864,7 +1886,7 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::new(false).await?;
+        let top_layer_tds = TestDownstairsSet::small(false).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
@@ -1950,7 +1972,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -1993,7 +2015,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin up three read-only downstairs
-        let tds = TestDownstairsSet::new(true).await?;
+        let tds = TestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2028,7 +2050,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2101,7 +2123,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2159,7 +2181,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2218,7 +2240,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2275,7 +2297,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2332,7 +2354,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::new(false).await?;
+        let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let guest = Arc::new(Guest::new());
@@ -2377,6 +2399,707 @@ mod test {
             vec![0x99_u8; BLOCK_SIZE],
             dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
         );
+
+        Ok(())
+    }
+
+    // The following tests are for the Pantry
+
+    #[tokio::test]
+    async fn test_pantry_import_from_url_ovmf() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        // Start the pantry
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+        let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
+
+        let sha256_digest =
+            "319d678f093c43502ca360911d52b475dea7fa6dcd962150c84fff18f5b32221";
+
+        let response = client
+            .import_from_url(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::ImportFromUrlRequest {
+                    url: url.clone(),
+                    expected_digest: Some(
+                        crucible_pantry_client::types::ExpectedDigest {
+                            sha256: sha256_digest.to_string(),
+                        },
+                    ),
+                },
+            )
+            .await?;
+
+        while !client
+            .is_job_finished(&response.job_id)
+            .await?
+            .job_is_finished
+        {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        client.job_result_ok(&response.job_id).await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // read the data to verify import
+
+        let dur = std::time::Duration::from_secs(5);
+        let client = reqwest::ClientBuilder::new()
+            .connect_timeout(dur)
+            .timeout(dur)
+            .build()?;
+
+        let bytes = client.get(&url).send().await?.bytes().await?;
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer = Buffer::new(bytes.len());
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert!(bytes.len() % BLOCK_SIZE == 0);
+
+        for i in (0..bytes.len()).step_by(BLOCK_SIZE) {
+            let start = i;
+            let end = i + BLOCK_SIZE;
+            assert_eq!(
+                bytes[..][start..end],
+                buffer.as_vec().await[start..end]
+            );
+            eprintln!("{} {} ok", start, end);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_import_from_url_ovmf_bad_digest() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        // Start the pantry
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+
+        // not the actual digest!
+        let sha256_digest =
+            "00000000000000000000000000000000000000000000000000000000f5b32221";
+
+        let response = client
+            .import_from_url(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::ImportFromUrlRequest {
+                    url: format!("{}/OVMF_CODE_20220922.fd", base_url),
+                    expected_digest: Some(
+                        crucible_pantry_client::types::ExpectedDigest {
+                            sha256: sha256_digest.to_string(),
+                        },
+                    ),
+                },
+            )
+            .await?;
+
+        while !client
+            .is_job_finished(&response.job_id)
+            .await?
+            .job_is_finished
+        {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        assert!(client.job_result_ok(&response.job_id).await.is_err());
+
+        client.detach(&volume_id.to_string()).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_import_from_local_server() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/img.raw"))
+                .times(1..)
+                .respond_with(status_code(200).body(vec![0x55; 5120])),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("HEAD", "/img.raw"))
+                .times(1..)
+                .respond_with(
+                    status_code(200)
+                        .append_header("Content-Length", format!("{}", 5120)),
+                ),
+        );
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Verify contents are zero on init
+        {
+            let volume = Volume::construct(vcr.clone(), None).await?;
+            volume.activate(1).await?;
+
+            let buffer = Buffer::new(5120);
+            volume
+                .read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )
+                .await?;
+
+            assert_eq!(vec![0x00; 5120], *buffer.as_vec().await);
+
+            volume.deactivate().await?;
+
+            drop(volume);
+        }
+
+        // Start the pantry, then use it to import img.raw
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        let response = client
+            .import_from_url(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::ImportFromUrlRequest {
+                    url: server.url("/img.raw").to_string(),
+                    expected_digest: None,
+                },
+            )
+            .await?;
+
+        // Test not polling here
+        client.job_result_ok(&response.job_id).await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Attach, validate img.raw got imported
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer = Buffer::new(5120);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert_eq!(vec![0x55; 5120], *buffer.as_vec().await);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_snapshot() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Start the pantry, then use it to snapshot
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        client
+            .snapshot(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::SnapshotRequest {
+                    snapshot_id: "testpost".to_string(),
+                },
+            )
+            .await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_bulk_write() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Start the pantry, then use it to bulk_write in data
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        for i in 0..10 {
+            client
+                .bulk_write(
+                    &volume_id.to_string(),
+                    &crucible_pantry_client::types::BulkWriteRequest {
+                        offset: i * 512,
+                        base64_encoded_data: base64::encode(vec![i as u8; 512]),
+                    },
+                )
+                .await?;
+        }
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Attach, validate bulk write worked
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer = Buffer::new(5120);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        let buffer_data = &*buffer.as_vec().await;
+
+        for i in 0..10 {
+            let start = i * 512;
+            let end = (i + 1) * 512;
+            assert_eq!(vec![i as u8; 512], buffer_data[start..end]);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_bulk_write_max_chunk_size() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Start the pantry, then use it to bulk_write in data
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        client
+            .bulk_write(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkWriteRequest {
+                    offset: 0,
+                    base64_encoded_data: base64::encode(
+                        vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE]
+                    ),
+                },
+            )
+            .await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Attach, validate bulk write worked
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(1).await?;
+
+        let buffer =
+            Buffer::new(crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert_eq!(
+            vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
+            *buffer.as_vec().await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pantry_scrub() -> Result<()> {
+        // Test scrubbing the OVMF image from a URL
+        // XXX httptest::Server does not support range requests, otherwise that
+        // should be used here instead.
+
+        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
+        let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
+
+        let data = {
+            let dur = std::time::Duration::from_secs(5);
+            let client = reqwest::ClientBuilder::new()
+                .connect_timeout(dur)
+                .timeout(dur)
+                .build()?;
+
+            client.get(&url).send().await?.bytes().await?
+        };
+
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct (with a
+        // read-only parent pointing to the random data above)
+
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        let volume_id = Uuid::new_v4();
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts: opts.clone(),
+                    gen: 0,
+                }],
+                read_only_parent: Some(Box::new(
+                    VolumeConstructionRequest::Url {
+                        id: Uuid::new_v4(),
+                        block_size: BLOCK_SIZE as u64,
+                        url: url.clone(),
+                    },
+                )),
+            };
+
+        // Verify contents match data on init
+        {
+            let volume = Volume::construct(vcr.clone(), None).await?;
+            volume.activate(1).await?;
+
+            let buffer = Buffer::new(data.len());
+            volume
+                .read(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    buffer.clone(),
+                )
+                .await?;
+
+            assert_eq!(data, *buffer.as_vec().await);
+
+            volume.deactivate().await?;
+
+            drop(volume);
+        }
+
+        // Start the pantry, then use it to scrub
+
+        let (log, pantry) = crucible_pantry::initialize_pantry().await?;
+        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+            &log,
+            "127.0.0.1:0".parse().unwrap(),
+            pantry,
+        )
+        .await?;
+
+        let client =
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr)?,
+                    )?,
+                },
+            )
+            .await?;
+
+        let response = client.scrub(&volume_id.to_string()).await?;
+
+        while !client
+            .is_job_finished(&response.job_id)
+            .await?
+            .job_is_finished
+        {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        client.job_result_ok(&response.job_id).await?;
+
+        client.detach(&volume_id.to_string()).await?;
+
+        // Drop the read only parent from the volume construction request
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    opts,
+                    gen: 0,
+                }],
+                read_only_parent: None,
+            };
+
+        // Attach, validate random data got imported
+
+        let volume = Volume::construct(vcr, None).await?;
+        volume.activate(2).await?;
+
+        let buffer = Buffer::new(data.len());
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert_eq!(data, *buffer.as_vec().await);
 
         Ok(())
     }

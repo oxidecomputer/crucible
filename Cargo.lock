@@ -768,10 +768,15 @@ dependencies = [
  "crucible",
  "crucible-client-types",
  "crucible-downstairs",
+ "crucible-pantry",
+ "crucible-pantry-client",
  "futures",
  "futures-core",
  "httptest",
  "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
  "slog",
  "slog-async",
  "slog-dtrace",
@@ -809,6 +814,52 @@ dependencies = [
  "anyhow",
  "omicron-zone-package",
  "tokio",
+]
+
+[[package]]
+name = "crucible-pantry"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap 3.2.1",
+ "crucible",
+ "crucible-common",
+ "crucible-smf",
+ "dropshot",
+ "expectorate",
+ "futures",
+ "hex",
+ "http",
+ "hyper",
+ "omicron-common",
+ "openapi-lint",
+ "openapiv3",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "slog",
+ "subprocess",
+ "tokio",
+ "uuid 1.0.0",
+]
+
+[[package]]
+name = "crucible-pantry-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "percent-encoding",
+ "progenitor",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "uuid 1.0.0",
 ]
 
 [[package]]
