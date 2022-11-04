@@ -4257,6 +4257,9 @@ impl Upstairs {
         let next_flush = self.next_flush_id().await;
         cdt::gw__flush__start!(|| (gw_id));
 
+        if snapshot_details.is_some() {
+            info!(self.log, "flush with snap requested");
+        }
         /*
          * To build the dependency list for this flush, iterate from the end
          * of the downstairs work active list in reverse order and
