@@ -3775,7 +3775,7 @@ mod test {
     async fn test_promote_to_active_multi_read_write_different_uuid_lower_gen(
     ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
-        // Upstairs) but with the same gen should be blocked
+        // Upstairs) but with a lower gen should be blocked.
         let ads = build_test_downstairs(false)?;
 
         let upstairs_connection_1 = UpstairsConnection {
