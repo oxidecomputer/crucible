@@ -176,7 +176,7 @@ impl PantryEntry {
     }
 
     pub async fn scrub(&self, log: &Logger) -> Result<()> {
-        self.volume.scrub(log).await?;
+        self.volume.scrub(log, None, None).await?;
         Ok(())
     }
 
