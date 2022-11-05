@@ -56,7 +56,7 @@ ptime -m cargo test --verbose
 
 banner output
 mkdir -p /work/rbins
-for t in crucible-downstairs crucible-hammer crutest dsc; do
+for t in crucible-downstairs crucible-hammer crutest dsc crudd; do
 	gzip < "target/release/$t" > "/work/rbins/$t.gz"
 done
 
@@ -88,6 +88,7 @@ tar cavf out/crucible-nightly.tar.gz \
     target/release/crucible-downstairs \
     target/release/crucible-hammer \
     target/release/dsc \
+    target/release/crudd \
     tools/downstairs_daemon.sh \
     tools/hammer_loop.sh \
     tools/test_reconnect.sh \
