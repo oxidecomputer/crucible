@@ -67,6 +67,7 @@ create_and_start_downstairs() {
     --create \
     --extent-size $EXTENT_SIZE_BLOCKS \
     --extent-count $EXTENT_COUNT \
+    --ds-bin "$BINDIR/crucible-downstairs" \
   1>&2 &
   DSC_PID=$!
   sleep 3
