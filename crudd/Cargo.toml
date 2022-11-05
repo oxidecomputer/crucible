@@ -20,3 +20,5 @@ serde_json = "1"
 tokio = { version = "1.21.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.5"
+signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
+signal-hook = "0.3.14"
