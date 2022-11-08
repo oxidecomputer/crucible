@@ -39,4 +39,5 @@ pfexec plimit -n 9123456 $$
 
 ptime -m bash "$input/scripts/test_perf.sh"
 echo "Test finished"
+ps -ef
 exit 0
