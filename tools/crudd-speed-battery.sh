@@ -1,6 +1,11 @@
 #!/bin/bash
 
+
 set -euo pipefail
+
+# This way you can run this script without manually setting BINDIR
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export BINDIR=${BINDIR:-$ROOT/target/release}
 
 REGION_SIZE_MIBS=4096
 REGION_SIZE_BYTES=$(( REGION_SIZE_MIBS * 1024 * 1024 ))
@@ -58,17 +63,25 @@ crudd_benchmark() {
 
 # create and start downstairs with dsc
 create_and_start_downstairs() {
-  if [[ -n ${DSC_PID-} ]]; then
+  if [[ -n ${DSC_PID-} ]] && pgrep -P "$DSC_PID" > /dev/null; then
     print_err "Error: DSC is already started, but someone tried to start it a second time. Current PID is allegedly $DSC_PID"
     return 1
   fi
-  "$BINDIR/dsc" start --cleanup \
+
+  "$BINDIR/dsc" create --cleanup \
     --block-size $BLOCK_SIZE \
-    --create \
     --extent-size $EXTENT_SIZE_BLOCKS \
     --extent-count $EXTENT_COUNT \
     --ds-bin "$BINDIR/crucible-downstairs" \
-  1>&2 &
+    1>&2
+
+  "$BINDIR/dsc" start \
+    --block-size $BLOCK_SIZE \
+    --extent-size $EXTENT_SIZE_BLOCKS \
+    --extent-count $EXTENT_COUNT \
+    --ds-bin "$BINDIR/crucible-downstairs" \
+    1>&2 &
+
   DSC_PID=$!
   sleep 3
   if ! pgrep -P $DSC_PID > /dev/null; then

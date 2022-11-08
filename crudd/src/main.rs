@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::io::FromRawFd;
 use std::sync::Arc;
@@ -77,7 +77,7 @@ pub struct Opt {
     #[clap(short, long, default_value = "2", action)]
     pipeline_length: usize,
 
-    /// Puts crudd into benchmarking mode. In benchmarking code, crudd will
+    /// Puts crudd into benchmarking mode. In benchmarking mode, crudd will
     /// exit early if it receives SIGUSR1. It will do its best to cleanly exit,
     /// but will not make any guarantees about the state of data it has sent
     /// downstairs. It will write out how many bytes were processed to the
@@ -134,16 +134,17 @@ async fn cmd_read<T: BlockIO>(
         );
     }
 
-    let mut output = if opt.benchmarking_mode.is_some() {
-        // In benchmarking mode, use /dev/null
-        File::create("/dev/null")?
+    let mut output: Box<dyn Write> = if opt.benchmarking_mode.is_some() {
+        Box::new(io::sink())
     } else {
         // Right now we just use fd3 as a file. This relies on the user actually
         // providing an FD3 in their shell. We should do something better than
         // this later, but for now im doing this because crucible internals are
-        // writing to stdout.
-        unsafe { File::from_raw_fd(3) }
+        // writing to stdout. TODO: maybe command line arg for output file
+        Box::new(BufWriter::new(unsafe { File::from_raw_fd(3) }))
     };
+
+    // let mut output = BufWriter::new(output_file);
 
     // ring buffers
     // The only reason we have a dynamic pipeline length is because I'm
@@ -368,9 +369,11 @@ async fn cmd_write<T: BlockIO>(
     }
 
     let mut input: Box<dyn Read> = if opt.benchmarking_mode.is_some() {
-        Box::new(File::open("/dev/zero")?)
+        // Write a value that isn't zero, because some things special-case all
+        // zero data in this world. Value chosen by a fair dice roll ;)
+        Box::new(io::repeat(17u8))
     } else {
-        Box::new(io::stdin())
+        Box::new(BufReader::new(io::stdin()))
     };
 
     // ring buffers
