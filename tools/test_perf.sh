@@ -43,7 +43,7 @@ function perf_round() {
     fi
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
     echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    timeout 1200 "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
+    timeout 200 "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
     "$dsc" cmd shutdown
@@ -77,9 +77,9 @@ done
 echo "Perf test with timeout begins at $(date)" > "$outfile"
 
 #            ES   EC
-perf_round  4096 6400
-perf_round  8192 3200
-perf_round 16384 1600
+#perf_round  4096 6400
+#perf_round  8192 3200
+#perf_round 16384 1600
 perf_round 32768  800
 
 # Print out a nice summary of all the perf results.  This depends

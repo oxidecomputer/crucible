@@ -38,3 +38,5 @@ banner perf
 pfexec plimit -n 9123456 $$
 
 ptime -m bash "$input/scripts/test_perf.sh"
+echo "Test finished"
+exit 0
