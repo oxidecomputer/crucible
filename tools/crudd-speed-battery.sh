@@ -30,6 +30,7 @@ print_err() {
 # $1 = mode (read or write)
 # $2 = request size in blocks
 # $3 = pipeline length
+# $4 = generation number for the upstairs/downstairs.
 # runs for a maximum time specified by the use of timeout in the function
 # prints the average throughput in bytes/second to stdout.
 crudd_benchmark() {
