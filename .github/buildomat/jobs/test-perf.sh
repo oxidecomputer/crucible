@@ -37,9 +37,9 @@ export BINDIR=/var/tmp/bins
 banner perf
 pfexec plimit -n 9123456 $$
 
-chmod +x $input/scripts/test_perf.sh
-$input/scripts/test_perf.sh
-echo "$? was our result"
+echo "Now try with bash prefix"
+bash $input/scripts/test_perf.sh
+echo "$? was our 2nd result"
 echo "Test finished"
 ps -ef
 exit 0
