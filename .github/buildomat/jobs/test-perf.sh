@@ -37,6 +37,8 @@ export BINDIR=/var/tmp/bins
 banner perf
 pfexec plimit -n 9123456 $$
 
+echo "Going to call exit 1 now"
+exit 1
 ptime -m bash "$input/scripts/test_perf.sh"
 echo "Test finished"
 ps -ef
