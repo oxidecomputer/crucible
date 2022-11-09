@@ -30,12 +30,14 @@ print_err() {
 # $1 = mode (read or write)
 # $2 = request size in blocks
 # $3 = pipeline length
+# $4 = generation number for the upstairs/downstairs.
 # runs for a maximum time specified by the use of timeout in the function
 # prints the average throughput in bytes/second to stdout.
 crudd_benchmark() {
   local mode="$1"
   local req_size="$2"
   local pipeline_len="$3"
+  local generation_number="$4"
 
   local start_time="$(date '+%s')"
 
@@ -49,7 +51,7 @@ crudd_benchmark() {
   timeout --signal=USR1 "$MAX_ITERATION_DURATION" \
     "$BINDIR/crudd" -t $DOWNSTAIRS_1 -t $DOWNSTAIRS_2 -t $DOWNSTAIRS_3 \
       -n $REGION_SIZE_BYTES -i "$req_size" -p "$pipeline_len" \
-      --benchmarking-mode "$BENCHMARK_RESULTS_TMPFILE" \
+      -g "$generation_number" --benchmarking-mode "$BENCHMARK_RESULTS_TMPFILE" \
       "$mode" \
       1>&2
 
@@ -124,27 +126,36 @@ perform_benchmarks_with_parameters() {
 
   local req_size="$1"
   local pipeline_len="$2"
+  local generation_number=1
 
   # test read speed before writing any data
-  local read_speed_uninit=$(crudd_benchmark read "$req_size" "$pipeline_len")
+  local read_speed_uninit=$(crudd_benchmark read "$req_size" "$pipeline_len" \
+    "$generation_number")
+  (( generation_number += 1 ))
 
   # test write speed before writing any data (first write)
-  local write_speed_uninit=$(crudd_benchmark write "$req_size" "$pipeline_len")
+  local write_speed_uninit=$(crudd_benchmark write "$req_size" "$pipeline_len" \
+    "$generation_number")
+  (( generation_number += 1 ))
 
   # make sure the entire region is written
   # we use a close to optimal write pattern to make this quick regardless of
   # the benchmark we're running, since we're not timing it out
   "$BINDIR/crudd" -t $DOWNSTAIRS_1 -t $DOWNSTAIRS_2 -t $DOWNSTAIRS_3 \
-    -n $REGION_SIZE_BYTES -i 32768 -p 4 \
+    -n $REGION_SIZE_BYTES -i 32768 -p 4 -g "$generation_number" \
     write \
     < /dev/zero 1>&2
+  (( generation_number += 1 ))
 
 
   # test read speed after writing data
-  local read_speed_init=$(crudd_benchmark read "$req_size" "$pipeline_len")
+  local read_speed_init=$(crudd_benchmark read "$req_size" "$pipeline_len" \
+    "$generation_number")
+  (( generation_number += 1 ))
 
   # test write speed after writing data
-  local write_speed_init=$(crudd_benchmark write "$req_size" "$pipeline_len")
+  local write_speed_init=$(crudd_benchmark write "$req_size" "$pipeline_len" \
+    "$generation_number")
 
   # shut it down
   stop_downstairs

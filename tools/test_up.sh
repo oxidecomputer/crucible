@@ -129,52 +129,71 @@ fi
 echo ""
 echo "Begin tests, output goes to ${log_prefix}_out.txt"
 res=0
-test_list="span big dep deactivate balloon"
+gen=1
+# Keep deactivate test last, and add 15 to the generation number so
+# tests that follow will be able to activate.
+test_list="span big dep balloon deactivate"
 for tt in ${test_list}; do
-    echo "Running test: $tt"
-    echo "$ct" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt"
-    if ! "$ct" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    # Add a blank line in the output file as all the output follows.
+    echo "" >> "${log_prefix}_out.txt"
+    echo "Running test: $tt" | tee -a "${log_prefix}_out.txt"
+    echo "Running test: $tt" >> "${log_prefix}_out.txt"
+    echo "$ct" "$tt" -g "$gen" -q "${args[@]}" >> "${log_prefix}_out.txt"
+    if ! "$ct" "$tt" -g "$gen" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
         (( res += 1 ))
         echo ""
         echo "Failed crutest $tt test"
+        echo "Failed crutest $tt test" >> "${log_prefix}_out.txt"
         echo "Failed crutest $tt test" >> "$fail_log"
         echo ""
     else
         echo "Completed test: $tt"
     fi
+    (( gen += 1 ))
 done
+(( gen += 10 ))
 
-echo "Running hammer"
-if ! time "$ch" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+echo "" >> "${log_prefix}_out.txt"
+echo "Running hammer" | tee -a "${log_prefix}_out.txt"
+if ! "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     echo "Failed hammer test"
     echo "Failed hammer test" >> "$fail_log"
     (( res += 1 ))
 fi
+# The hammer tests also updates the generation number.
+(( gen += 10 ))
 
 # Repair test
 # This one goes last because it modified the args variable.
 # We also test the --verify-* args here as well.
-echo "Run repair tests"
+echo "" >> "${log_prefix}_out.txt"
+echo "Run repair tests" | tee -a "${log_prefix}_out.txt"
+
 args+=( --verify-out "${testdir}/verify_file" )
-echo "$ct" fill -q "${args[@]}"
-if ! "$ct" fill -q "${args[@]}"; then
+echo "$ct" fill -g "$gen" -q "${args[@]}" | tee -a "${log_prefix}_out.txt"
+
+if ! "$ct" fill -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
-    echo "Failed setup repair test"
+    echo "Failed setup repair test" | tee -a "${log_prefix}_out.txt"
+
     echo "Failed setup repair test" >> "$fail_log"
     echo
 else
-    echo "Repair setup passed"
-fi
+    echo "Repair setup passed" | tee -a "${log_prefix}_out.txt"
 
-echo "Copy the $port file"
+fi
+(( gen += 1 ))
+
+echo "Copy the $port file" | tee -a "${log_prefix}_out.txt"
+
 
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
 args+=( --verify-in "${testdir}/verify_file" )
-echo "$ct" repair -q "${args[@]}"
-if ! "$ct" repair -q "${args[@]}"; then
+echo "$ct" repair -g "$gen" -q "${args[@]}"
+if ! "$ct" repair -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
@@ -183,6 +202,7 @@ if ! "$ct" repair -q "${args[@]}"; then
 else
     echo "Repair part 1 passed"
 fi
+(( gen += 1 ))
 
 echo ""
 
@@ -242,8 +262,8 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" -q "${args[@]}"
-if ! "$ct" verify -q "${args[@]}"; then
+echo "$ct" "$tt" -g "$gen" -q "${args[@]}"
+if ! "$ct" verify -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
@@ -252,6 +272,7 @@ if ! "$ct" verify -q "${args[@]}"; then
 else
     echo "Repair part 2 passed"
 fi
+(( gen += 1 ))
 
 # Now that repair has finished, make sure the dump command
 # does not detect any errors
@@ -309,6 +330,7 @@ echo ""
 if [[ $res != 0 ]]; then
     echo "$res Tests have failed"
     cat "$fail_log"
+    echo "check output in ${log_prefix}_out.txt"
 else
     echo "All Tests have passed"
 fi

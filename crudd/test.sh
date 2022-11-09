@@ -31,8 +31,8 @@ tmpbytes=$(( 512 * 1024 * 1024))
 dd if=/dev/urandom of="$tmpfile" bs=4M count=$((tmpbytes / ( 4 * 1024 * 1024 ) ))
 
 # test aligned write/read
-cat "$tmpfile" | cargo run --release -- -b 0 -n $tmpbytes -t "$1" -t "$2" -t "$3" write
-cargo run --release -- -b 0 -n "$tmpbytes" -t "$1" -t "$2" -t "$3" 3>"$tmpout" read
+cat "$tmpfile" | cargo run --release -- -g 1 -b 0 -n $tmpbytes -t "$1" -t "$2" -t "$3" write
+cargo run --release -- -g 2 -b 0 -n "$tmpbytes" -t "$1" -t "$2" -t "$3" 3>"$tmpout" read
 
 if diff -q "$tmpfile" "$tmpout"; then
   echo "Success: aligned read/write"
@@ -43,8 +43,8 @@ fi
 
 # misaligned write/read
 dd if=/dev/urandom of="$tmpfile" bs=4M count=$((tmpbytes / ( 4 * 1024 * 1024 ) ))
-cat "$tmpfile" | cargo run --release -- -b 29 -n $tmpbytes -t "$1" -t "$2" -t "$3" write
-cargo run --release -- -b 29 -n "$tmpbytes" -t "$1" -t "$2" -t "$3" 3>"$tmpout" read
+cat "$tmpfile" | cargo run --release -- -g 3 -b 29 -n $tmpbytes -t "$1" -t "$2" -t "$3" write
+cargo run --release -- -g 4 -b 29 -n "$tmpbytes" -t "$1" -t "$2" -t "$3" 3>"$tmpout" read
 
 if diff -q "$tmpfile" "$tmpout"; then
   echo "Success: misaligned read/write"
@@ -55,8 +55,8 @@ fi
 # nano-read/write
 nanosize=39
 dd if=/dev/urandom of="$tmpfile" bs=$nanosize count=1
-cat "$tmpfile" | cargo run --release -- -b 647 -n $nanosize -t "$1" -t "$2" -t "$3" write
-cargo run --release -- -b 647 -n $nanosize -t "$1" -t "$2" -t "$3" 3>"$tmpout" read
+cat "$tmpfile" | cargo run --release -- -g 5 -b 647 -n $nanosize -t "$1" -t "$2" -t "$3" write
+cargo run --release -- -g 6 -b 647 -n $nanosize -t "$1" -t "$2" -t "$3" 3>"$tmpout" read
 
 if diff -q "$tmpfile" "$tmpout"; then
   echo "Success: nano read/write"
