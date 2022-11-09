@@ -38,19 +38,19 @@ export BINDIR=/var/tmp/bins
 banner perf
 pfexec plimit -n 9123456 $$
 
-echo "Setup debug logging"
-mkdir /tmp/debug
-prstat -d d -mLc 1 > /tmp/debug/prstat.txt &
-iostat -T d -xn 1 > /tmp/debug/iostat.txt &
-mpstat -T d 1 > /tmp/debug/mpstat.txt &
-vmstat -T d -p 1 >/tmp/debug/paging.txt &
-
-disown -a
-echo "Start self timeout"
+echo "Setup self timeout"
 jobpid=$$; (sleep $(( 2 * 60 )); ps -ef; kill $jobpid) &
 
+echo "Setup debug logging"
+mkdir /tmp/debug
+prstat -d d -mLc 1 </dev/null > /tmp/debug/prstat.txt 2>&1 & disown
+# iostat -T d -xn 1 > /tmp/debug/iostat.txt &
+# mpstat -T d 1 > /tmp/debug/mpstat.txt &
+# vmstat -T d -p 1 >/tmp/debug/paging.txt &
+
+disown -a
 echo "Now try with bash prefix"
-bash $input/scripts/test_perf.sh
+bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
 echo "$? was our 2nd result"
 echo "Test finished"
 ps -ef
