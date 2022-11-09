@@ -56,12 +56,12 @@ ptime -m cargo test --verbose
 
 banner output
 mkdir -p /work/rbins
-for t in crucible-downstairs crucible-hammer crutest dsc; do
+for t in crucible-downstairs crucible-hammer crutest dsc crudd; do
 	gzip < "target/release/$t" > "/work/rbins/$t.gz"
 done
 
 mkdir -p /work/scripts
-for s in tools/test_perf.sh; do
+for s in tools/test_perf.sh tools/crudd-speed-battery.sh; do
 	cp "$s" /work/scripts/
 done
 
@@ -88,12 +88,14 @@ tar cavf out/crucible-nightly.tar.gz \
     target/release/crucible-downstairs \
     target/release/crucible-hammer \
     target/release/dsc \
+    target/release/crudd \
     tools/downstairs_daemon.sh \
     tools/hammer_loop.sh \
     tools/test_reconnect.sh \
     tools/test_repair.sh \
     tools/test_restart_repair.sh \
-    tools/test_nightly.sh
+    tools/test_nightly.sh \
+    tools/crudd-speed-battery.sh
 
 banner copy
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz

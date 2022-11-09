@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Volume {
     uuid: Uuid,
 
@@ -24,9 +24,10 @@ pub struct Volume {
      * Each sub volume should be the same block size (unit is bytes)
      */
     block_size: u64,
-    count: AtomicU32,
+    count: Arc<AtomicU32>,
 }
 
+#[derive(Clone)]
 pub struct SubVolume {
     lba_range: Range<u64>,
     block_io: Arc<dyn BlockIO + Send + Sync>,
@@ -48,7 +49,7 @@ impl Volume {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -83,7 +84,7 @@ impl Volume {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -185,6 +186,11 @@ impl Volume {
         Ok(())
     }
 
+    // Check to see if this volume has a read only parent
+    pub fn has_read_only_parent(&self) -> bool {
+        self.read_only_parent.is_some()
+    }
+
     // Imagine three sub volumes:
     //
     //  0 -> Range(0, a)
@@ -253,17 +259,42 @@ impl Volume {
     // Still TODO: here
     // If there is an error, how to we tell Nexus?
     // If we finish the scrub, how do we tell Nexus?
-    pub async fn scrub(&self, log: &Logger) -> Result<(), CrucibleError> {
+    pub async fn scrub(
+        &self,
+        log: &Logger,
+        start_delay: Option<u64>,
+        scrub_pause: Option<u64>,
+    ) -> Result<(), CrucibleError> {
         info!(log, "Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
         if let Some(ref read_only_parent) = self.read_only_parent {
+            // If requested, setup the pause between IOs as well as an initial
+            // waiting period before the scrubber starts.
+            let pause_millis = if let Some(scrub_pause) = scrub_pause {
+                scrub_pause
+            } else {
+                0
+            };
+
+            if let Some(start_delay) = start_delay {
+                info!(
+                    log,
+                    "Scrub pause {} seconds before starting", start_delay
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    start_delay,
+                ))
+                .await;
+            }
+
             let ts = read_only_parent.total_size().await?;
             let bs = read_only_parent.get_block_size().await? as usize;
 
             info!(log, "Scrub for {} begins", self.uuid);
             info!(log, "Scrub with total_size:{:?} block_size:{:?}", ts, bs);
             let scrub_start = Instant::now();
+
             let start = read_only_parent.lba_range.start;
             let end = read_only_parent.lba_range.end;
 
@@ -271,14 +302,15 @@ impl Volume {
             // 256 KiB IOs during the scrub. Here we select how many blocks
             // this is.
             // TODO: Determine if this value should be adjusted.
-            let mut block_count = 262144 / bs;
+            let mut block_count = 131072 / bs;
             info!(
                 log,
-                "Scrub from block {:?} to {:?} in ({}) {:?} size IOs",
+                "Scrubs from block {:?} to {:?} in ({}) {:?} size IOs pm:{}",
                 start,
                 end,
                 block_count,
                 block_count * bs,
+                pause_millis,
             );
 
             let mut retries = 0;
@@ -351,15 +383,21 @@ impl Volume {
                     );
                     showat += showstep;
                 }
+                // Pause just a bit between IOs so we don't starve the guest
+                // TODO: More benchmarking to find a good value here.
+                tokio::time::sleep(Duration::from_millis(pause_millis)).await;
             }
 
             let total_time = scrub_start.elapsed();
             info!(
                 log,
-                "Scrub {} done in {} seconds. Retries:{}",
+                "Scrub {} done in {} seconds. Retries:{} scrub_size:{} size:{} pause_milli:{}",
                 self.uuid,
                 total_time.as_secs(),
                 retries,
+                block_count * bs,
+                end - start,
+                pause_millis,
             );
             self.flush(None).await?;
         } else {
@@ -1049,7 +1087,7 @@ mod test {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         assert_eq!(volume.total_size().await?, 512 * 1024);
@@ -1100,7 +1138,7 @@ mod test {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         // volume:       |--------|--------|--------|
@@ -1168,7 +1206,7 @@ mod test {
             read_only_parent: None,
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_none());
@@ -1200,7 +1238,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: 512,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_some());
@@ -1570,8 +1608,11 @@ mod test {
         // the total volume size is 4096b
 
         let mut volume = Volume::new(BLOCK_SIZE);
+        assert!(!volume.has_read_only_parent());
         volume.add_subvolume(disk).await?;
+        assert!(!volume.has_read_only_parent());
         volume.add_read_only_parent(parent.clone()).await?;
+        assert!(volume.has_read_only_parent());
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume, 0x00).await?;
 
@@ -1766,7 +1807,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         volume.activate(0).await?;
@@ -1805,7 +1846,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         volume.activate(0).await.unwrap();
@@ -1839,7 +1880,7 @@ mod test {
             })),
             scrub_point: Arc::new(AtomicU64::new(0)),
             block_size: BLOCK_SIZE,
-            count: AtomicU32::new(0),
+            count: Arc::new(AtomicU32::new(0)),
         };
 
         volume.activate(0).await.unwrap();

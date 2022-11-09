@@ -1830,6 +1830,7 @@ impl Region {
         // snapshots currently only work with ZFS
         if cfg!(feature = "zfs_snapshot") {
             if let Some(snapshot_details) = snapshot_details {
+                info!(self.log, "Flush and snap request received");
                 // Check if the path exists, return an error if it does
                 let test_path = format!(
                     "{}/.zfs/snapshot/{}",
@@ -1885,8 +1886,9 @@ impl Region {
                     );
                 }
             }
+        } else if snapshot_details.is_some() {
+            error!(self.log, "Snapshot request received on unsupported binary");
         }
-
         Ok(())
     }
 }
