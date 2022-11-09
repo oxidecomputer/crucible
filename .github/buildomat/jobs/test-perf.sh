@@ -6,6 +6,7 @@
 #: output_rules = [
 #:  "/tmp/perf*.csv",
 #:  "/tmp/perfout.txt",
+#:  "/tmp/debug/*.txt",
 #: ]
 #: skip_clone = true
 #:
@@ -36,6 +37,16 @@ export BINDIR=/var/tmp/bins
 
 banner perf
 pfexec plimit -n 9123456 $$
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt &
+mpstat -T d 1 > /tmp/debug/mpstat.txt &
+vmstat -T d -p 1 >/tmp/debug/paging.txt &
+
+echo "Start self timeout"
+jobpid=$$; (sleep $(( 2 * 60 )); ps -ef; kill $jobpid) &
 
 echo "Now try with bash prefix"
 bash $input/scripts/test_perf.sh

@@ -43,12 +43,7 @@ function perf_round() {
     fi
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
     echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    set +o errexit
-    timeout 200 "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    if [[ $? -ne 0 ]]; then
-        echo "perf test result was bad"
-        exit 1
-    fi
+    "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     set +o errexit
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
