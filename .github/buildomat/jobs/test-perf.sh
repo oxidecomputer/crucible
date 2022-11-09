@@ -39,14 +39,14 @@ banner perf
 pfexec plimit -n 9123456 $$
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 2 * 60 )); ps -ef; kill $jobpid) &
+jobpid=$$; (sleep $(( 25 * 60 )); ps -ef; kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
 prstat -d d -mLc 1 </dev/null > /tmp/debug/prstat.txt 2>&1 & disown
-# iostat -T d -xn 1 > /tmp/debug/iostat.txt &
-# mpstat -T d 1 > /tmp/debug/mpstat.txt &
-# vmstat -T d -p 1 >/tmp/debug/paging.txt &
+iostat -T d -xn 1 </dev/null > /tmp/debug/iostat.txt 2>&1 & disown
+mpstat -T d 1 </dev/null > /tmp/debug/mpstat.txt 2>&1 & disown
+vmstat -T d -p 1 </dev/null >/tmp/debug/paging.txt 2>&1 & disown
 
 disown -a
 echo "Now try with bash prefix"
