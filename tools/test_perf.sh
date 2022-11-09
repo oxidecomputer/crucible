@@ -43,7 +43,7 @@ function perf_round() {
     fi
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
     echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
+    timeout 900 "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
     "$dsc" cmd shutdown
@@ -74,7 +74,7 @@ for bin in $dsc $ct $downstairs; do
     fi
 done
 
-echo "Perf test begins at $(date)" > "$outfile"
+echo "Perf test (with timeout) begins at $(date)" > "$outfile"
 
 #            ES   EC
 perf_round  4096 6400

@@ -77,7 +77,7 @@ use async_trait::async_trait;
 /// between flushes are performed in.
 #[async_trait]
 pub trait BlockIO: Sync {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
+    async fn activate(&self) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
@@ -170,15 +170,12 @@ pub trait BlockIO: Sync {
     }
 
     /// Activate if not active.
-    async fn conditional_activate(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
+    async fn conditional_activate(&self) -> Result<(), CrucibleError> {
         if self.query_is_active().await? {
             return Ok(());
         }
 
-        self.activate(gen).await
+        self.activate().await
     }
 }
 
@@ -1057,6 +1054,10 @@ where
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
                         }
+                        info!(up.log, "[{}] downstairs client at {} has UUID {}",
+                            up_coms.client_id, target, region_def.uuid(),
+                        );
+
                         up.add_ds_region(up_coms.client_id, region_def).await?;
 
                         let my_state = {
@@ -6413,7 +6414,8 @@ pub enum BlockOp {
     Flush {
         snapshot_details: Option<SnapshotDetails>,
     },
-    GoActive {
+    GoActive,
+    GoActiveWithGen {
         gen: u64,
     },
     Deactivate,
@@ -7068,15 +7070,26 @@ impl Guest {
         self.send(BlockOp::Commit).await.wait().await.unwrap();
         Ok(())
     }
+    // Maybe this can just be a guest specific thing, not a BlockIO
+    pub async fn activate_with_gen(
+        &self,
+        gen: u64,
+    ) -> Result<(), CrucibleError> {
+        let waiter = self.send(BlockOp::GoActiveWithGen { gen }).await;
+        println!("The guest has requested activation with gen:{}", gen);
+        waiter.wait().await?;
+        println!("The guest has finished waiting for activation with:{}", gen);
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl BlockIO for Guest {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActive { gen }).await;
-        println!("The guest has requested activation with gen:{}", gen);
+    async fn activate(&self) -> Result<(), CrucibleError> {
+        let waiter = self.send(BlockOp::GoActive).await;
+        println!("The guest has requested activation");
         waiter.wait().await?;
-        println!("The guest has finished waiting for activation with:{}", gen);
+        println!("The guest has finished waiting for activation");
         Ok(())
     }
 
@@ -7392,7 +7405,7 @@ async fn process_new_io(
          * These three options can be handled by this task directly,
          * and don't require the upstairs to be fully online.
          */
-        BlockOp::GoActive { gen } => {
+        BlockOp::GoActive => {
             /*
              * If we are deactivating, then reject this re-connect and
              * let the deactivate finish.
@@ -7400,16 +7413,21 @@ async fn process_new_io(
             if let Err(_e) = up.set_active_request(req).await {
                 return;
             }
-            /*
-             * We may redo how the generation number works as more parts
-             * that use it are built.  In the failed migration case an
-             * upstairs will have to recover and either self update the
-             * generation number, or get the new one from propolis.
-             */
-
             // Put the req waiter into the upstairs so we have a hook on
             // who to notify when the answer comes back.
             // We must do this before we tell all the tasks for downstairs.
+            let gen: u64 = *up.generation.lock().await;
+            send_active(dst, gen);
+        }
+        BlockOp::GoActiveWithGen { gen } => {
+            /*
+             * If we are deactivating, then reject this re-connect and
+             * let the deactivate finish.
+             */
+            if let Err(_e) = up.set_active_request(req).await {
+                return;
+            }
+            // ZZZ Can two IOs collide and compete for generation?
             up.set_generation(gen).await;
             send_active(dst, gen);
         }

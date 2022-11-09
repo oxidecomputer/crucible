@@ -537,13 +537,13 @@ async fn main() -> Result<()> {
     }
 
     if opt.retry_activate {
-        while let Err(e) = guest.activate(opt.gen).await {
+        while let Err(e) = guest.activate_with_gen(opt.gen).await {
             println!("Activate returns: {:#}  Retrying", e);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
         println!("Activate successful");
     } else {
-        guest.activate(opt.gen).await?;
+        guest.activate_with_gen(opt.gen).await?;
     }
 
     println!("Wait for a query_work_queue command to finish before sending IO");
@@ -1756,7 +1756,7 @@ async fn deactivate_workload(
         );
         let mut retry = 1;
         gen += 1;
-        while let Err(e) = guest.activate(gen).await {
+        while let Err(e) = guest.activate_with_gen(gen).await {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
                 c,

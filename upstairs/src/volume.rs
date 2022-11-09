@@ -138,7 +138,7 @@ impl Volume {
         let _join_handle =
             up_main(opts, gen, guest_clone, producer_registry).await?;
 
-        guest.activate(gen).await?;
+        guest.activate().await?;
 
         self.add_subvolume(guest).await
     }
@@ -471,9 +471,9 @@ impl Volume {
 
 #[async_trait]
 impl BlockIO for Volume {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.conditional_activate(gen).await?;
+            sub_volume.conditional_activate().await?;
 
             let sub_volume_computed_size = self.block_size
                 * (sub_volume.lba_range.end - sub_volume.lba_range.start);
@@ -484,7 +484,7 @@ impl BlockIO for Volume {
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.conditional_activate(gen).await?;
+            read_only_parent.conditional_activate().await?;
         }
 
         Ok(())
@@ -854,8 +854,8 @@ impl SubVolume {
 
 #[async_trait]
 impl BlockIO for SubVolume {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
-        self.block_io.activate(gen).await
+    async fn activate(&self) -> Result<(), CrucibleError> {
+        self.block_io.activate().await
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {
@@ -1350,7 +1350,7 @@ mod test {
         mut volume: Volume,
         read_only_parent_init_value: u8,
     ) -> Result<()> {
-        volume.activate(0).await?;
+        volume.activate().await?;
         assert_eq!(volume.get_block_size().await?, 512);
         assert_eq!(block_size, 512);
         assert_eq!(volume.total_size().await?, 4096);
@@ -1785,7 +1785,7 @@ mod test {
         let parent =
             Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
-        parent.activate(0).await?;
+        parent.activate().await?;
 
         // Write 0x80 into parent
         parent
@@ -1810,7 +1810,7 @@ mod test {
             count: Arc::new(AtomicU32::new(0)),
         };
 
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         assert_eq!(volume.total_size().await?, 2048);
 
@@ -1849,7 +1849,7 @@ mod test {
             count: Arc::new(AtomicU32::new(0)),
         };
 
-        volume.activate(0).await.unwrap();
+        volume.activate().await.unwrap();
 
         // Write 0x80 into volume - this will error
         let res = volume
@@ -1883,7 +1883,7 @@ mod test {
             count: Arc::new(AtomicU32::new(0)),
         };
 
-        volume.activate(0).await.unwrap();
+        volume.activate().await.unwrap();
 
         // Write 0x80 into volume - this will error
         let res = volume
@@ -2126,7 +2126,7 @@ mod test {
 
         volume.add_read_only_parent(parent).await?;
 
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         assert_eq!(volume.total_size().await?, block_size as u64 * 10);
 
@@ -2406,7 +2406,7 @@ mod test {
         ));
 
         volume.add_read_only_parent(parent.clone()).await?;
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         // The total blocks in our volume
         let volume_blocks = volume.total_size().await? / block_size as u64;
