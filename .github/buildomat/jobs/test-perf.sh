@@ -45,6 +45,7 @@ iostat -T d -xn 1 > /tmp/debug/iostat.txt &
 mpstat -T d 1 > /tmp/debug/mpstat.txt &
 vmstat -T d -p 1 >/tmp/debug/paging.txt &
 
+disown -a
 echo "Start self timeout"
 jobpid=$$; (sleep $(( 2 * 60 )); ps -ef; kill $jobpid) &
 
