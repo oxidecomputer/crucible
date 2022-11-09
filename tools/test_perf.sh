@@ -43,8 +43,7 @@ function perf_round() {
     fi
     echo "IOPs for es=$es ec=$ec" >> "$outfile"
     echo "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv | tee -a "$outfile"
-    set +o errexit
+    "$ct" perf $args --perf-out /tmp/perf-ES-"$es"-EC-"$ec".csv 2>&1 | tee -a "$outfile"
     echo "" >> "$outfile"
     echo Perf test completed, stop all downstairs
     "$dsc" cmd shutdown
