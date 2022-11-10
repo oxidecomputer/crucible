@@ -4,9 +4,9 @@
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
-#:  "/tmp/perf*.csv",
+#:  "=/tmp/perf*.csv",
 #:  "/tmp/perfout.txt",
-#:  "/tmp/debug/*.txt",
+#:  "%/tmp/debug/*.txt",
 #: ]
 #: skip_clone = true
 #:
@@ -19,11 +19,6 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
-echo "input rbins dir contains:"
-ls -ltr "$input"/rbins || true
-echo "input scripts dir contains:"
-ls -ltr "$input"/scripts || true
-
 banner unpack
 mkdir -p /var/tmp/bins
 for t in "$input/rbins/"*.gz; do
@@ -35,11 +30,11 @@ done
 
 export BINDIR=/var/tmp/bins
 
-banner perf
+banner setup
 pfexec plimit -n 9123456 $$
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 240 * 60 )); ps -ef; df -h;kill $jobpid) &
+jobpid=$$; (sleep $(( 240 * 60 )); ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
