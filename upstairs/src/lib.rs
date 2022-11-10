@@ -756,14 +756,6 @@ where
             r = up_coms.ds_active_rx.changed(),
                 if negotiated == 1 && !self_promotion =>
             {
-                /*
-                 * The activating guest sends us the generation number.
-                 * TODO: Update the promote to active message to send
-                 * the generation number along with the UUID for the
-                 * downstairs to validate. Or, possibly not. The generation
-                 * number the upstairs has is what it should use going
-                 * forward.  What the downstairs has should not be higher.
-                 */
                 match r {
                     Ok(_) => {
                         let gen = up_coms.ds_active_rx.borrow();
@@ -771,8 +763,7 @@ where
                             up_coms.client_id, *gen);
                     }
                     Err(e) => {
-                        // XXX bail? panic?
-                        warn!(up.log, "[{}] received activate error {:?}",
+                        error!(up.log, "[{}] received activate error {:?}",
                             up_coms.client_id, e);
                     }
                 }
@@ -958,9 +949,33 @@ where
                                 },
                             );
 
-                            up.ds_transition(up_coms.client_id, DsState::New).await;
-                            up.set_inactive(CrucibleError::UuidMismatch).await;
-                            return Err(CrucibleError::UuidMismatch.into());
+                            up.ds_transition(
+                                up_coms.client_id, DsState::New
+                            ).await;
+                            if !match_gen {
+                                let gen_error = format!(
+                                    "Generation requested:{} found:{}",
+                                    gen, up.get_generation().await
+                                );
+                                up.set_inactive(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        gen_error.clone()
+                                    )
+                                )
+                                .await;
+                                return Err(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        gen_error
+                                    )
+                                    .into()
+                                );
+                            } else {
+                                up.set_inactive(
+                                    CrucibleError::UuidMismatch
+                                )
+                                .await;
+                                return Err(CrucibleError::UuidMismatch.into());
+                            }
                         }
 
                         if negotiated != 1 {
@@ -5065,7 +5080,7 @@ impl Upstairs {
         } else {
             info!(
                 self.log,
-                "Generation requested: {} > found:{}", requested_gen, max_gen,
+                "Generation requested: {} >= found:{}", requested_gen, max_gen,
             );
         }
 
@@ -7427,7 +7442,6 @@ async fn process_new_io(
             if let Err(_e) = up.set_active_request(req).await {
                 return;
             }
-            // ZZZ Can two IOs collide and compete for generation?
             up.set_generation(gen).await;
             send_active(dst, gen);
         }
