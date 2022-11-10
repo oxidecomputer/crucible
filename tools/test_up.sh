@@ -5,12 +5,6 @@
 # This should eventually either move to some common test framework, or be
 # thrown away.
 
-if [[ ${#} -ne 1 ]];
-then
-    echo "specify either 'unencrypted' or 'encrypted' string"
-    exit 1
-fi
-
 set -o pipefail
 SECONDS=0
 
@@ -50,7 +44,7 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
-# Store log files we want to keep in /tmp/*.txt as this is what
+# Store log files we want to keep in /tmp/test_up/.txt as this is what
 # buildomat will look for and archive
 test_output_dir="/tmp/test_up"
 rm -rf ${test_output_dir} 2> /dev/null
@@ -62,6 +56,24 @@ rm -f "$fail_log"
 
 args=()
 dsc_args=()
+dsc_create_args=()
+dump_args=()
+
+function usage {
+    echo "Usage: $0 [-N] encrypted|unencrypted"
+    echo "N:  Don't dump color output"
+    echo "    encrypted or unencrypted must be provided"
+    exit 1
+}
+
+while getopts 'N' opt; do
+    case "$opt" in
+        N) echo "Turn off color for downstairs dump"
+            dump_args+=("--no-color")
+            shift
+            ;;
+    esac
+done
 
 case ${1} in
     "unencrypted")
@@ -70,22 +82,19 @@ case ${1} in
         upstairs_key=$(openssl rand -base64 32)
         echo "Upstairs using key: $upstairs_key"
         args+=( --key "$upstairs_key" )
-        dsc_args+=( --encrypted )
+        dsc_create_args+=( --encrypted )
         ;;
     *)
-        echo "Usage: $0 encrypted|unencrypted"
-        echo " encrypted or unencrypted are the only valid choices"
-        exit 1
+        usage
         ;;
 esac
 
-echo "Creating and starting three downstairs"
 dsc_output_dir="${test_output_dir}/dsc"
 mkdir -p ${dsc_output_dir}
 dsc_output="${test_output_dir}/dsc-out.txt"
 
-dsc_args+=( --cleanup --create )
-dsc_args+=( --extent-size 10 --extent-count 5 )
+dsc_create_args+=( --cleanup )
+dsc_create_args+=( --extent-size 10 --extent-count 5 )
 dsc_args+=( --output-dir "$dsc_output_dir" )
 dsc_args+=( --ds-bin "$cds" )
 
@@ -100,11 +109,17 @@ done
 
 dsc_args+=( --region-dir "$testdir" )
 echo "dsc output goes to $dsc_output"
-echo "${dsc}" start "${dsc_args[@]}" > "$dsc_output"
+
+echo "Creating three downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" "${dsc_args[@]}" > "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" "${dsc_args[@]}" >> "$dsc_output" 2>&1
+
+echo "Starting three downstairs"
+echo "${dsc}" start "${dsc_args[@]}" >> "$dsc_output"
 "${dsc}" start "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
 dsc_pid=$!
 
-sleep 2
+sleep 5
 if ! pgrep -P $dsc_pid > /dev/null; then
     echo "Gosh diddly darn it, dsc at $dsc_pid did not start"
     echo downstairs:
@@ -242,7 +257,6 @@ fi
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
 # The dump args look different than other downstairs commands
-dump_args=()
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
@@ -274,14 +288,8 @@ else
 fi
 (( gen += 1 ))
 
-# Now that repair has finished, make sure the dump command
-# does not detect any errors
-dump_args=()
-for (( i = 0; i < 30; i += 10 )); do
-    (( port = port_base + i ))
-    dir="${testdir}/$port"
-    dump_args+=( -d "$dir" )
-done
+# Now that repair has finished, make sure the dump command does not detect
+# any errors
 echo "$cds" dump "${dump_args[@]}"
 if ! "$cds" dump "${dump_args[@]}"; then
     (( res += 1 ))
