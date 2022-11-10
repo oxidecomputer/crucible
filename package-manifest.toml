@@ -12,3 +12,12 @@ to = "/opt/oxide/crucible/bin/downstairs_method_script.sh"
 [[package.crucible.paths]]
 from = "agent/agent_method_script.sh"
 to = "/opt/oxide/crucible/bin/agent_method_script.sh"
+
+[package.crucible-pantry]
+rust.binary_names = ["crucible-pantry"]
+rust.release = true
+service_name = "crucible-pantry"
+zone = true
+[[package.crucible-pantry.paths]]
+from = "pantry/smf"
+to = "/var/svc/manifest/site/crucible-pantry"

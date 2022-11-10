@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::io::FromRawFd;
 use std::sync::Arc;
@@ -10,6 +10,10 @@ use std::{cmp, io};
 
 use anyhow::{bail, Result};
 use clap::Parser;
+use futures::stream::StreamExt;
+use signal_hook::consts::signal::*;
+use signal_hook_tokio::Signals;
+use tokio::sync::mpsc;
 
 use crucible::*;
 
@@ -73,6 +77,16 @@ pub struct Opt {
     #[clap(short, long, default_value = "2", action)]
     pipeline_length: usize,
 
+    /// Puts crudd into benchmarking mode. In benchmarking mode, crudd will
+    /// exit early if it receives SIGUSR1. It will do its best to cleanly exit,
+    /// but will not make any guarantees about the state of data it has sent
+    /// downstairs. It will write out how many bytes were processed to the
+    /// filepath provided as an argument to this function. It will
+    /// use /dev/zero as source and /dev/null as a sink, instead of any
+    /// user-provided file source or sink.
+    #[clap(long, action)]
+    benchmarking_mode: Option<String>,
+
     #[clap(subcommand)]
     subcommand: CruddAct,
 }
@@ -88,8 +102,15 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
+async fn cmd_read<T: BlockIO>(
+    opt: &Opt,
+    crucible: Arc<T>,
+    mut early_shutdown: mpsc::Receiver<()>,
+) -> Result<usize> {
     let volume_size = crucible.total_size().await?;
+
+    // Count of all bytes we've read from the downstairs
+    let mut total_bytes_read = 0;
 
     // If num_bytes is None, we take that to mean "read to the end of the
     // region"
@@ -100,7 +121,7 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
 
     // A quick check- if we're supposed to read 0 bytes we should just stop now
     if num_bytes == 0 {
-        return Ok(());
+        return Ok(0);
     }
 
     let native_block_size = crucible.get_block_size().await?;
@@ -113,11 +134,17 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         );
     }
 
-    // Right now we just use fd3 as a file. This relies on the user actually
-    // providing an FD3 in their shell. We should do something better than
-    // this later, but for now im doing this because crucible internals are
-    // writing to stdout right now.
-    let mut output = unsafe { File::from_raw_fd(3) };
+    let mut output: Box<dyn Write> = if opt.benchmarking_mode.is_some() {
+        Box::new(io::sink())
+    } else {
+        // Right now we just use fd3 as a file. This relies on the user actually
+        // providing an FD3 in their shell. We should do something better than
+        // this later, but for now im doing this because crucible internals are
+        // writing to stdout. TODO: maybe command line arg for output file
+        Box::new(BufWriter::new(unsafe { File::from_raw_fd(3) }))
+    };
+
+    // let mut output = BufWriter::new(output_file);
 
     // ring buffers
     // The only reason we have a dynamic pipeline length is because I'm
@@ -158,6 +185,7 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
             &bytes[offset_misalignment as usize
                 ..(offset_misalignment + alignment_bytes) as usize],
         )?;
+        total_bytes_read += alignment_bytes as usize;
     }
 
     // we need to account for bytes we just read for offset alignment
@@ -192,19 +220,20 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let w_future = crucible.read(offset, w_buf.clone());
         buffers.push_back(w_buf);
         futures.push_back(w_future);
+        total_bytes_read +=
+            (opt.iocmd_block_count * native_block_size) as usize;
 
-        // Once we have a full queue of futures, we can start blocking on them
-        // to access our data and drain them to `output`.
+        // If we have a queue of futures, drain the oldest one to output.
         if futures.len() == opt.pipeline_length {
-            crucible::join_all(futures).await?;
-            futures = VecDeque::with_capacity(opt.pipeline_length);
+            futures.pop_front().unwrap().await?;
+            let r_buf = buffers.pop_front().unwrap();
+            output.write_all(&r_buf.as_vec().await)?;
+        }
 
-            // drain the buffer to the output file
-            while !buffers.is_empty() {
-                // unwrapping is safe because of the length check
-                let r_buf = buffers.pop_front().unwrap();
-                output.write_all(&r_buf.as_vec().await)?;
-            }
+        if early_shutdown.try_recv().is_ok() {
+            eprintln!("shutting down early in response to SIGUSR1");
+            join_all(futures).await?;
+            return Ok(total_bytes_read);
         }
     }
 
@@ -231,10 +260,11 @@ async fn cmd_read<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, buffer.clone()).await?;
+        total_bytes_read += remainder as usize;
         output.write_all(&buffer.as_vec().await[0..remainder as usize])?;
     }
 
-    Ok(())
+    Ok(total_bytes_read)
 }
 
 // We need to run this at the end to handle the remainder bytes, but we also
@@ -298,12 +328,19 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
     futures.push_back(flush_future);
 
     // Wait for all the writes
-    crucible::join_all(futures).await?;
+    join_all(futures).await?;
 
     Ok(())
 }
 
-async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
+/// Returns the number of bytes written
+async fn cmd_write<T: BlockIO>(
+    opt: &Opt,
+    crucible: Arc<T>,
+    mut early_shutdown: mpsc::Receiver<()>,
+) -> Result<usize> {
+    let mut total_bytes_written = 0;
+
     // A lot of this is going to be repeat from cmd_read, but it is
     // subtly different to handle things like read-modify-write for partial
     // blocks.
@@ -318,7 +355,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
 
     // A quick check- if we're supposed to write 0 bytes we should just stop now
     if num_bytes == 0 {
-        return Ok(());
+        return Ok(0);
     }
 
     let native_block_size = crucible.get_block_size().await?;
@@ -331,7 +368,13 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
         );
     }
 
-    let mut input = io::stdin();
+    let mut input: Box<dyn Read> = if opt.benchmarking_mode.is_some() {
+        // Write a value that isn't zero, because some things special-case all
+        // zero data in this world. Value chosen by a fair dice roll ;)
+        Box::new(io::repeat(17u8))
+    } else {
+        Box::new(BufReader::new(io::stdin()))
+    };
 
     // ring buffers
     let mut futures = VecDeque::with_capacity(opt.pipeline_length);
@@ -363,13 +406,15 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
             &mut w_vec[offset_misalignment as usize
                 ..(offset_misalignment + alignment_bytes) as usize],
         )?;
+        total_bytes_written += bytes_read;
+
         let w_bytes = Bytes::from(w_vec);
 
         crucible.write(offset, w_bytes).await?;
 
         if bytes_read != alignment_bytes as usize {
             // underrun, exit early
-            return Ok(());
+            return Ok(total_bytes_written);
         }
     }
 
@@ -403,6 +448,7 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
             (opt.iocmd_block_count * native_block_size) as usize,
         );
         w_buf.resize(w_buf.capacity(), 0);
+
         let mut n_read = 0;
         while n_read < w_buf.capacity() {
             match input.read(&mut w_buf[n_read..])? {
@@ -412,9 +458,11 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
                 }
             }
         }
+        total_bytes_written += n_read;
+
         if n_read < w_buf.capacity() {
             eprintln!("n_read was {}, returning early", n_read);
-            return write_remainder_and_finalize(
+            write_remainder_and_finalize(
                 &crucible,
                 w_buf,
                 offset,
@@ -422,18 +470,23 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
                 native_block_size,
                 futures,
             )
-            .await;
+            .await?;
+            return Ok(total_bytes_written);
         } else {
-            eprintln!("writing full iocmd");
             // good to go for a write
             let w_future = crucible.write(offset, w_buf.freeze());
             futures.push_back(w_future);
         }
 
-        // Block on futures so we dont get a backlog
+        // Block on oldest future so we dont get a backlog
         if futures.len() == opt.pipeline_length {
-            crucible::join_all(futures).await?;
-            futures = VecDeque::with_capacity(opt.pipeline_length);
+            futures.pop_front().unwrap().await?;
+        }
+
+        if early_shutdown.try_recv().is_ok() {
+            eprintln!("shutting down early in response to SIGUSR1");
+            join_all(futures).await?;
+            return Ok(total_bytes_written);
         }
     }
 
@@ -457,7 +510,9 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
                 }
             }
         }
-        return write_remainder_and_finalize(
+        total_bytes_written += n_read;
+
+        write_remainder_and_finalize(
             &crucible,
             w_buf,
             offset,
@@ -465,10 +520,26 @@ async fn cmd_write<T: BlockIO>(opt: &Opt, crucible: Arc<T>) -> Result<()> {
             native_block_size,
             futures,
         )
-        .await;
+        .await?;
     }
 
-    Ok(())
+    Ok(total_bytes_written)
+}
+
+/// Signal handler for to stop early and print read/write statistics
+/// This is intended for benchmarking
+async fn handle_signals(
+    mut signals: Signals,
+    early_shutdown: mpsc::Sender<()>,
+) {
+    while let Some(signal) = signals.next().await {
+        match signal {
+            SIGUSR1 => {
+                early_shutdown.send(()).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -496,12 +567,31 @@ async fn main() -> Result<()> {
     // IO time
     guest.activate(opt.gen).await?;
 
+    let (early_shutdown_sender, early_shutdown_receiver) = mpsc::channel(1);
+
+    // Only start the SIGUSR1 handler if we're in benchmarking mode
+    if opt.benchmarking_mode.is_some() {
+        let signals = Signals::new(&[SIGUSR1])?;
+        tokio::spawn(handle_signals(signals, early_shutdown_sender));
+    }
+
     let act_result = match opt.subcommand {
-        CruddAct::Write => cmd_write(&opt, guest.clone()).await,
-        CruddAct::Read => cmd_read(&opt, guest.clone()).await,
+        CruddAct::Write => {
+            cmd_write(&opt, guest.clone(), early_shutdown_receiver).await
+        }
+        CruddAct::Read => {
+            cmd_read(&opt, guest.clone(), early_shutdown_receiver).await
+        }
     };
     match act_result {
-        Ok(()) => {}
+        Ok(total_bytes_processed) => {
+            // Write the number of bytes processed so whatever is using us to
+            // benchmark can do something useful with it.
+            if let Some(filename) = opt.benchmarking_mode {
+                let mut file = File::create(filename)?;
+                write!(file, "{}", total_bytes_processed)?;
+            }
+        }
         Err(e) => {
             eprintln!("Encountered error while performing IO: {}. gracefully cleaning up.", e);
         }

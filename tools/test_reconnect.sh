@@ -32,7 +32,11 @@ echo "" > ${test_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-${dsc} start --cleanup --create --extent-count 50 >> "$test_log" 2>&1 &
+if ! ${dsc} create --cleanup --extent-count 50 >> "$test_log"; then
+    echo "Failed to create downstairs regions"
+    exit 1
+fi
+${dsc} start >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
 if ! ps -p $dsc_pid > /dev/null; then
@@ -47,12 +51,14 @@ for (( i = 0; i < 30; i += 10 )); do
     args+=( -t "127.0.0.1:$port" )
 done
 
+gen=1
 # Initial seed for verify file
-if ! "$crucible_test" fill "${args[@]}" -q \
+if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
 fi
+(( gen += 1 ))
 
 # Tell dsc to restart downstairs.
 if ! "$dsc" cmd enable-restart-all; then
@@ -74,7 +80,7 @@ do
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
     "$crucible_test" generic "${args[@]}" -c 15000 \
-            -q --verify-out alan \
+            -q -g "$gen" --verify-out alan \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1
     result=$?
@@ -88,6 +94,7 @@ do
         break
     fi
     duration=$SECONDS
+    (( gen += 1 ))
     (( pass_total += 1 ))
     (( total += duration ))
     ave=$(( total / pass_total ))

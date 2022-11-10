@@ -962,7 +962,7 @@ where
                             );
 
                             up.ds_transition(up_coms.client_id, DsState::New).await;
-                            up.set_inactive().await;
+                            up.set_inactive(CrucibleError::UuidMismatch).await;
                             return Err(CrucibleError::UuidMismatch.into());
                         }
 
@@ -993,7 +993,7 @@ where
                         );
 
                         up.ds_transition(up_coms.client_id, DsState::New).await;
-                        up.set_inactive().await;
+                        up.set_inactive(CrucibleError::NoLongerActive).await;
 
                         // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
@@ -1191,7 +1191,7 @@ where
                         up.ds_transition(
                             up_coms.client_id, DsState::Disabled
                         ).await;
-                        up.set_inactive().await;
+                        up.set_inactive(CrucibleError::UuidMismatch).await;
                         if up.uuid == expected_id {
                             /*
                              * Now, this is really going off the rails. Our
@@ -1394,7 +1394,7 @@ where
                             new_gen,
                         );
                         up.ds_transition(up_coms.client_id, DsState::Disabled).await;
-                        up.set_inactive().await;
+                        up.set_inactive(CrucibleError::NoLongerActive).await;
 
                         // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
@@ -1463,7 +1463,7 @@ where
                          * UUID be used as a denial of service?
                          */
                         up.ds_transition(up_coms.client_id, DsState::Disabled).await;
-                        up.set_inactive().await;
+                        up.set_inactive(CrucibleError::UuidMismatch).await;
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
                             up_coms.client_id, expected_id
@@ -3592,6 +3592,7 @@ enum UpState {
 struct UpstairsState {
     active_request: bool,
     up_state: UpState,
+    req: Option<BlockReq>,
 }
 
 impl UpstairsState {
@@ -3599,6 +3600,7 @@ impl UpstairsState {
         UpstairsState {
             active_request: false,
             up_state: UpState::Initializing,
+            req: None,
         }
     }
 
@@ -3611,7 +3613,7 @@ impl UpstairsState {
      * that happens on initial startup. This is because the running
      * upstairs has some state it can use to re-verify a downstairs.
      */
-    fn set_active(&mut self) -> Result<(), CrucibleError> {
+    async fn set_active(&mut self) -> Result<(), CrucibleError> {
         if self.up_state == UpState::Active {
             crucible_bail!(UpstairsAlreadyActive);
         } else if self.up_state == UpState::Deactivating {
@@ -3624,7 +3626,10 @@ impl UpstairsState {
         }
         self.active_request = false;
         self.up_state = UpState::Active;
-
+        let req = self.req.take();
+        if let Some(req) = req {
+            req.send_ok().await;
+        }
         Ok(())
     }
 }
@@ -3857,7 +3862,7 @@ impl Upstairs {
     async fn set_generation(&self, new_gen: u64) {
         let mut gen = self.generation.lock().await;
         *gen = new_gen;
-        info!(self.log, "Set generation to :{}", *gen);
+        info!(self.log, "Set desired generation to :{}", *gen);
     }
 
     async fn get_generation(&self) -> u64 {
@@ -3879,7 +3884,7 @@ impl Upstairs {
     async fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().await;
         self.stats.add_activation().await;
-        active.set_active()?;
+        active.set_active().await?;
         info!(
             self.log,
             "{} is now active with session: {}", self.uuid, self.session_id
@@ -3891,10 +3896,16 @@ impl Upstairs {
      * This is called if the upstairs has determined that something is
      * wrong and it should deactivate itself.
      */
-    async fn set_inactive(&self) {
+    async fn set_inactive(&self, err: CrucibleError) {
         let mut active = self.active.lock().await;
         active.active_request = false;
         active.up_state = UpState::Initializing;
+
+        // If something is waiting for activation, they can give up now.
+        let req = active.req.take();
+        if let Some(req) = req {
+            req.send_err(err).await;
+        }
         info!(
             self.log,
             "{} set inactive, session {}", self.uuid, self.session_id
@@ -4137,11 +4148,17 @@ impl Upstairs {
     /*
      * The guest has requested this upstairs go active.
      */
-    async fn set_active_request(&self) -> Result<(), CrucibleError> {
+    async fn set_active_request(
+        &self,
+        req: BlockReq,
+    ) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().await;
         match active.up_state {
             UpState::Initializing => {
+                assert!(!active.active_request);
+                assert!(active.req.is_none());
                 active.active_request = true;
+                active.req = Some(req);
                 info!(self.log, "{} active request set", self.uuid);
                 Ok(())
             }
@@ -4150,6 +4167,7 @@ impl Upstairs {
                     self.log,
                     "{} active denied while Deactivating", self.uuid
                 );
+                req.send_err(CrucibleError::UpstairsDeactivating).await;
                 crucible_bail!(UpstairsDeactivating);
             }
             UpState::Active => {
@@ -4157,6 +4175,7 @@ impl Upstairs {
                     self.log,
                     "{} Request to activate upstairs already active", self.uuid
                 );
+                req.send_err(CrucibleError::UpstairsAlreadyActive).await;
                 crucible_bail!(UpstairsAlreadyActive);
             }
         }
@@ -4257,6 +4276,9 @@ impl Upstairs {
         let next_flush = self.next_flush_id().await;
         cdt::gw__flush__start!(|| (gw_id));
 
+        if snapshot_details.is_some() {
+            info!(self.log, "flush with snap requested");
+        }
         /*
          * To build the dependency list for this flush, iterate from the end
          * of the downstairs work active list in reverse order and
@@ -4961,10 +4983,10 @@ impl Upstairs {
      * Compare downstairs region metadata and based on the results:
      *
      * Determine the global flush number for this region set.
-     * Verify the guest given gen number is highest (TODO)
+     * Verify the guest given gen number is highest.
      * Decide if we need repair, and if so create the repair list
      */
-    async fn collate_downstairs(&self, ds: &mut Downstairs) -> bool {
+    async fn collate_downstairs(&self, ds: &mut Downstairs) -> Result<bool> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -5014,33 +5036,36 @@ impl Upstairs {
             }
         }
 
+        info!(self.log, "Max found gen is {}", max_gen);
         /*
-         * XXX because the generation number is not plumbed up yet in
-         * nexus, we are manually increasing it here.  Whatever the highest
-         * number we find during our initial scan, we add one and use that.
-         * When we start receiving a gen from outside, then we need to
-         * take this out.  To support reconciliation working correctly, the
-         * generation coming from Propolis/Nexus must be larger than what
-         * we find on the downstairs, as the correct generation number is
-         * required to break ties under some failure conditions.
+         * Verify that the generation number that the guest has requested
+         * is higher than what we have from the three downstairs.
          */
-        let cur_max_gen = self.get_generation().await;
-        if cur_max_gen == 0 {
-            warn!(self.log, "XXX Manual generation setting to {}", max_gen);
-            self.set_generation(max_gen).await;
-        } else if cur_max_gen < max_gen {
+        let requested_gen = self.get_generation().await;
+        if requested_gen == 0 {
+            error!(self.log, "generation number should be at least 1");
+            bail!("Generation number should be at least 1");
+        } else if requested_gen < max_gen {
             /*
-             * This may eventually be a panic, or a refusal to start the
-             * upstairs if we find generation numbers higher than we expect.
-             * XXX
+             * We refuse to connect. The provided generation number is not
+             * high enough to let us connect to these downstairs.
              */
-            warn!(
+            error!(
                 self.log,
                 "found/using gen number {}, larger than requested: {}",
                 max_gen,
-                cur_max_gen,
+                requested_gen,
             );
-            self.set_generation(max_gen).await;
+            bail!(
+                "found/using gen number {}, larger than requested: {}",
+                max_gen,
+                requested_gen,
+            );
+        } else {
+            info!(
+                self.log,
+                "Generation requested: {} > found:{}", requested_gen, max_gen,
+            );
         }
 
         /*
@@ -5081,10 +5106,10 @@ impl Upstairs {
             );
             ds.convert_rc_to_messages(reconcile_list.mend, max_flush, max_gen);
             ds.reconcile_repair_needed = ds.reconcile_task_list.len();
-            true
+            Ok(true)
         } else {
             info!(self.log, "All extents match");
-            false
+            Ok(false)
         }
     }
 
@@ -5233,10 +5258,10 @@ impl Upstairs {
      * Return false if we are not ready, or if things failed.
      * If we failed, then we will update the DsState for what failed.
      *
-     * XXX How do we make sure our current generation number is higher
-     * than what we received from the downstairs?  Think about that
-     * failure case where one downstairs got a higher gen number, can
-     * that exist?
+     * If we have enough downstairs and we can activate, then we should
+     * notify the requestor of activation.
+     * If we have enough downstairs and can't activate, then we should
+     * also notify the requestor.
      *
      * If we have a problem here, we can't activate the upstairs.
      */
@@ -5254,6 +5279,7 @@ impl Upstairs {
          */
         let need_repair;
         let repair_commands;
+        let failed_collate;
         {
             let active = self.active.lock().await;
             if active.up_state != UpState::Initializing {
@@ -5279,16 +5305,60 @@ impl Upstairs {
             }
 
             /*
-             * While holding the downstairs lock, we figure out if
-             * there is any reconciliation to do, and if so, we build
-             * the list of operations that will repair the extents that
-             * are not in sync
+             * While holding the downstairs lock, we figure out if there is
+             * any reconciliation to do, and if so, we build the list of
+             * operations that will repair the extents that are not in sync.
+             *
+             * If we fail to collate, then we need to kick out all the
+             * downstairs out, forget any activation requests, and the
+             * upstairs goes back to waiting for another activation request.
              */
-            need_repair = self.collate_downstairs(&mut ds).await;
+            match self.collate_downstairs(&mut ds).await {
+                Ok(res) => {
+                    need_repair = res;
+                    failed_collate = false;
+                }
+                Err(e) => {
+                    need_repair = false;
+                    failed_collate = true;
+                    error!(self.log, "Failed collate with {}", e);
+                }
+            }
             repair_commands = ds.reconcile_task_list.len();
         }
 
-        if need_repair {
+        if failed_collate {
+            // We failed to collate the three downstairs, so we need
+            // to reset that activation request, and kick all the downstairs
+            // to FailedRepair
+            //
+            self.set_inactive(CrucibleError::RegionAssembleError).await;
+            let _active = self.active.lock().await;
+            let mut ds = self.downstairs.lock().await;
+
+            // While collating, downstairs should all be DsState::Repair.
+            // As we have released then locked the downstairs, we have to
+            // verify that the downstairs are all in the state we expect them
+            // to be.  Any change means that downstairs went away, but any
+            // downstairs still repairing should be moved to failed repair.
+            assert_eq!(ds.active.len(), 0);
+            assert_eq!(ds.reconcile_task_list.len(), 0);
+
+            for (i, s) in ds.ds_state.iter_mut().enumerate() {
+                if *s == DsState::WaitQuorum {
+                    *s = DsState::FailedRepair;
+                    warn!(
+                        self.log,
+                        "Mark {} as FAILED Collate in final check", i
+                    );
+                } else {
+                    warn!(
+                        self.log,
+                        "downstairs in state {} after failed collate", *s
+                    );
+                }
+            }
+        } else if need_repair {
             self.do_reconciliation(
                 dst,
                 lastcast,
@@ -5358,7 +5428,7 @@ impl Upstairs {
                 for s in ds.ds_state.iter_mut() {
                     *s = DsState::Active;
                 }
-                active.set_active()?;
+                active.set_active().await?;
                 info!(
                     self.log,
                     "{} is now active with session: {}",
@@ -5392,7 +5462,7 @@ impl Upstairs {
                 for s in ds.ds_state.iter_mut() {
                     *s = DsState::Active;
                 }
-                active.set_active()?;
+                active.set_active().await?;
                 info!(
                     self.log,
                     "{} is now active with session: {}",
@@ -5419,7 +5489,7 @@ impl Upstairs {
 
         info!(
             self.log,
-            "Notify all downstairs for a final check of reconcile queue."
+            "Notify all downstairs, region set compare is done."
         );
         send_reconcile_work(dst, *lastcast);
         *lastcast += 1;
@@ -7004,24 +7074,10 @@ impl Guest {
 impl BlockIO for Guest {
     async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
         let waiter = self.send(BlockOp::GoActive { gen }).await;
-        println!("The guest is requesting activation with gen:{}", gen);
+        println!("The guest has requested activation with gen:{}", gen);
         waiter.wait().await?;
-
-        /*
-         * XXX Figure out how long to wait for this.  The time to go active
-         * will include the time to reconcile all three downstairs.
-         */
-        loop {
-            if self.query_is_active().await? {
-                println!("This guest Upstairs is now active");
-                return Ok(());
-            } else {
-                println!(
-                    "Upstairs is not yet active, waiting in activate function"
-                );
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            }
-        }
+        println!("The guest has finished waiting for activation with:{}", gen);
+        Ok(())
     }
 
     /// Disable any more IO from this guest and deactivate the downstairs.
@@ -7341,8 +7397,7 @@ async fn process_new_io(
              * If we are deactivating, then reject this re-connect and
              * let the deactivate finish.
              */
-            if let Err(e) = up.set_active_request().await {
-                req.send_err(e).await;
+            if let Err(_e) = up.set_active_request(req).await {
                 return;
             }
             /*
@@ -7351,9 +7406,12 @@ async fn process_new_io(
              * upstairs will have to recover and either self update the
              * generation number, or get the new one from propolis.
              */
+
+            // Put the req waiter into the upstairs so we have a hook on
+            // who to notify when the answer comes back.
+            // We must do this before we tell all the tasks for downstairs.
             up.set_generation(gen).await;
             send_active(dst, gen);
-            req.send_ok().await;
         }
         BlockOp::QueryGuestIOReady { data } => {
             *data.lock().await = up.guest_io_ready().await;
@@ -7612,7 +7670,7 @@ async fn up_listen(
                             &mut lastcast,
                             &mut ds_reconcile_done_rx,
                         ).await {
-                            info!(
+                            error!(
                                 up.log,
                                 "Reconciliation attempt reported error {}",
                                 e

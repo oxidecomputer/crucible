@@ -96,7 +96,7 @@ fi
 
 # Do initial volume population.
 generation=1
-echo "$ct with $target_args  $dump_args $ds0_pid $ds1_pid $ds2_pid"
+echo "$ct with $target_args $dump_args $ds0_pid $ds1_pid $ds2_pid"
 if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q -g "$generation"
 then
     echo "ERROR: Exit on initial fill"

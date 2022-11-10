@@ -116,6 +116,12 @@ pub enum CrucibleError {
 
     #[error("Generation number is too low: {0}")]
     GenerationNumberTooLow(String),
+
+    #[error("No longer active")]
+    NoLongerActive,
+
+    #[error("Failed reconciliation")]
+    RegionAssembleError,
 }
 
 impl From<std::io::Error> for CrucibleError {

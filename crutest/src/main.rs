@@ -36,16 +36,16 @@ enum Workload {
     Burst,
     /// Starts a CLI client
     Cli {
-        /// Address to connect to
+        /// Address the cli client will try to connect to
         #[clap(long, short, default_value = "0.0.0.0:5050", action)]
         attach: SocketAddr,
     },
     /// Start a server and listen on the given address and port
     CliServer {
-        /// Address to listen on
+        /// Address for the cliserver to listen on
         #[clap(long, short, default_value = "0.0.0.0", action)]
         listen: IpAddr,
-        /// Port to listen on
+        /// Port for the cliserver to listen on
         #[clap(long, short, default_value = "5050", action)]
         port: u16,
     },
@@ -1755,6 +1755,7 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut retry = 1;
+        gen += 1;
         while let Err(e) = guest.activate(gen).await {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
@@ -1770,7 +1771,6 @@ async fn deactivate_workload(
             }
             retry += 1;
         }
-        gen += 1;
     }
     println!("One final");
     generic_workload(guest, 20, ri).await?;
