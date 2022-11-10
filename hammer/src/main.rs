@@ -38,7 +38,7 @@ pub struct Opt {
     #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0", action)]
+    #[clap(short, long, default_value = "1", action)]
     gen: u64,
 
     /*
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
     let mut cpfs: Vec<crucible::CruciblePseudoFile<Guest>> =
         Vec::with_capacity(opt.num_upstairs);
 
-    for gen in 0..opt.num_upstairs {
+    for i in 0..opt.num_upstairs {
         /*
          * The structure we use to send work from outside crucible into the
          * Upstairs main task.
@@ -132,6 +132,7 @@ async fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
+        let gen: u64 = i as u64 + opt.gen;
         let _join_handle =
             up_main(crucible_opts.clone(), gen as u64, guest.clone(), None)
                 .await?;
