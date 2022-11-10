@@ -4,7 +4,7 @@
 #: variety = "basic"
 #: target = "helios"
 #: output_rules = [
-#:	"/tmp/*.txt",
+#:	"/tmp/test_up/*.txt",
 #: ]
 #: skip_clone = true
 #:
@@ -32,6 +32,6 @@ done
 export BINDIR=/var/tmp/bins
 
 banner test_up_unencrypted
-ptime -m bash "$input/scripts/test_up.sh" unencrypted
+ptime -m bash "$input/scripts/test_up.sh" -N unencrypted
 
 # Save the output files?
