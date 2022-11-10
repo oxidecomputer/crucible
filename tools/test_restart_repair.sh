@@ -73,14 +73,16 @@ for (( i = 0; i < 30; i += 10 )); do
     args+=( -t "127.0.0.1:$port" )
 done
 
+gen=1
 # Send something to the region so our old region files have data.
 echo "$(date) pre-fill" >> "$test_log"
-echo "$ct" fill "${args[@]}" -q >> "$test_log"
-"$ct" fill "${args[@]}" -q >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" -q -g "$gen" >> "$test_log"
+"$ct" fill "${args[@]}" -q -g "$gen" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial pre-fill"
     ctrl_c
 fi
+(( gen += 1 ))
 
 touch /var/tmp/ds_test/pause
 rm -f /var/tmp/ds_test/up
@@ -101,12 +103,13 @@ touch /var/tmp/ds_test/up
 rm -f /var/tmp/ds_test/pause
 # Now do Initial seed for verify file
 echo "$(date) fill" >> "$test_log"
-echo "$ct" fill "${args[@]}" -q --verify-out alan >> "$test_log"
-"$ct" fill "${args[@]}" -q --verify-out alan >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log"
+"$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
 fi
+(( gen += 1 ))
 
 echo "Fill completed, wait for downstairs to start restarting" >> "$test_log"
 rm -f /var/tmp/ds_test/up
@@ -148,7 +151,7 @@ do
 
     echo "$(date) do one IO" >> "$test_log"
     "$ct" one "${args[@]}" \
-            -q --verify-out alan \
+            -q -g "$gen" --verify-out alan \
             --verify-in alan \
             --verify \
             --retry-activate >> "$test_log" 2>&1
@@ -164,6 +167,7 @@ do
     fi
 
     duration=$SECONDS
+    (( gen += 1 ))
     (( pass_total += 1 ))
     (( total += duration ))
     ave=$(( total / pass_total ))

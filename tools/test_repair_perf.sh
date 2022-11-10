@@ -70,13 +70,15 @@ function repair_round() {
     done
 
     # Do one IO to each block, verify.
+    gen=1
     echo "$(date) fill" >> "$test_log"
-    echo "$ct" fill "${args[@]}" -q --verify-out alan >> "$test_log"
-    "$ct" fill "${args[@]}" -q --verify-out alan >> "$test_log" 2>&1
+    echo "$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log"
+    "$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log" 2>&1
     if [[ $? -ne 0 ]]; then
         echo "Error in initial fill"
         stop_test
     fi
+    (( gen += 1 ))
 
     echo "Fill completed" >> "$test_log"
 
@@ -136,7 +138,7 @@ function repair_round() {
             SECONDS=0
             echo "$(date) do one IO" >> "$test_log"
             "$ct" one "${args[@]}" \
-                    -q --verify-out alan \
+                    -q -g "$gen" --verify-out alan \
                     --verify-in alan \
                     --verify \
                     --retry-activate >> "$test_log" 2>&1
@@ -147,6 +149,7 @@ function repair_round() {
                 mv "$test_log" "$test_log".lastfail
                 return 1
             fi
+            (( gen += 1 ))
             printf "%6d %3d [%d][%d] " \
                     "$es" "$ec" "$i" "$ds" | tee -a "${loop_log}"
 
