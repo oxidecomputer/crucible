@@ -34,7 +34,7 @@ banner setup
 pfexec plimit -n 9123456 $$
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 240 * 60 )); ps -ef; zfs list;kill $jobpid) &
+jobpid=$$; (sleep $(( 240 * 60 )); ps -ef; zfs list;kill $jobpid) & disown
 
 echo "Setup debug logging"
 mkdir /tmp/debug
@@ -50,4 +50,5 @@ banner start
 bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
 echo "$? was our result"
 echo "Test finished"
+sleep 5
 ps -ef
