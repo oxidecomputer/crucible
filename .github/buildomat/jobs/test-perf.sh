@@ -39,7 +39,7 @@ banner perf
 pfexec plimit -n 9123456 $$
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 6 * 60 )); ps -ef; kill $jobpid) &
+jobpid=$$; (sleep $(( 36 * 60 )); ps -ef; kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
@@ -49,9 +49,8 @@ mpstat -T d 1 </dev/null > /tmp/debug/mpstat.txt 2>&1 & disown
 vmstat -T d -p 1 </dev/null >/tmp/debug/paging.txt 2>&1 & disown
 
 disown -a
-echo "Now try with bash prefix"
+banner start
 bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
-echo "$? was our 2nd result"
+echo "$? was our result"
 echo "Test finished"
 ps -ef
-exit 0
