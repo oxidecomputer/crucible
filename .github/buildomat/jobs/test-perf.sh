@@ -34,18 +34,17 @@ banner setup
 pfexec plimit -n 9123456 $$
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 240 * 60 )); ps -ef; zfs list;kill $jobpid) & disown
+jobpid=$$; (sleep $(( 240 * 60 )); ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
 psrinfo -v > /tmp/debug/psrinfo.txt
 df -h > /tmp/debug/df.txt
-prstat -d d -mLc 1 </dev/null > /tmp/debug/prstat.txt 2>&1 & disown
-iostat -T d -xn 1 </dev/null > /tmp/debug/iostat.txt 2>&1 & disown
-mpstat -T d 1 </dev/null > /tmp/debug/mpstat.txt 2>&1 & disown
-vmstat -T d -p 1 </dev/null >/tmp/debug/paging.txt 2>&1 & disown
+prstat -d d -mLc 1 </dev/null > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 </dev/null > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 </dev/null > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 </dev/null >/tmp/debug/paging.txt 2>&1 &
 
-disown -a
 banner start
 bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
 echo "$? was our result"
