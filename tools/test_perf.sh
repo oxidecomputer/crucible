@@ -77,6 +77,7 @@ done
 echo "Perf test with timeout begins at $(date)" > "$outfile"
 
 #            ES   EC
+# XXX TODO: put this back with things start working better
 #perf_round  4096 6400
 #perf_round  8192 3200
 #perf_round 16384 1600
