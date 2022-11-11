@@ -5,12 +5,6 @@
 # This should eventually either move to some common test framework, or be
 # thrown away.
 
-if [[ ${#} -ne 1 ]];
-then
-    echo "specify either 'unencrypted' or 'encrypted' string"
-    exit 1
-fi
-
 set -o pipefail
 SECONDS=0
 
@@ -50,7 +44,7 @@ if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
-# Store log files we want to keep in /tmp/*.txt as this is what
+# Store log files we want to keep in /tmp/test_up/.txt as this is what
 # buildomat will look for and archive
 test_output_dir="/tmp/test_up"
 rm -rf ${test_output_dir} 2> /dev/null
@@ -62,6 +56,24 @@ rm -f "$fail_log"
 
 args=()
 dsc_args=()
+dsc_create_args=()
+dump_args=()
+
+function usage {
+    echo "Usage: $0 [-N] encrypted|unencrypted"
+    echo "N:  Don't dump color output"
+    echo "    encrypted or unencrypted must be provided"
+    exit 1
+}
+
+while getopts 'N' opt; do
+    case "$opt" in
+        N) echo "Turn off color for downstairs dump"
+            dump_args+=("--no-color")
+            shift
+            ;;
+    esac
+done
 
 case ${1} in
     "unencrypted")
@@ -70,22 +82,19 @@ case ${1} in
         upstairs_key=$(openssl rand -base64 32)
         echo "Upstairs using key: $upstairs_key"
         args+=( --key "$upstairs_key" )
-        dsc_args+=( --encrypted )
+        dsc_create_args+=( --encrypted )
         ;;
     *)
-        echo "Usage: $0 encrypted|unencrypted"
-        echo " encrypted or unencrypted are the only valid choices"
-        exit 1
+        usage
         ;;
 esac
 
-echo "Creating and starting three downstairs"
 dsc_output_dir="${test_output_dir}/dsc"
 mkdir -p ${dsc_output_dir}
 dsc_output="${test_output_dir}/dsc-out.txt"
 
-dsc_args+=( --cleanup --create )
-dsc_args+=( --extent-size 10 --extent-count 5 )
+dsc_create_args+=( --cleanup )
+dsc_create_args+=( --extent-size 10 --extent-count 5 )
 dsc_args+=( --output-dir "$dsc_output_dir" )
 dsc_args+=( --ds-bin "$cds" )
 
@@ -100,11 +109,17 @@ done
 
 dsc_args+=( --region-dir "$testdir" )
 echo "dsc output goes to $dsc_output"
-echo "${dsc}" start "${dsc_args[@]}" > "$dsc_output"
+
+echo "Creating three downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" "${dsc_args[@]}" > "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" "${dsc_args[@]}" >> "$dsc_output" 2>&1
+
+echo "Starting three downstairs"
+echo "${dsc}" start "${dsc_args[@]}" >> "$dsc_output"
 "${dsc}" start "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
 dsc_pid=$!
 
-sleep 2
+sleep 5
 if ! pgrep -P $dsc_pid > /dev/null; then
     echo "Gosh diddly darn it, dsc at $dsc_pid did not start"
     echo downstairs:
@@ -129,52 +144,71 @@ fi
 echo ""
 echo "Begin tests, output goes to ${log_prefix}_out.txt"
 res=0
-test_list="span big dep deactivate balloon"
+gen=1
+# Keep deactivate test last, and add 15 to the generation number so
+# tests that follow will be able to activate.
+test_list="span big dep balloon deactivate"
 for tt in ${test_list}; do
-    echo "Running test: $tt"
-    echo "$ct" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt"
-    if ! "$ct" "$tt" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    # Add a blank line in the output file as all the output follows.
+    echo "" >> "${log_prefix}_out.txt"
+    echo "Running test: $tt" | tee -a "${log_prefix}_out.txt"
+    echo "Running test: $tt" >> "${log_prefix}_out.txt"
+    echo "$ct" "$tt" -g "$gen" -q "${args[@]}" >> "${log_prefix}_out.txt"
+    if ! "$ct" "$tt" -g "$gen" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
         (( res += 1 ))
         echo ""
         echo "Failed crutest $tt test"
+        echo "Failed crutest $tt test" >> "${log_prefix}_out.txt"
         echo "Failed crutest $tt test" >> "$fail_log"
         echo ""
     else
         echo "Completed test: $tt"
     fi
+    (( gen += 1 ))
 done
+(( gen += 10 ))
 
-echo "Running hammer"
-if ! time "$ch" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+echo "" >> "${log_prefix}_out.txt"
+echo "Running hammer" | tee -a "${log_prefix}_out.txt"
+if ! "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     echo "Failed hammer test"
     echo "Failed hammer test" >> "$fail_log"
     (( res += 1 ))
 fi
+# The hammer tests also updates the generation number.
+(( gen += 10 ))
 
 # Repair test
 # This one goes last because it modified the args variable.
 # We also test the --verify-* args here as well.
-echo "Run repair tests"
+echo "" >> "${log_prefix}_out.txt"
+echo "Run repair tests" | tee -a "${log_prefix}_out.txt"
+
 args+=( --verify-out "${testdir}/verify_file" )
-echo "$ct" fill -q "${args[@]}"
-if ! "$ct" fill -q "${args[@]}"; then
+echo "$ct" fill -g "$gen" -q "${args[@]}" | tee -a "${log_prefix}_out.txt"
+
+if ! "$ct" fill -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
-    echo "Failed setup repair test"
+    echo "Failed setup repair test" | tee -a "${log_prefix}_out.txt"
+
     echo "Failed setup repair test" >> "$fail_log"
     echo
 else
-    echo "Repair setup passed"
-fi
+    echo "Repair setup passed" | tee -a "${log_prefix}_out.txt"
 
-echo "Copy the $port file"
+fi
+(( gen += 1 ))
+
+echo "Copy the $port file" | tee -a "${log_prefix}_out.txt"
+
 
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
 args+=( --verify-in "${testdir}/verify_file" )
-echo "$ct" repair -q "${args[@]}"
-if ! "$ct" repair -q "${args[@]}"; then
+echo "$ct" repair -g "$gen" -q "${args[@]}"
+if ! "$ct" repair -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
@@ -183,6 +217,7 @@ if ! "$ct" repair -q "${args[@]}"; then
 else
     echo "Repair part 1 passed"
 fi
+(( gen += 1 ))
 
 echo ""
 
@@ -222,7 +257,6 @@ fi
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
 # The dump args look different than other downstairs commands
-dump_args=()
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
@@ -242,8 +276,8 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" -q "${args[@]}"
-if ! "$ct" verify -q "${args[@]}"; then
+echo "$ct" "$tt" -g "$gen" -q "${args[@]}"
+if ! "$ct" verify -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
@@ -252,15 +286,10 @@ if ! "$ct" verify -q "${args[@]}"; then
 else
     echo "Repair part 2 passed"
 fi
+(( gen += 1 ))
 
-# Now that repair has finished, make sure the dump command
-# does not detect any errors
-dump_args=()
-for (( i = 0; i < 30; i += 10 )); do
-    (( port = port_base + i ))
-    dir="${testdir}/$port"
-    dump_args+=( -d "$dir" )
-done
+# Now that repair has finished, make sure the dump command does not detect
+# any errors
 echo "$cds" dump "${dump_args[@]}"
 if ! "$cds" dump "${dump_args[@]}"; then
     (( res += 1 ))
@@ -309,6 +338,7 @@ echo ""
 if [[ $res != 0 ]]; then
     echo "$res Tests have failed"
     cat "$fail_log"
+    echo "check output in ${log_prefix}_out.txt"
 else
     echo "All Tests have passed"
 fi

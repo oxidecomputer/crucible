@@ -7,6 +7,7 @@
 
 use futures::executor;
 use futures::lock::{Mutex, MutexGuard};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -968,7 +969,9 @@ where
                             upstairs_connection.unwrap());
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::YesItsMe { version: 1, repair_addr }).await?;
+                        fw.send(
+                            Message::YesItsMe { version: 1, repair_addr }
+                        ).await?;
                     }
                     Some(Message::PromoteToActive {
                         upstairs_id,
@@ -995,17 +998,17 @@ where
                                         upstairs_connection.upstairs_id,
                                 }
                             ).await?;
+                            bail!(
+                                "Upstairs connection expected \
+                                upstairs_id:{} session_id:{}  received \
+                                upstairs_id:{} session_id:{}",
+                                upstairs_connection.upstairs_id,
+                                upstairs_connection.session_id,
+                                upstairs_id,
+                                session_id
+                            );
 
-                            /*
-                             * At this point, should we just return error?
-                             * XXX
-                             */
                         } else {
-                            // matches_self above should include a check for
-                            // gen, but gen number may change between
-                            // negotiation and activation (see `XXX because the
-                            // generation number` upstairs). update generation
-                            // number here.
                             if upstairs_connection.gen != gen {
                                 warn!(
                                     log,
@@ -1842,12 +1845,64 @@ impl Downstairs {
                 }
 
                 1 => {
-                    // Kick out this session. Do this while holding the work
-                    // lock.
+                    // There is an existing session.  Determine if this new
+                    // request to promote to active should move forward or
+                    // be blocked.
+                    let active_upstairs = self
+                        .active_upstairs
+                        .get(&currently_active_upstairs_uuids[0])
+                        .unwrap();
+
+                    println!(
+                        "Attempting RW takeover from {:?} to {:?}",
+                        active_upstairs.upstairs_connection,
+                        upstairs_connection,
+                    );
+
+                    // Compare the new generaion number to what the existing
+                    // connection is and take action based on that.
+                    match upstairs_connection
+                        .gen
+                        .cmp(&active_upstairs.upstairs_connection.gen)
+                    {
+                        Ordering::Less => {
+                            // If the new connection has a lower generation
+                            // number than the current connection, we don't
+                            // allow it to take over.
+                            bail!(
+                                "Current gen {} is > requested gen of {}",
+                                active_upstairs.upstairs_connection.gen,
+                                upstairs_connection.gen,
+                            );
+                        }
+                        Ordering::Equal => {
+                            // The generation numbers match, the only way we
+                            // allow this new connection to take over is if the
+                            // upstairs_id and the session_id are the same,
+                            // which means the whole structures need to be
+                            // identical.
+                            if active_upstairs.upstairs_connection
+                                != upstairs_connection
+                            {
+                                bail!(
+                                    "Same gen, but UUIDs {:?} don't match {:?}",
+                                    active_upstairs.upstairs_connection,
+                                    upstairs_connection,
+                                );
+                            }
+                        }
+                        // The only remaining case is the new generation
+                        // number is higher than the existing.
+                        Ordering::Greater => {}
+                    }
+
+                    // Now that we know we can remove/replace it, go ahead
+                    // and take it off the list.
                     let active_upstairs = self
                         .active_upstairs
                         .remove(&currently_active_upstairs_uuids[0])
                         .unwrap();
+
                     let mut work = active_upstairs.work.lock().await;
 
                     warn!(
@@ -1904,7 +1959,8 @@ impl Downstairs {
                     // for.
                     work.clear();
 
-                    // Insert a new session
+                    // Insert or replace the session
+
                     self.active_upstairs.insert(
                         upstairs_connection.upstairs_id,
                         ActiveUpstairs {
@@ -3665,10 +3721,10 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_promote_to_active_multi_read_write_different_uuid(
+    async fn test_promote_to_active_multi_read_write_different_uuid_same_gen(
     ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
-        // Upstairs) should kick out the other connection
+        // Upstairs) but with the same gen should be blocked
         let ads = build_test_downstairs(false)?;
 
         let upstairs_connection_1 = UpstairsConnection {
@@ -3696,23 +3752,84 @@ mod test {
         assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
         assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
 
-        ds.promote_to_active(upstairs_connection_2, tx2).await?;
-        assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
-        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Empty));
+        let res = ds.promote_to_active(upstairs_connection_2, tx2).await;
+        assert!(res.is_err());
+
+        assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
+        assert!(matches!(
+            rx2.try_recv().unwrap_err(),
+            TryRecvError::Disconnected
+        ));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
-        assert!(!ds.is_active(upstairs_connection_1));
-        assert!(ds.is_active(upstairs_connection_2));
+        // Original connection is still active.
+        assert!(ds.is_active(upstairs_connection_1));
+        // New connection was blocked.
+        assert!(!ds.is_active(upstairs_connection_2));
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_promote_to_active_multi_read_write_same_uuid() -> Result<()> {
+    async fn test_promote_to_active_multi_read_write_different_uuid_lower_gen(
+    ) -> Result<()> {
+        // Attempting to activate multiple read-write (where it's different
+        // Upstairs) but with a lower gen should be blocked.
+        let ads = build_test_downstairs(false)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 2,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        println!("ds1: {:?}", ds);
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+        println!("\nds2: {:?}\n", ds);
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        let res = ds.promote_to_active(upstairs_connection_2, tx2).await;
+        assert!(res.is_err());
+
+        assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
+        assert!(matches!(
+            rx2.try_recv().unwrap_err(),
+            TryRecvError::Disconnected
+        ));
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        // Original connection is still active.
+        assert!(ds.is_active(upstairs_connection_1));
+        // New connection was blocked.
+        assert!(!ds.is_active(upstairs_connection_2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_multi_read_write_same_uuid_same_gen(
+    ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's the same
-        // Upstairs but a different session) should kick out the other
-        // connection
+        // Upstairs but a different session) will block the "new" connection
+        // if it has the same generation number.
         let ads = build_test_downstairs(false)?;
 
         let upstairs_connection_1 = UpstairsConnection {
@@ -3725,6 +3842,56 @@ mod test {
             upstairs_id: upstairs_connection_1.upstairs_id,
             session_id: Uuid::new_v4(),
             gen: 1,
+        };
+
+        let (tx1, mut rx1) = channel(1);
+        let tx1 = Arc::new(tx1);
+
+        let (tx2, mut rx2) = channel(1);
+        let tx2 = Arc::new(tx2);
+
+        let mut ds = ads.lock().await;
+        ds.promote_to_active(upstairs_connection_1, tx1).await?;
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+        assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));
+        assert!(matches!(rx2.try_recv().err().unwrap(), TryRecvError::Empty));
+
+        let res = ds.promote_to_active(upstairs_connection_2, tx2).await;
+        assert!(res.is_err());
+
+        assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
+        assert!(matches!(
+            rx2.try_recv().unwrap_err(),
+            TryRecvError::Disconnected
+        ));
+
+        assert_eq!(ds.active_upstairs().len(), 1);
+
+        assert!(ds.is_active(upstairs_connection_1));
+        assert!(!ds.is_active(upstairs_connection_2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_promote_to_active_multi_read_write_same_uuid_larger_gen(
+    ) -> Result<()> {
+        // Attempting to activate multiple read-write where it's the same
+        // Upstairs, but a different session, and with a larger generation
+        // should allow the new connection to take over.
+        let ads = build_test_downstairs(false)?;
+
+        let upstairs_connection_1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+        };
+
+        let upstairs_connection_2 = UpstairsConnection {
+            upstairs_id: upstairs_connection_1.upstairs_id,
+            session_id: Uuid::new_v4(),
+            gen: 2,
         };
 
         let (tx1, mut rx1) = channel(1);
@@ -4101,7 +4268,8 @@ mod test {
     }
 
     // Validate that `complete_work` can see None if the same Upstairs
-    // reconnects
+    // reconnects.  We know it's the same Upstairs because the session and
+    // upstairs ids will match.
     #[tokio::test]
     async fn test_complete_work_can_see_none() -> Result<()> {
         // Test region create and a read of one block.
