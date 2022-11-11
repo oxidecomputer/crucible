@@ -9,8 +9,8 @@ set -o pipefail
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
-    if [[ -n "$fds" ]]; then
-        "$dsc" cmd shutdown
+    if [[ -n "$dsc" ]]; then
+        "$dsc" cmd shutdown > /dev/null 2>&1 || true
     fi
     exit 1
 }
