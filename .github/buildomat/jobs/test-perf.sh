@@ -7,6 +7,7 @@
 #:  "=/tmp/perf*.csv",
 #:  "/tmp/perfout.txt",
 #:  "%/tmp/debug/*.txt",
+#:  "/tmp/dsc/*.txt",
 #: ]
 #: skip_clone = true
 #:
@@ -40,10 +41,11 @@ echo "Setup debug logging"
 mkdir /tmp/debug
 psrinfo -v > /tmp/debug/psrinfo.txt
 df -h > /tmp/debug/df.txt
-prstat -d d -mLc 1 </dev/null > /tmp/debug/prstat.txt 2>&1 &
-iostat -T d -xn 1 </dev/null > /tmp/debug/iostat.txt 2>&1 &
-mpstat -T d 1 </dev/null > /tmp/debug/mpstat.txt 2>&1 &
-vmstat -T d -p 1 </dev/null >/tmp/debug/paging.txt 2>&1 &
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
 
 banner start
 bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
