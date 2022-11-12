@@ -35,7 +35,8 @@ banner setup
 pfexec plimit -n 9123456 $$
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 14 * 60 )); ps -ef; zfs list;kill $jobpid) &
+# This timeout is from issue 520
+jobpid=$$; (sleep $(( 40 * 60 )); ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
