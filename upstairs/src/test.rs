@@ -743,7 +743,7 @@ mod up_test {
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
@@ -925,7 +925,7 @@ mod up_test {
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
@@ -996,7 +996,7 @@ mod up_test {
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
@@ -1195,7 +1195,7 @@ mod up_test {
             // emulated run in up_ds_listen
 
             let mut ds = upstairs.downstairs.lock().await;
-            let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+            let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
             assert_eq!(state, AckStatus::AckReady);
             ds.ack(next_id);
 
@@ -1606,7 +1606,7 @@ mod up_test {
             )
             .unwrap());
 
-        assert!(ds.active.get(&next_id).unwrap().data.is_none());
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
         assert!(!ds
             .process_ds_completion(
@@ -1618,7 +1618,7 @@ mod up_test {
             )
             .unwrap());
 
-        assert!(ds.active.get(&next_id).unwrap().data.is_none());
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
         let response = Ok(vec![]);
 
@@ -1659,7 +1659,7 @@ mod up_test {
             .process_ds_completion(next_id, 2, response, &None, UpState::Active)
             .unwrap());
 
-        let responses = ds.active.get(&next_id).unwrap().data.as_ref();
+        let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
         assert_eq!(
             responses.map(|responses| responses
@@ -1708,7 +1708,7 @@ mod up_test {
             )
             .unwrap());
 
-        assert!(ds.active.get(&next_id).unwrap().data.is_none());
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
         assert!(!ds
             .process_ds_completion(
@@ -1720,7 +1720,7 @@ mod up_test {
             )
             .unwrap());
 
-        assert!(ds.active.get(&next_id).unwrap().data.is_none());
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[3])]);
@@ -1729,7 +1729,7 @@ mod up_test {
             .process_ds_completion(next_id, 2, response, &None, UpState::Active)
             .unwrap());
 
-        let responses = ds.active.get(&next_id).unwrap().data.as_ref();
+        let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
         assert_eq!(
             responses.map(|responses| responses
@@ -1775,7 +1775,7 @@ mod up_test {
             )
             .unwrap());
 
-        assert!(ds.active.get(&next_id).unwrap().data.is_none());
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
         assert!(!ds
             .process_ds_completion(
@@ -1787,7 +1787,7 @@ mod up_test {
             )
             .unwrap());
 
-        assert!(ds.active.get(&next_id).unwrap().data.is_none());
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[6])]);
@@ -1796,7 +1796,7 @@ mod up_test {
             .process_ds_completion(next_id, 2, response, &None, UpState::Active)
             .unwrap());
 
-        let responses = ds.active.get(&next_id).unwrap().data.as_ref();
+        let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
         assert_eq!(
             responses.map(|responses| responses
@@ -1864,7 +1864,7 @@ mod up_test {
         assert_eq!(ds.completed.len(), 0);
 
         // The job should still be ack ready
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Ack the job to the guest
@@ -1923,7 +1923,7 @@ mod up_test {
             )
             .unwrap());
 
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // ACK the flush and let retire_check move things along.
@@ -2236,7 +2236,7 @@ mod up_test {
             )
             .unwrap());
 
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
         ds.retire_check(next_id);
@@ -2454,18 +2454,18 @@ mod up_test {
 
         // One completion should allow for an ACK
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Be sure the job is not yet in replay
-        assert!(!ds.active.get_mut(&next_id).unwrap().replay);
+        assert!(!ds.ds_active.get_mut(&next_id).unwrap().replay);
         ds.re_new(0);
         // Now the IO should be replay
-        assert!(ds.active.get_mut(&next_id).unwrap().replay);
+        assert!(ds.ds_active.get_mut(&next_id).unwrap().replay);
 
         // The act of taking a downstairs offline should move a read
         // back from AckReady if it was the only completed read.
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::NotAcked);
     }
 
@@ -2506,7 +2506,7 @@ mod up_test {
             .process_ds_completion(next_id, 0, response, &None, UpState::Active)
             .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Complete the read on a 2nd downstairs.
@@ -2522,12 +2522,12 @@ mod up_test {
         ds.re_new(0);
 
         // Should still be ok to ACK this IO
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Taking the second downstairs offline should revert the ACK.
         ds.re_new(1);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::NotAcked);
 
         // Redo the read on DS 0, IO should go back to ackable.
@@ -2539,7 +2539,7 @@ mod up_test {
             .process_ds_completion(next_id, 0, response, &None, UpState::Active)
             .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
     }
 
@@ -2580,7 +2580,7 @@ mod up_test {
 
         // Verify the read is now AckReady
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Ack the read to the guest.
@@ -2598,7 +2598,7 @@ mod up_test {
         ds.re_new(0);
 
         // Acked IO should remain so.
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
 
         // Redo on DS 0, IO should remain acked.
@@ -2609,7 +2609,7 @@ mod up_test {
             .process_ds_completion(next_id, 0, response, &None, UpState::Active)
             .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
     }
 
@@ -2675,11 +2675,11 @@ mod up_test {
         ds.ack(next_id);
 
         // Before re re_new, the IO is not replay
-        assert!(!ds.active.get_mut(&next_id).unwrap().replay);
+        assert!(!ds.ds_active.get_mut(&next_id).unwrap().replay);
         // Now, take that downstairs offline
         ds.re_new(0);
         // Now the IO should be replay
-        assert!(ds.active.get_mut(&next_id).unwrap().replay);
+        assert!(ds.ds_active.get_mut(&next_id).unwrap().replay);
 
         // Move it to in-progress.
         ds.in_progress(next_id, 0);
@@ -2700,7 +2700,7 @@ mod up_test {
         // Some final checks.  The replay should behave in every other way
         // like a regular read.
         assert_eq!(ds.ackable_work().len(), 0);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
     }
 
@@ -2776,7 +2776,7 @@ mod up_test {
         // Now, take the second downstairs offline
         ds.re_new(1);
         // Now the IO should be replay
-        assert!(ds.active.get_mut(&next_id).unwrap().replay);
+        assert!(ds.ds_active.get_mut(&next_id).unwrap().replay);
 
         // Move it to in-progress.
         ds.in_progress(next_id, 1);
@@ -2797,7 +2797,7 @@ mod up_test {
         // Some final checks.  The replay should behave in every other way
         // like a regular read.
         assert_eq!(ds.ackable_work().len(), 0);
-        let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
     }
 
@@ -2852,18 +2852,18 @@ mod up_test {
             .unwrap());
 
         // Verify AckReady
-        let state = ds.active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         /* Now, take that downstairs offline */
         // Before re re_new, the IO is not replay
-        assert!(!ds.active.get_mut(&id1).unwrap().replay);
+        assert!(!ds.ds_active.get_mut(&id1).unwrap().replay);
         ds.re_new(1);
         // Now the IO should be replay
-        assert!(ds.active.get_mut(&id1).unwrap().replay);
+        assert!(ds.ds_active.get_mut(&id1).unwrap().replay);
 
         // State goes back to NotAcked
-        let state = ds.active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::NotAcked);
 
         // Re-submit and complete the write
@@ -2873,7 +2873,7 @@ mod up_test {
             .unwrap());
 
         // State should go back to acked.
-        let state = ds.active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
     }
 
@@ -2939,7 +2939,7 @@ mod up_test {
         ds.re_new(0);
 
         // State should stay acked
-        let state = ds.active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
 
         // Finish the write all the way out.
@@ -4771,7 +4771,7 @@ mod up_test {
         {
             // Verify we are not ready to ACK yet.
             let mut ds = up.downstairs.lock().await;
-            let state = ds.active.get_mut(&next_id).unwrap().ack_status;
+            let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
             assert_eq!(state, AckStatus::NotAcked);
         }
         // Three failures, process_ds_operation should return true now.
@@ -5315,9 +5315,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
 
         assert!(jobs[0].work.deps().is_empty());
@@ -5372,9 +5372,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty());
@@ -5425,9 +5425,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty());
@@ -5483,9 +5483,9 @@ mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 7);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
@@ -5542,9 +5542,9 @@ mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
@@ -5610,9 +5610,9 @@ mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 7);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
@@ -5675,9 +5675,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
@@ -5721,9 +5721,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
@@ -5765,9 +5765,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
@@ -5808,9 +5808,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
 
         assert!(jobs[0].work.deps().is_empty()); // read @ 0
@@ -5855,9 +5855,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
@@ -5900,9 +5900,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
@@ -5931,9 +5931,9 @@ mod up_test {
         upstairs.submit_flush(None, None).await.unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty());
@@ -5996,9 +5996,9 @@ mod up_test {
         upstairs.submit_flush(None, None).await.unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 8);
 
         assert!(jobs[0].work.deps().is_empty()); // flush (op 0)
@@ -6057,9 +6057,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6104,9 +6104,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6183,9 +6183,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 6);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6228,9 +6228,9 @@ mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 5);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6270,9 +6270,9 @@ mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 5);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6332,9 +6332,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6393,9 +6393,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -6480,9 +6480,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 5);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -6562,9 +6562,9 @@ mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -6608,9 +6608,9 @@ mod up_test {
 
         {
             let mut ds = upstairs.downstairs.lock().await;
-            let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+            let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
             let jobs: Vec<&DownstairsIO> =
-                keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+                keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
             assert_eq!(jobs.len(), 1);
 
             let ds_id = jobs[0].ds_id;
@@ -6644,9 +6644,9 @@ mod up_test {
 
         {
             let ds = upstairs.downstairs.lock().await;
-            let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+            let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
             let jobs: Vec<&DownstairsIO> =
-                keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+                keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
 
             // retire_check not run yet, so there's two active jobs
             assert_eq!(jobs.len(), 2);
@@ -6694,9 +6694,9 @@ mod up_test {
         // complete and ack the previous flush and both writes
 
         let mut ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
 
         let write_1 = jobs[0].ds_id;
@@ -6743,9 +6743,9 @@ mod up_test {
         // only the read should be left (retire_check removes the flush and the
         // deps of the flush)
 
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 1);
 
         assert_eq!(jobs[0].ds_id, read);
@@ -6778,9 +6778,9 @@ mod up_test {
         upstairs.submit_flush(None, None).await.unwrap();
 
         let mut ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.active.keys().sorted().collect();
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.active.get(k).unwrap()).collect();
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
 
         let flush = jobs[1].ds_id;
@@ -6800,6 +6800,6 @@ mod up_test {
         ds.ack(flush);
         ds.retire_check(flush);
 
-        assert_eq!(ds.active.keys().count(), 0);
+        assert_eq!(ds.ds_active.keys().count(), 0);
     }
 }

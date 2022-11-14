@@ -127,7 +127,7 @@ async fn upstairs_fill_info(
     let ds_state = api_context.up.ds_state_copy().await;
     let up_jobs = api_context.up.guest.guest_work.lock().await.active.len();
     let ds = api_context.up.downstairs.lock().await;
-    let ds_jobs = ds.active.len();
+    let ds_jobs = ds.ds_active.len();
     let repair_done = ds.reconcile_repaired;
     let repair_needed = ds.reconcile_repair_needed;
 
