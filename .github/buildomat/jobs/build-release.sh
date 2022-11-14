@@ -61,7 +61,7 @@ for t in crucible-downstairs crucible-hammer crutest dsc crudd; do
 done
 
 mkdir -p /work/scripts
-for s in tools/test_perf.sh tools/crudd-speed-battery.sh; do
+for s in tools/test_perf.sh tools/crudd-speed-battery.sh tools/dtrace/perf-downstairs-tick.d; do
 	cp "$s" /work/scripts/
 done
 
