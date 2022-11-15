@@ -2495,7 +2495,7 @@ mod test {
 
         // read the data to verify import
 
-        let dur = std::time::Duration::from_secs(5);
+        let dur = std::time::Duration::from_secs(25);
         let client = reqwest::ClientBuilder::new()
             .connect_timeout(dur)
             .timeout(dur)
@@ -3056,7 +3056,7 @@ mod test {
         let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
 
         let data = {
-            let dur = std::time::Duration::from_secs(5);
+            let dur = std::time::Duration::from_secs(25);
             let client = reqwest::ClientBuilder::new()
                 .connect_timeout(dur)
                 .timeout(dur)
