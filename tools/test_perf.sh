@@ -26,7 +26,7 @@ function perf_round() {
     es=$1
     ec=$2
     # Args for crutest.  Using the default IP:port for dsc
-    args="-g 1 -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 16000 -q"
+    args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 5000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
     "$dsc" create --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec"
@@ -78,10 +78,10 @@ echo "Perf test with timeout begins at $(date)" > "$outfile"
 
 #            ES   EC
 # XXX TODO: put this back with things start working better
-#perf_round  4096 6400
+perf_round  4096 6400
 #perf_round  8192 3200
 #perf_round 16384 1600
-perf_round 32768  800
+#perf_round 32768  800
 
 # Print out a nice summary of all the perf results.  This depends
 # on the header and client perf output matching specific strings.
