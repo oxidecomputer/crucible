@@ -48,7 +48,7 @@ crudd_benchmark() {
   # run shorter if we're fast and the region is small. So we take bytes written,
   # divided by the time, to get our actual speed. This is all a little bit jank,
   # admittedly.
-  # timeout --signal=USR1 "$MAX_ITERATION_DURATION"
+  timeout --signal=USR1 "$MAX_ITERATION_DURATION" \
     "$BINDIR/crudd" -t $DOWNSTAIRS_1 -t $DOWNSTAIRS_2 -t $DOWNSTAIRS_3 \
       -n $REGION_SIZE_BYTES -i "$req_size" -p "$pipeline_len" \
       -g "$generation_number" --benchmarking-mode "$BENCHMARK_RESULTS_TMPFILE" \
