@@ -48,7 +48,7 @@ crudd_benchmark() {
   # run shorter if we're fast and the region is small. So we take bytes written,
   # divided by the time, to get our actual speed. This is all a little bit jank,
   # admittedly.
-  timeout --signal=USR1 "$MAX_ITERATION_DURATION" \
+  # timeout --signal=USR1 "$MAX_ITERATION_DURATION"
     "$BINDIR/crudd" -t $DOWNSTAIRS_1 -t $DOWNSTAIRS_2 -t $DOWNSTAIRS_3 \
       -n $REGION_SIZE_BYTES -i "$req_size" -p "$pipeline_len" \
       -g "$generation_number" --benchmarking-mode "$BENCHMARK_RESULTS_TMPFILE" \
@@ -164,7 +164,7 @@ perform_benchmarks_with_parameters() {
   printf '%s\t%s\t%s\t%s' "$read_speed_uninit" "$write_speed_uninit" "$read_speed_init" "$write_speed_init"
 }
 
-main() {
+full_test() {
   # the maximum amount of time for the full test suite is
   # number of req_size elems * number of pipeline_len elems * 4 * MAX_ITERATION_DURATION
   # 5 * 4 * 4 * 2 = 160 minutes max
@@ -204,4 +204,51 @@ main() {
   | tee /tmp/crudd-speed-battery-results.json
 }
 
-main
+single_test() {
+  req_size=4096
+  pipeline_len=8
+
+  printf '%s\t%s\t%s\n' \
+    $req_size \
+    $pipeline_len \
+    "$(perform_benchmarks_with_parameters $req_size $pipeline_len)" \
+  | awk '
+    {
+      request_size = $1;
+      pipeline_length = $2;
+      read_speed_uninit = $3;
+      write_speed_uninit = $4;
+      read_speed_init = $5;
+      write_speed_init = $6;
+
+      # json time
+      print ( \
+        "{ " \
+        "\"request_size\": "  request_size ", " \
+        "\"pipeline_length\": "  pipeline_length ", " \
+        "\"read_speed_uninit\": "  read_speed_uninit ", " \
+        "\"write_speed_uninit\": "  write_speed_uninit ", " \
+        "\"read_speed_init\": "  read_speed_init ", " \
+        "\"write_speed_init\": "  write_speed_init \
+        " }" \
+      );
+
+    }
+  ' \
+  | tee /tmp/crudd-speed-battery-results.json
+}
+
+if [ -z ${1+x} ]; then
+    echo run single test
+    single_test
+else
+    if [ "$1" = "full" ]; then
+        echo run full test
+        full_test
+    else
+        echo "Usage: $0 [full]"
+        echo "full: Run the full tests"
+        echo "By default, only a single test will run"
+    fi
+fi
+
