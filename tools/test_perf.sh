@@ -26,7 +26,7 @@ function perf_round() {
     es=$1
     ec=$2
     # Args for crutest.  Using the default IP:port for dsc
-    args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 5000 -q"
+    args="-g 1 -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -c 5000 -q"
 
     echo Create region with ES:"$es" EC:"$ec"
     "$dsc" create --ds-bin "$downstairs" --cleanup --extent-size  "$es" --extent-count "$ec"
