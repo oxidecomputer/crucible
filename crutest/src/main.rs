@@ -598,7 +598,7 @@ async fn main() -> Result<()> {
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
-            burst_workload(&guest, 60, 190, &mut region_info, &opt.verify_out)
+            burst_workload(&guest, 460, 190, &mut region_info, &opt.verify_out)
                 .await?;
         }
         Workload::Deactivate => {
@@ -619,15 +619,19 @@ async fn main() -> Result<()> {
         }
         Workload::Demo => {
             println!("Run Demo test");
-            println!("Pause for 10 seconds, then start testing");
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
+            let count = {
+                if opt.count == 0 {
+                    300
+                } else {
+                    opt.count
+                }
+            };
             /*
              * The count provided here should be greater than the flow
              * control limit if we wish to test flow control.  Also, set
              * lossy on a downstairs otherwise it will probably keep up.
              */
-            demo_workload(&guest, 300, &mut region_info).await?;
+            demo_workload(&guest, count, &mut region_info).await?;
         }
         Workload::Dep => {
             println!("Run dep test");
@@ -1334,7 +1338,6 @@ async fn dirty_workload(
         let future = guest.write(offset, data);
         futureslist.push(future);
     }
-
     println!("loop over {} futures", futureslist.len());
     crucible::join_all(futureslist).await?;
     Ok(())
@@ -1907,12 +1910,12 @@ async fn burst_workload(
             println!("Wrote out file {:?} at this time", cp);
         }
         println!(
-            "{:>0width$}/{:>0width$}: 5 second pause, then another test loop",
+            "{:>0width$}/{:>0width$}: 2 second pause, then another test loop",
             c,
             count,
             width = count_width
         );
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
     Ok(())
 }
@@ -2039,10 +2042,17 @@ async fn demo_workload(
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
+    // Because this workload issues a bunch of IO all at the same time,
+    // we can't be sure the order will be preserved for our IOs.
+    // We take the state of the volume now as our minimum, and verify
+    // that the read at the end of this loop finds some value between
+    // what it is now and what it is at the end of test.
+    ri.write_log.commit();
+
     let mut futureslist = Vec::new();
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
-    for i in 1..=count {
+    for _ in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
@@ -2085,18 +2095,16 @@ async fn demo_workload(
                 let future = guest.read(offset, data.clone());
                 futureslist.push(future);
             }
-
-            if i == 10 || i == 20 {
-                guest.show_work().await?;
-            }
         }
     }
     let mut wc = WQCounts {
         up_count: 0,
         ds_count: 0,
     };
-
-    println!("loop over {} futures", futureslist.len());
+    println!(
+        "Submit work and wait for {} jobs to finish",
+        futureslist.len()
+    );
     crucible::join_all(futureslist).await?;
 
     /*
@@ -2108,9 +2116,12 @@ async fn demo_workload(
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
     println!("All downstairs jobs completed.");
-    if let Err(e) = verify_volume(guest, ri, false).await {
+    if let Err(e) = verify_volume(guest, ri, true).await {
         bail!("Final volume verify failed: {:?}", e)
     }
+
+    // Commit the current state as the new minimum for any future tests.
+    ri.write_log.commit();
 
     Ok(())
 }
