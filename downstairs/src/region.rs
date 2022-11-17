@@ -12,6 +12,7 @@ use anyhow::{bail, Result};
 use crucible_common::*;
 use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use futures::TryStreamExt;
+use rayon::prelude::*;
 use repair_client::types::FileType;
 use repair_client::Client;
 use rusqlite::{params, Connection};
@@ -1821,10 +1822,12 @@ impl Region {
 
         // XXX How to we convert between usize and u32 correctly?
         cdt::os__flush__start!(|| job_id);
-        for eid in 0..self.def.extent_count() {
-            let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number, gen_number, job_id, &self.log)?;
-        }
+        (0..self.def.extent_count())
+            .into_par_iter()
+            .try_for_each(|eid| {
+                let extent = &self.extents[eid as usize];
+                extent.flush_block(flush_number, gen_number, job_id, &self.log)
+            })?;
         cdt::os__flush__done!(|| job_id);
 
         // snapshots currently only work with ZFS
