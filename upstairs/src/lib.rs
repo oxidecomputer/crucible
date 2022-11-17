@@ -2207,6 +2207,11 @@ struct Downstairs {
      * The logger for messages sent from downstairs methods.
      */
     log: Logger,
+
+    /**
+     * Counters for the in flight work for the downstairs
+     */
+    io_state_count: IOStateCount,
 }
 
 impl Downstairs {
@@ -2226,6 +2231,7 @@ impl Downstairs {
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
+            io_state_count: IOStateCount::new(),
         }
     }
 
@@ -2250,18 +2256,20 @@ impl Downstairs {
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.ds_active.get_mut(&ds_id).unwrap();
 
-        let newstate = match &self.downstairs_errors.get(&client_id) {
+        let new_state = match &self.downstairs_errors.get(&client_id) {
             Some(_) => IOState::Skipped,
             None => IOState::InProgress,
         };
 
-        let oldstate = job.state.insert(client_id, newstate.clone());
-        assert_eq!(oldstate, Some(IOState::New));
+        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        assert_eq!(old_state, IOState::New);
+        self.io_state_count.decr(&old_state, client_id);
+        self.io_state_count.incr(&new_state, client_id);
 
-        match newstate {
+        match new_state {
             IOState::Skipped => None,
             IOState::InProgress => Some(job.work.clone()),
-            _ => panic!("bad state in in_progress!"),
+            _ => panic!("bad state {} in in_progress!", new_state),
         }
     }
 
@@ -2334,7 +2342,7 @@ impl Downstairs {
             return None;
         }
         if let Some(job) = &mut self.reconcile_current_work {
-            let oldstate = job.state.insert(client_id, IOState::InProgress);
+            let old_state = job.state.insert(client_id, IOState::InProgress);
 
             /*
              * It is possible in reconnect states that multiple messages
@@ -2342,7 +2350,7 @@ impl Downstairs {
              * work for this client to do. Make sure we don't send the the
              * same message twice.
              */
-            if oldstate != Some(IOState::New) {
+            if old_state != Some(IOState::New) {
                 info!(
                     self.log,
                     "[{}] rep_in_progress ignore submitted job {:?}",
@@ -2367,8 +2375,8 @@ impl Downstairs {
      */
     fn rep_done(&mut self, client_id: u8, rep_id: u64) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
-            let oldstate = job.state.insert(client_id, IOState::Done);
-            assert_eq!(oldstate, Some(IOState::InProgress));
+            let old_state = job.state.insert(client_id, IOState::Done).unwrap();
+            assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
             let mut done = 0;
 
@@ -2494,7 +2502,10 @@ impl Downstairs {
 
             if *state == IOState::InProgress || *state == IOState::New {
                 info!(self.log, "{} change {} to skipped", client_id, ds_id);
-                job.state.insert(client_id, IOState::Skipped);
+                let old_state =
+                    job.state.insert(client_id, IOState::Skipped).unwrap();
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::Skipped, client_id);
             }
         }
     }
@@ -2581,8 +2592,12 @@ impl Downstairs {
                     }
                 }
             }
-            job.state.insert(client_id, IOState::New);
+            let old_state = job.state.insert(client_id, IOState::New).unwrap();
             job.replay = true;
+            if old_state != IOState::New {
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::New, client_id);
+            }
         }
     }
 
@@ -2632,6 +2647,10 @@ impl Downstairs {
      * Enqueue a new downstairs request.
      */
     fn enqueue(&mut self, io: DownstairsIO) {
+        for cid in 0..3 {
+            assert_eq!(io.state[&cid], IOState::New);
+            self.io_state_count.incr(&IOState::New, cid);
+        }
         self.ds_active.insert(io.ds_id, io);
     }
 
@@ -3075,7 +3094,7 @@ impl Downstairs {
                 }
             };
 
-        let newstate = if let Err(ref e) = read_data {
+        let new_state = if let Err(ref e) = read_data {
             warn!(
                 self.log,
                 "[{}] Reports error {:?} on job {}, {:?}",
@@ -3090,20 +3109,22 @@ impl Downstairs {
             IOState::Done
         };
 
-        let oldstate = job.state.insert(client_id, newstate.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        self.io_state_count.decr(&old_state, client_id);
+        self.io_state_count.incr(&new_state, client_id);
 
         /*
          * Verify the job was InProgress
          */
-        if oldstate != IOState::InProgress {
+        if old_state != IOState::InProgress {
             bail!(
                 "[{}] job completed while not InProgress: {:?}",
                 client_id,
-                oldstate
+                old_state
             );
         }
 
-        if let IOState::Error(e) = newstate {
+        if let IOState::Error(e) = new_state {
             // Some errors can be returned without considering the Downstairs
             // bad. For example, it's still an error if a snapshot exists
             // already but we should not increment downstairs_errors and
@@ -3179,7 +3200,7 @@ impl Downstairs {
                 }
             }
         } else if job.ack_status == AckStatus::Acked {
-            assert_eq!(newstate, IOState::Done);
+            assert_eq!(new_state, IOState::Done);
             /*
              * If this job is already acked, then we don't have much
              * more to do here.  If it's a flush, then we want to be
@@ -3232,7 +3253,7 @@ impl Downstairs {
                 _ => { /* Write and WriteUnwritten IOs have no action here */ }
             }
         } else {
-            assert_eq!(newstate, IOState::Done);
+            assert_eq!(new_state, IOState::Done);
             assert_ne!(job.ack_status, AckStatus::Acked);
 
             let read_data: Vec<ReadResponse> = read_data.unwrap();
@@ -3426,6 +3447,10 @@ impl Downstairs {
                 let oj = self.ds_active.remove(id).unwrap();
                 assert_eq!(oj.ack_status, AckStatus::Acked);
                 self.completed.push(*id);
+                for cid in 0..3 {
+                    let old_state = oj.state.get(&cid).unwrap();
+                    self.io_state_count.decr(old_state, cid);
+                }
             }
         }
     }
@@ -3848,12 +3873,14 @@ impl Upstairs {
         let up_count = self.up_work_active().await;
         let ds_count = self.ds_work_active().await;
         let ds_state = self.ds_state_copy().await;
+        let ds_io_count = self.downstairs.lock().await.io_state_count;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 ds_count,
                 ds_state,
+                ds_io_count,
             };
             (msg, arg)
         });
@@ -6178,7 +6205,7 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Copy, Clone, Serialize)]
 struct IOStateCount {
     new: [u32; 3],
     in_progress: [u32; 3],
@@ -6258,6 +6285,28 @@ impl IOStateCount {
             }
             IOState::Error(_) => {
                 self.error[cid] += 1;
+            }
+        }
+    }
+
+    pub fn decr(&mut self, state: &IOState, cid: u8) {
+        assert!(cid < 3);
+        let cid = cid as usize;
+        match state {
+            IOState::New => {
+                self.new[cid] -= 1;
+            }
+            IOState::InProgress => {
+                self.in_progress[cid] -= 1;
+            }
+            IOState::Done => {
+                self.done[cid] -= 1;
+            }
+            IOState::Skipped => {
+                self.skipped[cid] -= 1;
+            }
+            IOState::Error(_) => {
+                self.error[cid] -= 1;
             }
         }
     }
@@ -7561,6 +7610,7 @@ pub struct Arg {
     up_count: u32,
     ds_count: u32,
     ds_state: Vec<DsState>,
+    ds_io_count: IOStateCount,
 }
 
 /**
@@ -8031,11 +8081,10 @@ fn create_flush(
  * the clients.
  */
 async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
-    let mut iosc: IOStateCount = IOStateCount::new();
     let gior = up.guest_io_ready().await;
     let up_count = up.guest.guest_work.lock().await.active.len();
 
-    let ds = up.downstairs.lock().await;
+    let mut ds = up.downstairs.lock().await;
     let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
@@ -8131,7 +8180,6 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                         // XXX I have no idea why this is two spaces instead of
                         // one...
                         print!("  {0:>5}", state);
-                        iosc.incr(state, cid);
                     }
                     _x => {
                         print!("  {0:>5}", "????");
@@ -8142,7 +8190,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
             println!();
         }
-        iosc.show_all();
+        ds.io_state_count.show_all();
         print!("Last Flush: ");
         for lf in ds.ds_last_flush.iter() {
             print!("{} ", lf);
