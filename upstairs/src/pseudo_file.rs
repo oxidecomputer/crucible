@@ -152,8 +152,8 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         self.sz
     }
 
-    pub async fn activate(&mut self, gen: u64) -> Result<(), CrucibleError> {
-        if let Err(e) = self.block_io.activate(gen).await {
+    pub async fn activate(&mut self) -> Result<(), CrucibleError> {
+        if let Err(e) = self.block_io.activate().await {
             match e {
                 CrucibleError::UpstairsAlreadyActive => {
                     // underlying block io is already active, but pseudo file

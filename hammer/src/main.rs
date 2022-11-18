@@ -38,7 +38,7 @@ pub struct Opt {
     #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0", action)]
+    #[clap(short, long, default_value = "1", action)]
     gen: u64,
 
     /*
@@ -91,7 +91,6 @@ async fn main() -> Result<()> {
         control: opt.control,
         read_only: false,
     };
-    let mut generation_number = opt.gen;
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {
         let tracer = opentelemetry_jaeger::new_pipeline()
@@ -124,7 +123,7 @@ async fn main() -> Result<()> {
     let mut cpfs: Vec<crucible::CruciblePseudoFile<Guest>> =
         Vec::with_capacity(opt.num_upstairs);
 
-    for _ in 0..opt.num_upstairs {
+    for i in 0..opt.num_upstairs {
         /*
          * The structure we use to send work from outside crucible into the
          * Upstairs main task.
@@ -133,13 +132,10 @@ async fn main() -> Result<()> {
          */
         let guest = Arc::new(Guest::new());
 
-        let _join_handle = up_main(
-            crucible_opts.clone(),
-            opt.gen, // XXX increase gen per upstairs
-            guest.clone(),
-            None,
-        )
-        .await?;
+        let gen: u64 = i as u64 + opt.gen;
+        let _join_handle =
+            up_main(crucible_opts.clone(), gen as u64, guest.clone(), None)
+                .await?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);
@@ -153,8 +149,7 @@ async fn main() -> Result<()> {
     let mut cpf_idx = 0;
 
     println!("Initial Handing off to CPF {}", cpf_idx);
-    cpfs[cpf_idx].activate(generation_number).await?;
-    generation_number += 1;
+    cpfs[cpf_idx].activate().await?;
     println!(
         "Initial Hand off to CPF {} {:?}",
         cpf_idx,
@@ -186,8 +181,7 @@ async fn main() -> Result<()> {
             println!("Round {} Handing off to CPF {}", idx, cpf_idx);
 
             let cpf = &mut cpfs[cpf_idx];
-            cpf.activate(generation_number).await?;
-            generation_number += 1;
+            cpf.activate().await?;
 
             println!(
                 "Round {} Handed off to CPF {} {:?}",

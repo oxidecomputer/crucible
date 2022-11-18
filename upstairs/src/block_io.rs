@@ -36,7 +36,7 @@ impl FileBlockIO {
 
 #[async_trait]
 impl BlockIO for FileBlockIO {
-    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         Ok(())
     }
 
@@ -181,7 +181,7 @@ impl ReqwestBlockIO {
 
 #[async_trait]
 impl BlockIO for ReqwestBlockIO {
-    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         Ok(())
     }
 
