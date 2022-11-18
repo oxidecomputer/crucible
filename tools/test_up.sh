@@ -170,6 +170,7 @@ done
 
 echo "" >> "${log_prefix}_out.txt"
 echo "Running hammer" | tee -a "${log_prefix}_out.txt"
+echo "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt"
 if ! "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     echo "Failed hammer test"
     echo "Failed hammer test" >> "$fail_log"

@@ -77,7 +77,7 @@ use async_trait::async_trait;
 /// between flushes are performed in.
 #[async_trait]
 pub trait BlockIO: Sync {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
+    async fn activate(&self) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
@@ -170,15 +170,12 @@ pub trait BlockIO: Sync {
     }
 
     /// Activate if not active.
-    async fn conditional_activate(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
+    async fn conditional_activate(&self) -> Result<(), CrucibleError> {
         if self.query_is_active().await? {
             return Ok(());
         }
 
-        self.activate(gen).await
+        self.activate().await
     }
 }
 
@@ -759,14 +756,6 @@ where
             r = up_coms.ds_active_rx.changed(),
                 if negotiated == 1 && !self_promotion =>
             {
-                /*
-                 * The activating guest sends us the generation number.
-                 * TODO: Update the promote to active message to send
-                 * the generation number along with the UUID for the
-                 * downstairs to validate. Or, possibly not. The generation
-                 * number the upstairs has is what it should use going
-                 * forward.  What the downstairs has should not be higher.
-                 */
                 match r {
                     Ok(_) => {
                         let gen = up_coms.ds_active_rx.borrow();
@@ -774,8 +763,7 @@ where
                             up_coms.client_id, *gen);
                     }
                     Err(e) => {
-                        // XXX bail? panic?
-                        warn!(up.log, "[{}] received activate error {:?}",
+                        error!(up.log, "[{}] received activate error {:?}",
                             up_coms.client_id, e);
                     }
                 }
@@ -961,9 +949,33 @@ where
                                 },
                             );
 
-                            up.ds_transition(up_coms.client_id, DsState::New).await;
-                            up.set_inactive(CrucibleError::UuidMismatch).await;
-                            return Err(CrucibleError::UuidMismatch.into());
+                            up.ds_transition(
+                                up_coms.client_id, DsState::New
+                            ).await;
+                            if !match_gen {
+                                let gen_error = format!(
+                                    "Generation requested:{} found:{}",
+                                    gen, up.get_generation().await
+                                );
+                                up.set_inactive(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        gen_error.clone()
+                                    )
+                                )
+                                .await;
+                                return Err(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        gen_error
+                                    )
+                                    .into()
+                                );
+                            } else {
+                                up.set_inactive(
+                                    CrucibleError::UuidMismatch
+                                )
+                                .await;
+                                return Err(CrucibleError::UuidMismatch.into());
+                            }
                         }
 
                         if negotiated != 1 {
@@ -1057,6 +1069,10 @@ where
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
                         }
+                        info!(up.log, "[{}] downstairs client at {} has UUID {}",
+                            up_coms.client_id, target, region_def.uuid(),
+                        );
+
                         up.add_ds_region(up_coms.client_id, region_def).await?;
 
                         let my_state = {
@@ -5091,7 +5107,7 @@ impl Upstairs {
         } else {
             info!(
                 self.log,
-                "Generation requested: {} > found:{}", requested_gen, max_gen,
+                "Generation requested: {} >= found:{}", requested_gen, max_gen,
             );
         }
 
@@ -6462,7 +6478,8 @@ pub enum BlockOp {
     Flush {
         snapshot_details: Option<SnapshotDetails>,
     },
-    GoActive {
+    GoActive,
+    GoActiveWithGen {
         gen: u64,
     },
     Deactivate,
@@ -7117,15 +7134,26 @@ impl Guest {
         self.send(BlockOp::Commit).await.wait().await.unwrap();
         Ok(())
     }
+    // Maybe this can just be a guest specific thing, not a BlockIO
+    pub async fn activate_with_gen(
+        &self,
+        gen: u64,
+    ) -> Result<(), CrucibleError> {
+        let waiter = self.send(BlockOp::GoActiveWithGen { gen }).await;
+        println!("The guest has requested activation with gen:{}", gen);
+        waiter.wait().await?;
+        println!("The guest has finished waiting for activation with:{}", gen);
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl BlockIO for Guest {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActive { gen }).await;
-        println!("The guest has requested activation with gen:{}", gen);
+    async fn activate(&self) -> Result<(), CrucibleError> {
+        let waiter = self.send(BlockOp::GoActive).await;
+        println!("The guest has requested activation");
         waiter.wait().await?;
-        println!("The guest has finished waiting for activation with:{}", gen);
+        println!("The guest has finished waiting for activation");
         Ok(())
     }
 
@@ -7441,7 +7469,7 @@ async fn process_new_io(
          * These three options can be handled by this task directly,
          * and don't require the upstairs to be fully online.
          */
-        BlockOp::GoActive { gen } => {
+        BlockOp::GoActive => {
             /*
              * If we are deactivating, then reject this re-connect and
              * let the deactivate finish.
@@ -7449,16 +7477,20 @@ async fn process_new_io(
             if let Err(_e) = up.set_active_request(req).await {
                 return;
             }
-            /*
-             * We may redo how the generation number works as more parts
-             * that use it are built.  In the failed migration case an
-             * upstairs will have to recover and either self update the
-             * generation number, or get the new one from propolis.
-             */
-
             // Put the req waiter into the upstairs so we have a hook on
             // who to notify when the answer comes back.
             // We must do this before we tell all the tasks for downstairs.
+            let gen: u64 = *up.generation.lock().await;
+            send_active(dst, gen);
+        }
+        BlockOp::GoActiveWithGen { gen } => {
+            /*
+             * If we are deactivating, then reject this re-connect and
+             * let the deactivate finish.
+             */
+            if let Err(_e) = up.set_active_request(req).await {
+                return;
+            }
             up.set_generation(gen).await;
             send_active(dst, gen);
         }
