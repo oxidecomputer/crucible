@@ -272,6 +272,7 @@ pfexec dtrace -s upstairs_info.d
 
 You start crucible, then run the above script.  Output should start appearing
 with a few seconds.
+
 The output has several columns.  The first three will list the state of each
 of the three downstairs.  Following that the remaining columns all indicate
 various work queues and job state for work internal to the Upstairs.  Before we
@@ -281,19 +282,22 @@ upstairs is needed.
 Inside the Upstairs there are two work queues.
 * The upstairs (or guest) side
 * The downstairs side.
+
 For the upstairs side, this holds jobs the upstairs has received from the
-guest that we have not Acked yet.  For every upstairs side, there is one or more
-corresponding downstairs jobs that track the progress of the work required
+guest that we have not Acked yet.  For every upstairs side, there is one or
+more corresponding downstairs jobs that track the progress of the work required
 to complete this job.  For each downstairs job, there is a state for that job
 on each of the three downstairs.
 
 Now, back to the columns.
-Columns 4 and 5 show the count of active jobs for the guest side (UPW) and
-for the downstairs side (DSW).
+Columns four and five show the count of active jobs for the guest side (UPW)
+and for the downstairs side (DSW).
+
+
 The remaining columns 6-20 show the count of job states on each downstairs.
 Jobs for the downstairs can be in one of five possible states:
-  New, In Progress, Done, Skipped, Error,
-For each downstairs/state, we print a count of jobs in that state.
+ `New`, `In Progress`, `Done`, `Skipped`, `Error`.
+For each state/downstairs, we print a count of jobs in that state.
 
 Here is an example of how it might look:
 ```
