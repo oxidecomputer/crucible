@@ -263,7 +263,7 @@ Trace a downstairs IO and measure time for in in the following three parts:
 * 3rd report is OS done to downstairs sending the ACK back to upstairs
 
 ## upstairs_info.d
-This is a dtrace script for printing some simple upstairs state info.
+This is a dtrace script for printing upstairs state and work queue info.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will
 wait to find the matching probe.
 ```
@@ -271,16 +271,23 @@ pfexec dtrace -s upstairs_info.d
 ```
 
 You start crucible, then run the above script.  Output should start appearing
-right away with the state of the three downstairs and a count of active
-jobs for upstairs and downstairs.
+with a few seconds.  Output will state of each of the three downstairs and
+a count of active jobs for the guest side (UPW) and for the downstairs side
+(DSW).  Jobs for the downstairs can be in one of five possible states:
+  New, In Progress, Done, Skipped, Error,
+For each downstairs/state, we print a count of jobs in that state.
 
 Here is an example of how it might look:
 ```
 alan@cat:crucible$ pfexec dtrace -s upstairs_info.d
-["Active","Active","Active"] Upstairs:   1 Downstairs:   3
-["Active","Active","Active"] Upstairs:   1 Downstairs:   3
-["Active","Active","Active"] Upstairs:   1 Downstairs:   6
-["Active","Active","Active"] Upstairs:   1 Downstairs:   6
+DS 0 STATE   DS 1 STATE   DS 2 STATE   UPW  DSW  NEW0 NEW1 NEW2   IP0  IP1  IP2    D0   D1   D2    S0   S1   S2  E0 E1 E2
+    active       active       active     1    2     1    1    1     0    0    0     1    1    1     0    0    0   0  0  0
+    active       active       active     4 1259     1    1    1     2    2    2  1256 1256 1256     0    0    0   0  0  0
+    active       active       active     3  557     1    1   77     2    2   99   554  554  381     0    0    0   0  0  0
+    active       active       active     2 1364     0    0  446     1    1  100  1363 1363  818     0    0    0   0  0  0
+    active       active       active     9 1510     1    1   47     8    8  100  1501 1501 1363     0    0    0   0  0  0
+    active       active       active     9 1508     1    1 1317     8    8    0  1499 1499  191     0    0    0   0  0  0
+    active       active       active     9 2175     1    1  576     8    8  100  2166 2166 1499     0    0    0   0  0  0
 ```
 
 ## tracegw.d
