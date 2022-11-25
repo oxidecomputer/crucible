@@ -23,7 +23,7 @@ indicatif = { version = "0.17.2", features = ["rayon"] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-ringbuffer = "0.8"
+ringbuffer = "0.10"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 reedline = "0.14.0"
