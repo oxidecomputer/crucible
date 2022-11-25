@@ -5,7 +5,7 @@ license = "MPL-2.0"
 edition = "2018"
 
 [dependencies]
-clap = { version = "3.2", features = ["derive", "env"] }
+clap = { version = "4.0", features = ["derive", "env"] }
 crucible = { path = "../upstairs" }
 crucible-control-client = { path = "../control-client" }
 tokio = { version = "1.22.0", features = ["full"] }
