@@ -19,7 +19,7 @@ dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" 
 dsc-client = { path = "../dsc-client" }
 futures = "0.3"
 futures-core = "0.3"
-indicatif = { version = "0.17.1", features = ["rayon"] }
+indicatif = { version = "0.17.2", features = ["rayon"] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
