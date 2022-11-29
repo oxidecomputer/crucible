@@ -260,8 +260,7 @@ impl Pantry {
 
         info!(self.log, "volume {} constructed ok", volume_id);
 
-        // XXX activation number going away?
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         info!(self.log, "volume {} activated ok", volume_id);
 

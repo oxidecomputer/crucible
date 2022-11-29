@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
         up_main(crucible_opts, opt.gen, guest.clone(), None).await?;
     println!("Crucible runtime is spawned");
 
-    guest.activate(opt.gen).await?;
+    guest.activate().await?;
 
     let mut rng = rand::thread_rng();
 

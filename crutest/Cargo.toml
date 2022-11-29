@@ -19,18 +19,18 @@ dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" 
 dsc-client = { path = "../dsc-client" }
 futures = "0.3"
 futures-core = "0.3"
-indicatif = { version = "0.17.1", features = ["rayon"] }
+indicatif = { version = "0.17.2", features = ["rayon"] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-ringbuffer = "0.8"
+ringbuffer = "0.10"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
-reedline = "0.13.0"
+reedline = "0.14.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 statistical = "1.0.0"
-tokio = { version = "1.21.2", features = ["full"] }
+tokio = { version = "1.22.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.5"
-uuid = { version = "1.0.0", features = [ "serde", "v4" ] }
+uuid = { version = "1.2.2", features = [ "serde", "v4" ] }

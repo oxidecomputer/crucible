@@ -565,7 +565,7 @@ async fn main() -> Result<()> {
     eprintln!("Crucible runtime is spawned");
 
     // IO time
-    guest.activate(opt.gen).await?;
+    guest.activate().await?;
 
     let (early_shutdown_sender, early_shutdown_receiver) = mpsc::channel(1);
 
