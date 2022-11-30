@@ -271,7 +271,7 @@ pfexec dtrace -s upstairs_info.d
 ```
 
 You start crucible, then run the above script.  Output should start appearing
-with a few seconds.
+within a few seconds.
 
 The output has several columns.  The first three will list the state of each
 of the three downstairs.  Following that the remaining columns all indicate
