@@ -721,11 +721,8 @@ mod test {
             "1644356407".to_string(),
         );
 
-        let actual =
-            Utc.timestamp_opt(
-                String::from_utf8_lossy(&fake_stdout).parse()?,
-                0
-            )
+        let actual = Utc
+            .timestamp_opt(String::from_utf8_lossy(&fake_stdout).parse()?, 0)
             .unwrap();
 
         assert_eq!(expected, actual);
