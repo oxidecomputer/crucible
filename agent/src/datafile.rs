@@ -548,32 +548,34 @@ impl DataFile {
 
     /**
      * The worker thread will request the first region that is in a
-     * particular state.
+     * particular state.  If there are no tasks in the provided state,
+     * we sleep waiting for work to do.
      */
-    pub fn first_region_in_states(&self, states: &[State]) -> Option<Region> {
-        let inner = self.inner.lock().unwrap();
+    pub fn first_in_states(&self, states: &[State]) -> Region {
+        let mut inner = self.inner.lock().unwrap();
 
-        /*
-         * States are provided in priority order.  We check for regions
-         * in the first requested state before we check for
-         * regions in the second provided state, etc.  This
-         * allows us to focus on destroying tombstoned
-         * regions ahead of creating new regions.
-         */
-        for s in states {
-            for r in inner.regions.values() {
-                if &r.state == s {
-                    return Some(r.clone());
+        loop {
+            /*
+             * States are provided in priority order.  We check for regions
+             * in the first requested state before we check for
+             * regions in the second provided state, etc.  This
+             * allows us to focus on destroying tombstoned
+             * regions ahead of creating new regions.
+             */
+            for s in states {
+                for r in inner.regions.values() {
+                    if &r.state == s {
+                        return r.clone();
+                    }
                 }
             }
+
+            /*
+             * If we did not find any regions in the specified state, sleep
+             * on the condvar.
+             */
+            inner = self.bell.wait(inner).unwrap();
         }
-
-        None
-    }
-
-    pub fn wait_on_bell(&self) {
-        let inner = self.inner.lock().unwrap();
-        let _guard = self.bell.wait(inner).unwrap();
     }
 
     /**
