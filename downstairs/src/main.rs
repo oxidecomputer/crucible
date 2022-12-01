@@ -153,8 +153,17 @@ enum Args {
         #[clap(short, long, default_value = "9000", action)]
         port: u16,
 
+        /// Randomly return read errors
         #[clap(long, action)]
-        return_errors: bool,
+        read_errors: bool,
+
+        /// Randomly return write errors
+        #[clap(long, action)]
+        write_errors: bool,
+
+        /// Randomly return flush errors
+        #[clap(long, action)]
+        flush_errors: bool,
 
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
@@ -286,7 +295,9 @@ async fn main() -> Result<()> {
             oximeter,
             lossy,
             port,
-            return_errors,
+            read_errors,
+            write_errors,
+            flush_errors,
             trace_endpoint,
             cert_pem,
             key_pem,
@@ -324,7 +335,9 @@ async fn main() -> Result<()> {
             let d = build_downstairs_for_region(
                 &data,
                 lossy,
-                return_errors,
+                read_errors,
+                write_errors,
+                flush_errors,
                 read_only,
                 Some(log),
             )?;
