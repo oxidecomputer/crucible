@@ -1338,8 +1338,10 @@ pub struct ActiveUpstairs {
 #[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
-    lossy: bool,         // Test flag, enables pauses and skipped jobs
-    return_errors: bool, // Test flag
+    lossy: bool,        // Test flag, enables pauses and skipped jobs
+    read_errors: bool,  // Test flag
+    write_errors: bool, // Test flag
+    flush_errors: bool, // Test flag
     active_upstairs: HashMap<Uuid, ActiveUpstairs>,
     dss: DsStatOuter,
     read_only: bool,
@@ -1353,7 +1355,9 @@ impl Downstairs {
     fn new(
         region: Region,
         lossy: bool,
-        return_errors: bool,
+        read_errors: bool,
+        write_errors: bool,
+        flush_errors: bool,
         read_only: bool,
         encrypted: bool,
         log: Logger,
@@ -1366,7 +1370,9 @@ impl Downstairs {
         Downstairs {
             region,
             lossy,
-            return_errors,
+            read_errors,
+            write_errors,
+            flush_errors,
             active_upstairs: HashMap::new(),
             dss,
             read_only,
@@ -1562,7 +1568,7 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let responses = if self.return_errors && random() && random() {
+                let responses = if self.read_errors && random() && random() {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1587,7 +1593,7 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let result = if self.return_errors && random() && random() {
+                let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1610,7 +1616,7 @@ impl Downstairs {
                 dependencies: _dependencies,
                 writes,
             } => {
-                let result = if self.return_errors && random() && random() {
+                let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1633,7 +1639,7 @@ impl Downstairs {
                 gen_number,
                 snapshot_details,
             } => {
-                let result = if self.return_errors && random() && random() {
+                let result = if self.flush_errors && random() && random() {
                     warn!(self.log, "returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2339,7 +2345,9 @@ pub fn create_region(
 pub fn build_downstairs_for_region(
     data: &Path,
     lossy: bool,
-    return_errors: bool,
+    read_errors: bool,
+    write_errors: bool,
+    flush_errors: bool,
     read_only: bool,
     log_request: Option<Logger>,
 ) -> Result<Arc<Mutex<Downstairs>>> {
@@ -2377,7 +2385,9 @@ pub fn build_downstairs_for_region(
     Ok(Arc::new(Mutex::new(Downstairs::new(
         region,
         lossy,
-        return_errors,
+        read_errors,
+        write_errors,
+        flush_errors,
         read_only,
         encrypted,
         log,
@@ -2733,6 +2743,8 @@ mod test {
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
             &path_dir,
+            false,
+            false,
             false,
             false,
             false,
@@ -3672,7 +3684,9 @@ mod test {
         build_downstairs_for_region(
             &path_dir,
             false, // lossy
-            false, // return_errors
+            false, // read errors
+            false, // write errors
+            false, // flush errors
             read_only,
             Some(csl()),
         )
@@ -4114,6 +4128,8 @@ mod test {
             false,
             false,
             false,
+            false,
+            false,
             Some(csl()),
         )?;
 
@@ -4206,6 +4222,8 @@ mod test {
             false,
             false,
             false,
+            false,
+            false,
             Some(csl()),
         )?;
 
@@ -4295,6 +4313,8 @@ mod test {
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
             &path_dir,
+            false,
+            false,
             false,
             false,
             false,

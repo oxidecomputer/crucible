@@ -71,7 +71,9 @@ mod test {
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
                 false, /* lossy */
-                false, /* return_errors */
+                false, /* read errors */
+                false, /* write errors */
+                false, /* flush errors */
                 read_only,
                 Some(csl()),
             )?;
@@ -99,7 +101,9 @@ mod test {
             self.downstairs = build_downstairs_for_region(
                 self.tempdir.path(),
                 false, /* lossy */
-                false, /* return_errors */
+                false, /* read errors */
+                false, /* write errors */
+                false, /* flush errors */
                 true,
                 Some(csl()),
             )?;
