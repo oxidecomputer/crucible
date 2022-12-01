@@ -690,7 +690,7 @@ impl DataFile {
 
                 results.push(Snapshot {
                     name: dir_name,
-                    created: Utc.timestamp(cmd_stdout.parse()?, 0),
+                    created: Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap(),
                 });
             }
         }
@@ -721,8 +721,9 @@ mod test {
             "1644356407".to_string(),
         );
 
-        let actual =
-            Utc.timestamp(String::from_utf8_lossy(&fake_stdout).parse()?, 0);
+        let actual = Utc
+            .timestamp_opt(String::from_utf8_lossy(&fake_stdout).parse()?, 0)
+            .unwrap();
 
         assert_eq!(expected, actual);
 
@@ -743,7 +744,7 @@ mod test {
             cmd_stdout
         };
 
-        let _date = Utc.timestamp(cmd_stdout.parse()?, 0);
+        let _date = Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap();
 
         Ok(())
     }
