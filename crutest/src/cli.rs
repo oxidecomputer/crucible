@@ -713,7 +713,7 @@ async fn process_cli_command(
     verify_output: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
-        CliMessage::Activate(gen) => match guest.activate(gen).await {
+        CliMessage::Activate(gen) => match guest.activate_with_gen(gen).await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },

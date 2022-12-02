@@ -548,32 +548,34 @@ impl DataFile {
 
     /**
      * The worker thread will request the first region that is in a
-     * particular state.
+     * particular state.  If there are no tasks in the provided state,
+     * we sleep waiting for work to do.
      */
-    pub fn first_region_in_states(&self, states: &[State]) -> Option<Region> {
-        let inner = self.inner.lock().unwrap();
+    pub fn first_in_states(&self, states: &[State]) -> Region {
+        let mut inner = self.inner.lock().unwrap();
 
-        /*
-         * States are provided in priority order.  We check for regions
-         * in the first requested state before we check for
-         * regions in the second provided state, etc.  This
-         * allows us to focus on destroying tombstoned
-         * regions ahead of creating new regions.
-         */
-        for s in states {
-            for r in inner.regions.values() {
-                if &r.state == s {
-                    return Some(r.clone());
+        loop {
+            /*
+             * States are provided in priority order.  We check for regions
+             * in the first requested state before we check for
+             * regions in the second provided state, etc.  This
+             * allows us to focus on destroying tombstoned
+             * regions ahead of creating new regions.
+             */
+            for s in states {
+                for r in inner.regions.values() {
+                    if &r.state == s {
+                        return r.clone();
+                    }
                 }
             }
+
+            /*
+             * If we did not find any regions in the specified state, sleep
+             * on the condvar.
+             */
+            inner = self.bell.wait(inner).unwrap();
         }
-
-        None
-    }
-
-    pub fn wait_on_bell(&self) {
-        let inner = self.inner.lock().unwrap();
-        let _guard = self.bell.wait(inner).unwrap();
     }
 
     /**
@@ -688,7 +690,7 @@ impl DataFile {
 
                 results.push(Snapshot {
                     name: dir_name,
-                    created: Utc.timestamp(cmd_stdout.parse()?, 0),
+                    created: Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap(),
                 });
             }
         }
@@ -719,8 +721,9 @@ mod test {
             "1644356407".to_string(),
         );
 
-        let actual =
-            Utc.timestamp(String::from_utf8_lossy(&fake_stdout).parse()?, 0);
+        let actual = Utc
+            .timestamp_opt(String::from_utf8_lossy(&fake_stdout).parse()?, 0)
+            .unwrap();
 
         assert_eq!(expected, actual);
 
@@ -741,7 +744,7 @@ mod test {
             cmd_stdout
         };
 
-        let _date = Utc.timestamp(cmd_stdout.parse()?, 0);
+        let _date = Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap();
 
         Ok(())
     }
