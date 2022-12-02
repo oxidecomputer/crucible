@@ -3825,6 +3825,7 @@ impl Upstairs {
             root_cert_pem: None,
             control: None,
             read_only: false,
+            expected_extent_info: None,
         };
 
         // Register DTrace, and setup slog logging to use it.

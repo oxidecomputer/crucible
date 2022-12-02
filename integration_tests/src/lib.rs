@@ -181,6 +181,7 @@ mod test {
                 root_cert_pem: None,
                 control: None,
                 read_only,
+                expected_extent_info: None,
             };
 
             Ok(TestDownstairsSet {

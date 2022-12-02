@@ -136,9 +136,31 @@ impl Volume {
         // Spawn crucible tasks
         let guest_clone = guest.clone();
 
-        // TODO(gjc) extract region definition out of the CrucibleOpts
+        // If the options supply enough information to reason about the extents
+        // of this region, set up a region definition to pass to the new
+        // upstairs.
+        let region_def = opts
+            .expected_extent_info
+            .as_ref()
+            .map(|info| -> anyhow::Result<RegionDefinition> {
+                let mut region_options = RegionOptions::default();
+                region_options.set_block_size(self.block_size);
+                region_options.set_extent_size(Block {
+                    value: info.blocks_per_extent,
+                    shift: self.block_size.trailing_zeros(),
+                });
+                region_options.set_uuid(opts.id);
+                region_options.set_encrypted(opts.key.is_some());
+
+                let mut def = RegionDefinition::from_options(&region_options)?;
+                def.set_extent_count(info.extent_count);
+                Ok(def)
+            })
+            .transpose()?;
+
         let _join_handle =
-            up_main(opts, gen, None, guest_clone, producer_registry).await?;
+            up_main(opts, gen, region_def, guest_clone, producer_registry)
+                .await?;
 
         guest.activate().await?;
 
