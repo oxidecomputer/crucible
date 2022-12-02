@@ -3841,19 +3841,13 @@ impl Upstairs {
         }
         let log = Logger::root(drain.fuse(), o!());
 
-        Self::new(
-            &opts,
-            0,
-            RegionDefinition::default(),
-            Arc::new(Guest::default()),
-            log,
-        )
+        Self::new(&opts, 0, None, Arc::new(Guest::default()), log)
     }
 
     pub fn new(
         opt: &CrucibleOpts,
         gen: u64,
-        def: RegionDefinition,
+        def: Option<RegionDefinition>,
         guest: Arc<Guest>,
         log: Logger,
     ) -> Arc<Upstairs> {
@@ -3886,11 +3880,9 @@ impl Upstairs {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
         };
 
-        // TODO(gjc) Make `def` an Option instead of peeling the block size
-        // off of it.
-        let rd_status = match def.block_size() {
-            0 => RegionDefinitionStatus::WaitingForDownstairs,
-            _ => RegionDefinitionStatus::ExpectingFromDownstairs(def),
+        let rd_status = match def {
+            None => RegionDefinitionStatus::WaitingForDownstairs,
+            Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
 
         let session_id = Uuid::new_v4();
@@ -7910,7 +7902,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest, log);
+    let up = Upstairs::new(&opt, gen, None, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task

@@ -110,7 +110,7 @@ mod up_test {
             ..Default::default()
         };
 
-        Upstairs::new(&opts, 0, def, Arc::new(Guest::new()), csl())
+        Upstairs::new(&opts, 0, Some(def), Arc::new(Guest::new()), csl())
     }
 
     /*
