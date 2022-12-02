@@ -1351,6 +1351,7 @@ pub struct Downstairs {
     log: Logger,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl Downstairs {
     fn new(
         region: Region,
