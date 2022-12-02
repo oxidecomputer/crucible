@@ -7610,49 +7610,53 @@ async fn process_new_io(
         }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request block size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-
-            // TODO(gjc) don't unwrap here; instead fail if the information
-            // is not available. For now we're still relying on the preceding
-            // guest_io_ready call, which ensures that everything is activated
-            // and so guarantees that everything is in the right state.
-            *data.lock().await =
-                up.ddef.lock().await.get_def().unwrap().block_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.block_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Block size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::UpstairsInactive).await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryTotalSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request total size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await =
-                up.ddef.lock().await.get_def().unwrap().total_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.total_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Total size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::UpstairsInactive).await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request extent size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await =
-                up.ddef.lock().await.get_def().unwrap().extent_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.extent_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Extent size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::UpstairsInactive).await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {

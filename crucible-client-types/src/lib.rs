@@ -32,9 +32,7 @@ pub enum VolumeConstructionRequest {
     },
 }
 
-#[derive(
-    Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq,
-)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct RegionExtentInfo {
     pub blocks_per_extent: u64,
     pub extent_count: u32,
