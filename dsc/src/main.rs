@@ -1664,7 +1664,7 @@ mod test {
 
         // Verify that we can find the existing region directories.
         dsci.generate_region_set().await.unwrap();
-        let _rs = dsci.rs.blocking_lock();
+        let _rs = dsci.rs.lock().await;
     }
 
     #[tokio::test]
