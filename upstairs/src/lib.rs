@@ -5661,16 +5661,18 @@ impl Upstairs {
             bail!("Encryption expectation mismatch!");
         }
 
-        // TODO(gjc) Verify more rigorously.
-        if client_ddef.block_size() == 0 {
-            bail!("Client block size must not be zero");
-        }
+        /*
+         * TODO(#551) Verify that `client_ddef` makes sense (valid, nonzero
+         * block size, etc.)
+         */
 
         /*
-         * XXX Eventually we will be provided UUIDs when the upstairs
-         * starts, so we can compare those with what we get here.
+         * If this downstairs was previously registered, make sure this
+         * connection reports the one the old connection did.
          *
-         * For now, we take whatever connects to us first.
+         * XXX The expected per-client UUIDs should eventually be provided
+         * when the upstairs stairs. When that happens, they can be
+         * verified here.
          */
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
@@ -5691,26 +5693,19 @@ impl Upstairs {
             ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
 
-        /*
-         * XXX Until we are passed expected region info at start, we
-         * can only compare the three downstairs to each other and move
-         * forward if all three are the same.
-         *
-         * For now I'm using zero as an indication that we don't yet know
-         * the valid values and non-zero meaning we have at least one
-         * downstairs to compare with.
-         *
-         * 0 should never be a valid block size, so this hack will let us
-         * move forward until we get the expected region info at startup.
-         */
         let mut ddef = self.ddef.lock().await;
-        let prev_def = match &*ddef {
-            RegionDefinitionStatus::WaitingForDownstairs => None,
-            RegionDefinitionStatus::ExpectingFromDownstairs(rd) => Some(rd),
-            RegionDefinitionStatus::Received(rd) => Some(rd),
-        };
 
-        if let Some(prev_def) = prev_def {
+        /*
+         * If there is an expected region definition of any kind (either from
+         * a previous connection or an expectation that was supplied
+         * when this upstairs was created), make sure the new
+         * definition matches it.
+         *
+         * If this upstairs' creator didn't specify any expected values, the
+         * first downstairs to connect sets the expected values for the other
+         * two.
+         */
+        if let Some(prev_def) = ddef.get_def() {
             if prev_def.block_size() != client_ddef.block_size()
                 || prev_def.extent_size().value
                     != client_ddef.extent_size().value
@@ -5727,7 +5722,6 @@ impl Upstairs {
         }
 
         *ddef = RegionDefinitionStatus::Received(client_ddef);
-
         Ok(())
     }
 
