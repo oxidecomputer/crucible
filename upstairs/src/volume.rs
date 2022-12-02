@@ -135,8 +135,10 @@ impl Volume {
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
+
+        // TODO(gjc) extract region definition out of the CrucibleOpts
         let _join_handle =
-            up_main(opts, gen, guest_clone, producer_registry).await?;
+            up_main(opts, gen, None, guest_clone, producer_registry).await?;
 
         guest.activate().await?;
 

@@ -3857,20 +3857,18 @@ impl Upstairs {
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
-        // create an encryption context if a key is supplied.
+        // Create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
             Arc::new(EncryptionContext::new(
                 key,
-                /*
-                 * XXX: It would be good to do BlockOp::QueryBlockSize here,
-                 * but this creates a deadlock. Upstairs::new runs before
-                 * up_ds_listen in up_main, and up_ds_listen needs to run
-                 * to answer BlockOp::QueryBlockSize.
-                 *
-                 * At this point ddef is the default, the downstairs haven't
-                 * reported in.
-                 */
-                512,
+                // XXX: Figure out what to do if no expected region definition
+                // was supplied. It would be good to do BlockOp::QueryBlockSize
+                // here, but this creates a deadlock. Upstairs::new runs before
+                // up_ds_listen in up_main, and up_ds_listen needs to run to
+                // answer BlockOp::QueryBlockSize. (Note that the downstairs
+                // have not reported in yet, so if no expected definition was
+                // supplied no downstairs information is available.)
+                def.map(|rd| rd.block_size() as usize).unwrap_or(512),
             ))
         });
 
@@ -5673,6 +5671,10 @@ impl Upstairs {
          * XXX The expected per-client UUIDs should eventually be provided
          * when the upstairs stairs. When that happens, they can be
          * verified here.
+         *
+         * REVIEW(gjc): is the UUID expected to be the same for all three
+         * downstairs? Can we check it against the expected/previous region
+         * definition?
          */
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
@@ -7875,6 +7877,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
+    def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -7896,7 +7899,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, None, guest, log);
+    let up = Upstairs::new(&opt, gen, def, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task
