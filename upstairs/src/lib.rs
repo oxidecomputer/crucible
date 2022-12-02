@@ -3585,7 +3585,7 @@ impl EncryptionContext {
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
-        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], &data[..]]);
+        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
         Ok((nonce, tag, computed_hash))
     }
@@ -5523,12 +5523,11 @@ impl Upstairs {
          * (even if none was required) and they should proceed to being
          * active and accepting commands on the ds_work_ message channel.
          */
-        assert!(!self
+        assert!(self
             .downstairs
             .lock()
             .await
-            .reconcile_current_work
-            .is_some());
+            .reconcile_current_work.is_none());
 
         info!(
             self.log,

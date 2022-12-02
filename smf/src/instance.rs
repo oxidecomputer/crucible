@@ -128,11 +128,9 @@ impl<'a> Instance<'a> {
         }
 
         let state = get_val(&restarter, "state")?
-            .map(|v| State::parse(&v))
-            .flatten();
+            .and_then(|v| State::parse(&v));
         let next_state = get_val(&restarter, "next_state")?
-            .map(|v| State::parse(&v))
-            .flatten();
+            .and_then(|v| State::parse(&v));
 
         Ok((state, next_state))
     }
