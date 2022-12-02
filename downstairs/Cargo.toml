@@ -53,7 +53,7 @@ uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 [dev-dependencies]
 expectorate = "1.0.5"
 openapiv3 = "1.0.1"
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 rand_chacha = "0.3.1"
 tempfile = "3"
 
