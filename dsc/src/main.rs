@@ -1,5 +1,4 @@
 // Copyright 2022 Oxide Computer Company
-#![feature(exit_status_error)]
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;

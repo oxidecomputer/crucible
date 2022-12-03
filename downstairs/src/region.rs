@@ -390,7 +390,7 @@ pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("copy".to_string());
+    out.set_extension("copy");
     out
 }
 
@@ -405,7 +405,7 @@ pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("replace".to_string());
+    out.set_extension("replace");
     out
 }
 /**
@@ -419,7 +419,7 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("completed".to_string());
+    out.set_extension("completed");
     out
 }
 
@@ -1363,7 +1363,7 @@ impl Region {
          * - matches our eid
          * - is not read-only
          */
-        assert!(!self.extents[eid].inner.is_some());
+        assert!(self.extents[eid].inner.is_none());
         assert_eq!(self.extents[eid].number, eid as u32);
         assert!(!self.read_only);
 
@@ -2177,7 +2177,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2209,7 +2209,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2239,7 +2239,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2280,7 +2280,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2345,7 +2345,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2564,12 +2564,12 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Close extent 4
         let ext_four = &mut region.extents[4];
         ext_four.close()?;
-        assert!(!ext_four.inner.is_some());
+        assert!(ext_four.inner.is_none());
 
         // Reopen all extents
         region.reopen_all_extents()?;

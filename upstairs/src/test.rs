@@ -3515,9 +3515,9 @@ mod up_test {
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
-        assert!(!ds.rep_in_progress(0).is_some());
-        assert!(!ds.rep_in_progress(1).is_some());
-        assert!(!ds.rep_in_progress(2).is_some());
+        assert!(ds.rep_in_progress(0).is_none());
+        assert!(ds.rep_in_progress(1).is_none());
+        assert!(ds.rep_in_progress(2).is_none());
     }
 
     #[tokio::test]
@@ -3569,9 +3569,9 @@ mod up_test {
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
-        assert!(!ds.rep_in_progress(0).is_some());
-        assert!(!ds.rep_in_progress(1).is_some());
-        assert!(!ds.rep_in_progress(2).is_some());
+        assert!(ds.rep_in_progress(0).is_none());
+        assert!(ds.rep_in_progress(1).is_none());
+        assert!(ds.rep_in_progress(2).is_none());
     }
 
     #[tokio::test]
@@ -3602,7 +3602,7 @@ mod up_test {
         assert!(ds.rep_in_progress(0).is_some());
         assert!(ds.rep_in_progress(1).is_some());
         ds.ds_state[2] = DsState::New;
-        assert!(!ds.rep_in_progress(2).is_some());
+        assert!(ds.rep_in_progress(2).is_none());
 
         // Okay, now the DS is back and ready for repair, verify it will
         // start taking work.
