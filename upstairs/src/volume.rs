@@ -162,8 +162,6 @@ impl Volume {
             up_main(opts, gen, region_def, guest_clone, producer_registry)
                 .await?;
 
-        guest.activate().await?;
-
         self.add_subvolume(guest).await
     }
 
