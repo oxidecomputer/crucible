@@ -6,7 +6,7 @@ use std::fs::File;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use byte_unit::Byte;
@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::sleep_until;
 
 pub mod client;
@@ -457,7 +457,7 @@ impl DscInfo {
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
-        let mut rs = self.rs.lock().unwrap();
+        let mut rs = self.rs.lock().await;
         // use port to do this, or make a client ID that is port base, etc
         let port = rs.port_base + (ds_id * rs.port_step);
         let rd = &rs.region_dir[ds_id as usize];
@@ -533,8 +533,8 @@ impl DscInfo {
     /**
      * Delete a region directory at the given ds_id.
      */
-    fn delete_ds_region(&self, ds_id: usize) -> Result<()> {
-        let rs = self.rs.lock().unwrap();
+    async fn delete_ds_region(&self, ds_id: usize) -> Result<()> {
+        let rs = self.rs.lock().await;
         if rs.region_dir.len() < ds_id {
             bail!("Invalid index {} for downstairs regions", ds_id);
         }
@@ -552,8 +552,8 @@ impl DscInfo {
      * TODO: This is assuming a fair amount of stuff.
      * Make fewer assumptions...
      */
-    fn generate_region_set(&self) -> Result<()> {
-        let mut rs = self.rs.lock().unwrap();
+    async fn generate_region_set(&self) -> Result<()> {
+        let mut rs = self.rs.lock().await;
         let mut port = rs.port_base;
 
         for ds_id in 0..3 {
@@ -584,16 +584,16 @@ impl DscInfo {
         Ok(())
     }
 
-    fn get_ds_state(&self, client_id: usize) -> Result<DownstairsState> {
-        let rs = self.rs.lock().unwrap();
+    async fn get_ds_state(&self, client_id: usize) -> Result<DownstairsState> {
+        let rs = self.rs.lock().await;
         if rs.ds_state.len() <= client_id {
             bail!("Invalid client ID: {}", client_id);
         }
         Ok(rs.ds_state[client_id])
     }
 
-    fn get_ds_pid(&self, client_id: usize) -> Result<Option<u32>> {
-        let rs = self.rs.lock().unwrap();
+    async fn get_ds_pid(&self, client_id: usize) -> Result<Option<u32>> {
+        let rs = self.rs.lock().await;
         if rs.ds_state.len() <= client_id {
             bail!("Invalid client ID: {}", client_id);
         }
@@ -770,7 +770,7 @@ async fn start_dsc(
     let mut handles = vec![];
 
     // Spawn a task to start and monitor each of our downstairs.
-    let rs = dsci.rs.lock().unwrap();
+    let rs = dsci.rs.lock().await;
     for ds in rs.ds.iter() {
         println!("start ds: {:?}", ds.port);
         let txc = tx.clone();
@@ -800,7 +800,7 @@ async fn start_dsc(
                 // we can exit this loop and the program.
                 if shutdown_sent {
                     let mut keep_waiting = false;
-                    let rs = dsci.rs.lock().unwrap();
+                    let rs = dsci.rs.lock().await;
 
                     for state in rs.ds_state.clone() {
                         match state {
@@ -839,7 +839,7 @@ async fn start_dsc(
                 // We have to walk our job list here, as there are some
                 // jobs that require local changes.
 
-                let mut dsc_work = dsci.work.lock().unwrap();
+                let mut dsc_work = dsci.work.lock().await;
                 while let Some(work) = dsc_work.get_cmd() {
                     println!("got dsc {:?}", work);
 
@@ -885,7 +885,7 @@ async fn start_dsc(
                     println!("[{}][{}] reports {:?}",
                         mi.port, mi.client_id,
                         mi.state);
-                    let mut rs = dsci.rs.lock().unwrap();
+                    let mut rs = dsci.rs.lock().await;
                     rs.ds_state[mi.client_id] = mi.state;
                     rs.ds_pid[mi.client_id] = mi.pid;
                 } else {
@@ -1154,7 +1154,7 @@ async fn loop_create_test(
             )
             .await?;
         times.push(ct);
-        dsci.delete_ds_region(0)?;
+        dsci.delete_ds_region(0).await?;
     }
 
     let size = region_si(extent_size, extent_count, block_size);
@@ -1216,7 +1216,7 @@ async fn single_create_test(
         "{:>9.3} {}  {} {:>6} {:>6} {:>4}",
         ct, size, extent_file_size, extent_size, extent_count, block_size,
     );
-    dsci.delete_ds_region(0)?;
+    dsci.delete_ds_region(0).await?;
 
     // If requested, also write out the results to the csv file
     if let Some(csv) = csv {
@@ -1429,7 +1429,7 @@ fn main() -> Result<()> {
                     encrypted,
                 ))?;
             } else {
-                dsci.generate_region_set()?;
+                runtime.block_on(dsci.generate_region_set())?;
             }
 
             let dsci_c = Arc::clone(&dsci);
@@ -1570,8 +1570,8 @@ mod test {
         assert!(res.is_err());
     }
 
-    #[test]
-    fn delete_bad_region() {
+    #[tokio::test]
+    async fn delete_bad_region() {
         // Test deletion of a region that does not exist, should report error.
         let (ds_bin, _ds_path) = temp_file_path();
 
@@ -1581,13 +1581,13 @@ mod test {
         let dsci =
             DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810).unwrap();
 
-        let res = dsci.delete_ds_region(0);
+        let res = dsci.delete_ds_region(0).await;
         println!("res is {:?}", res);
         assert!(res.is_err());
     }
 
-    #[test]
-    fn delete_bad_second_region() {
+    #[tokio::test]
+    async fn delete_bad_second_region() {
         // Test deletion of a region that does not exist, should report error.
         let (ds_bin, _ds_path) = temp_file_path();
 
@@ -1605,7 +1605,7 @@ mod test {
             port_to_region(r1.into_os_string().into_string().unwrap(), 8810)
                 .unwrap();
         fs::create_dir_all(&ds_region_dir).unwrap();
-        let res = dsci.delete_ds_region(1);
+        let res = dsci.delete_ds_region(1).await;
         assert!(res.is_err());
     }
 
@@ -1615,8 +1615,8 @@ mod test {
         assert_eq!(nr, "/var/tmp/rr/1234".to_string());
     }
 
-    #[test]
-    fn delete_region() {
+    #[tokio::test]
+    async fn delete_region() {
         // Test creation then deletion of a region
         let (ds_bin, _ds_path) = temp_file_path();
 
@@ -1634,13 +1634,13 @@ mod test {
                 .unwrap();
         fs::create_dir_all(&ds_region_dir).unwrap();
 
-        let res = dsci.delete_ds_region(0);
+        let res = dsci.delete_ds_region(0).await;
         assert!(res.is_ok());
         assert!(!Path::new(&ds_region_dir).exists());
     }
 
-    #[test]
-    fn restart_region() {
+    #[tokio::test]
+    async fn restart_region() {
         // Test a typical creation
         let (ds_bin, _ds_path) = temp_file_path();
 
@@ -1664,12 +1664,12 @@ mod test {
         }
 
         // Verify that we can find the existing region directories.
-        dsci.generate_region_set().unwrap();
-        let _rs = dsci.rs.lock().unwrap();
+        dsci.generate_region_set().await.unwrap();
+        let _rs = dsci.rs.lock().await;
     }
 
-    #[test]
-    fn restart_region_bad() {
+    #[tokio::test]
+    async fn restart_region_bad() {
         // Test region restart when a region directory is not present.
         // This should return error.
         let (ds_bin, _ds_path) = temp_file_path();
@@ -1694,7 +1694,7 @@ mod test {
         }
 
         // Verify that the missing region will return error.
-        let res = dsci.generate_region_set();
+        let res = dsci.generate_region_set().await;
         assert!(res.is_err());
     }
 }
