@@ -127,10 +127,10 @@ impl<'a> Instance<'a> {
             }
         }
 
-        let state = get_val(&restarter, "state")?
-            .and_then(|v| State::parse(&v));
-        let next_state = get_val(&restarter, "next_state")?
-            .and_then(|v| State::parse(&v));
+        let state =
+            get_val(&restarter, "state")?.and_then(|v| State::parse(&v));
+        let next_state =
+            get_val(&restarter, "next_state")?.and_then(|v| State::parse(&v));
 
         Ok((state, next_state))
     }

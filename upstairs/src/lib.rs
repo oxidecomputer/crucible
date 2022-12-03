@@ -5527,7 +5527,8 @@ impl Upstairs {
             .downstairs
             .lock()
             .await
-            .reconcile_current_work.is_none());
+            .reconcile_current_work
+            .is_none());
 
         info!(
             self.log,
