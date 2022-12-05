@@ -21,6 +21,7 @@ use tracing::instrument;
 
 use super::*;
 
+
 #[derive(Debug)]
 pub struct Extent {
     number: u32,
@@ -1144,10 +1145,13 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
+        cdt::extent__flush__start!(|| { (job_id, self.number) });
+
         /*
          * We must first fsync to get any outstanding data written to disk.
          * This must be done before we update the flush number.
          */
+        cdt::extent__flush__file__start!(|| { (job_id, self.number) });
         if let Err(e) = inner.file.sync_all() {
             /*
              * XXX Retry?  Mark extent as broken?
@@ -1159,11 +1163,13 @@ impl Extent {
                 e
             );
         }
+        cdt::extent__flush__file__done!(|| { (job_id, self.number)});
 
         // Clear old block contexts. In order to be crash consistent, only
         // perform this after the extent fsync is done. Read each block in the
         // extent and find out the integrity hash. Then, remove all block
         // context rows where the integrity hash does not match.
+        cdt::extent__flush__rehash__start!(|| { (job_id, self.number )});
 
         let total_bytes: usize =
             self.extent_size.value as usize * self.block_size as usize;
@@ -1178,9 +1184,13 @@ impl Extent {
             .map(|(i, data)| (i, integrity_hash(&[data])))
             .collect();
 
+        cdt::extent__flush__rehash__done!(|| { (job_id, self.number )});
+
+        cdt::extent__flush__sqlite__insert__start!(|| { (job_id, self.number )});
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
+        cdt::extent__flush__sqlite__insert__done!(|| { (job_id, self.number )});
 
         // Reset the file's seek offset to 0, and set the flush number and gen
         // number
