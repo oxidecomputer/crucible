@@ -356,14 +356,14 @@ pub mod cdt {
     fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
-    fn extent__flush__start(job_id: u64, extent_id: u32) {}
-    fn extent__flush__done(job_id: u64, extent_id: u32) {}
-    fn extent__flush__file__start(job_id: u64, extent_id: u32) {}
-    fn extent__flush__file__done(job_id: u64, extent_id: u32) {}
-    fn extent__flush__rehash__start(job_id: u64, extent_id: u32) {}
-    fn extent__flush__rehash__done(job_id: u64, extent_id: u32) {}
-    fn extent__flush__sqlite__insert__start(job_id: u64, extent_id: u32) {}
-    fn extent__flush__sqlite__insert__done(_job_id: u64, _extent_id: u32) {}
+    fn extent__flush__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__rehash__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__rehash__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__sqlite__insert__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__sqlite__insert__done(_job_id: u64, _extent_id: u32, n_blocks: u64) {}
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__get__hashes__start(

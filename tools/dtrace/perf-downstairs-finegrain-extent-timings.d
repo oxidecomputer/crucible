@@ -43,28 +43,28 @@ crucible_downstairs*:::extent-flush-sqlite-insert-start
 crucible_downstairs*:::extent-flush-done
 /extent_flush_start[pid,arg0,arg1]/
 {
-    @time["flush"] = quantize(timestamp - extent_flush_start[pid,arg0,arg1]);
+    @time["flush"] = quantize((timestamp - extent_flush_start[pid,arg0,arg1]) / arg2);
     extent_flush_start[pid,arg0,arg1] = 0;
 }
 
 crucible_downstairs*:::extent-flush-file-done
 /extent_flush_file_start[pid,arg0,arg1]/
 {
-    @time["flush_file"] = quantize(timestamp - extent_flush_file_start[pid,arg0,arg1]);
+    @time["flush_file"] = quantize((timestamp - extent_flush_file_start[pid,arg0,arg1]) / arg2);
     extent_flush_file_start[pid,arg0,arg1] = 0;
 }
 
 crucible_downstairs*:::extent-flush-rehash-done
 /extent_flush_rehash_start[pid,arg0,arg1]/
 {
-    @time["flush_rehash"] = quantize(timestamp - extent_flush_rehash_start[pid,arg0,arg1]);
+    @time["flush_rehash"] = quantize((timestamp - extent_flush_rehash_start[pid,arg0,arg1]) / arg2);
     extent_flush_rehash_start[pid,arg0,arg1] = 0;
 }
 
 crucible_downstairs*:::extent-flush-sqlite-insert-done
 /extent_flush_sqlite_insert_start[pid,arg0,arg1]/
 {
-    @time["flush_sqlite_insert"] = quantize(timestamp - extent_flush_sqlite_insert_start[pid,arg0,arg1]);
+    @time["flush_sqlite_insert"] = quantize((timestamp - extent_flush_sqlite_insert_start[pid,arg0,arg1]) / arg2);
     extent_flush_sqlite_insert_start[pid,arg0,arg1] = 0;
 }
 
