@@ -828,9 +828,11 @@ impl Extent {
     #[instrument]
     pub fn read(
         &self,
+        job_id: u64,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
     ) -> Result<(), CrucibleError> {
+        cdt::extent__read__start!(|| { (job_id, self.number, requests.len() as u64 )});
         let mut inner = self.inner();
 
         // This code batches up operations for contiguous regions of
@@ -869,6 +871,7 @@ impl Extent {
             }
 
             // Finally we get to read the actual data. That's why we're here
+            cdt::extent__read__file__start!(|| { (job_id, self.number, n_contiguous_requests as u64 )});
             inner.file.seek(SeekFrom::Start(
                 first_req.offset.value * self.block_size,
             ))?;
@@ -877,12 +880,15 @@ impl Extent {
             );
             read_buffer.resize(read_buffer.capacity(), 0);
             inner.file.read_exact(&mut read_buffer)?;
+            cdt::extent__read__file__done!(|| { (job_id, self.number, n_contiguous_requests as u64 )});
 
             // Query the block metadata
+            cdt::extent__read__get__contexts__start!(|| { (job_id, self.number, n_contiguous_requests as u64 )});
             let block_contexts = inner.get_block_contexts(
                 first_req.offset.value,
                 n_contiguous_requests as u64,
             )?;
+            cdt::extent__read__get__contexts__done!(|| { (job_id, self.number, n_contiguous_requests as u64 )});
 
             // Now it's time to put everything into the responses.
             // We use into_iter here to move values out of enc_ctxts/hashes,
@@ -910,6 +916,8 @@ impl Extent {
 
             req_run_start += n_contiguous_requests;
         }
+
+        cdt::extent__read__done!(|| { (job_id, self.number, requests.len() as u64 )});
 
         Ok(())
     }
@@ -951,12 +959,15 @@ impl Extent {
     #[instrument]
     pub fn write(
         &self,
+        job_id: u64,
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
+
+        cdt::extent__write__start!(|| { (job_id, self.number, writes.len() as u64 )});
 
         let mut inner = self.inner();
 
@@ -1011,6 +1022,7 @@ impl Extent {
         // blocks have hashes
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
+            cdt::extent__write__get__hashes__start!(|| { (job_id, self.number, writes.len() as u64 )});
             let mut write_run_start = 0;
             while write_run_start < writes.len() {
                 let first_write = writes[write_run_start];
@@ -1045,9 +1057,11 @@ impl Extent {
 
                 write_run_start += n_contiguous_writes;
             }
+            cdt::extent__write__get__hashes__done!(|| { (job_id, self.number, writes.len() as u64 )});
 
             if writes_to_skip.len() == writes.len() {
                 // Nothing to do
+                cdt::extent__write__done!(|| { (job_id, self.number, writes.len() as u64 )});
                 return Ok(());
             }
         }
@@ -1055,6 +1069,9 @@ impl Extent {
         inner.set_dirty()?;
 
         // Write all the metadata to the DB
+        // TODO right now we're including the integrity_hash() time in the sqlite time. It's small in
+        // comparison right now, but worth being aware of when looking at dtrace numbers
+        cdt::extent__write__sqlite__insert__start!(|| { (job_id, self.number, writes.len() as u64 )});
         let tx = inner.metadb_transaction()?;
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
@@ -1072,11 +1089,13 @@ impl Extent {
             )?;
         }
         tx.commit()?;
+        cdt::extent__write__sqlite__insert__done!(|| { (job_id, self.number, writes.len() as u64 )});
 
         // Buffer writes for fewer syscalls. The 65536 buffer size here is
         // chosen somewhat arbitrarily.
         let mut write_buffer = [0u8; 65536];
 
+        cdt::extent__write__file__start!(|| { (job_id, self.number, writes.len() as u64 )});
         let mut bytes_in_run = 0;
         let mut next_block_in_run = u64::MAX;
         for write in writes {
@@ -1115,6 +1134,9 @@ impl Extent {
         if bytes_in_run > 0 {
             inner.file.write_all(&write_buffer[..bytes_in_run])?;
         }
+        cdt::extent__write__file__done!(|| { (job_id, self.number, writes.len() as u64 )});
+
+        cdt::extent__write__done!(|| { (job_id, self.number, writes.len() as u64 )});
 
         Ok(())
     }
@@ -1726,7 +1748,7 @@ impl Region {
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
-            extent.write(&writes[..], only_write_unwritten)?;
+            extent.write(job_id, &writes[..], only_write_unwritten)?;
         }
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id);
@@ -1764,7 +1786,7 @@ impl Region {
                     batched_reads.push(request);
                 } else {
                     let extent = &self.extents[_eid as usize];
-                    extent.read(&batched_reads[..], &mut responses)?;
+                    extent.read(job_id, &batched_reads[..], &mut responses)?;
 
                     eid = Some(request.eid);
                     batched_reads.clear();
@@ -1779,7 +1801,7 @@ impl Region {
 
         if let Some(_eid) = eid {
             let extent = &self.extents[_eid as usize];
-            extent.read(&batched_reads[..], &mut responses)?;
+            extent.read(job_id, &batched_reads[..], &mut responses)?;
         }
         cdt::os__read__done!(|| job_id);
 
