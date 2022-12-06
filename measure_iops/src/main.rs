@@ -81,7 +81,6 @@ async fn main() -> Result<()> {
         root_cert_pem: opt.root_cert_pem,
         control: None,
         read_only: false,
-        expected_extent_info: None,
     };
 
     /*

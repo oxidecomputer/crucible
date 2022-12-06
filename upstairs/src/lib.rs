@@ -3825,7 +3825,6 @@ impl Upstairs {
             root_cert_pem: None,
             control: None,
             read_only: false,
-            expected_extent_info: None,
         };
 
         // Register DTrace, and setup slog logging to use it.
@@ -4684,7 +4683,7 @@ impl Upstairs {
         let impacted_blocks = extent_from_offset(
             *ddef,
             offset,
-            Block::from_bytes(data.len(), &ddef),
+            Block::from_bytes(data.len(), ddef),
         );
 
         /*

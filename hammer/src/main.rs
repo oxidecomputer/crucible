@@ -90,7 +90,6 @@ async fn main() -> Result<()> {
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
         read_only: false,
-        expected_extent_info: None,
     };
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {

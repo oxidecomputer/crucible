@@ -22,6 +22,8 @@ pub enum VolumeConstructionRequest {
     },
     Region {
         block_size: u64,
+        blocks_per_extent: u64,
+        extent_count: u32,
         opts: CrucibleOpts,
         gen: u64,
     },
@@ -30,12 +32,6 @@ pub enum VolumeConstructionRequest {
         block_size: u64,
         path: String,
     },
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct RegionExtentInfo {
-    pub blocks_per_extent: u64,
-    pub extent_count: u32,
 }
 
 #[derive(
@@ -52,7 +48,6 @@ pub struct CrucibleOpts {
     pub root_cert_pem: Option<String>,
     pub control: Option<SocketAddr>,
     pub read_only: bool,
-    pub expected_extent_info: Option<RegionExtentInfo>,
 }
 
 impl CrucibleOpts {

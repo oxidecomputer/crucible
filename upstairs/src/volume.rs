@@ -8,6 +8,26 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
 
+pub struct RegionExtentInfo {
+    pub block_size: u64,
+    pub blocks_per_extent: u64,
+    pub extent_count: u32,
+}
+
+impl RegionExtentInfo {
+    fn create_region_options(&self, opts: &CrucibleOpts) -> RegionOptions {
+        let mut region_options = RegionOptions::default();
+        region_options.set_block_size(self.block_size);
+        region_options.set_extent_size(Block {
+            value: self.blocks_per_extent,
+            shift: self.block_size.trailing_zeros(),
+        });
+        region_options.set_uuid(opts.id);
+        region_options.set_encrypted(opts.key.is_some());
+        region_options
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Volume {
     uuid: Uuid,
@@ -128,6 +148,7 @@ impl Volume {
     pub async fn add_subvolume_create_guest(
         &mut self,
         opts: CrucibleOpts,
+        extent_info: RegionExtentInfo,
         gen: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
@@ -136,31 +157,19 @@ impl Volume {
         // Spawn crucible tasks
         let guest_clone = guest.clone();
 
-        // If the options supply enough information to reason about the extents
-        // of this region, set up a region definition to pass to the new
-        // upstairs.
-        let region_def = opts
-            .expected_extent_info
-            .as_ref()
-            .map(|info| -> anyhow::Result<RegionDefinition> {
-                let mut region_options = RegionOptions::default();
-                region_options.set_block_size(self.block_size);
-                region_options.set_extent_size(Block {
-                    value: info.blocks_per_extent,
-                    shift: self.block_size.trailing_zeros(),
-                });
-                region_options.set_uuid(opts.id);
-                region_options.set_encrypted(opts.key.is_some());
+        let mut region_def = RegionDefinition::from_options(
+            &extent_info.create_region_options(&opts),
+        )?;
+        region_def.set_extent_count(extent_info.extent_count);
 
-                let mut def = RegionDefinition::from_options(&region_options)?;
-                def.set_extent_count(info.extent_count);
-                Ok(def)
-            })
-            .transpose()?;
-
-        let _join_handle =
-            up_main(opts, gen, region_def, guest_clone, producer_registry)
-                .await?;
+        let _join_handle = up_main(
+            opts,
+            gen,
+            Some(region_def),
+            guest_clone,
+            producer_registry,
+        )
+        .await?;
 
         self.add_subvolume(guest).await
     }
@@ -985,12 +994,23 @@ impl Volume {
 
             VolumeConstructionRequest::Region {
                 block_size,
+                blocks_per_extent,
+                extent_count,
                 opts,
                 gen,
             } => {
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume_create_guest(opts, gen, producer_registry)
-                    .await?;
+                vol.add_subvolume_create_guest(
+                    opts,
+                    RegionExtentInfo {
+                        block_size,
+                        blocks_per_extent,
+                        extent_count,
+                    },
+                    gen,
+                    producer_registry,
+                )
+                .await?;
                 Ok(vol)
             }
 
