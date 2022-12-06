@@ -287,17 +287,18 @@ mod test {
     async fn integration_test_two_layers() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_common(opts, false).await
+        integration_test_two_layers_common(tds, opts, false).await
     }
 
     #[tokio::test]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_common(opts, true).await
+        integration_test_two_layers_common(tds, opts, true).await
     }
 
     async fn integration_test_two_layers_common(
+        tds: TestDownstairsSet,
         opts: CrucibleOpts,
         is_write_unwritten: bool,
     ) -> Result<()> {
@@ -329,8 +330,8 @@ mod test {
                 opts,
                 volume::RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: 10,
-                    extent_count: 1,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                 },
                 1,
                 None,
@@ -1101,7 +1102,7 @@ mod test {
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_small_common(opts, false).await
+        integration_test_two_layers_small_common(tds, opts, false).await
     }
 
     #[tokio::test]
@@ -1109,10 +1110,11 @@ mod test {
     {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_small_common(opts, true).await
+        integration_test_two_layers_small_common(tds, opts, true).await
     }
 
     async fn integration_test_two_layers_small_common(
+        tds: TestDownstairsSet,
         opts: CrucibleOpts,
         is_write_unwritten: bool,
     ) -> Result<()> {
@@ -1148,8 +1150,8 @@ mod test {
                 opts,
                 volume::RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: 5,
-                    extent_count: 1,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                 },
                 1,
                 None,
@@ -1228,8 +1230,8 @@ mod test {
                 opts,
                 volume::RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: 10,
-                    extent_count: 1,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                 },
                 1,
                 None,
@@ -1311,8 +1313,8 @@ mod test {
                 opts,
                 volume::RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: 5,
-                    extent_count: 1,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                 },
                 1,
                 None,
@@ -1415,8 +1417,8 @@ mod test {
                 opts,
                 volume::RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: 5,
-                    extent_count: 1,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                 },
                 1,
                 None,
@@ -1510,8 +1512,8 @@ mod test {
                 opts,
                 volume::RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: 10,
-                    extent_count: 1,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                 },
                 1,
                 None,
