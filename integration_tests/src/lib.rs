@@ -37,36 +37,23 @@ mod test {
             address: IpAddr,
             encrypted: bool,
             read_only: bool,
-            big: bool,
+            blocks_per_extent: u64,
+            extent_count: u32,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = if big {
-                // create a 47 MB region
-                create_region(
-                    512, /* block_size */
-                    tempdir.path().to_path_buf(),
-                    512, /* extent_size */
-                    188, /* extent_count */
-                    Uuid::new_v4(),
-                    encrypted,
-                    csl(),
-                )?
-            } else {
-                // create a 5120b region
-                create_region(
-                    512, /* block_size */
-                    tempdir.path().to_path_buf(),
-                    5, /* extent_size */
-                    2, /* extent_count */
-                    Uuid::new_v4(),
-                    encrypted,
-                    csl(),
-                )?
-            };
+            let _region = create_region(
+                512, /* block_size */
+                tempdir.path().to_path_buf(),
+                blocks_per_extent,
+                extent_count,
+                Uuid::new_v4(),
+                encrypted,
+                csl(),
+            )?;
 
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
@@ -152,15 +139,33 @@ mod test {
             read_only: bool,
             big: bool,
         ) -> Result<TestDownstairsSet> {
-            let downstairs1 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
-                    .await?;
-            let downstairs2 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
-                    .await?;
-            let downstairs3 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
-                    .await?;
+            let (blocks_per_extent, extent_count) =
+                if big { (512, 188) } else { (5, 2) };
+
+            let downstairs1 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+            )
+            .await?;
+            let downstairs2 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+            )
+            .await?;
+            let downstairs3 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+            )
+            .await?;
 
             // Generate random data for our key
             let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
@@ -181,7 +186,12 @@ mod test {
                 root_cert_pem: None,
                 control: None,
                 read_only,
-                expected_extent_info: None,
+                expected_extent_info: Some(
+                    crucible_client_types::RegionExtentInfo {
+                        blocks_per_extent,
+                        extent_count,
+                    },
+                ),
             };
 
             Ok(TestDownstairsSet {
