@@ -373,14 +373,6 @@
             "nullable": true,
             "type": "string"
           },
-          "expected_extent_info": {
-            "nullable": true,
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/RegionExtentInfo"
-              }
-            ]
-          },
           "flush_timeout": {
             "nullable": true,
             "type": "integer",
@@ -499,25 +491,6 @@
           "job_is_finished"
         ]
       },
-      "RegionExtentInfo": {
-        "type": "object",
-        "properties": {
-          "blocks_per_extent": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "extent_count": {
-            "type": "integer",
-            "format": "uint32",
-            "minimum": 0
-          }
-        },
-        "required": [
-          "blocks_per_extent",
-          "extent_count"
-        ]
-      },
       "ScrubResponse": {
         "type": "object",
         "properties": {
@@ -619,6 +592,16 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "blocks_per_extent": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "extent_count": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
               "gen": {
                 "type": "integer",
                 "format": "uint64",
@@ -636,6 +619,8 @@
             },
             "required": [
               "block_size",
+              "blocks_per_extent",
+              "extent_count",
               "gen",
               "opts",
               "type"
