@@ -3847,7 +3847,7 @@ impl Upstairs {
     pub fn new(
         opt: &CrucibleOpts,
         gen: u64,
-        def: Option<RegionDefinition>,
+        expected_region_def: Option<RegionDefinition>,
         guest: Arc<Guest>,
         log: Logger,
     ) -> Arc<Upstairs> {
@@ -3868,7 +3868,9 @@ impl Upstairs {
                 // answer BlockOp::QueryBlockSize. (Note that the downstairs
                 // have not reported in yet, so if no expected definition was
                 // supplied no downstairs information is available.)
-                def.map(|rd| rd.block_size() as usize).unwrap_or(512),
+                expected_region_def
+                    .map(|rd| rd.block_size() as usize)
+                    .unwrap_or(512),
             ))
         });
 
@@ -3878,7 +3880,7 @@ impl Upstairs {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
         };
 
-        let rd_status = match def {
+        let rd_status = match expected_region_def {
             None => RegionDefinitionStatus::WaitingForDownstairs,
             Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
@@ -4399,9 +4401,6 @@ impl Upstairs {
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
-         *
-         * The region definition is safe to unwrap because this upstairs
-         * should be activated by now.
          */
         let ddef = self.ddef.lock().await;
         let fl = create_flush(
@@ -7881,7 +7880,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
-    def: Option<RegionDefinition>,
+    expected_region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -7903,7 +7902,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, def, guest, log);
+    let up = Upstairs::new(&opt, gen, expected_region_def, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task
