@@ -7876,7 +7876,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
-    expected_region_def: Option<RegionDefinition>,
+    region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -7898,7 +7898,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, expected_region_def, guest, log);
+    let up = Upstairs::new(&opt, gen, region_def, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task
