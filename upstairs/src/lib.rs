@@ -7612,7 +7612,10 @@ async fn process_new_io(
                         "Block size not available (active: {})",
                         up.guest_io_ready().await
                     );
-                    req.send_err(CrucibleError::UpstairsInactive).await;
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "block size".to_string(),
+                    ))
+                    .await;
                     return;
                 }
             };
@@ -7628,7 +7631,10 @@ async fn process_new_io(
                         "Total size not available (active: {})",
                         up.guest_io_ready().await
                     );
-                    req.send_err(CrucibleError::UpstairsInactive).await;
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "total size".to_string(),
+                    ))
+                    .await;
                     return;
                 }
             };
@@ -7646,7 +7652,10 @@ async fn process_new_io(
                         "Extent size not available (active: {})",
                         up.guest_io_ready().await
                     );
-                    req.send_err(CrucibleError::UpstairsInactive).await;
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "extent size".to_string(),
+                    ))
+                    .await;
                     return;
                 }
             };
