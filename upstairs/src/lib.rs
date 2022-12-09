@@ -5670,10 +5670,6 @@ impl Upstairs {
          * XXX The expected per-client UUIDs should eventually be provided
          * when the upstairs stairs. When that happens, they can be
          * verified here.
-         *
-         * REVIEW(gjc): is the UUID expected to be the same for all three
-         * downstairs? Can we check it against the expected/previous region
-         * definition?
          */
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
@@ -5714,7 +5710,7 @@ impl Upstairs {
                     != client_ddef.extent_size().block_size_in_bytes()
                 || prev_def.extent_count() != client_ddef.extent_count()
             {
-                // XXX Figure out if we can handle this error. Possibly not.
+                // TODO(#558) Figure out if we can handle this error. Possibly not.
                 panic!(
                     "New downstairs region info mismatch {:?} vs. {:?}",
                     *ddef, client_ddef
