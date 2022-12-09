@@ -14,18 +14,28 @@ pub struct RegionExtentInfo {
     pub extent_count: u32,
 }
 
-impl RegionExtentInfo {
-    fn create_region_options(&self, opts: &CrucibleOpts) -> RegionOptions {
-        let mut region_options = RegionOptions::default();
-        region_options.set_block_size(self.block_size);
-        region_options.set_extent_size(Block {
-            value: self.blocks_per_extent,
-            shift: self.block_size.trailing_zeros(),
-        });
-        region_options.set_uuid(opts.id);
-        region_options.set_encrypted(opts.key.is_some());
-        region_options
-    }
+/// Creates a `RegionDefinition` from a set of parameters in a region
+/// construction request.
+//
+// TODO(#559): This should return a Vec<RegionDefinition> with one definition
+// for each downstairs, each bearing the expected downstairs UUID for that
+// downstairs, but this requires those UUIDs to be present in `opts`, which
+// currently doesn't store them.
+fn build_region_definition(
+    extent_info: &RegionExtentInfo,
+    opts: &CrucibleOpts,
+) -> Result<RegionDefinition> {
+    let mut region_options = RegionOptions::default();
+    region_options.set_block_size(extent_info.block_size);
+    region_options.set_extent_size(Block {
+        value: extent_info.blocks_per_extent,
+        shift: extent_info.block_size.trailing_zeros(),
+    });
+    region_options.set_encrypted(opts.key.is_some());
+
+    let mut region_def = RegionDefinition::from_options(&region_options)?;
+    region_def.set_extent_count(extent_info.extent_count);
+    Ok(region_def)
 }
 
 #[derive(Debug, Clone)]
@@ -152,15 +162,11 @@ impl Volume {
         gen: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
+        let region_def = build_region_definition(&extent_info, &opts)?;
         let guest = Arc::new(Guest::new());
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
-
-        let mut region_def = RegionDefinition::from_options(
-            &extent_info.create_region_options(&opts),
-        )?;
-        region_def.set_extent_count(extent_info.extent_count);
 
         let _join_handle = up_main(
             opts,
