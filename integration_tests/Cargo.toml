@@ -22,7 +22,7 @@ crucible-pantry-client = { path = "../pantry-client" }
 futures = "0.3"
 futures-core = "0.3"
 httptest = "0.15.4"
-base64 = "0.13"
+base64 = "0.20"
 rand = "0.8.5"
 slog = "2.7"
 slog-async = "2.7"
