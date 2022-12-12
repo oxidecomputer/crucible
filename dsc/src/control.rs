@@ -116,8 +116,8 @@ pub struct Max {
     max: u64,
 }
 
-fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
-    let rs = dsci.rs.lock().unwrap();
+async fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
+    let rs = dsci.rs.lock().await;
     rs.ds_state.len() <= cid
 }
 
@@ -136,13 +136,13 @@ async fn dsc_get_pid(
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             Some(String::from("BadInput")),
             format!("Invalid client id: {}", cid),
         ));
     }
-    let ds_pid = api_context.dsci.get_ds_pid(cid).map_err(|e| {
+    let ds_pid = api_context.dsci.get_ds_pid(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
             format!("failed to state for downstairs {}: {:#}", 0, e),
@@ -167,13 +167,13 @@ async fn dsc_get_ds_state(
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let ds_state = api_context.dsci.get_ds_state(cid).map_err(|e| {
+    let ds_state = api_context.dsci.get_ds_state(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
             format!("failed to state for downstairs {}: {:#}", 0, e),
@@ -198,13 +198,13 @@ async fn dsc_stop(
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::Stop(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -220,7 +220,7 @@ async fn dsc_stop_all(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::StopAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -237,7 +237,7 @@ async fn dsc_stop_rand(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::StopRand);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -257,13 +257,13 @@ async fn dsc_start(
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::Start(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -280,7 +280,7 @@ async fn dsc_start_all(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::StartAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -300,13 +300,13 @@ async fn dsc_disable_restart(
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::DisableRestart(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -323,7 +323,7 @@ async fn dsc_disable_restart_all(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::DisableRestartAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -343,13 +343,13 @@ async fn dsc_enable_restart(
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRestart(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -366,7 +366,7 @@ async fn dsc_enable_restart_all(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRestartAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -383,7 +383,7 @@ async fn dsc_shutdown(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::Shutdown);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -400,7 +400,7 @@ async fn dsc_enable_random_stop(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRandomStop);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -417,7 +417,7 @@ async fn dsc_disable_random_stop(
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::DisableRandomStop);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -437,7 +437,7 @@ async fn dsc_enable_random_min(
     let min = path.min;
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::RandomStopMin(min));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -457,7 +457,7 @@ async fn dsc_enable_random_max(
     let max = path.max;
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::RandomStopMax(max));
     Ok(HttpResponseUpdatedNoContent())
 }

@@ -3,7 +3,7 @@ name = "crucible-downstairs"
 version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
@@ -54,7 +54,7 @@ uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 [dev-dependencies]
 expectorate = "1.0.5"
 openapiv3 = "1.0.1"
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 rand_chacha = "0.3.1"
 tempfile = "3"
 

@@ -2,7 +2,7 @@
 name = "crucible-agent"
 version = "0.0.1"
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
@@ -25,5 +25,5 @@ uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 [dev-dependencies]
 expectorate = "1.0.5"
 openapiv3 = "1.0"
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 subprocess = "0.2.9"

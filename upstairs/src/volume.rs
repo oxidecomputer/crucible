@@ -8,6 +8,36 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
 
+pub struct RegionExtentInfo {
+    pub block_size: u64,
+    pub blocks_per_extent: u64,
+    pub extent_count: u32,
+}
+
+/// Creates a `RegionDefinition` from a set of parameters in a region
+/// construction request.
+//
+// TODO(#559): This should return a Vec<RegionDefinition> with one definition
+// for each downstairs, each bearing the expected downstairs UUID for that
+// downstairs, but this requires those UUIDs to be present in `opts`, which
+// currently doesn't store them.
+fn build_region_definition(
+    extent_info: &RegionExtentInfo,
+    opts: &CrucibleOpts,
+) -> Result<RegionDefinition> {
+    let mut region_options = RegionOptions::default();
+    region_options.set_block_size(extent_info.block_size);
+    region_options.set_extent_size(Block {
+        value: extent_info.blocks_per_extent,
+        shift: extent_info.block_size.trailing_zeros(),
+    });
+    region_options.set_encrypted(opts.key.is_some());
+
+    let mut region_def = RegionDefinition::from_options(&region_options)?;
+    region_def.set_extent_count(extent_info.extent_count);
+    Ok(region_def)
+}
+
 #[derive(Debug, Clone)]
 pub struct Volume {
     uuid: Uuid,
@@ -128,17 +158,24 @@ impl Volume {
     pub async fn add_subvolume_create_guest(
         &mut self,
         opts: CrucibleOpts,
+        extent_info: RegionExtentInfo,
         gen: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
+        let region_def = build_region_definition(&extent_info, &opts)?;
         let guest = Arc::new(Guest::new());
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
-        let _join_handle =
-            up_main(opts, gen, guest_clone, producer_registry).await?;
 
-        guest.activate().await?;
+        let _join_handle = up_main(
+            opts,
+            gen,
+            Some(region_def),
+            guest_clone,
+            producer_registry,
+        )
+        .await?;
 
         self.add_subvolume(guest).await
     }
@@ -963,12 +1000,23 @@ impl Volume {
 
             VolumeConstructionRequest::Region {
                 block_size,
+                blocks_per_extent,
+                extent_count,
                 opts,
                 gen,
             } => {
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume_create_guest(opts, gen, producer_registry)
-                    .await?;
+                vol.add_subvolume_create_guest(
+                    opts,
+                    RegionExtentInfo {
+                        block_size,
+                        blocks_per_extent,
+                        extent_count,
+                    },
+                    gen,
+                    producer_registry,
+                )
+                .await?;
                 Ok(vol)
             }
 

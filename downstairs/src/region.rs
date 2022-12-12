@@ -391,7 +391,7 @@ pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("copy".to_string());
+    out.set_extension("copy");
     out
 }
 
@@ -406,7 +406,7 @@ pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("replace".to_string());
+    out.set_extension("replace");
     out
 }
 /**
@@ -420,7 +420,7 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("completed".to_string());
+    out.set_extension("completed");
     out
 }
 
@@ -828,9 +828,13 @@ impl Extent {
     #[instrument]
     pub fn read(
         &self,
+        job_id: u64,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
     ) -> Result<(), CrucibleError> {
+        cdt::extent__read__start!(|| {
+            (job_id, self.number, requests.len() as u64)
+        });
         let mut inner = self.inner();
 
         // This code batches up operations for contiguous regions of
@@ -869,6 +873,9 @@ impl Extent {
             }
 
             // Finally we get to read the actual data. That's why we're here
+            cdt::extent__read__file__start!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
             inner.file.seek(SeekFrom::Start(
                 first_req.offset.value * self.block_size,
             ))?;
@@ -877,12 +884,21 @@ impl Extent {
             );
             read_buffer.resize(read_buffer.capacity(), 0);
             inner.file.read_exact(&mut read_buffer)?;
+            cdt::extent__read__file__done!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
 
             // Query the block metadata
+            cdt::extent__read__get__contexts__start!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
             let block_contexts = inner.get_block_contexts(
                 first_req.offset.value,
                 n_contiguous_requests as u64,
             )?;
+            cdt::extent__read__get__contexts__done!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
 
             // Now it's time to put everything into the responses.
             // We use into_iter here to move values out of enc_ctxts/hashes,
@@ -910,6 +926,10 @@ impl Extent {
 
             req_run_start += n_contiguous_requests;
         }
+
+        cdt::extent__read__done!(|| {
+            (job_id, self.number, requests.len() as u64)
+        });
 
         Ok(())
     }
@@ -951,12 +971,17 @@ impl Extent {
     #[instrument]
     pub fn write(
         &self,
+        job_id: u64,
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
+
+        cdt::extent__write__start!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
 
         let mut inner = self.inner();
 
@@ -1011,6 +1036,9 @@ impl Extent {
         // blocks have hashes
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
+            cdt::extent__write__get__hashes__start!(|| {
+                (job_id, self.number, writes.len() as u64)
+            });
             let mut write_run_start = 0;
             while write_run_start < writes.len() {
                 let first_write = writes[write_run_start];
@@ -1045,9 +1073,15 @@ impl Extent {
 
                 write_run_start += n_contiguous_writes;
             }
+            cdt::extent__write__get__hashes__done!(|| {
+                (job_id, self.number, writes.len() as u64)
+            });
 
             if writes_to_skip.len() == writes.len() {
                 // Nothing to do
+                cdt::extent__write__done!(|| {
+                    (job_id, self.number, writes.len() as u64)
+                });
                 return Ok(());
             }
         }
@@ -1055,6 +1089,11 @@ impl Extent {
         inner.set_dirty()?;
 
         // Write all the metadata to the DB
+        // TODO right now we're including the integrity_hash() time in the sqlite time. It's small in
+        // comparison right now, but worth being aware of when looking at dtrace numbers
+        cdt::extent__write__sqlite__insert__start!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
         let tx = inner.metadb_transaction()?;
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
@@ -1072,11 +1111,17 @@ impl Extent {
             )?;
         }
         tx.commit()?;
+        cdt::extent__write__sqlite__insert__done!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
 
         // Buffer writes for fewer syscalls. The 65536 buffer size here is
         // chosen somewhat arbitrarily.
         let mut write_buffer = [0u8; 65536];
 
+        cdt::extent__write__file__start!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
         let mut bytes_in_run = 0;
         let mut next_block_in_run = u64::MAX;
         for write in writes {
@@ -1115,6 +1160,13 @@ impl Extent {
         if bytes_in_run > 0 {
             inner.file.write_all(&write_buffer[..bytes_in_run])?;
         }
+        cdt::extent__write__file__done!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
+
+        cdt::extent__write__done!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
 
         Ok(())
     }
@@ -1145,10 +1197,17 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
+        cdt::extent__flush__start!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
+
         /*
          * We must first fsync to get any outstanding data written to disk.
          * This must be done before we update the flush number.
          */
+        cdt::extent__flush__file__start!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
         if let Err(e) = inner.file.sync_all() {
             /*
              * XXX Retry?  Mark extent as broken?
@@ -1160,11 +1219,17 @@ impl Extent {
                 e
             );
         }
+        cdt::extent__flush__file__done!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
 
         // Clear old block contexts. In order to be crash consistent, only
         // perform this after the extent fsync is done. Read each block in the
         // extent and find out the integrity hash. Then, remove all block
         // context rows where the integrity hash does not match.
+        cdt::extent__flush__rehash__start!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
 
         let total_bytes: usize =
             self.extent_size.value as usize * self.block_size as usize;
@@ -1179,9 +1244,19 @@ impl Extent {
             .map(|(i, data)| (i, integrity_hash(&[data])))
             .collect();
 
+        cdt::extent__flush__rehash__done!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
+
+        cdt::extent__flush__sqlite__insert__start!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
+        cdt::extent__flush__sqlite__insert__done!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
 
         // Reset the file's seek offset to 0, and set the flush number and gen
         // number
@@ -1189,6 +1264,10 @@ impl Extent {
         inner.file.seek(SeekFrom::Start(0))?;
 
         inner.set_flush_number(new_flush, new_gen)?;
+
+        cdt::extent__flush__done!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
 
         Ok(())
     }
@@ -1364,7 +1443,7 @@ impl Region {
          * - matches our eid
          * - is not read-only
          */
-        assert!(!self.extents[eid].inner.is_some());
+        assert!(self.extents[eid].inner.is_none());
         assert_eq!(self.extents[eid].number, eid as u32);
         assert!(!self.read_only);
 
@@ -1715,7 +1794,7 @@ impl Region {
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
-            extent.write(&writes[..], only_write_unwritten)?;
+            extent.write(job_id, &writes[..], only_write_unwritten)?;
         }
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id);
@@ -1753,7 +1832,7 @@ impl Region {
                     batched_reads.push(request);
                 } else {
                     let extent = &self.extents[_eid as usize];
-                    extent.read(&batched_reads[..], &mut responses)?;
+                    extent.read(job_id, &batched_reads[..], &mut responses)?;
 
                     eid = Some(request.eid);
                     batched_reads.clear();
@@ -1768,7 +1847,7 @@ impl Region {
 
         if let Some(_eid) = eid {
             let extent = &self.extents[_eid as usize];
-            extent.read(&batched_reads[..], &mut responses)?;
+            extent.read(job_id, &batched_reads[..], &mut responses)?;
         }
         cdt::os__read__done!(|| job_id);
 
@@ -2180,7 +2259,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2212,7 +2291,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2242,7 +2321,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2283,7 +2362,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2348,7 +2427,7 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2567,12 +2646,12 @@ mod test {
         // Close extent 1
         let ext_one = &mut region.extents[1];
         ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        assert!(ext_one.inner.is_none());
 
         // Close extent 4
         let ext_four = &mut region.extents[4];
         ext_four.close()?;
-        assert!(!ext_four.inner.is_some());
+        assert!(ext_four.inner.is_none());
 
         // Reopen all extents
         region.reopen_all_extents()?;
