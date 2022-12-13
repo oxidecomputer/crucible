@@ -55,7 +55,7 @@ features = [ "max_level_trace", "release_max_level_debug" ]
 
 [dev-dependencies]
 expectorate = "1.0.5"
-openapiv3 = "1.0.1"
+openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 tokio-test = "*"
 tempfile = "3"
