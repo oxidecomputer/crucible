@@ -269,12 +269,10 @@ impl Inner {
 
         cdt::extent__context__truncate__start!(|| n_blocks as u64);
         for (block, on_disk_hash) in extent_block_indexes_and_hashes {
-            let _rows_affected = stmt
-                .execute(params![block, on_disk_hash.to_le_bytes()])?;
+            let _rows_affected =
+                stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
         }
         cdt::extent__context__truncate__done!(|| ());
-
-        drop(stmt);
 
         drop(stmt);
 
@@ -1347,7 +1345,6 @@ impl Extent {
         // Potential for tuning here.
         inner.dirty_blocks.shrink_to(16);
 
-
         cdt::extent__flush__rehash__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
@@ -1355,7 +1352,6 @@ impl Extent {
         cdt::extent__flush__sqlite__insert__start!(|| {
             (job_id, self.number, self.extent_size.value)
         });
-
 
         Inner::truncate_encryption_contexts_and_hashes(
             &mut inner.metadb,
@@ -3256,7 +3252,10 @@ mod test {
         assert_eq!(ctxs[1].on_disk_hash, 65536);
 
         // "Flush", so only the rows that match should remain.
-        Inner::truncate_encryption_contexts_and_hashes(&mut inner.metadb, vec![(0, 65536)])?;
+        Inner::truncate_encryption_contexts_and_hashes(
+            &mut inner.metadb,
+            vec![(0, 65536)],
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -3468,7 +3467,10 @@ mod test {
 
         // "Flush", so only the rows that match the on-disk hash should remain.
 
-        Inner::truncate_encryption_contexts_and_hashes(&mut inner.metadb, vec![(0, 6), (1, 7)])?;
+        Inner::truncate_encryption_contexts_and_hashes(
+            &mut inner.metadb,
+            vec![(0, 6), (1, 7)],
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 2)?;
 
