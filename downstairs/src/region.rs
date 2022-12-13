@@ -258,7 +258,7 @@ impl Inner {
     /// calling this function.
     fn truncate_encryption_contexts_and_hashes(
         &mut self,
-        extent_block_indexes_and_hashes: Vec<(usize, u64)>,
+        extent_block_indexes_and_hashes: impl Iterator<Item = (usize, u64)>,
     ) -> Result<()> {
         let tx = self.metadb.transaction()?;
 
@@ -269,8 +269,8 @@ impl Inner {
 
         cdt::extent__context__truncate__start!(|| n_blocks as u64);
         for (block, on_disk_hash) in extent_block_indexes_and_hashes {
-            let _rows_affected =
-                stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
+            let _rows_affected = stmt
+                .execute(params![block, on_disk_hash.to_le_bytes()])?;
         }
         cdt::extent__context__truncate__done!(|| ());
 
@@ -1131,7 +1131,6 @@ impl Extent {
             // TODO it would be nice if we could profile what % of time we're
             // spending on hashes locally vs sqlite
             let on_disk_hash = integrity_hash(&[&write.data[..]]);
-
             Inner::tx_set_block_context(
                 &tx,
                 &DownstairsBlockContext {
@@ -1327,9 +1326,20 @@ impl Extent {
         cdt::extent__flush__sqlite__insert__start!(|| {
             (job_id, self.number, self.extent_size.value)
         });
+
+        let extent_block_indexes_and_hashes = inner.dirty_blocks.drain();
+
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
+
+        // It'd be nice not to allocate here on small writes. They have a hard
+        // enough time as it is. We don't want our maps to be keeping a lot of
+        // memory allocated though. With 16 entries max, even a 32TiB region
+        // of 128MiB extents would only be spending 64MiB of ram on on this.
+        // Potential for tuning here.
+
+        inner.dirty_blocks.shrink_to(16);
         cdt::extent__flush__sqlite__insert__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
@@ -3224,7 +3234,7 @@ mod test {
         assert_eq!(ctxs[1].on_disk_hash, 65536);
 
         // "Flush", so only the rows that match should remain.
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)])?;
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)].iter().copied())?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -3436,7 +3446,7 @@ mod test {
 
         // "Flush", so only the rows that match the on-disk hash should remain.
 
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 6), (1, 7)])?;
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 6), (1, 7)].iter().copied())?;
 
         let ctxs = inner.get_block_contexts(0, 2)?;
 
