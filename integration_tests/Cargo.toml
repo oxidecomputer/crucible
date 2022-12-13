@@ -27,7 +27,7 @@ rand = "0.8.5"
 slog = "2.7"
 slog-async = "2.7"
 slog-dtrace = "0.2"
-slog-term = "2.7"
+slog-term = "2.9"
 tempfile = "3.3.0"
 tokio = { version = "1.22.0", features = ["full"] }
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
