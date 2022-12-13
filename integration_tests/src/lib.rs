@@ -37,41 +37,30 @@ mod test {
             address: IpAddr,
             encrypted: bool,
             read_only: bool,
-            big: bool,
+            blocks_per_extent: u64,
+            extent_count: u32,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = if big {
-                // create a 47 MB region
-                create_region(
-                    512, /* block_size */
-                    tempdir.path().to_path_buf(),
-                    512, /* extent_size */
-                    188, /* extent_count */
-                    Uuid::new_v4(),
-                    encrypted,
-                    csl(),
-                )?
-            } else {
-                // create a 5120b region
-                create_region(
-                    512, /* block_size */
-                    tempdir.path().to_path_buf(),
-                    5, /* extent_size */
-                    2, /* extent_count */
-                    Uuid::new_v4(),
-                    encrypted,
-                    csl(),
-                )?
-            };
+            let _region = create_region(
+                512, /* block_size */
+                tempdir.path().to_path_buf(),
+                blocks_per_extent,
+                extent_count.into(),
+                Uuid::new_v4(),
+                encrypted,
+                csl(),
+            )?;
 
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
                 false, /* lossy */
-                false, /* return_errors */
+                false, /* read errors */
+                false, /* write errors */
+                false, /* flush errors */
                 read_only,
                 Some(csl()),
             )?;
@@ -99,7 +88,9 @@ mod test {
             self.downstairs = build_downstairs_for_region(
                 self.tempdir.path(),
                 false, /* lossy */
-                false, /* return_errors */
+                false, /* read errors */
+                false, /* write errors */
+                false, /* flush errors */
                 true,
                 Some(csl()),
             )?;
@@ -130,6 +121,8 @@ mod test {
         downstairs2: TestDownstairs,
         downstairs3: TestDownstairs,
         crucible_opts: CrucibleOpts,
+        blocks_per_extent: u64,
+        extent_count: u32,
     }
 
     impl TestDownstairsSet {
@@ -148,15 +141,33 @@ mod test {
             read_only: bool,
             big: bool,
         ) -> Result<TestDownstairsSet> {
-            let downstairs1 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
-                    .await?;
-            let downstairs2 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
-                    .await?;
-            let downstairs3 =
-                TestDownstairs::new("127.0.0.1".parse()?, true, read_only, big)
-                    .await?;
+            let (blocks_per_extent, extent_count) =
+                if big { (512, 188) } else { (5, 2) };
+
+            let downstairs1 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+            )
+            .await?;
+            let downstairs2 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+            )
+            .await?;
+            let downstairs3 = TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+            )
+            .await?;
 
             // Generate random data for our key
             let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
@@ -184,6 +195,8 @@ mod test {
                 downstairs2,
                 downstairs3,
                 crucible_opts,
+                blocks_per_extent,
+                extent_count,
             })
         }
 
@@ -191,6 +204,14 @@ mod test {
         // three given ports for targets.
         pub fn opts(&self) -> CrucibleOpts {
             self.crucible_opts.clone()
+        }
+
+        pub fn blocks_per_extent(&self) -> u64 {
+            self.blocks_per_extent
+        }
+
+        pub fn extent_count(&self) -> u32 {
+            self.extent_count
         }
 
         pub async fn reboot_read_only(&mut self) -> Result<()> {
@@ -223,6 +244,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -264,17 +287,18 @@ mod test {
     async fn integration_test_two_layers() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_common(opts, false).await
+        integration_test_two_layers_common(tds, opts, false).await
     }
 
     #[tokio::test]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_common(opts, true).await
+        integration_test_two_layers_common(tds, opts, true).await
     }
 
     async fn integration_test_two_layers_common(
+        tds: TestDownstairsSet,
         opts: CrucibleOpts,
         is_write_unwritten: bool,
     ) -> Result<()> {
@@ -301,7 +325,18 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
         volume.add_read_only_parent(in_memory_data.clone()).await?;
 
         volume.activate().await?;
@@ -385,6 +420,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -466,6 +503,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -528,6 +567,8 @@ mod test {
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
                         opts,
                         gen: 1,
                     },
@@ -573,6 +614,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -642,6 +685,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -713,6 +758,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -781,6 +828,8 @@ mod test {
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds1.blocks_per_extent(),
+            extent_count: tds1.extent_count(),
             opts,
             gen: 1,
         });
@@ -788,6 +837,8 @@ mod test {
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds2.blocks_per_extent(),
+            extent_count: tds2.extent_count(),
             opts,
             gen: 1,
         });
@@ -863,6 +914,8 @@ mod test {
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds1.blocks_per_extent(),
+            extent_count: tds1.extent_count(),
             opts,
             gen: 1,
         });
@@ -870,6 +923,8 @@ mod test {
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds2.blocks_per_extent(),
+            extent_count: tds2.extent_count(),
             opts,
             gen: 1,
         });
@@ -967,6 +1022,8 @@ mod test {
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds1.blocks_per_extent(),
+            extent_count: tds1.extent_count(),
             opts,
             gen: 1,
         });
@@ -974,6 +1031,8 @@ mod test {
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds2.blocks_per_extent(),
+            extent_count: tds2.extent_count(),
             opts,
             gen: 1,
         });
@@ -1043,7 +1102,7 @@ mod test {
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_small_common(opts, false).await
+        integration_test_two_layers_small_common(tds, opts, false).await
     }
 
     #[tokio::test]
@@ -1051,10 +1110,11 @@ mod test {
     {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
-        integration_test_two_layers_small_common(opts, true).await
+        integration_test_two_layers_small_common(tds, opts, true).await
     }
 
     async fn integration_test_two_layers_small_common(
+        tds: TestDownstairsSet,
         opts: CrucibleOpts,
         is_write_unwritten: bool,
     ) -> Result<()> {
@@ -1085,7 +1145,18 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate().await?;
@@ -1154,7 +1225,18 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate().await?;
@@ -1226,7 +1308,18 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate().await?;
@@ -1319,7 +1412,18 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate().await?;
@@ -1403,7 +1507,18 @@ mod test {
             .await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
         volume.add_read_only_parent(in_memory_data).await?;
 
         volume.activate().await?;
@@ -1479,6 +1594,8 @@ mod test {
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds1.blocks_per_extent(),
+            extent_count: tds1.extent_count(),
             opts,
             gen: 1,
         });
@@ -1486,6 +1603,8 @@ mod test {
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds2.blocks_per_extent(),
+            extent_count: tds2.extent_count(),
             opts,
             gen: 1,
         });
@@ -1600,6 +1719,8 @@ mod test {
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds1.blocks_per_extent(),
+            extent_count: tds1.extent_count(),
             opts,
             gen: 1,
         });
@@ -1607,6 +1728,8 @@ mod test {
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds2.blocks_per_extent(),
+            extent_count: tds2.extent_count(),
             opts,
             gen: 1,
         });
@@ -1710,6 +1833,8 @@ mod test {
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
                         opts: opts.clone(),
                         gen: 1,
                     },
@@ -1727,6 +1852,8 @@ mod test {
                 read_only_parent: Some(Box::new(
                     VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
                         opts,
                         gen: 1,
                     },
@@ -1777,7 +1904,18 @@ mod test {
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
-        volume.add_subvolume_create_guest(opts, 1, None).await?;
+        volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
 
         volume.activate().await?;
 
@@ -1829,7 +1967,16 @@ mod test {
 
         let mut volume = Volume::new(BLOCK_SIZE as u64);
         volume
-            .add_subvolume_create_guest(test_downstairs_set.opts(), 1, None)
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
             .await?;
 
         volume.activate().await?;
@@ -1858,7 +2005,17 @@ mod test {
         {
             let mut volume = Volume::new(BLOCK_SIZE as u64);
             volume
-                .add_subvolume_create_guest(test_downstairs_set.opts(), 2, None)
+                .add_subvolume_create_guest(
+                    test_downstairs_set.opts(),
+                    volume::RegionExtentInfo {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: test_downstairs_set
+                            .blocks_per_extent(),
+                        extent_count: test_downstairs_set.extent_count(),
+                    },
+                    2,
+                    None,
+                )
                 .await?;
 
             volume.activate().await?;
@@ -1896,6 +2053,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: top_layer_tds.blocks_per_extent(),
+                    extent_count: top_layer_tds.extent_count(),
                     opts: top_layer_opts,
                     gen: 3,
                 }],
@@ -1905,6 +2064,9 @@ mod test {
                         block_size: BLOCK_SIZE as u64,
                         sub_volumes: vec![VolumeConstructionRequest::Region {
                             block_size: BLOCK_SIZE as u64,
+                            blocks_per_extent: test_downstairs_set
+                                .blocks_per_extent(),
+                            extent_count: test_downstairs_set.extent_count(),
                             opts: bottom_layer_opts,
                             gen: 3,
                         }],
@@ -1980,7 +2142,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2024,7 +2186,7 @@ mod test {
         let gc = guest.clone();
 
         // Read-only Upstairs should return errors if writes are attempted.
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
 
@@ -2058,7 +2220,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2131,7 +2293,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2189,7 +2351,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2248,7 +2410,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2305,7 +2467,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2362,7 +2524,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2433,6 +2595,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 1,
                 }],
@@ -2519,6 +2683,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 2,
                 }],
@@ -2572,6 +2738,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -2666,6 +2834,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 1,
                 }],
@@ -2713,6 +2883,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 2,
                 }],
@@ -2761,6 +2933,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 3,
                 }],
@@ -2795,6 +2969,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 1,
                 }],
@@ -2864,6 +3040,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 1,
                 }],
@@ -2926,6 +3104,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 2,
                 }],
@@ -2966,6 +3146,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 1,
                 }],
@@ -3027,6 +3209,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 2,
                 }],
@@ -3097,6 +3281,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 1,
                 }],
@@ -3144,6 +3330,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts: opts.clone(),
                     gen: 2,
                 }],
@@ -3191,6 +3379,8 @@ mod test {
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![VolumeConstructionRequest::Region {
                     block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
                     opts,
                     gen: 3,
                 }],

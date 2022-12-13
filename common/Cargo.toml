@@ -3,7 +3,7 @@ name = "crucible-common"
 version = "0.0.0"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer>"]
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"

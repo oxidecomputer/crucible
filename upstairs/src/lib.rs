@@ -2223,6 +2223,11 @@ struct Downstairs {
      * The logger for messages sent from downstairs methods.
      */
     log: Logger,
+
+    /**
+     * Counters for the in flight work for the downstairs
+     */
+    io_state_count: IOStateCount,
 }
 
 impl Downstairs {
@@ -2242,6 +2247,7 @@ impl Downstairs {
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
+            io_state_count: IOStateCount::new(),
         }
     }
 
@@ -2266,18 +2272,20 @@ impl Downstairs {
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
         let job = self.ds_active.get_mut(&ds_id).unwrap();
 
-        let newstate = match &self.downstairs_errors.get(&client_id) {
+        let new_state = match &self.downstairs_errors.get(&client_id) {
             Some(_) => IOState::Skipped,
             None => IOState::InProgress,
         };
 
-        let oldstate = job.state.insert(client_id, newstate.clone());
-        assert_eq!(oldstate, Some(IOState::New));
+        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        assert_eq!(old_state, IOState::New);
+        self.io_state_count.decr(&old_state, client_id);
+        self.io_state_count.incr(&new_state, client_id);
 
-        match newstate {
+        match new_state {
             IOState::Skipped => None,
             IOState::InProgress => Some(job.work.clone()),
-            _ => panic!("bad state in in_progress!"),
+            _ => panic!("bad state {} in in_progress!", new_state),
         }
     }
 
@@ -2350,7 +2358,7 @@ impl Downstairs {
             return None;
         }
         if let Some(job) = &mut self.reconcile_current_work {
-            let oldstate = job.state.insert(client_id, IOState::InProgress);
+            let old_state = job.state.insert(client_id, IOState::InProgress);
 
             /*
              * It is possible in reconnect states that multiple messages
@@ -2358,7 +2366,7 @@ impl Downstairs {
              * work for this client to do. Make sure we don't send the the
              * same message twice.
              */
-            if oldstate != Some(IOState::New) {
+            if old_state != Some(IOState::New) {
                 info!(
                     self.log,
                     "[{}] rep_in_progress ignore submitted job {:?}",
@@ -2383,8 +2391,8 @@ impl Downstairs {
      */
     fn rep_done(&mut self, client_id: u8, rep_id: u64) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
-            let oldstate = job.state.insert(client_id, IOState::Done);
-            assert_eq!(oldstate, Some(IOState::InProgress));
+            let old_state = job.state.insert(client_id, IOState::Done).unwrap();
+            assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
             let mut done = 0;
 
@@ -2510,7 +2518,10 @@ impl Downstairs {
 
             if *state == IOState::InProgress || *state == IOState::New {
                 info!(self.log, "{} change {} to skipped", client_id, ds_id);
-                job.state.insert(client_id, IOState::Skipped);
+                let old_state =
+                    job.state.insert(client_id, IOState::Skipped).unwrap();
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::Skipped, client_id);
             }
         }
     }
@@ -2597,8 +2608,12 @@ impl Downstairs {
                     }
                 }
             }
-            job.state.insert(client_id, IOState::New);
+            let old_state = job.state.insert(client_id, IOState::New).unwrap();
             job.replay = true;
+            if old_state != IOState::New {
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::New, client_id);
+            }
         }
     }
 
@@ -2648,6 +2663,10 @@ impl Downstairs {
      * Enqueue a new downstairs request.
      */
     fn enqueue(&mut self, io: DownstairsIO) {
+        for cid in 0..3 {
+            assert_eq!(io.state[&cid], IOState::New);
+            self.io_state_count.incr(&IOState::New, cid);
+        }
         self.ds_active.insert(io.ds_id, io);
     }
 
@@ -3091,7 +3110,7 @@ impl Downstairs {
                 }
             };
 
-        let newstate = if let Err(ref e) = read_data {
+        let new_state = if let Err(ref e) = read_data {
             warn!(
                 self.log,
                 "[{}] Reports error {:?} on job {}, {:?}",
@@ -3106,20 +3125,22 @@ impl Downstairs {
             IOState::Done
         };
 
-        let oldstate = job.state.insert(client_id, newstate.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        self.io_state_count.decr(&old_state, client_id);
+        self.io_state_count.incr(&new_state, client_id);
 
         /*
          * Verify the job was InProgress
          */
-        if oldstate != IOState::InProgress {
+        if old_state != IOState::InProgress {
             bail!(
                 "[{}] job completed while not InProgress: {:?}",
                 client_id,
-                oldstate
+                old_state
             );
         }
 
-        if let IOState::Error(e) = newstate {
+        if let IOState::Error(e) = new_state {
             // Some errors can be returned without considering the Downstairs
             // bad. For example, it's still an error if a snapshot exists
             // already but we should not increment downstairs_errors and
@@ -3195,7 +3216,7 @@ impl Downstairs {
                 }
             }
         } else if job.ack_status == AckStatus::Acked {
-            assert_eq!(newstate, IOState::Done);
+            assert_eq!(new_state, IOState::Done);
             /*
              * If this job is already acked, then we don't have much
              * more to do here.  If it's a flush, then we want to be
@@ -3248,7 +3269,7 @@ impl Downstairs {
                 _ => { /* Write and WriteUnwritten IOs have no action here */ }
             }
         } else {
-            assert_eq!(newstate, IOState::Done);
+            assert_eq!(new_state, IOState::Done);
             assert_ne!(job.ack_status, AckStatus::Acked);
 
             let read_data: Vec<ReadResponse> = read_data.unwrap();
@@ -3442,6 +3463,10 @@ impl Downstairs {
                 let oj = self.ds_active.remove(id).unwrap();
                 assert_eq!(oj.ack_status, AckStatus::Acked);
                 self.completed.push(*id);
+                for cid in 0..3 {
+                    let old_state = oj.state.get(&cid).unwrap();
+                    self.io_state_count.decr(old_state, cid);
+                }
             }
         }
     }
@@ -3560,7 +3585,7 @@ impl EncryptionContext {
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
-        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], &data[..]]);
+        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
         Ok((nonce, tag, computed_hash))
     }
@@ -3650,6 +3675,37 @@ impl UpstairsState {
     }
 }
 
+/// Describes the region definition an upstairs has received or expects to
+/// receive from its downstairs.
+#[derive(Clone, Copy, Debug)]
+enum RegionDefinitionStatus {
+    /// The upstairs has not received any region information from any
+    /// downstairs yet. It will accept the first legal region definition it
+    /// receives from any downstairs and ensure that all other downstairs
+    /// supply the same definition.
+    WaitingForDownstairs,
+
+    /// The upstairs expects to receive specific region information from each
+    /// downstairs and will reject attempts to connect to a downstairs that
+    /// supplies the wrong information.
+    ExpectingFromDownstairs(RegionDefinition),
+
+    /// The upstairs has received region information from at least one
+    /// downstairs, which subsequent downstairs must match.
+    Received(RegionDefinition),
+}
+
+impl RegionDefinitionStatus {
+    fn get_def(&self) -> Option<RegionDefinition> {
+        use RegionDefinitionStatus::*;
+        match self {
+            WaitingForDownstairs => None,
+            ExpectingFromDownstairs(rd) => Some(*rd),
+            Received(rd) => Some(*rd),
+        }
+    }
+}
+
 /*
  * XXX Track scheduled storage work in the central structure. Have the
  * target management task check for work to do here by changing the value in
@@ -3716,7 +3772,7 @@ pub struct Upstairs {
      * This allows us to verify each downstairs is the same, as well as
      * enables us to translate an LBA to an extent and block offset.
      */
-    ddef: Mutex<RegionDefinition>,
+    ddef: Mutex<RegionDefinitionStatus>,
 
     /*
      * Optional encryption context - Some if a key was supplied in
@@ -3785,19 +3841,13 @@ impl Upstairs {
         }
         let log = Logger::root(drain.fuse(), o!());
 
-        Self::new(
-            &opts,
-            0,
-            RegionDefinition::default(),
-            Arc::new(Guest::default()),
-            log,
-        )
+        Self::new(&opts, 0, None, Arc::new(Guest::default()), log)
     }
 
     pub fn new(
         opt: &CrucibleOpts,
         gen: u64,
-        def: RegionDefinition,
+        expected_region_def: Option<RegionDefinition>,
         guest: Arc<Guest>,
         log: Logger,
     ) -> Arc<Upstairs> {
@@ -3807,20 +3857,20 @@ impl Upstairs {
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
-        // create an encryption context if a key is supplied.
+        // Create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
             Arc::new(EncryptionContext::new(
                 key,
-                /*
-                 * XXX: It would be good to do BlockOp::QueryBlockSize here,
-                 * but this creates a deadlock. Upstairs::new runs before
-                 * up_ds_listen in up_main, and up_ds_listen needs to run
-                 * to answer BlockOp::QueryBlockSize.
-                 *
-                 * At this point ddef is the default, the downstairs haven't
-                 * reported in.
-                 */
-                512,
+                // XXX: Figure out what to do if no expected region definition
+                // was supplied. It would be good to do BlockOp::QueryBlockSize
+                // here, but this creates a deadlock. Upstairs::new runs before
+                // up_ds_listen in up_main, and up_ds_listen needs to run to
+                // answer BlockOp::QueryBlockSize. (Note that the downstairs
+                // have not reported in yet, so if no expected definition was
+                // supplied no downstairs information is available.)
+                expected_region_def
+                    .map(|rd| rd.block_size() as usize)
+                    .unwrap_or(512),
             ))
         });
 
@@ -3828,6 +3878,11 @@ impl Upstairs {
         info!(log, "Crucible stats registered with UUID: {}", uuid);
         let stats = UpStatOuter {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
+        };
+
+        let rd_status = match expected_region_def {
+            None => RegionDefinitionStatus::WaitingForDownstairs,
+            Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
 
         let session_id = Uuid::new_v4();
@@ -3840,7 +3895,7 @@ impl Upstairs {
             guest,
             downstairs: Mutex::new(Downstairs::new(log.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
-            ddef: Mutex::new(def),
+            ddef: Mutex::new(rd_status),
             encryption_context,
             need_flush: Mutex::new(false),
             stats,
@@ -3864,12 +3919,14 @@ impl Upstairs {
         let up_count = self.up_work_active().await;
         let ds_count = self.ds_work_active().await;
         let ds_state = self.ds_state_copy().await;
+        let ds_io_count = self.downstairs.lock().await.io_state_count;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 ds_count,
                 ds_state,
+                ds_io_count,
             };
             (msg, arg)
         });
@@ -4353,7 +4410,7 @@ impl Upstairs {
             gw_id,
             self.get_generation().await,
             snapshot_details,
-            ImpactedBlocks::new(*ddef),
+            ImpactedBlocks::new(ddef.get_def().unwrap()),
         );
 
         let mut sub = HashMap::new();
@@ -4416,9 +4473,9 @@ impl Upstairs {
          */
         let ddef = self.ddef.lock().await;
         let impacted_blocks = extent_from_offset(
-            *ddef,
+            ddef.get_def().unwrap(),
             offset,
-            Block::from_bytes(data.len(), &ddef),
+            Block::from_bytes(data.len(), &ddef.get_def().unwrap()),
         );
 
         /*
@@ -4504,7 +4561,7 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.tuples().len());
 
         for (eid, bo) in impacted_blocks.tuples() {
-            let byte_len: usize = ddef.block_size() as usize;
+            let byte_len: usize = ddef.get_def().unwrap().block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
                 &self.encryption_context
@@ -4620,11 +4677,12 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span many extents, and eventually, TODO, regions.
          */
-        let ddef = self.ddef.lock().await;
+        let ddef_state = self.ddef.lock().await;
+        let ddef = &ddef_state.get_def().unwrap();
         let impacted_blocks = extent_from_offset(
             *ddef,
             offset,
-            Block::from_bytes(data.len(), &ddef),
+            Block::from_bytes(data.len(), ddef),
         );
 
         /*
@@ -5496,12 +5554,12 @@ impl Upstairs {
          * (even if none was required) and they should proceed to being
          * active and accepting commands on the ds_work_ message channel.
          */
-        assert!(!self
+        assert!(self
             .downstairs
             .lock()
             .await
             .reconcile_current_work
-            .is_some());
+            .is_none());
 
         info!(
             self.log,
@@ -5601,10 +5659,17 @@ impl Upstairs {
         }
 
         /*
-         * XXX Eventually we will be provided UUIDs when the upstairs
-         * starts, so we can compare those with what we get here.
+         * TODO(#551) Verify that `client_ddef` makes sense (valid, nonzero
+         * block size, etc.)
+         */
+
+        /*
+         * If this downstairs was previously registered, make sure this
+         * connection reports the one the old connection did.
          *
-         * For now, we take whatever connects to us first.
+         * XXX The expected per-client UUIDs should eventually be provided
+         * when the upstairs stairs. When that happens, they can be
+         * verified here.
          */
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
@@ -5625,42 +5690,35 @@ impl Upstairs {
             ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
 
-        /*
-         * XXX Until we are passed expected region info at start, we
-         * can only compare the three downstairs to each other and move
-         * forward if all three are the same.
-         *
-         * For now I'm using zero as an indication that we don't yet know
-         * the valid values and non-zero meaning we have at least one
-         * downstairs to compare with.
-         *
-         * 0 should never be a valid block size, so this hack will let us
-         * move forward until we get the expected region info at startup.
-         */
         let mut ddef = self.ddef.lock().await;
-        if ddef.block_size() == 0 {
-            ddef.set_block_size(client_ddef.block_size());
-            ddef.set_extent_size(client_ddef.extent_size());
-            ddef.set_extent_count(client_ddef.extent_count());
-            info!(
-                self.log,
-                "Setting expected region info to: {:?}", client_ddef
-            );
+
+        /*
+         * If there is an expected region definition of any kind (either from
+         * a previous connection or an expectation that was supplied
+         * when this upstairs was created), make sure the new
+         * definition matches it.
+         *
+         * If this upstairs' creator didn't specify any expected values, the
+         * first downstairs to connect sets the expected values for the other
+         * two.
+         */
+        if let Some(prev_def) = ddef.get_def() {
+            if prev_def.block_size() != client_ddef.block_size()
+                || prev_def.extent_size().value
+                    != client_ddef.extent_size().value
+                || prev_def.extent_size().block_size_in_bytes()
+                    != client_ddef.extent_size().block_size_in_bytes()
+                || prev_def.extent_count() != client_ddef.extent_count()
+            {
+                // TODO(#558) Figure out if we can handle this error. Possibly not.
+                panic!(
+                    "New downstairs region info mismatch {:?} vs. {:?}",
+                    *ddef, client_ddef
+                );
+            }
         }
 
-        if ddef.block_size() != client_ddef.block_size()
-            || ddef.extent_size().value != client_ddef.extent_size().value
-            || ddef.extent_size().block_size_in_bytes()
-                != client_ddef.extent_size().block_size_in_bytes()
-            || ddef.extent_count() != client_ddef.extent_count()
-        {
-            // XXX Figure out if we can handle this error. Possibly not.
-            panic!(
-                "New downstairs region info mismatch {:?} vs. {:?}",
-                ddef, client_ddef
-            );
-        }
-
+        *ddef = RegionDefinitionStatus::Received(client_ddef);
         Ok(())
     }
 
@@ -6194,7 +6252,7 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Copy, Clone, Serialize)]
 struct IOStateCount {
     new: [u32; 3],
     in_progress: [u32; 3],
@@ -6274,6 +6332,28 @@ impl IOStateCount {
             }
             IOState::Error(_) => {
                 self.error[cid] += 1;
+            }
+        }
+    }
+
+    pub fn decr(&mut self, state: &IOState, cid: u8) {
+        assert!(cid < 3);
+        let cid = cid as usize;
+        match state {
+            IOState::New => {
+                self.new[cid] -= 1;
+            }
+            IOState::InProgress => {
+                self.in_progress[cid] -= 1;
+            }
+            IOState::Done => {
+                self.done[cid] -= 1;
+            }
+            IOState::Skipped => {
+                self.skipped[cid] -= 1;
+            }
+            IOState::Error(_) => {
+                self.error[cid] -= 1;
             }
         }
     }
@@ -7524,41 +7604,62 @@ async fn process_new_io(
         }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request block size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.block_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.block_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Block size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "block size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryTotalSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request total size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.total_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.total_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Total size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "total size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request extent size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.extent_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.extent_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Extent size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "extent size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {
@@ -7593,6 +7694,7 @@ pub struct Arg {
     up_count: u32,
     ds_count: u32,
     ds_state: Vec<DsState>,
+    ds_io_count: IOStateCount,
 }
 
 /**
@@ -7783,6 +7885,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
+    region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -7804,7 +7907,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest, log);
+    let up = Upstairs::new(&opt, gen, region_def, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task
@@ -8063,11 +8166,10 @@ fn create_flush(
  * the clients.
  */
 async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
-    let mut iosc: IOStateCount = IOStateCount::new();
     let gior = up.guest_io_ready().await;
     let up_count = up.guest.guest_work.lock().await.active.len();
 
-    let ds = up.downstairs.lock().await;
+    let mut ds = up.downstairs.lock().await;
     let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
@@ -8163,7 +8265,6 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                         // XXX I have no idea why this is two spaces instead of
                         // one...
                         print!("  {0:>5}", state);
-                        iosc.incr(state, cid);
                     }
                     _x => {
                         print!("  {0:>5}", "????");
@@ -8174,7 +8275,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
             println!();
         }
-        iosc.show_all();
+        ds.io_state_count.show_all();
         print!("Last Flush: ");
         for lf in ds.ds_last_flush.iter() {
             print!("{} ", lf);

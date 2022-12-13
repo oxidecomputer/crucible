@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.13"
+base64 = "0.20"
 chrono = { version = "0.4", features = [ "serde" ] }
 clap = { version = "4.0", features = ["derive"] }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
@@ -21,7 +21,7 @@ crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-tokio = { version = "1.22", features = [ "full" ] }
+tokio = { version = "1.23", features = [ "full" ] }
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 reqwest = { version = "0.11", features = ["json", "stream"] }
 hex = "0.4"
@@ -30,5 +30,5 @@ sha2 = "0.10"
 [dev-dependencies]
 expectorate = "1.0.5"
 openapiv3 = "1.0"
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 subprocess = "0.2.9"

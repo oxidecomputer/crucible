@@ -21,7 +21,9 @@ pub struct RunDownstairsForRegionParams {
     lossy: bool,
     port: u16,
     rport: u16,
-    return_errors: bool,
+    read_errors: bool,
+    write_errors: bool,
+    flush_errors: bool,
     cert_pem: Option<String>,
     key_pem: Option<String>,
     root_cert_pem: Option<String>,
@@ -63,7 +65,9 @@ pub async fn run_downstairs_for_region(
     let d = build_downstairs_for_region(
         &run_params.data,
         run_params.lossy,
-        run_params.return_errors,
+        run_params.read_errors,
+        run_params.write_errors,
+        run_params.flush_errors,
         run_params.read_only,
         None,
     )

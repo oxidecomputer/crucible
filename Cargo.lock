@@ -138,9 +138,9 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.58"
+version = "0.1.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e805d94e6b5001b651426cf4cd446b1ab5f319d27bab5c644f61de0a804360c"
+checksum = "31e6e93155431f3931513b243d371981bb2770112b370c82745a1d19d2f99364"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -192,6 +192,12 @@ name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
+name = "base64"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ea22880d78093b0cbe17c89f64a7d457941e65759157ec6cb31a31d652b05e5"
 
 [[package]]
 name = "bincode"
@@ -413,6 +419,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "const_panic"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58baae561b85ca19b3122a9ddd35c8ec40c3bcd14fe89921824eae73f7baffbf"
+dependencies = [
+ "konst_kernel",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -557,7 +572,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "base64",
+ "base64 0.20.0",
  "bitvec",
  "bytes",
  "chrono",
@@ -630,7 +645,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
  "reqwest",
  "schemars",
  "serde",
@@ -641,7 +656,7 @@ dependencies = [
 name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.20.0",
  "schemars",
  "serde",
  "serde_json",
@@ -671,7 +686,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
  "reqwest",
  "schemars",
  "serde",
@@ -756,7 +771,7 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.20.0",
  "bytes",
  "crucible",
  "crucible-client-types",
@@ -814,7 +829,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.20.0",
  "chrono",
  "clap 4.0.27",
  "crucible",
@@ -847,7 +862,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
  "reqwest",
  "schemars",
  "serde",
@@ -1068,7 +1083,7 @@ source = "git+https://github.com/oxidecomputer/dropshot?branch=main#99261d7fc2df
 dependencies = [
  "async-stream",
  "async-trait",
- "base64",
+ "base64 0.13.1",
  "bytes",
  "chrono",
  "dropshot_endpoint",
@@ -1141,7 +1156,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
  "reqwest",
  "schemars",
  "serde",
@@ -1669,9 +1684,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-staticfile"
-version = "0.9.0"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b558728d3c96e74c39398c9083c760f3ca068134ff342a8dbf1b296e1d83bb80"
+checksum = "7e272e9ec011228580b4d7bcca665cd1ea863038f7e6a7f71752dd03f9a29853"
 dependencies = [
  "futures-util",
  "http",
@@ -1843,6 +1858,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "konst_kernel"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7771682454392dfe62a909aba2c6efc6674e2ad0b678fbc33b154e2e1bd59b89"
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1850,9 +1871,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.137"
+version = "0.2.138"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc7fcc620a3bff7cdd7a365be3376c97191aeaccc2a603e600951e452615bf89"
+checksum = "db6d7e329c562c5dfab7a46a2afabc8b987ab9a4834c9d1ca04dc54c1546cef8"
 
 [[package]]
 name = "libsqlite3-sys"
@@ -2047,7 +2068,7 @@ source = "git+https://github.com/oxidecomputer/omicron?branch=main#b20ed23095790
 dependencies = [
  "chrono",
  "omicron-common",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor)",
  "reqwest",
  "serde",
  "serde_json",
@@ -2194,7 +2215,7 @@ dependencies = [
  "ipnetwork",
  "macaddr",
  "parse-display",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor)",
  "rand 0.8.5",
  "reqwest",
  "ring",
@@ -2255,7 +2276,7 @@ checksum = "624a8340c38c1b80fd549087862da4ba43e08858af025b236e509b6649fc13d5"
 [[package]]
 name = "openapi-lint"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/openapi-lint#9e3ada82808ef882fdefe2d01a39eeeb219c8778"
+source = "git+https://github.com/oxidecomputer/openapi-lint?branch=main#9e3ada82808ef882fdefe2d01a39eeeb219c8778"
 dependencies = [
  "convert_case",
  "indexmap",
@@ -2652,7 +2673,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "878c6cbf956e03af9aa8204b407b9cbf47c072164800aa918c516cd4b056c50c"
 dependencies = [
- "base64",
+ "base64 0.13.1",
  "byteorder",
  "bytes",
  "fallible-iterator",
@@ -2719,14 +2740,42 @@ dependencies = [
 [[package]]
 name = "progenitor"
 version = "0.1.2-dev"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=main#d3441861bc36247af11c774c8e1de43e0c37bf4b"
+dependencies = [
+ "anyhow",
+ "getopts",
+ "openapiv3",
+ "progenitor-client 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
+ "progenitor-impl 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
+ "progenitor-macro 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "progenitor"
+version = "0.1.2-dev"
 source = "git+https://github.com/oxidecomputer/progenitor#d3441861bc36247af11c774c8e1de43e0c37bf4b"
 dependencies = [
  "anyhow",
  "getopts",
  "openapiv3",
- "progenitor-client",
- "progenitor-impl",
- "progenitor-macro",
+ "progenitor-client 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor)",
+ "progenitor-impl 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor)",
+ "progenitor-macro 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor)",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "progenitor-client"
+version = "0.1.2-dev"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=main#d3441861bc36247af11c774c8e1de43e0c37bf4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "percent-encoding",
+ "reqwest",
  "serde",
  "serde_json",
 ]
@@ -2742,6 +2791,28 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "progenitor-impl"
+version = "0.1.2-dev"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=main#d3441861bc36247af11c774c8e1de43e0c37bf4b"
+dependencies = [
+ "getopts",
+ "heck 0.4.0",
+ "indexmap",
+ "openapiv3",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustfmt-wrapper",
+ "schemars",
+ "serde",
+ "serde_json",
+ "syn",
+ "thiserror",
+ "typify",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -2769,11 +2840,26 @@ dependencies = [
 [[package]]
 name = "progenitor-macro"
 version = "0.1.2-dev"
+source = "git+https://github.com/oxidecomputer/progenitor?branch=main#d3441861bc36247af11c774c8e1de43e0c37bf4b"
+dependencies = [
+ "openapiv3",
+ "proc-macro2",
+ "progenitor-impl 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
+ "quote",
+ "serde",
+ "serde_json",
+ "serde_tokenstream",
+ "syn",
+]
+
+[[package]]
+name = "progenitor-macro"
+version = "0.1.2-dev"
 source = "git+https://github.com/oxidecomputer/progenitor#d3441861bc36247af11c774c8e1de43e0c37bf4b"
 dependencies = [
  "openapiv3",
  "proc-macro2",
- "progenitor-impl",
+ "progenitor-impl 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor)",
  "quote",
  "serde",
  "serde_json",
@@ -3043,7 +3129,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.1.2-dev (git+https://github.com/oxidecomputer/progenitor?branch=main)",
  "reqwest",
  "schemars",
  "serde",
@@ -3056,7 +3142,7 @@ version = "0.11.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68cc60575865c7831548863cc02356512e3f1dc2f3f82cb837d7fc4cc8f3c97c"
 dependencies = [
- "base64",
+ "base64 0.13.1",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -3110,9 +3196,12 @@ dependencies = [
 
 [[package]]
 name = "ringbuffer"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "310a2514cb46bb500a2f2ad70c79c51c5a475cc23faa245d2c675faabe889370"
+checksum = "034f2f6835eab90a8942169db360776272fe3fce9eb13b9bdefaceea67cabd68"
+dependencies = [
+ "const_panic",
+]
 
 [[package]]
 name = "rusqlite"
@@ -3194,7 +3283,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0864aeff53f8c05aa08d86e5ef839d3dfcf07aeba2db32f12db0ef716e87bd55"
 dependencies = [
- "base64",
+ "base64 0.13.1",
 ]
 
 [[package]]
@@ -3955,9 +4044,9 @@ checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "tokio"
-version = "1.22.0"
+version = "1.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d76ce4a75fb488c605c54bf610f221cea8b0dafb53333c1a67e8ee199dcd2ae3"
+checksum = "eab6d665857cc6ca78d6e80303a02cea7a7851e85dfbd77cbdc09bd129f1ef46"
 dependencies = [
  "autocfg 1.1.0",
  "bytes",
@@ -3970,7 +4059,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
- "winapi",
+ "windows-sys 0.42.0",
 ]
 
 [[package]]

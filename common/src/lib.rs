@@ -122,6 +122,9 @@ pub enum CrucibleError {
 
     #[error("Failed reconciliation")]
     RegionAssembleError,
+
+    #[error("Property not available: {0}")]
+    PropertyNotAvailable(String),
 }
 
 impl From<std::io::Error> for CrucibleError {
