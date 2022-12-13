@@ -257,10 +257,10 @@ impl Inner {
     /// `extent_block_indexes_and_hashes` is sorted by block number before
     /// calling this function.
     fn truncate_encryption_contexts_and_hashes(
-        &mut self,
-        extent_block_indexes_and_hashes: impl Iterator<Item = (usize, u64)>,
+        metadb: &mut Connection,
+        extent_block_indexes_and_hashes: Vec<(usize, u64)>,
     ) -> Result<()> {
-        let tx = self.metadb.transaction()?;
+        let tx = metadb.transaction()?;
 
         let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
         let mut stmt = tx.prepare_cached(stmt)?;
@@ -273,6 +273,8 @@ impl Inner {
                 .execute(params![block, on_disk_hash.to_le_bytes()])?;
         }
         cdt::extent__context__truncate__done!(|| ());
+
+        drop(stmt);
 
         drop(stmt);
 
@@ -1245,6 +1247,11 @@ impl Extent {
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
+        // I realize this looks like some nonsense but what this is doing is
+        // borrowing the inner up-front from the MutexGuard, which will allow
+        // us to later disjointly borrow fields. Basically, we're helping the
+        // borrow-checker do its job.
+        let inner = &mut *inner;
 
         if !inner.dirty()? {
             /*
@@ -1338,8 +1345,23 @@ impl Extent {
         // memory allocated though. With 16 entries max, even a 32TiB region
         // of 128MiB extents would only be spending 64MiB of ram on on this.
         // Potential for tuning here.
-
         inner.dirty_blocks.shrink_to(16);
+
+
+        cdt::extent__flush__rehash__done!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
+
+        cdt::extent__flush__sqlite__insert__start!(|| {
+            (job_id, self.number, self.extent_size.value)
+        });
+
+
+        Inner::truncate_encryption_contexts_and_hashes(
+            &mut inner.metadb,
+            extent_block_indexes_and_hashes,
+        )?;
+
         cdt::extent__flush__sqlite__insert__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
@@ -3234,7 +3256,7 @@ mod test {
         assert_eq!(ctxs[1].on_disk_hash, 65536);
 
         // "Flush", so only the rows that match should remain.
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)].iter().copied())?;
+        Inner::truncate_encryption_contexts_and_hashes(&mut inner.metadb, vec![(0, 65536)])?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -3446,7 +3468,7 @@ mod test {
 
         // "Flush", so only the rows that match the on-disk hash should remain.
 
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 6), (1, 7)].iter().copied())?;
+        Inner::truncate_encryption_contexts_and_hashes(&mut inner.metadb, vec![(0, 6), (1, 7)])?;
 
         let ctxs = inner.get_block_contexts(0, 2)?;
 
