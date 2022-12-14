@@ -61,12 +61,7 @@ enum Args {
         #[clap(short, long, name = "UUID", action)]
         uuid: Uuid,
 
-        #[clap(
-            long,
-            default_value = "false",
-            default_missing_value = "true",
-            action(clap::ArgAction::Set)
-        )]
+        #[clap(long, action)]
         encrypted: bool,
     },
     /*
