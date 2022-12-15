@@ -1245,11 +1245,6 @@ impl Extent {
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner();
-        // I realize this looks like some nonsense but what this is doing is
-        // borrowing the inner up-front from the MutexGuard, which will allow
-        // us to later disjointly borrow fields. Basically, we're helping the
-        // borrow-checker do its job.
-        let inner = &mut *inner;
 
         if !inner.dirty()? {
             /*
