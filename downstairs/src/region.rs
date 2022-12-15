@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
-use std::fs::{rename, File, OpenOptions};
+use std::fs::{File, OpenOptions, rename};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -211,7 +211,7 @@ impl Inner {
              VALUES (?1, ?2, ?3, ?4, ?5)";
 
         let (nonce, tag) = if let Some(encryption_context) =
-            &block_context.block_context.encryption_context
+        &block_context.block_context.encryption_context
         {
             (
                 Some(&encryption_context.nonce),
@@ -257,10 +257,10 @@ impl Inner {
     /// `extent_block_indexes_and_hashes` is sorted by block number before
     /// calling this function.
     fn truncate_encryption_contexts_and_hashes(
-        metadb: &mut Connection,
+        &mut self,
         extent_block_indexes_and_hashes: Vec<(usize, u64)>,
     ) -> Result<()> {
-        let tx = metadb.transaction()?;
+        let tx = self.metadb.transaction()?;
 
         let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
         let mut stmt = tx.prepare_cached(stmt)?;
@@ -935,7 +935,7 @@ impl Extent {
             // We could make this a little cleaner if we pulled in itertools and
             // used multizip from that, but i don't think it's worth it.
             for ((resp, r_ctx), r_data) in
-                resp_iter.zip(ctx_iter).zip(data_iter)
+            resp_iter.zip(ctx_iter).zip(data_iter)
             {
                 // Shove everything into the response
                 resp.block_contexts =
@@ -1347,12 +1347,9 @@ impl Extent {
         cdt::extent__flush__sqlite__insert__start!(|| {
             (job_id, self.number, self.extent_size.value)
         });
-
-        Inner::truncate_encryption_contexts_and_hashes(
-            &mut inner.metadb,
+        inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
-
         cdt::extent__flush__sqlite__insert__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
@@ -1903,7 +1900,7 @@ impl Region {
     ) -> Result<(), CrucibleError> {
         for write in writes {
             let computed_hash = if let Some(encryption_context) =
-                &write.block_context.encryption_context
+            &write.block_context.encryption_context
             {
                 integrity_hash(&[
                     &encryption_context.nonce[..],
@@ -2116,7 +2113,7 @@ impl Region {
                             "{}@{}",
                             dataset_name, snapshot_details.snapshot_name
                         )
-                        .as_str(),
+                            .as_str(),
                     ])
                     .output()
                     .map_err(|e| {
@@ -2292,8 +2289,8 @@ pub async fn save_stream_to_file(
     mut stream: Pin<
         Box<
             dyn futures::Stream<
-                    Item = std::result::Result<crucible::Bytes, reqwest::Error>,
-                > + std::marker::Send,
+                Item=std::result::Result<crucible::Bytes, reqwest::Error>,
+            > + std::marker::Send,
         >,
     >,
 ) -> Result<(), CrucibleError> {
@@ -2866,7 +2863,7 @@ mod test {
             false,
             &csl(),
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -3247,10 +3244,7 @@ mod test {
         assert_eq!(ctxs[1].on_disk_hash, 65536);
 
         // "Flush", so only the rows that match should remain.
-        Inner::truncate_encryption_contexts_and_hashes(
-            &mut inner.metadb,
-            vec![(0, 65536)],
-        )?;
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)])?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -3462,10 +3456,7 @@ mod test {
 
         // "Flush", so only the rows that match the on-disk hash should remain.
 
-        Inner::truncate_encryption_contexts_and_hashes(
-            &mut inner.metadb,
-            vec![(0, 6), (1, 7)],
-        )?;
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 6), (1, 7)])?;
 
         let ctxs = inner.get_block_contexts(0, 2)?;
 
