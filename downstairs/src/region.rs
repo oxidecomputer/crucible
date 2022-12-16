@@ -59,6 +59,13 @@ pub struct Inner {
 }
 
 impl Inner {
+    /// Checkpoint the database. This clears the WAL log, truncates it, and fsync's the database.
+    fn db_checkpoint(&self) -> Result<()> {
+        self.metadb
+            .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        Ok(())
+    }
+
     pub fn gen_number(&self) -> Result<u64> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='gen_number'",
@@ -94,27 +101,30 @@ impl Inner {
     /*
      * The flush and generation numbers will be updated at the same time.
      */
-    fn set_flush_number(&self, new_flush: u64, new_gen: u64) -> Result<()> {
-        let mut stmt = self.metadb.prepare_cached(
-            "UPDATE metadata SET value=?1 WHERE name='flush_number'",
-        )?;
+    fn set_flush_number(&mut self, new_flush: u64, new_gen: u64) -> Result<()> {
+        let tx = self.metadb.transaction()?;
 
-        let _rows_affected = stmt.execute([new_flush])?;
+        let _ = tx
+            .prepare_cached(
+                "UPDATE metadata SET value=?1 WHERE name='flush_number'",
+            )?
+            .execute([new_flush])?;
 
-        let mut stmt = self.metadb.prepare_cached(
-            "UPDATE metadata SET value=?1 WHERE name='gen_number'",
-        )?;
-
-        let _rows_affected = stmt.execute([new_gen])?;
+        let _ = tx
+            .prepare_cached(
+                "UPDATE metadata SET value=?1 WHERE name='gen_number'",
+            )?
+            .execute([new_gen])?;
 
         /*
          * When we write out the new flush number, the dirty bit should be
          * set back to false.
          */
-        let mut stmt = self
-            .metadb
-            .prepare_cached("UPDATE metadata SET value=0 WHERE name='dirty'")?;
-        let _rows_affected = stmt.execute([])?;
+        let _ = tx
+            .prepare_cached("UPDATE metadata SET value=0 WHERE name='dirty'")?
+            .execute([])?;
+
+        tx.commit()?;
 
         Ok(())
     }
@@ -140,6 +150,8 @@ impl Inner {
             .metadb
             .prepare_cached("UPDATE metadata SET value=1 WHERE name='dirty'")?
             .execute([])?;
+
+        // YYY could decide to checkpoint here if value changed
         Ok(())
     }
 
@@ -154,19 +166,20 @@ impl Inner {
     ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
         let stmt =
-            "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
+            "SELECT block, on_disk_hash, hash, nonce, tag  FROM block_context \
              WHERE block BETWEEN ?1 AND ?2";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
         let stmt_iter =
             stmt.query_map(params![block, block + count - 1], |row| {
                 let block_index: u64 = row.get(0)?;
-                let hash: Vec<u8> = row.get(1)?;
-                let nonce: Option<Vec<u8>> = row.get(2)?;
-                let tag: Option<Vec<u8>> = row.get(3)?;
-                let on_disk_hash: Vec<u8> = row.get(4)?;
+                let on_disk_hash: i64 = row.get(1)?;
+                let hash: Vec<u8> = row.get(2)?;
+                let nonce: Option<Vec<u8>> = row.get(3)?;
+                let tag: Option<Vec<u8>> = row.get(4)?;
 
-                Ok((block_index, hash, nonce, tag, on_disk_hash))
+                // YYY rearrange
+                Ok((block_index, hash, nonce, tag, on_disk_hash as u64))
             })?;
 
         let mut results = Vec::with_capacity(count as usize);
@@ -189,7 +202,7 @@ impl Inner {
                     encryption_context,
                 },
                 block: block_index,
-                on_disk_hash: u64::from_le_bytes(on_disk_hash[..].try_into()?),
+                on_disk_hash,
             };
 
             results[(ctx.block - block) as usize].push(ctx);
@@ -217,7 +230,7 @@ impl Inner {
         // A. verifies that it works without panicking
         // B. verifies that it... does whatever we want it to do i guess
         let stmt =
-            "INSERT INTO block_context (block, hash, nonce, tag, on_disk_hash) \
+            "INSERT INTO block_context (block, on_disk_hash, hash, nonce, tag) \
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT DO NOTHING";
 
@@ -234,10 +247,10 @@ impl Inner {
 
         let rows_affected = tx.prepare_cached(stmt)?.execute(params![
             block_context.block,
+            block_context.on_disk_hash as i64,
             block_context.block_context.hash.to_le_bytes(),
             nonce,
             tag,
-            block_context.on_disk_hash.to_le_bytes(),
         ])?;
 
         // YYY this assertion fails on the DO NOTHING clause
@@ -283,7 +296,7 @@ impl Inner {
         cdt::extent__context__truncate__start!(|| n_blocks as u64);
         for (block, on_disk_hash) in extent_block_indexes_and_hashes {
             let _rows_affected =
-                stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
+                stmt.execute(params![block, on_disk_hash as i64])?;
         }
         cdt::extent__context__truncate__done!(|| ());
 
@@ -496,7 +509,44 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 
     assert!(metadb.is_autocommit());
     metadb.pragma_update(None, "journal_mode", &"WAL")?;
-    metadb.pragma_update(None, "synchronous", &"FULL")?;
+
+    // TODO: we may (untested) get some benefit by switching from FULL to
+    // NORMAL, but we should consider the implications. When using the WAL
+    // journal mode, NORMAL is safe from corruption in all the same scenarios
+    // that FULL is, but may still lose data. That is, we would crash
+    // consistent, but we may incur data loss.
+    //
+    // To quote https://www.sqlite.org/pragma.html#pragma_synchronous ,
+    // > In WAL mode when synchronous is NORMAL (1), the WAL file is
+    // > synchronized before each checkpoint and the database file is
+    // > synchronized after each completed checkpoint and the WAL file header
+    // > is synchronized when a WAL file begins to be reused after a
+    // > checkpoint, but no sync operations occur during most transactions.
+    // > With synchronous=FULL in WAL mode, an additional sync operation of the
+    // > WAL file happens after each transaction commit. The extra WAL sync
+    // > following each transaction helps ensure that transactions are durable
+    // > across a power loss. Transactions are consistent with or without the
+    // > extra syncs provided by synchronous=FULL. If durability is not a
+    // > concern, then synchronous=NORMAL is normally all one needs in WAL
+    // > mode.
+    //
+    // So switching to NORMAL would probably make a big difference for small
+    // writes. We could then checkpoint in flush(), and fulfill our
+    // durability contract with proposlis.
+
+    metadb.pragma_update(None, "synchronous", &"NORMAL")?;
+
+    // 4096 is supposedly the default, but let's be sure about it. There may
+    // be some tuning potential here too.
+    metadb.pragma_update(None, "page_size", 4096)?;
+
+    // This defaults to 0, but increasing this allows prepared statements to
+    // launch threads to help them with their query. Potential tuning
+    // metadb.pragma_update(None, "threads", 0)?;
+
+    // Disable autocheckpoint. This puts us fully in charge of checkpointing, which we'll
+    // do in flush()
+    metadb.pragma_update(None, "wal_autocheckpoint", 0)?;
 
     // rusqlite provides an LRU Cache (a cache which, when full, evicts the
     // least-recently-used value). This caches prepared statements, allowing
@@ -760,10 +810,10 @@ impl Extent {
             metadb.execute(
                 "CREATE TABLE block_context (
                     block INTEGER,
+                    on_disk_hash INTEGER,
                     hash BLOB NOT NULL,
                     nonce BLOB,
                     tag BLOB,
-                    on_disk_hash BLOB NOT NULL,
                     PRIMARY KEY (block, on_disk_hash)
                 ) WITHOUT ROWID",
                 [],
@@ -1373,6 +1423,9 @@ impl Extent {
 
         inner.set_flush_number(new_flush, new_gen)?;
 
+        // Checkpoint the database, making sure it's fsync'd
+        inner.db_checkpoint()?;
+
         cdt::extent__flush__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
@@ -1437,6 +1490,8 @@ impl Extent {
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
+
+        inner.db_checkpoint()?;
 
         inner.file.seek(SeekFrom::Start(0))?;
 
