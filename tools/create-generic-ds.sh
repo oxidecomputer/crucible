@@ -81,8 +81,8 @@ for port in 8810 8820 8830; do
             res=1
         fi
     else
-        echo "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted=true
-        if ! time "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted=true; then
+        echo "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted
+        if ! time "$cds" create -u 12345678-"$port"-"$port"-"$port"-00000000"$port" -d var/"$port" --extent-count "$extent_count" --extent-size "$extent_size"  --block-size "$block_size" --encrypted; then
             echo "Failed to create downstairs $port"
             res=1
         fi
