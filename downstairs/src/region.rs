@@ -2,13 +2,13 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
-use std::fs::{File, OpenOptions, rename};
+use std::fs::{rename, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use futures::TryStreamExt;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -218,11 +218,11 @@ impl Inner {
         // B. verifies that it... does whatever we want it to do i guess
         let stmt =
             "INSERT INTO block_context (block, hash, nonce, tag, on_disk_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT DO NOTHING";
 
         let (nonce, tag) = if let Some(encryption_context) =
-        &block_context.block_context.encryption_context
+            &block_context.block_context.encryption_context
         {
             (
                 Some(&encryption_context.nonce),
@@ -240,7 +240,9 @@ impl Inner {
             block_context.on_disk_hash.to_le_bytes(),
         ])?;
 
-        assert_eq!(rows_affected, 1);
+        // YYY this assertion fails on the DO NOTHING clause
+        ensure!(rows_affected <= 1);
+        // assert_eq!(rows_affected, 1);
 
         Ok(())
     }
@@ -946,7 +948,7 @@ impl Extent {
             // We could make this a little cleaner if we pulled in itertools and
             // used multizip from that, but i don't think it's worth it.
             for ((resp, r_ctx), r_data) in
-            resp_iter.zip(ctx_iter).zip(data_iter)
+                resp_iter.zip(ctx_iter).zip(data_iter)
             {
                 // Shove everything into the response
                 resp.block_contexts =
@@ -1911,7 +1913,7 @@ impl Region {
     ) -> Result<(), CrucibleError> {
         for write in writes {
             let computed_hash = if let Some(encryption_context) =
-            &write.block_context.encryption_context
+                &write.block_context.encryption_context
             {
                 integrity_hash(&[
                     &encryption_context.nonce[..],
@@ -2124,7 +2126,7 @@ impl Region {
                             "{}@{}",
                             dataset_name, snapshot_details.snapshot_name
                         )
-                            .as_str(),
+                        .as_str(),
                     ])
                     .output()
                     .map_err(|e| {
@@ -2300,8 +2302,8 @@ pub async fn save_stream_to_file(
     mut stream: Pin<
         Box<
             dyn futures::Stream<
-                Item=std::result::Result<crucible::Bytes, reqwest::Error>,
-            > + std::marker::Send,
+                    Item = std::result::Result<crucible::Bytes, reqwest::Error>,
+                > + std::marker::Send,
         >,
     >,
 ) -> Result<(), CrucibleError> {
@@ -2874,7 +2876,7 @@ mod test {
             false,
             &csl(),
         )
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
