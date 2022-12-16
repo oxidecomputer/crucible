@@ -40,7 +40,7 @@ pub struct Extent {
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct DownstairsBlockContext {
     pub block_context: BlockContext,
 
@@ -155,8 +155,7 @@ impl Inner {
         // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
         let stmt =
             "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
-             WHERE block BETWEEN ?1 AND ?2 \
-             ORDER BY ROWID ASC";
+             WHERE block BETWEEN ?1 AND ?2";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
         let stmt_iter =
@@ -206,9 +205,21 @@ impl Inner {
         tx: &rusqlite::Transaction,
         block_context: &DownstairsBlockContext,
     ) -> Result<()> {
+        // YYY explain why UPSERT is ok, and needed (mainly: writes of the
+        // same data, especially unencrypted regions) but also... how did we
+        // even run into that error in the first place? crudd speed battery
+        // does a write of 0x11, then a write of all zeroes, then a write of
+        // 0x11 again. it shouldn't be possible unless something else is
+        // going wrong, right?
+        //
+        // but also this has revealed that we should really make a test that writes a block
+        // then writes a block a second time, and then like
+        // A. verifies that it works without panicking
+        // B. verifies that it... does whatever we want it to do i guess
         let stmt =
             "INSERT INTO block_context (block, hash, nonce, tag, on_disk_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5)";
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT DO NOTHING";
 
         let (nonce, tag) = if let Some(encryption_context) =
         &block_context.block_context.encryption_context
@@ -751,8 +762,8 @@ impl Extent {
                     nonce BLOB,
                     tag BLOB,
                     on_disk_hash BLOB NOT NULL,
-                    PRIMARY KEY (block, hash, nonce, tag, on_disk_hash)
-                )",
+                    PRIMARY KEY (block, on_disk_hash)
+                ) WITHOUT ROWID",
                 [],
             )?;
 
@@ -3137,7 +3148,7 @@ mod test {
 
         // Set and verify block 0's context
 
-        inner.set_block_contexts(&[&DownstairsBlockContext {
+        let block_0_ctx_0 = DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
                     nonce: [1, 2, 3].to_vec(),
@@ -3147,32 +3158,15 @@ mod test {
             },
             block: 0,
             on_disk_hash: 456,
-        }])?;
+        };
+
+        inner.set_block_contexts(&[&block_0_ctx_0])?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
+        // Block 0 hash was inserted correctly, and comes back out ok.
         assert_eq!(ctxs.len(), 1);
-
-        assert_eq!(
-            ctxs[0]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .nonce,
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            ctxs[0]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .tag,
-            vec![4, 5, 6, 7]
-        );
-        assert_eq!(ctxs[0].block_context.hash, 123);
-        assert_eq!(ctxs[0].on_disk_hash, 456);
+        assert_eq!(ctxs[0], block_0_ctx_0);
 
         // Block 1 should still be blank
 
@@ -3183,7 +3177,7 @@ mod test {
         let blob1 = rand::thread_rng().gen::<[u8; 32]>();
         let blob2 = rand::thread_rng().gen::<[u8; 32]>();
 
-        inner.set_block_contexts(&[&DownstairsBlockContext {
+        let block_0_ctx_1 = DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
                     nonce: blob1.to_vec(),
@@ -3193,55 +3187,18 @@ mod test {
             },
             block: 0,
             on_disk_hash: 65536,
-        }])?;
+        };
+        inner.set_block_contexts(&[&block_0_ctx_1])?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 2);
 
-        // First context didn't change
-        assert_eq!(
-            ctxs[0]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .nonce,
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            ctxs[0]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .tag,
-            vec![4, 5, 6, 7]
-        );
-        assert_eq!(ctxs[0].block_context.hash, 123);
-        assert_eq!(ctxs[0].on_disk_hash, 456);
+        // First context is still present
+        assert!(ctxs.contains(&block_0_ctx_0));
 
         // Second context was appended
-        assert_eq!(
-            ctxs[1]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .nonce,
-            blob1
-        );
-        assert_eq!(
-            ctxs[1]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .tag,
-            blob2
-        );
-        assert_eq!(ctxs[1].block_context.hash, 1024);
-        assert_eq!(ctxs[1].on_disk_hash, 65536);
+        assert!(ctxs.contains(&block_0_ctx_1));
 
         // "Flush", so only the rows that match should remain.
         inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)])?;
@@ -3249,27 +3206,7 @@ mod test {
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
         assert_eq!(ctxs.len(), 1);
-
-        assert_eq!(
-            ctxs[0]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .nonce,
-            blob1
-        );
-        assert_eq!(
-            ctxs[0]
-                .block_context
-                .encryption_context
-                .as_ref()
-                .unwrap()
-                .tag,
-            blob2
-        );
-        assert_eq!(ctxs[0].block_context.hash, 1024);
-        assert_eq!(ctxs[0].on_disk_hash, 65536);
+        assert_eq!(ctxs[0], block_0_ctx_1);
 
         Ok(())
     }
