@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-byte-unit = "4.0.17"
+byte-unit = "4.0.18"
 clap = { version = "4.0", features = ["derive", "env"] }
 csv = "1.1.6"
 dsc-client = { path = "../dsc-client" }
