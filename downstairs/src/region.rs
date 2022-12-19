@@ -3,21 +3,22 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use crucible_common::*;
-use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use futures::TryStreamExt;
-use repair_client::types::FileType;
-use repair_client::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tokio::macros::support::Pin;
 use tracing::instrument;
+
+use crucible_common::*;
+use crucible_protocol::{EncryptionContext, SnapshotDetails};
+use repair_client::types::FileType;
+use repair_client::Client;
 
 use super::*;
 
@@ -51,6 +52,10 @@ pub struct DownstairsBlockContext {
 pub struct Inner {
     file: File,
     metadb: Connection,
+
+    /// Map of block number to on_disk_hash of the block. Stores blocks that
+    /// have been written since the last flush.
+    dirty_blocks: HashMap<usize, u64>,
 }
 
 impl Inner {
@@ -229,10 +234,6 @@ impl Inner {
         Ok(())
     }
 
-    pub fn metadb_transaction(&mut self) -> Result<rusqlite::Transaction> {
-        Ok(self.metadb.transaction()?)
-    }
-
     #[cfg(test)]
     fn set_block_contexts(
         &mut self,
@@ -251,10 +252,10 @@ impl Inner {
         Ok(())
     }
 
-    /*
-     * Get rid of all block context rows except those that match the on-disk
-     * hash that is computed after a flush.
-     */
+    /// Get rid of all block context rows except those that match the on-disk
+    /// hash that is computed after a flush. For best performance, make sure
+    /// `extent_block_indexes_and_hashes` is sorted by block number before
+    /// calling this function.
     fn truncate_encryption_contexts_and_hashes(
         &mut self,
         extent_block_indexes_and_hashes: Vec<(usize, u64)>,
@@ -262,12 +263,18 @@ impl Inner {
         let tx = self.metadb.transaction()?;
 
         let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
+        let mut stmt = tx.prepare_cached(stmt)?;
 
+        let n_blocks = extent_block_indexes_and_hashes.len();
+
+        cdt::extent__context__truncate__start!(|| n_blocks as u64);
         for (block, on_disk_hash) in extent_block_indexes_and_hashes {
-            let _rows_affected = tx
-                .prepare_cached(stmt)?
-                .execute(params![block, on_disk_hash.to_le_bytes()])?;
+            let _rows_affected =
+                stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
         }
+        cdt::extent__context__truncate__done!(|| ());
+
+        drop(stmt);
 
         tx.commit()?;
 
@@ -408,6 +415,7 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     out.set_extension("replace");
     out
 }
+
 /**
  * Produce a PathBuf that refers to the completed directory we use for
  * a given extent "number".  This directory is generated (see below) when
@@ -604,13 +612,23 @@ impl Extent {
 
         // XXX: schema updates?
 
-        Ok(Extent {
+        let extent = Extent {
             number,
             read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Some(Mutex::new(Inner { file, metadb })),
-        })
+            inner: Some(Mutex::new(Inner {
+                file,
+                metadb,
+                dirty_blocks: HashMap::new(),
+            })),
+        };
+
+        // Clean out any irrelevant block contexts, which may be present if downstairs
+        // crashed between a write() and a flush().
+        extent.fully_rehash_and_clean_all_stale_contexts(false)?;
+
+        Ok(extent)
     }
 
     /**
@@ -725,6 +743,7 @@ impl Extent {
             // Any of the context rows written between flushes could be valid
             // until we call flush and remove context rows where the integrity
             // hash does not match what was actually flushed to disk.
+
             metadb.execute(
                 "CREATE TABLE block_context (
                     block INTEGER,
@@ -759,7 +778,11 @@ impl Extent {
             read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Some(Mutex::new(Inner { file, metadb })),
+            inner: Some(Mutex::new(Inner {
+                file,
+                metadb,
+                dirty_blocks: HashMap::new(),
+            })),
         })
     }
 
@@ -983,6 +1006,11 @@ impl Extent {
         });
 
         let mut inner = self.inner();
+        // I realize this looks like some nonsense but what this is doing is
+        // borrowing the inner up-front from the MutexGuard, which will allow
+        // us to later disjointly borrow fields. Basically, we're helping the
+        // borrow-checker do its job.
+        let inner = &mut *inner;
 
         for write in writes {
             self.check_input(write.offset, &write.data)?;
@@ -1093,23 +1121,41 @@ impl Extent {
         cdt::extent__write__sqlite__insert__start!(|| {
             (job_id, self.number, writes.len() as u64)
         });
-        let tx = inner.metadb_transaction()?;
+        let tx = inner.metadb.transaction()?;
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
                 debug_assert!(only_write_unwritten);
                 continue;
             }
 
+            // TODO it would be nice if we could profile what % of time we're
+            // spending on hashes locally vs sqlite
+            let on_disk_hash = integrity_hash(&[&write.data[..]]);
+
             Inner::tx_set_block_context(
                 &tx,
                 &DownstairsBlockContext {
                     block_context: write.block_context.clone(),
                     block: write.offset.value,
-                    on_disk_hash: integrity_hash(&[&write.data[..]]),
+                    on_disk_hash,
                 },
             )?;
+
+            // Worth some thought: this could happen inside
+            // tx_set_block_context, if we passed a reference to dirty_blocks
+            // into that function too. This might be nice, since then a block
+            // context could never be set without marking the block as dirty.
+            // On the other paw, our test suite very much likes the fact that
+            // tx_set_block_context would mark blocks as dirty, since it lets
+            // us easily test specific edge-cases of the database state.
+            // Could make another function that wraps tx_set_block_context
+            // and handles this as well.
+            let _ = inner
+                .dirty_blocks
+                .insert(write.offset.value as usize, on_disk_hash);
         }
         tx.commit()?;
+
         cdt::extent__write__sqlite__insert__done!(|| {
             (job_id, self.number, writes.len() as u64)
         });
@@ -1118,6 +1164,27 @@ impl Extent {
         // chosen somewhat arbitrarily.
         let mut write_buffer = [0u8; 65536];
 
+        // PERFORMANCE TODO: While sqlite is the bulk of our performance cost
+        // in writes, we're still paying quite the price on small writes
+        // here. It would be nice if we could improve that a bit. An easy win
+        // would be to replace the seek+write with the syscall that does both
+        // in one go. I also wonder whether memory-mapping would be
+        // advantageous here.
+        //
+        // Something else worth considering for small writes is that, based on
+        // my memory of conversations we had with propolis folks about what
+        // OSes expect out of an NVMe driver, I believe our contract with the
+        // upstairs doesn't require us to have the writes inside the file
+        // until after a flush() returns. If that is indeed true, we could
+        // buffer a certain amount of writes, only actually writing that
+        // buffer when either a flush is issued or the buffer exceeds some
+        // set size(based on our memory constraints). This would have
+        // benefits on any workload that frequently writes to the same block
+        // between flushes, would have benefits for small contiguous writes
+        // issued over multiple write commands by letting us batch them into
+        // a larger write, and(speculation) may benefit non-contiguous writes
+        // by cutting down the number of sqlite transactions. But, it
+        // introduces complexity.
         cdt::extent__write__file__start!(|| {
             (job_id, self.number, writes.len() as u64)
         });
@@ -1171,7 +1238,7 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn flush_block(
+    pub fn flush(
         &self,
         new_flush: u64,
         new_gen: u64,
@@ -1223,27 +1290,37 @@ impl Extent {
         });
 
         // Clear old block contexts. In order to be crash consistent, only
-        // perform this after the extent fsync is done. Read each block in the
-        // extent and find out the integrity hash. Then, remove all block
-        // context rows where the integrity hash does not match.
-        cdt::extent__flush__rehash__start!(|| {
+        // perform this after the extent fsync is done. For each block written
+        // since the last flush, remove all block context rows where the integrity
+        // hash does not map the last-written value. This is safe, because we
+        // know the process has not crashed since those values were written.
+        // When the region is first opened, the entire file is rehashed, since
+        // in that case we don't have that luxury.
+
+        cdt::extent__flush__collect__hashes__start!(|| {
             (job_id, self.number, self.extent_size.value)
         });
 
-        let total_bytes: usize =
-            self.extent_size.value as usize * self.block_size as usize;
-        let mut extent_data: Vec<u8> = vec![0; total_bytes];
+        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> =
+            inner.dirty_blocks.drain().collect();
 
-        inner.file.seek(SeekFrom::Start(0))?;
-        inner.file.read_exact(&mut extent_data)?;
+        // Sorting here is extremely important to get good performance out of
+        // truncate_encryption_contexts_and_hashes() later.
+        //
+        // Benchmarks show that sorting by just block doubles how fast this sort
+        // happens compared to a sort_unstable() that considers block and value.
+        extent_block_indexes_and_hashes
+            .sort_unstable_by(|(l, _), (r, _)| l.cmp(r));
 
-        let extent_block_indexes_and_hashes = extent_data
-            .chunks(self.block_size as usize)
-            .enumerate()
-            .map(|(i, data)| (i, integrity_hash(&[data])))
-            .collect();
+        // We could shrink this to 0, but it's nice not to have to expand the
+        // dirty_blocks HashMap on small writes. They have a hard enough time
+        // as it is. We don't want our maps to be keeping a lot of memory
+        // allocated though. With 16 entries max, even a 32TiB region of
+        // 128MiB extents would only be spending ~64MiB of ram on on this,
+        // across the entire region. There's potential for tuning here.
+        inner.dirty_blocks.shrink_to(16);
 
-        cdt::extent__flush__rehash__done!(|| {
+        cdt::extent__flush__collect__hashes__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
 
@@ -1259,7 +1336,6 @@ impl Extent {
 
         // Reset the file's seek offset to 0, and set the flush number and gen
         // number
-
         inner.file.seek(SeekFrom::Start(0))?;
 
         inner.set_flush_number(new_flush, new_gen)?;
@@ -1267,6 +1343,75 @@ impl Extent {
         cdt::extent__flush__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
+
+        Ok(())
+    }
+
+    /// Rehash the entire file. Remove any stored hash/encryption contexts
+    /// that do not correlate to data currently stored on disk. This is
+    /// primarily when opening an extent after recovering from a crash, since
+    /// irrelevant hashes will normally be cleared out during a flush().
+    ///
+    /// By default this function will only do work if the extent is marked
+    /// dirty. Set `force_override_dirty` to `true` to override this behavior.
+    /// This override should generally not be necessary, as the dirty flag
+    /// is set before any contexts are written.
+    #[instrument]
+    fn fully_rehash_and_clean_all_stale_contexts(
+        &self,
+        force_override_dirty: bool,
+    ) -> Result<(), CrucibleError> {
+        let mut inner = self.inner();
+
+        if !force_override_dirty && !inner.dirty()? {
+            return Ok(());
+        }
+
+        // Just in case, let's be very sure that the file on disk is what it should be
+        if let Err(e) = inner.file.sync_all() {
+            crucible_bail!(
+                IoError,
+                "extent {}: fsync 1 failure during full rehash: {:?}",
+                self.number,
+                e
+            );
+        }
+
+        inner.file.seek(SeekFrom::Start(0))?;
+
+        // Buffer the file so we dont spend all day waiting on syscall
+        let mut inner_file_buffered =
+            BufReader::with_capacity(64 * 1024, &inner.file);
+
+        // This gets filled one block at a time for hashing
+        let mut block = vec![0; self.block_size as usize];
+
+        // The vec of hashes that we'll pass off to truncate...()
+        let mut extent_block_indexes_and_hashes =
+            Vec::with_capacity(self.extent_size.value as usize);
+
+        // Stream the contents of the file and rehash them.
+        for i in 0..self.extent_size.value as usize {
+            inner_file_buffered.read_exact(&mut block)?;
+            extent_block_indexes_and_hashes
+                .push((i, integrity_hash(&[&block])));
+        }
+
+        // NOTE on safety: Unlike BufWriter, BufReader drop() does not have
+        // side-effects. There are no unhandled errors here.
+        drop(inner_file_buffered);
+
+        inner.truncate_encryption_contexts_and_hashes(
+            extent_block_indexes_and_hashes,
+        )?;
+
+        inner.file.seek(SeekFrom::Start(0))?;
+
+        // XXX should we be clearing the dirty flag here? If we do, should we
+        // also increment the generation/flush number like flush() does?
+        // We don't have them coming in during the open, so if we updated them
+        // we'd need to increment the database values, and who are we to assume
+        // we're an authority on the matter here?
 
         Ok(())
     }
@@ -1874,7 +2019,7 @@ impl Region {
         );
 
         let extent = &self.extents[eid];
-        extent.flush_block(flush_number, gen_number, 0, &self.log)?;
+        extent.flush(flush_number, gen_number, 0, &self.log)?;
 
         Ok(())
     }
@@ -1902,7 +2047,7 @@ impl Region {
         cdt::os__flush__start!(|| job_id);
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number, gen_number, job_id, &self.log)?;
+            extent.flush(flush_number, gen_number, job_id, &self.log)?;
         }
         cdt::os__flush__done!(|| job_id);
 
@@ -2153,14 +2298,17 @@ pub async fn save_stream_to_file(
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::dump::dump_region;
-    use bytes::{BufMut, BytesMut};
-    use rand::{Rng, RngCore};
     use std::fs::rename;
     use std::path::PathBuf;
+
+    use bytes::{BufMut, BytesMut};
+    use rand::{Rng, RngCore};
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    use crate::dump::dump_region;
+
+    use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -2172,6 +2320,7 @@ mod test {
         let inn = Inner {
             file: ff,
             metadb: Connection::open_in_memory().unwrap(),
+            dirty_blocks: HashMap::new(),
         };
 
         /*
@@ -2761,30 +2910,37 @@ mod test {
     fn extent_name_basic() {
         assert_eq!(extent_file_name(4, ExtentType::Data), "004");
     }
+
     #[test]
     fn extent_name_basic_ext() {
         assert_eq!(extent_file_name(4, ExtentType::Db), "004.db");
     }
+
     #[test]
     fn extent_name_basic_ext_shm() {
         assert_eq!(extent_file_name(4, ExtentType::DbShm), "004.db-shm");
     }
+
     #[test]
     fn extent_name_basic_ext_wal() {
         assert_eq!(extent_file_name(4, ExtentType::DbWal), "004.db-wal");
     }
+
     #[test]
     fn extent_name_basic_two() {
         assert_eq!(extent_file_name(10, ExtentType::Data), "00A");
     }
+
     #[test]
     fn extent_name_basic_three() {
         assert_eq!(extent_file_name(59, ExtentType::Data), "03B");
     }
+
     #[test]
     fn extent_name_max() {
         assert_eq!(extent_file_name(u32::MAX, ExtentType::Data), "FFF");
     }
+
     #[test]
     fn extent_name_min() {
         assert_eq!(extent_file_name(u32::MIN, ExtentType::Data), "000");
@@ -2802,6 +2958,7 @@ mod test {
             p("/var/region/FF/FFF")
         );
     }
+
     #[test]
     fn extent_dir_min() {
         assert_eq!(
@@ -2817,6 +2974,7 @@ mod test {
             p("/var/region/00/000/000")
         );
     }
+
     #[test]
     fn copy_path_basic() {
         assert_eq!(
@@ -3374,9 +3532,10 @@ mod test {
 
     #[test]
     fn test_flush_removes_partial_writes() -> Result<()> {
-        // Validate that incorrect context rows are removed by a flush so that a
-        // repair will get rid of partial writes' block context rows. This is
-        // necessary for write_unwritten to work after a crash.
+        // Validate that incorrect context rows are removed by a full rehash,
+        // so that opening an extent will get rid of partial writes' block
+        // context rows. This is necessary for write_unwritten to work after
+        // a crash.
         //
         // Specifically, this test checks for the case where we had a brand new
         // block and a write to that blocks that failed such that only the
@@ -3403,7 +3562,11 @@ mod test {
             }])?;
         }
 
-        region.region_flush(1, 1, &None, 123)?;
+        // This should clear out the invalid context
+        for extent in &mut region.extents {
+            extent.close()?;
+        }
+        region.reopen_all_extents()?;
 
         // Verify no block context rows exist
 

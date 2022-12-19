@@ -28,9 +28,9 @@ crucible_downstairs*:::extent-flush-file-start
     extent_flush_file_start[pid,arg0,arg1] = timestamp;
 }
 
-crucible_downstairs*:::extent-flush-rehash-start
+crucible_downstairs*:::extent-flush-collect-hashes-start
 {
-    extent_flush_rehash_start[pid,arg0,arg1] = timestamp;
+    extent_flush_collect_hashes_start[pid,arg0,arg1] = timestamp;
 }
 
 crucible_downstairs*:::extent-flush-sqlite-insert-start
@@ -54,11 +54,11 @@ crucible_downstairs*:::extent-flush-file-done
     extent_flush_file_start[pid,arg0,arg1] = 0;
 }
 
-crucible_downstairs*:::extent-flush-rehash-done
-/extent_flush_rehash_start[pid,arg0,arg1]/
+crucible_downstairs*:::extent-flush-collect-hashes-done
+/extent_flush_collect_hashes_start[pid,arg0,arg1]/
 {
-    @time["flush_rehash"] = quantize((timestamp - extent_flush_rehash_start[pid,arg0,arg1]) / arg2);
-    extent_flush_rehash_start[pid,arg0,arg1] = 0;
+    @time["flush_collect_hashes"] = quantize((timestamp - extent_flush_collect_hashes_start[pid,arg0,arg1]) / arg2);
+    extent_flush_collect_hashes_start[pid,arg0,arg1] = 0;
 }
 
 crucible_downstairs*:::extent-flush-sqlite-insert-done
@@ -166,3 +166,16 @@ crucible_downstairs*:::extent-read-get-contexts-done
     extent_read_get_contexts_start[pid,arg0,arg1] = 0;
 }
 
+
+
+crucible_downstairs*:::extent-context-truncate-start {
+    this->truncate_start = timestamp;
+    @truncate_sizes["truncation blocks"] = quantize(arg0);
+}
+
+crucible_downstairs*:::extent-context-truncate-done
+/this->truncate_start/
+{
+    @time["truncate-loop"] = quantize(timestamp - this->truncate_start);
+    this->truncate_start = 0;
+}
