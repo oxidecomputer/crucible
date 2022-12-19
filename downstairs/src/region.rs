@@ -1390,29 +1390,10 @@ impl Extent {
             (job_id, self.number, self.extent_size.value)
         });
 
-        let extent_block_indexes_and_hashes = inner.dirty_blocks.drain();
-
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
 
-        // It'd be nice not to allocate here on small writes. They have a hard
-        // enough time as it is. We don't want our maps to be keeping a lot of
-        // memory allocated though. With 16 entries max, even a 32TiB region
-        // of 128MiB extents would only be spending 64MiB of ram on on this.
-        // Potential for tuning here.
-        inner.dirty_blocks.shrink_to(16);
-
-        cdt::extent__flush__rehash__done!(|| {
-            (job_id, self.number, self.extent_size.value)
-        });
-
-        cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id, self.number, self.extent_size.value)
-        });
-        inner.truncate_encryption_contexts_and_hashes(
-            extent_block_indexes_and_hashes,
-        )?;
         cdt::extent__flush__sqlite__insert__done!(|| {
             (job_id, self.number, self.extent_size.value)
         });
