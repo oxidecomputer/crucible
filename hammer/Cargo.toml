@@ -2,18 +2,18 @@
 name = "crucible-hammer"
 version = "0.1.0"
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
-clap = { version = "3.2", features = ["derive"] }
+clap = { version = "4.0", features = ["derive"] }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 rand = "0.8.5"
-tokio = { version = "1.22.0", features = ["full"] }
+tokio = { version = "1.23.0", features = ["full"] }
 opentelemetry = "0.18.0"
 opentelemetry-jaeger = { version = "0.16.0" }
 tracing-subscriber = "0.3.16"

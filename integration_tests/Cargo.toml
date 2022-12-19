@@ -7,7 +7,7 @@ authors = [
     "James MacMahon <james@oxide.computer>"
 ]
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 [dev-dependencies]
 anyhow = "1"
@@ -22,15 +22,15 @@ crucible-pantry-client = { path = "../pantry-client" }
 futures = "0.3"
 futures-core = "0.3"
 httptest = "0.15.4"
-base64 = "0.13"
+base64 = "0.20"
 rand = "0.8.5"
 slog = "2.7"
 slog-async = "2.7"
 slog-dtrace = "0.2"
-slog-term = "2.7"
+slog-term = "2.9"
 tempfile = "3.3.0"
-tokio = { version = "1.22.0", features = ["full"] }
+tokio = { version = "1.23.0", features = ["full"] }
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1.0.89"
+serde_json = "1.0.91"
 reqwest = { version = "0.11", features = ["json", "stream"] }

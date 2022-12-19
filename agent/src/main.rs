@@ -910,7 +910,7 @@ fn worker_region_create(
         .arg(region.extent_size.to_string())
         .arg("--extent-count")
         .arg(region.extent_count.to_string())
-        .arg(format!("--encrypted={}", region.encrypted))
+        .arg(if region.encrypted { "--encrypted" } else { "" })
         .output()?;
 
     if cmd.status.success() {

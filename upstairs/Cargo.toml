@@ -3,7 +3,7 @@ name = "crucible"
 version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 [lib]
 name = "crucible"
@@ -14,9 +14,9 @@ asm = ["usdt/asm"]
 
 [dependencies]
 anyhow = "1"
-async-trait = "0.1.58"
+async-trait = "0.1.60"
 async-recursion = "1.0.0"
-base64 = "0.13.1"
+base64 = "0.20.0"
 bitvec = "1"
 bytes = "1"
 chrono = { version = "0.4.23", features = [ "serde" ] }
@@ -31,19 +31,19 @@ omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "m
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 rand = "0.8.5"
-ringbuffer = "0.10"
+ringbuffer = "0.11"
 schemars = { version = "0.8.11", features = [ "uuid1" ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slog-async = "2.7"
 slog-dtrace = "0.2"
-slog-term = "2.7"
-tokio = { version = "1.22.0", features = ["full"] }
+slog-term = "2.9"
+tokio = { version = "1.23.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 tokio-rustls = { version = "0.23.4" }
 toml = "0.5"
 tracing = "0.1"
-usdt = "0.3.4"
+usdt = "0.3.5"
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 aes-gcm-siv = "0.10.3"
 rand_chacha = "0.3.1"
@@ -55,8 +55,8 @@ features = [ "max_level_trace", "release_max_level_debug" ]
 
 [dev-dependencies]
 expectorate = "1.0.5"
-openapiv3 = "1.0.1"
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint" }
+openapiv3 = "1.0"
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 tokio-test = "*"
 tempfile = "3"
 

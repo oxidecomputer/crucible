@@ -3585,7 +3585,7 @@ impl EncryptionContext {
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
-        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], &data[..]]);
+        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
         Ok((nonce, tag, computed_hash))
     }
@@ -3675,6 +3675,37 @@ impl UpstairsState {
     }
 }
 
+/// Describes the region definition an upstairs has received or expects to
+/// receive from its downstairs.
+#[derive(Clone, Copy, Debug)]
+enum RegionDefinitionStatus {
+    /// The upstairs has not received any region information from any
+    /// downstairs yet. It will accept the first legal region definition it
+    /// receives from any downstairs and ensure that all other downstairs
+    /// supply the same definition.
+    WaitingForDownstairs,
+
+    /// The upstairs expects to receive specific region information from each
+    /// downstairs and will reject attempts to connect to a downstairs that
+    /// supplies the wrong information.
+    ExpectingFromDownstairs(RegionDefinition),
+
+    /// The upstairs has received region information from at least one
+    /// downstairs, which subsequent downstairs must match.
+    Received(RegionDefinition),
+}
+
+impl RegionDefinitionStatus {
+    fn get_def(&self) -> Option<RegionDefinition> {
+        use RegionDefinitionStatus::*;
+        match self {
+            WaitingForDownstairs => None,
+            ExpectingFromDownstairs(rd) => Some(*rd),
+            Received(rd) => Some(*rd),
+        }
+    }
+}
+
 /*
  * XXX Track scheduled storage work in the central structure. Have the
  * target management task check for work to do here by changing the value in
@@ -3741,7 +3772,7 @@ pub struct Upstairs {
      * This allows us to verify each downstairs is the same, as well as
      * enables us to translate an LBA to an extent and block offset.
      */
-    ddef: Mutex<RegionDefinition>,
+    ddef: Mutex<RegionDefinitionStatus>,
 
     /*
      * Optional encryption context - Some if a key was supplied in
@@ -3810,19 +3841,13 @@ impl Upstairs {
         }
         let log = Logger::root(drain.fuse(), o!());
 
-        Self::new(
-            &opts,
-            0,
-            RegionDefinition::default(),
-            Arc::new(Guest::default()),
-            log,
-        )
+        Self::new(&opts, 0, None, Arc::new(Guest::default()), log)
     }
 
     pub fn new(
         opt: &CrucibleOpts,
         gen: u64,
-        def: RegionDefinition,
+        expected_region_def: Option<RegionDefinition>,
         guest: Arc<Guest>,
         log: Logger,
     ) -> Arc<Upstairs> {
@@ -3832,20 +3857,20 @@ impl Upstairs {
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
-        // create an encryption context if a key is supplied.
+        // Create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
             Arc::new(EncryptionContext::new(
                 key,
-                /*
-                 * XXX: It would be good to do BlockOp::QueryBlockSize here,
-                 * but this creates a deadlock. Upstairs::new runs before
-                 * up_ds_listen in up_main, and up_ds_listen needs to run
-                 * to answer BlockOp::QueryBlockSize.
-                 *
-                 * At this point ddef is the default, the downstairs haven't
-                 * reported in.
-                 */
-                512,
+                // XXX: Figure out what to do if no expected region definition
+                // was supplied. It would be good to do BlockOp::QueryBlockSize
+                // here, but this creates a deadlock. Upstairs::new runs before
+                // up_ds_listen in up_main, and up_ds_listen needs to run to
+                // answer BlockOp::QueryBlockSize. (Note that the downstairs
+                // have not reported in yet, so if no expected definition was
+                // supplied no downstairs information is available.)
+                expected_region_def
+                    .map(|rd| rd.block_size() as usize)
+                    .unwrap_or(512),
             ))
         });
 
@@ -3853,6 +3878,11 @@ impl Upstairs {
         info!(log, "Crucible stats registered with UUID: {}", uuid);
         let stats = UpStatOuter {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
+        };
+
+        let rd_status = match expected_region_def {
+            None => RegionDefinitionStatus::WaitingForDownstairs,
+            Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
 
         let session_id = Uuid::new_v4();
@@ -3865,7 +3895,7 @@ impl Upstairs {
             guest,
             downstairs: Mutex::new(Downstairs::new(log.clone())),
             flush_info: Mutex::new(FlushInfo::new()),
-            ddef: Mutex::new(def),
+            ddef: Mutex::new(rd_status),
             encryption_context,
             need_flush: Mutex::new(false),
             stats,
@@ -4380,7 +4410,7 @@ impl Upstairs {
             gw_id,
             self.get_generation().await,
             snapshot_details,
-            ImpactedBlocks::new(*ddef),
+            ImpactedBlocks::new(ddef.get_def().unwrap()),
         );
 
         let mut sub = HashMap::new();
@@ -4443,9 +4473,9 @@ impl Upstairs {
          */
         let ddef = self.ddef.lock().await;
         let impacted_blocks = extent_from_offset(
-            *ddef,
+            ddef.get_def().unwrap(),
             offset,
-            Block::from_bytes(data.len(), &ddef),
+            Block::from_bytes(data.len(), &ddef.get_def().unwrap()),
         );
 
         /*
@@ -4531,7 +4561,7 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.tuples().len());
 
         for (eid, bo) in impacted_blocks.tuples() {
-            let byte_len: usize = ddef.block_size() as usize;
+            let byte_len: usize = ddef.get_def().unwrap().block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
                 &self.encryption_context
@@ -4647,11 +4677,12 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span many extents, and eventually, TODO, regions.
          */
-        let ddef = self.ddef.lock().await;
+        let ddef_state = self.ddef.lock().await;
+        let ddef = &ddef_state.get_def().unwrap();
         let impacted_blocks = extent_from_offset(
             *ddef,
             offset,
-            Block::from_bytes(data.len(), &ddef),
+            Block::from_bytes(data.len(), ddef),
         );
 
         /*
@@ -5523,12 +5554,12 @@ impl Upstairs {
          * (even if none was required) and they should proceed to being
          * active and accepting commands on the ds_work_ message channel.
          */
-        assert!(!self
+        assert!(self
             .downstairs
             .lock()
             .await
             .reconcile_current_work
-            .is_some());
+            .is_none());
 
         info!(
             self.log,
@@ -5628,10 +5659,17 @@ impl Upstairs {
         }
 
         /*
-         * XXX Eventually we will be provided UUIDs when the upstairs
-         * starts, so we can compare those with what we get here.
+         * TODO(#551) Verify that `client_ddef` makes sense (valid, nonzero
+         * block size, etc.)
+         */
+
+        /*
+         * If this downstairs was previously registered, make sure this
+         * connection reports the one the old connection did.
          *
-         * For now, we take whatever connects to us first.
+         * XXX The expected per-client UUIDs should eventually be provided
+         * when the upstairs stairs. When that happens, they can be
+         * verified here.
          */
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
@@ -5652,42 +5690,35 @@ impl Upstairs {
             ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
 
-        /*
-         * XXX Until we are passed expected region info at start, we
-         * can only compare the three downstairs to each other and move
-         * forward if all three are the same.
-         *
-         * For now I'm using zero as an indication that we don't yet know
-         * the valid values and non-zero meaning we have at least one
-         * downstairs to compare with.
-         *
-         * 0 should never be a valid block size, so this hack will let us
-         * move forward until we get the expected region info at startup.
-         */
         let mut ddef = self.ddef.lock().await;
-        if ddef.block_size() == 0 {
-            ddef.set_block_size(client_ddef.block_size());
-            ddef.set_extent_size(client_ddef.extent_size());
-            ddef.set_extent_count(client_ddef.extent_count());
-            info!(
-                self.log,
-                "Setting expected region info to: {:?}", client_ddef
-            );
+
+        /*
+         * If there is an expected region definition of any kind (either from
+         * a previous connection or an expectation that was supplied
+         * when this upstairs was created), make sure the new
+         * definition matches it.
+         *
+         * If this upstairs' creator didn't specify any expected values, the
+         * first downstairs to connect sets the expected values for the other
+         * two.
+         */
+        if let Some(prev_def) = ddef.get_def() {
+            if prev_def.block_size() != client_ddef.block_size()
+                || prev_def.extent_size().value
+                    != client_ddef.extent_size().value
+                || prev_def.extent_size().block_size_in_bytes()
+                    != client_ddef.extent_size().block_size_in_bytes()
+                || prev_def.extent_count() != client_ddef.extent_count()
+            {
+                // TODO(#558) Figure out if we can handle this error. Possibly not.
+                panic!(
+                    "New downstairs region info mismatch {:?} vs. {:?}",
+                    *ddef, client_ddef
+                );
+            }
         }
 
-        if ddef.block_size() != client_ddef.block_size()
-            || ddef.extent_size().value != client_ddef.extent_size().value
-            || ddef.extent_size().block_size_in_bytes()
-                != client_ddef.extent_size().block_size_in_bytes()
-            || ddef.extent_count() != client_ddef.extent_count()
-        {
-            // XXX Figure out if we can handle this error. Possibly not.
-            panic!(
-                "New downstairs region info mismatch {:?} vs. {:?}",
-                ddef, client_ddef
-            );
-        }
-
+        *ddef = RegionDefinitionStatus::Received(client_ddef);
         Ok(())
     }
 
@@ -7573,41 +7604,62 @@ async fn process_new_io(
         }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request block size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.block_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.block_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Block size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "block size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryTotalSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request total size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.total_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.total_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Total size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "total size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request extent size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.extent_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.extent_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Extent size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "extent size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {
@@ -7833,6 +7885,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
+    region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -7854,7 +7907,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest, log);
+    let up = Upstairs::new(&opt, gen, region_def, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task
