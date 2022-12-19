@@ -311,8 +311,8 @@ async fn main() -> Result<()> {
 
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_pipeline()
-                    .with_agent_endpoint(endpoint) // usually port 6831
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
                     .with_service_name("downstairs")
                     .install_simple()
                     .expect("Error initializing Jaeger exporter");
@@ -369,8 +369,8 @@ async fn main() -> Result<()> {
 
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_pipeline()
-                    .with_agent_endpoint(endpoint) // usually port 6831
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
                     .with_service_name("downstairs")
                     .install_simple()
                     .expect("Error initializing Jaeger exporter");

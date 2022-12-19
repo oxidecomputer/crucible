@@ -93,8 +93,8 @@ async fn main() -> Result<()> {
     };
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {
-        let tracer = opentelemetry_jaeger::new_pipeline()
-            .with_agent_endpoint(tracing_endpoint)
+        let tracer = opentelemetry_jaeger::new_agent_pipeline()
+            .with_endpoint(tracing_endpoint)
             .with_service_name("crucible-hammer")
             .install_simple()
             .expect("Error initializing Jaeger exporter");
