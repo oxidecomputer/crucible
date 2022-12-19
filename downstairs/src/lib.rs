@@ -396,28 +396,42 @@ pub mod cdt {
     fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
-    fn extent__flush__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
-    fn extent__flush__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
-    fn extent__flush__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
-    fn extent__flush__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
-    fn extent__flush__rehash__start(
+    fn extent__flush__start(job_id: u64, extent_id: u32, extent_size: u64) {}
+    fn extent__flush__done(job_id: u64, extent_id: u32, extent_size: u64) {}
+    fn extent__flush__file__start(
         job_id: u64,
         extent_id: u32,
-        n_blocks: u64,
+        extent_size: u64,
     ) {
     }
-    fn extent__flush__rehash__done(job_id: u64, extent_id: u32, n_blocks: u64) {
+    fn extent__flush__file__done(
+        job_id: u64,
+        extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
+    fn extent__flush__collect__hashes__start(
+        job_id: u64,
+        extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
+    fn extent__flush__collect__hashes__done(
+        job_id: u64,
+        extent_id: u32,
+        extent_size: u64,
+    ) {
     }
     fn extent__flush__sqlite__insert__start(
         job_id: u64,
         extent_id: u32,
-        n_blocks: u64,
+        extent_size: u64,
     ) {
     }
     fn extent__flush__sqlite__insert__done(
         _job_id: u64,
         _extent_id: u32,
-        n_blocks: u64,
+        extent_size: u64,
     ) {
     }
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
@@ -464,6 +478,9 @@ pub mod cdt {
     }
     fn extent__read__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__read__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+
+    fn extent__context__truncate__start(n_deletions: u64) {}
+    fn extent__context__truncate__done() {}
 }
 
 // Check if a Message is valid on this downstairs or not.
