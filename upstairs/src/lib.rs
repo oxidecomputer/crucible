@@ -40,8 +40,8 @@ use tracing::{instrument, span, Level};
 use usdt::register_probes;
 use uuid::Uuid;
 
-use aes_gcm_siv::aead::{AeadInPlace, NewAead};
-use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
+use aes_gcm_siv::aead::AeadInPlace;
+use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
 pub mod control;
@@ -3549,7 +3549,7 @@ impl Debug for EncryptionContext {
 impl EncryptionContext {
     pub fn new(key: Vec<u8>, block_size: usize) -> EncryptionContext {
         assert!(key.len() == 32);
-        let key = Key::from_slice(&key[..]);
+        let key = Key::<Aes256GcmSiv>::from_slice(&key[..]);
         let cipher = Aes256GcmSiv::new(key);
 
         EncryptionContext { cipher, block_size }
