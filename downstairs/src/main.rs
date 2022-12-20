@@ -61,12 +61,7 @@ enum Args {
         #[clap(short, long, name = "UUID", action)]
         uuid: Uuid,
 
-        #[clap(
-            long,
-            default_value = "false",
-            default_missing_value = "true",
-            action(clap::ArgAction::Set)
-        )]
+        #[clap(long, action)]
         encrypted: bool,
     },
     /*
@@ -316,8 +311,8 @@ async fn main() -> Result<()> {
 
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_pipeline()
-                    .with_agent_endpoint(endpoint) // usually port 6831
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
                     .with_service_name("downstairs")
                     .install_simple()
                     .expect("Error initializing Jaeger exporter");
@@ -374,8 +369,8 @@ async fn main() -> Result<()> {
 
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_pipeline()
-                    .with_agent_endpoint(endpoint) // usually port 6831
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
                     .with_service_name("downstairs")
                     .install_simple()
                     .expect("Error initializing Jaeger exporter");

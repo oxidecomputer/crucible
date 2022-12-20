@@ -22,6 +22,8 @@ pub enum VolumeConstructionRequest {
     },
     Region {
         block_size: u64,
+        blocks_per_extent: u64,
+        extent_count: u32,
         opts: CrucibleOpts,
         gen: u64,
     },

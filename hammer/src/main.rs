@@ -93,8 +93,8 @@ async fn main() -> Result<()> {
     };
 
     if let Some(tracing_endpoint) = opt.tracing_endpoint {
-        let tracer = opentelemetry_jaeger::new_pipeline()
-            .with_agent_endpoint(tracing_endpoint)
+        let tracer = opentelemetry_jaeger::new_agent_pipeline()
+            .with_endpoint(tracing_endpoint)
             .with_service_name("crucible-hammer")
             .install_simple()
             .expect("Error initializing Jaeger exporter");
@@ -133,9 +133,14 @@ async fn main() -> Result<()> {
         let guest = Arc::new(Guest::new());
 
         let gen: u64 = i as u64 + opt.gen;
-        let _join_handle =
-            up_main(crucible_opts.clone(), gen as u64, guest.clone(), None)
-                .await?;
+        let _join_handle = up_main(
+            crucible_opts.clone(),
+            gen as u64,
+            None,
+            guest.clone(),
+            None,
+        )
+        .await?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

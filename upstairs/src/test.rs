@@ -110,7 +110,7 @@ mod up_test {
             ..Default::default()
         };
 
-        Upstairs::new(&opts, 0, def, Arc::new(Guest::new()), csl())
+        Upstairs::new(&opts, 0, Some(def), Arc::new(Guest::new()), csl())
     }
 
     /*
@@ -122,9 +122,9 @@ mod up_test {
         offset: Block,
         num_blocks: u64,
     ) -> Vec<(u64, Block)> {
-        let ddef = up.ddef.lock().await;
+        let ddef = up.ddef.lock().await.get_def().unwrap();
         let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
-        extent_from_offset(*ddef, offset, num_blocks).tuples()
+        extent_from_offset(ddef, offset, num_blocks).tuples()
     }
 
     #[tokio::test]
@@ -3053,7 +3053,7 @@ mod up_test {
         // Verify that the flush takes three completions.
         // Verify that deactivate done returns the upstairs to init.
 
-        let up = Upstairs::default();
+        let up = make_upstairs();
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
@@ -3239,7 +3239,7 @@ mod up_test {
         // Verify that we can't deactivate without a flush as the
         // last job on the list
 
-        let up = Upstairs::default();
+        let up = make_upstairs();
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
@@ -3569,9 +3569,9 @@ mod up_test {
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
-        assert!(!ds.rep_in_progress(0).is_some());
-        assert!(!ds.rep_in_progress(1).is_some());
-        assert!(!ds.rep_in_progress(2).is_some());
+        assert!(ds.rep_in_progress(0).is_none());
+        assert!(ds.rep_in_progress(1).is_none());
+        assert!(ds.rep_in_progress(2).is_none());
     }
 
     #[tokio::test]
@@ -3623,9 +3623,9 @@ mod up_test {
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
-        assert!(!ds.rep_in_progress(0).is_some());
-        assert!(!ds.rep_in_progress(1).is_some());
-        assert!(!ds.rep_in_progress(2).is_some());
+        assert!(ds.rep_in_progress(0).is_none());
+        assert!(ds.rep_in_progress(1).is_none());
+        assert!(ds.rep_in_progress(2).is_none());
     }
 
     #[tokio::test]
@@ -3656,7 +3656,7 @@ mod up_test {
         assert!(ds.rep_in_progress(0).is_some());
         assert!(ds.rep_in_progress(1).is_some());
         ds.ds_state[2] = DsState::New;
-        assert!(!ds.rep_in_progress(2).is_some());
+        assert!(ds.rep_in_progress(2).is_none());
 
         // Okay, now the DS is back and ready for repair, verify it will
         // start taking work.

@@ -356,6 +356,74 @@ pub mod cdt {
     fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
+    fn extent__flush__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__flush__rehash__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__flush__rehash__done(job_id: u64, extent_id: u32, n_blocks: u64) {
+    }
+    fn extent__flush__sqlite__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__flush__sqlite__insert__done(
+        _job_id: u64,
+        _extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__write__get__hashes__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__write__get__hashes__done(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__write__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__write__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__write__sqlite__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__write__sqlite__insert__done(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__read__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__read__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__read__get__contexts__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__read__get__contexts__done(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__read__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__read__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
 }
 /*
  * A new IO request has been received.
@@ -1351,6 +1419,7 @@ pub struct Downstairs {
     log: Logger,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl Downstairs {
     fn new(
         region: Region,
