@@ -53,7 +53,11 @@ enum Workload {
     Demo,
     Dep,
     Dirty,
-    Fill,
+    Fill {
+        /// Don't do the verify step after filling the region.
+        #[clap(long, action)]
+        skip_verify: bool,
+    },
     Generic,
     Nothing,
     One,
@@ -665,9 +669,9 @@ async fn main() -> Result<()> {
             return Ok(());
         }
 
-        Workload::Fill => {
+        Workload::Fill { skip_verify } => {
             println!("Fill test");
-            fill_workload(&guest, &mut region_info).await?;
+            fill_workload(&guest, &mut region_info, skip_verify).await?;
         }
 
         Workload::Generic => {
@@ -1142,7 +1146,11 @@ async fn balloon_workload(
 /*
  * Write then read (and verify) to every possible block.
  */
-async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn fill_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    skip_verify: bool,
+) -> Result<()> {
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
@@ -1181,7 +1189,9 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     guest.flush(None).await?;
     pb.finish();
 
-    verify_volume(guest, ri, false).await?;
+    if !skip_verify {
+        verify_volume(guest, ri, false).await?;
+    }
     Ok(())
 }
 

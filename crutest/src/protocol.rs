@@ -30,7 +30,7 @@ pub enum CliMessage {
     // Record the current write count to the verify-out file.
     Export,
     // Run the fill test.
-    Fill,
+    Fill(bool),
     Flush,
     Generic(usize),
     Info(u64, u64, u64),

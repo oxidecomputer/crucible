@@ -112,7 +112,11 @@ enum CliCommand {
     /// Export the current write count to the verify out file
     Export,
     /// Run the fill then verify test.
-    Fill,
+    Fill {
+        /// Don't do the verify step after filling the region.
+        #[clap(long, action)]
+        skip_verify: bool,
+    },
     /// Flush
     Flush,
     /// Run Generic workload
@@ -463,8 +467,8 @@ async fn cmd_to_msg(
         CliCommand::Export => {
             fw.send(CliMessage::Export).await?;
         }
-        CliCommand::Fill => {
-            fw.send(CliMessage::Fill).await?;
+        CliCommand::Fill { skip_verify } => {
+            fw.send(CliMessage::Fill(skip_verify)).await?;
         }
         CliCommand::Flush => {
             fw.send(CliMessage::Flush).await?;
@@ -793,14 +797,14 @@ async fn process_cli_command(
                 }
             }
         }
-        CliMessage::Fill => {
+        CliMessage::Fill(skip_verify) => {
             if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
                 )))
                 .await
             } else {
-                match fill_workload(guest, ri).await {
+                match fill_workload(guest, ri, skip_verify).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("Fill/Verify failed with {}", e);
