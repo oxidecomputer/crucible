@@ -1,20 +1,20 @@
 [package.crucible]
-rust.binary_names = ["crucible-agent", "crucible-downstairs"]
-rust.release = true
 service_name = "crucible"
-zone = true
-[[package.crucible.paths]]
-from = "agent/smf"
-to = "/var/svc/manifest/site/crucible"
-[[package.crucible.paths]]
-from = "agent/downstairs_method_script.sh"
-to = "/opt/oxide/crucible/bin/downstairs_method_script.sh"
+source.type = "local"
+source.rust.binary_names = ["crucible-agent", "crucible-downstairs"]
+source.rust.release = true
+source.paths = [
+  { from = "agent/smf", to = "/var/svc/manifest/site/crucible" },
+  { from = "agent/downstairs_method_script.sh", to = "/opt/oxide/crucible/bin/downstairs_method_script.sh" }
+]
+output.type = "zone"
 
 [package.crucible-pantry]
-rust.binary_names = ["crucible-pantry"]
-rust.release = true
 service_name = "crucible-pantry"
-zone = true
-[[package.crucible-pantry.paths]]
-from = "pantry/smf"
-to = "/var/svc/manifest/site/crucible-pantry"
+source.type = "local"
+source.rust.binary_names = ["crucible-pantry"]
+source.rust.release = true
+source.paths = [
+  { from = "pantry/smf", to = "/var/svc/manifest/site/crucible-pantry" }
+]
+output.type = "zone"

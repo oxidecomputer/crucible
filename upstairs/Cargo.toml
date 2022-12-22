@@ -45,7 +45,7 @@ toml = "0.5"
 tracing = "0.1"
 usdt = "0.3.5"
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
-aes-gcm-siv = "0.10.3"
+aes-gcm-siv = "0.11.1"
 rand_chacha = "0.3.1"
 reqwest = { version = "0.11.13", features = ["default", "blocking" ] }
 

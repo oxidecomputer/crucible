@@ -11,8 +11,8 @@ async fn main() -> Result<()> {
     let output_dir = Path::new("out");
     create_dir_all(&output_dir)?;
 
-    for package in cfg.packages.values() {
-        package.create(output_dir).await?;
+    for (name, package) in cfg.packages {
+        package.create(&name, output_dir).await?;
     }
 
     Ok(())
