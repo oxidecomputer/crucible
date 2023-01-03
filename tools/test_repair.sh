@@ -172,6 +172,7 @@ for (( i = 0; i < 100; i += 1 )); do
         ds2_pid=$!
     fi
 
+    cp "$verify_file" ${verify_file}.last
     echo "Verifying data now"
     echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" > "$test_log"
     if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" >> "$test_log" 2>&1
@@ -181,6 +182,16 @@ for (( i = 0; i < 100; i += 1 )); do
         cleanup
         exit 1
     fi
+    set +o errexit
+    if diff -q "$verify_file" ${verify_file}.last; then
+        echo "No change after verify"
+    else
+        diff "$verify_file" ${verify_file}.last
+        echo "diff found after verify"
+        cp "$verify_file" ${verify_file}.original
+        cp ${verify_file}.last ${verify_file}.withdiff
+    fi
+    set -o errexit
     (( generation += 1))
 
     echo "Loop: $i  Downstairs dump after verify (and repair):"
