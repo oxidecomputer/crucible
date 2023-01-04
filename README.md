@@ -1,6 +1,6 @@
 # Oxide Crucible
 
-A prototype storage service.
+A block storage service.
 
 There are two components:
 
