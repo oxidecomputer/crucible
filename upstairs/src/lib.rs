@@ -3607,6 +3607,7 @@ impl EncryptionContext {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum UpState {
@@ -5905,6 +5906,7 @@ impl FlushInfo {
  * XXX This very much still under development. Most of these are place
  * holders and the final set of states will change.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum DsState {
@@ -6150,6 +6152,7 @@ impl ReconcileIO {
 /*
  * Crucible to storage IO operations.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOop {
     Write {
@@ -6214,6 +6217,7 @@ impl IOop {
  * There is a state that is unique to each downstairs task we have and
  * they operate independent of each other.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOState {
     // A new IO request.
@@ -6359,6 +6363,7 @@ impl IOStateCount {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AckStatus {
     NotAcked,

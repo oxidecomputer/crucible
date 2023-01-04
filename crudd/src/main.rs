@@ -571,7 +571,7 @@ async fn main() -> Result<()> {
 
     // Only start the SIGUSR1 handler if we're in benchmarking mode
     if opt.benchmarking_mode.is_some() {
-        let signals = Signals::new(&[SIGUSR1])?;
+        let signals = Signals::new([SIGUSR1])?;
         tokio::spawn(handle_signals(signals, early_shutdown_sender));
     }
 

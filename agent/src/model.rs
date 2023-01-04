@@ -7,6 +7,7 @@ use crucible_smf::scf_type_t::{self, *};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
@@ -17,6 +18,7 @@ pub enum State {
     Failed,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct Region {
     pub id: RegionId,
@@ -105,6 +107,7 @@ impl Region {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct CreateRegion {
     pub id: RegionId,
@@ -163,6 +166,7 @@ impl CreateRegion {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
     Serialize,
     Deserialize,
@@ -176,12 +180,14 @@ impl CreateRegion {
 )]
 pub struct RegionId(pub String);
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct Snapshot {
     pub name: String,
     pub created: DateTime<Utc>,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct RunningSnapshot {
     pub id: RegionId,
@@ -271,12 +277,14 @@ pub struct CreateRunningSnapshotRequest {
     pub root_pem: Option<String>,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct DeleteRunningSnapshotRequest {
     pub id: RegionId,
     pub name: String,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
 pub struct DeleteSnapshotRequest {
     pub id: RegionId,

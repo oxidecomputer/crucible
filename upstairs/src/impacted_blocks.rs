@@ -7,6 +7,7 @@ use itertools::Itertools;
 use std::ops::BitAnd;
 
 /// Store a list of impacted blocks for later job dependency calculation
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Default, PartialEq)]
 pub struct ImpactedBlocks {
     ddef: RegionDefinition,
