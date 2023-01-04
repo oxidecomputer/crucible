@@ -51,7 +51,7 @@ usdt = "0.3.5"
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 
 [dev-dependencies]
-expectorate = "1.0.5"
+expectorate = "1.0.6"
 openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 rand_chacha = "0.3.1"
