@@ -2440,8 +2440,7 @@ pub fn build_downstairs_for_region(
             Logger::root(drain.fuse(), o!())
         }
     };
-    let region =
-        Region::open(data, Default::default(), true, read_only, &log)?;
+    let region = Region::open(data, Default::default(), true, read_only, &log)?;
 
     info!(log, "UUID: {:?}", region.def().uuid());
     info!(
