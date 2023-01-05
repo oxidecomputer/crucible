@@ -123,9 +123,11 @@ mod up_test {
         offset: Block,
         num_blocks: u64,
     ) -> Vec<(u64, Block)> {
-        let ddef = up.ddef.lock().await.get_def().unwrap();
-        let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
-        extent_from_offset(ddef, offset, num_blocks).tuples()
+        let ddef = &up.ddef.lock().await.get_def().unwrap();
+        let num_blocks = Block::new_with_ddef(num_blocks, ddef);
+        extent_from_offset(ddef, offset, num_blocks)
+            .blocks(ddef)
+            .collect()
     }
 
     #[tokio::test]
@@ -218,10 +220,9 @@ mod up_test {
      * Testing various invalid inputs
      */
     #[tokio::test]
-    #[should_panic]
     async fn off_to_extent_length_zero() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(0), 0).await;
+        assert_eq!(up_efo(&up, Block::new_512(0), 0).await, vec![]);
     }
 
     #[tokio::test]
@@ -231,10 +232,12 @@ mod up_test {
     }
 
     #[tokio::test]
-    #[should_panic]
     async fn off_to_extent_length_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(0), 1001).await;
+        assert_eq!(
+            up_efo(&up, Block::new_512(0), 1001).await,
+            up_efo(&up, Block::new_512(0), 1000).await
+        );
     }
 
     #[tokio::test]
@@ -244,17 +247,16 @@ mod up_test {
     }
 
     #[tokio::test]
-    #[should_panic]
     async fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(900), 101).await;
+        assert_eq!(up_efo(&up, Block::new_512(1000), 1).await, vec![]);
     }
 
     #[tokio::test]
     #[should_panic]
     async fn not_right_block_size() {
         let up = make_upstairs();
-        up_efo(&up, Block::new(900 * 4096, 4096), 101).await;
+        up_efo(&up, Block::new_4096(900), 1).await;
     }
 
     // key material made with `openssl rand -base64 32`
@@ -711,7 +713,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
 
         ds.enqueue(op);
@@ -776,7 +778,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
 
         ds.enqueue(op);
@@ -841,7 +843,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
 
         ds.enqueue(op);
@@ -908,7 +910,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -967,7 +978,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1030,7 +1050,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1096,7 +1125,16 @@ mod up_test {
             vec![],
             10,
             vec![request],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1167,7 +1205,16 @@ mod up_test {
                 vec![],
                 10,
                 vec![request.clone()],
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -1238,7 +1285,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1287,7 +1343,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1333,7 +1398,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1383,7 +1457,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1433,7 +1516,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1483,7 +1575,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1526,7 +1627,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1588,7 +1698,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1644,7 +1763,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1690,7 +1818,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1757,7 +1894,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1828,7 +1974,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -1885,7 +2040,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
 
         ds.enqueue(op);
@@ -1975,7 +2130,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -1993,7 +2157,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2034,7 +2207,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
         ds.enqueue(op);
 
@@ -2144,7 +2317,7 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
         // Put the write on the queue.
         ds.enqueue(op);
@@ -2199,7 +2372,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
         ds.enqueue(op);
 
@@ -2285,7 +2458,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2303,7 +2485,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2344,7 +2535,7 @@ mod up_test {
             0,
             0,
             None,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::Empty,
         );
         ds.enqueue(op);
 
@@ -2437,7 +2628,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2489,7 +2689,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2563,7 +2772,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2652,7 +2870,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2740,7 +2967,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2836,7 +3072,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -2911,7 +3156,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -3056,7 +3310,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -3240,7 +3503,16 @@ mod up_test {
                 },
             }],
             is_write_unwritten,
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
         ds.enqueue(op);
 
@@ -4130,7 +4402,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         let context = Arc::new(EncryptionContext::new(
@@ -4211,7 +4492,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         ds.enqueue(op);
@@ -4262,7 +4552,16 @@ mod up_test {
             vec![],
             10,
             vec![request.clone()],
-            ImpactedBlocks::default(),
+            ImpactedBlocks::new(
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+                ImpactedAddr {
+                    extent_id: 0,
+                    block: 7,
+                },
+            ),
         );
 
         let context = Arc::new(EncryptionContext::new(
@@ -4735,7 +5034,16 @@ mod up_test {
                     },
                 }],
                 false,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -4822,7 +5130,16 @@ mod up_test {
                     },
                 }],
                 false,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -4880,7 +5197,16 @@ mod up_test {
                 vec![],
                 10,
                 vec![request.clone()],
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -4921,7 +5247,7 @@ mod up_test {
                 0,
                 0,
                 None,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::Empty,
             );
             ds.enqueue(op);
 
@@ -4988,7 +5314,16 @@ mod up_test {
                     },
                 }],
                 false,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -5051,7 +5386,16 @@ mod up_test {
                 vec![],
                 10,
                 vec![request.clone()],
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -5104,7 +5448,16 @@ mod up_test {
                     },
                 }],
                 false,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -5167,7 +5520,16 @@ mod up_test {
                     },
                 }],
                 false,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::new(
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                    ImpactedAddr {
+                        extent_id: 0,
+                        block: 7,
+                    },
+                ),
             );
 
             ds.enqueue(op);
@@ -5209,7 +5571,7 @@ mod up_test {
                 0,
                 0,
                 None,
-                ImpactedBlocks::default(),
+                ImpactedBlocks::Empty,
             );
             ds.enqueue(op);
 
@@ -6400,12 +6762,12 @@ mod up_test {
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
-        assert_eq!(jobs[0].impacted_blocks.extents().len(), 1);
-        assert_eq!(jobs[1].impacted_blocks.extents().len(), 2);
-        assert_eq!(jobs[2].impacted_blocks.extents().len(), 1);
+        assert_eq!(jobs[0].impacted_blocks.extents().unwrap().count(), 1);
+        assert_eq!(jobs[1].impacted_blocks.extents().unwrap().count(), 2);
+        assert_eq!(jobs[2].impacted_blocks.extents().unwrap().count(), 1);
         assert_ne!(
-            jobs[0].impacted_blocks.extents()[0],
-            jobs[2].impacted_blocks.extents()[0]
+            jobs[0].impacted_blocks.extents(),
+            jobs[2].impacted_blocks.extents()
         );
 
         // confirm deps
@@ -6487,19 +6849,19 @@ mod up_test {
         assert_eq!(jobs.len(), 5);
 
         // confirm which extents are impacted (in case make_upstairs changes)
-        assert_eq!(jobs[0].impacted_blocks.extents().len(), 1);
-        assert_eq!(jobs[1].impacted_blocks.extents().len(), 2);
-        assert_eq!(jobs[2].impacted_blocks.extents().len(), 1);
-        assert_eq!(jobs[3].impacted_blocks.extents().len(), 2);
-        assert_eq!(jobs[4].impacted_blocks.extents().len(), 1);
+        assert_eq!(jobs[0].impacted_blocks.extents().unwrap().count(), 1);
+        assert_eq!(jobs[1].impacted_blocks.extents().unwrap().count(), 2);
+        assert_eq!(jobs[2].impacted_blocks.extents().unwrap().count(), 1);
+        assert_eq!(jobs[3].impacted_blocks.extents().unwrap().count(), 2);
+        assert_eq!(jobs[4].impacted_blocks.extents().unwrap().count(), 1);
 
         assert_ne!(
-            jobs[0].impacted_blocks.extents()[0],
-            jobs[2].impacted_blocks.extents()[0]
+            jobs[0].impacted_blocks.extents(),
+            jobs[2].impacted_blocks.extents()
         );
         assert_ne!(
-            jobs[4].impacted_blocks.extents()[0],
-            jobs[2].impacted_blocks.extents()[0]
+            jobs[4].impacted_blocks.extents(),
+            jobs[2].impacted_blocks.extents()
         );
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
@@ -6569,13 +6931,13 @@ mod up_test {
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
-        assert_eq!(jobs[0].impacted_blocks.extents().len(), 1);
-        assert_eq!(jobs[1].impacted_blocks.extents().len(), 1);
-        assert_eq!(jobs[2].impacted_blocks.extents().len(), 2);
+        assert_eq!(jobs[0].impacted_blocks.extents().unwrap().count(), 1);
+        assert_eq!(jobs[1].impacted_blocks.extents().unwrap().count(), 1);
+        assert_eq!(jobs[2].impacted_blocks.extents().unwrap().count(), 2);
 
         assert_ne!(
-            jobs[0].impacted_blocks.extents()[0],
-            jobs[1].impacted_blocks.extents()[0]
+            jobs[0].impacted_blocks.extents(),
+            jobs[1].impacted_blocks.extents()
         );
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
