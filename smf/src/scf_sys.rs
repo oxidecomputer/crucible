@@ -5,6 +5,7 @@
 
 use libc::{size_t, ssize_t};
 use std::os::raw::{c_char, c_int, c_ulong};
+use std::marker::{PhantomData, PhantomPinned};
 
 type scf_version_t = c_ulong;
 
@@ -21,7 +22,14 @@ pub const SMF_AT_NEXT_BOOT: c_int = 0x4;
 
 macro_rules! opaque_handle {
     ($type_name:ident) => {
-        pub enum $type_name {}
+        #[repr(C)]
+        pub struct $type_name {
+            _data: [u8; 0],
+            // See https://doc.rust-lang.org/nomicon/ffi.html; this marker
+            // guarantees our type does not implement `Send`, `Sync`, or
+            // `Unpin`.
+            _marker: PhantomData<(*mut u8, PhantomPinned)>,
+        }
         impl Copy for $type_name {}
         impl Clone for $type_name {
             fn clone(&self) -> $type_name {
