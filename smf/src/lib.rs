@@ -1,8 +1,8 @@
 // Copyright 2021 Oxide Computer Company
 
 use num_traits::FromPrimitive;
-use std::ffi::CStr;
-use std::ptr::NonNull;
+use std::ffi::{CStr, CString};
+use std::ptr::{self, NonNull};
 use thiserror::Error;
 
 #[macro_use]
@@ -171,6 +171,36 @@ impl Scf {
 
     pub fn scopes(&self) -> Result<Scopes> {
         Scopes::new(self)
+    }
+
+    pub fn get_instance_from_fmri(&self, fmri: &str) -> Result<Instance<'_>> {
+        let fmri = CString::new(fmri).unwrap();
+
+        let scope = Scope::new(self)?;
+        let service = Service::new(self)?;
+        let instance = Instance::new(self)?;
+
+        let ret = unsafe {
+            scf_handle_decode_fmri(
+                self.handle.as_ptr(),
+                fmri.as_ptr(),
+                scope.scope.as_ptr(),
+                service.service.as_ptr(),
+                instance.instance.as_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                // `fmri` _must_ have an instance, but is allowed to also
+                // specify a propertygroup / property; ignore those if present
+                // via `SCF_DECODE_FMRI_TRUNCATE`.
+                SCF_DECODE_FMRI_REQUIRE_INSTANCE | SCF_DECODE_FMRI_TRUNCATE,
+            )
+        };
+
+        if ret == 0 {
+            Ok(instance)
+        } else {
+            Err(ScfError::last())
+        }
     }
 }
 
