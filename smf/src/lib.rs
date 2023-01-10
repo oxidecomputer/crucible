@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 
 use num_traits::FromPrimitive;
+use std::env;
 use std::ffi::{CStr, CString};
 use std::ptr::{self, NonNull};
 use thiserror::Error;
@@ -86,6 +87,8 @@ pub enum ScfError {
     CallbackFailed,
     #[error("internal error")]
     Internal,
+    #[error("environment variable SMF_FMRI not found")]
+    MissingSmfFmriEnvironmentVariable,
     #[error("unknown error ({0})")]
     Unknown(u32),
 }
@@ -201,6 +204,20 @@ impl Scf {
         } else {
             Err(ScfError::last())
         }
+    }
+
+    /// From within a running service instance, get our own [`Instance`].
+    ///
+    /// If you are using this to look up the current value of your properties,
+    /// you almost certainly want [`get_self_snapshot()`] instead!
+    ///
+    /// This method looks up our own FMRI via the `SMF_FMRI` environment
+    /// variable, which is supplied by `smf` to running instances.
+    pub fn get_self_instance(&self) -> Result<Instance<'_>> {
+        let fmri = env::var("SMF_FMRI")
+            .map_err(|_| ScfError::MissingSmfFmriEnvironmentVariable)?;
+
+        self.get_instance_from_fmri(&fmri)
     }
 }
 
