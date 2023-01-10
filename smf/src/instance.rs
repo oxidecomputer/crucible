@@ -139,6 +139,12 @@ impl<'a> Instance<'a> {
         Snapshots::new(self)
     }
 
+    /// Helper function to get the running snapshot for this instance, if one
+    /// exists.
+    pub fn get_running_snapshot(&self) -> Result<Option<Snapshot>> {
+        self.get_snapshot("running")
+    }
+
     pub fn get_snapshot(&self, name: &str) -> Result<Option<Snapshot>> {
         let name = CString::new(name).unwrap();
         let snap = Snapshot::new(self)?;

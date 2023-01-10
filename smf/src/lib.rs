@@ -209,7 +209,8 @@ impl Scf {
     /// From within a running service instance, get our own [`Instance`].
     ///
     /// If you are using this to look up the current value of your properties,
-    /// you almost certainly want [`get_self_snapshot()`] instead!
+    /// you almost certainly want to call [`Instance::get_running_snapshot()`]
+    /// on the returned instance.
     ///
     /// This method looks up our own FMRI via the `SMF_FMRI` environment
     /// variable, which is supplied by `smf` to running instances.
