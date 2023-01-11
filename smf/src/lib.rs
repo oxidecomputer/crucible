@@ -89,6 +89,8 @@ pub enum ScfError {
     Internal,
     #[error("not running under SMF (environment variable SMF_FMRI not found)")]
     NotRunningUnderSmf,
+    #[error("no running snaphot exists")]
+    NoRunningSnapshot,
     #[error("unknown error ({0})")]
     Unknown(u32),
 }
