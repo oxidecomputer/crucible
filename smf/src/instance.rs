@@ -139,8 +139,10 @@ impl<'a> Instance<'a> {
         Snapshots::new(self)
     }
 
-    /// Helper function to get the running snapshot for this instance, if one
-    /// exists.
+    /**
+     * Helper function to get the running snapshot for this instance, if one
+     * exists.
+     */
     pub fn get_running_snapshot(&self) -> Result<Option<Snapshot>> {
         self.get_snapshot("running")
     }

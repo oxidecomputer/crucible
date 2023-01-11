@@ -25,9 +25,11 @@ macro_rules! opaque_handle {
         #[repr(C)]
         pub struct $type_name {
             _data: [u8; 0],
-            // See https://doc.rust-lang.org/nomicon/ffi.html; this marker
-            // guarantees our type does not implement `Send`, `Sync`, or
-            // `Unpin`.
+            /*
+             * See https://doc.rust-lang.org/nomicon/ffi.html; this marker
+             * guarantees our type does not implement `Send`, `Sync`, or
+             * `Unpin`.
+             */
             _marker: PhantomData<(*mut u8, PhantomPinned)>,
         }
         impl Copy for $type_name {}
