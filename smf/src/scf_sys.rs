@@ -113,10 +113,10 @@ pub const SCF_LIMIT_MAX_FMRI_LENGTH: u32 = 0xfffff82d;
 
 pub const SCF_SCOPE_LOCAL: &[u8] = b"localhost\0";
 
-pub(crate) const SCF_DECODE_FMRI_EXACT: c_int = 0x00000001;
-pub(crate) const SCF_DECODE_FMRI_TRUNCATE: c_int = 0x00000002;
-pub(crate) const SCF_DECODE_FMRI_REQUIRE_INSTANCE: c_int = 0x00000004;
-pub(crate) const SCF_DECODE_FMRI_REQUIRE_NO_INSTANCE: c_int = 0x00000008;
+pub const SCF_DECODE_FMRI_EXACT: c_int = 0x00000001;
+pub const SCF_DECODE_FMRI_TRUNCATE: c_int = 0x00000002;
+pub const SCF_DECODE_FMRI_REQUIRE_INSTANCE: c_int = 0x00000004;
+pub const SCF_DECODE_FMRI_REQUIRE_NO_INSTANCE: c_int = 0x00000008;
 
 #[cfg(target_os = "illumos")]
 #[link(name = "scf")]
