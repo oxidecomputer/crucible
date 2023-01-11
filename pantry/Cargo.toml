@@ -21,7 +21,7 @@ crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-tokio = { version = "1.23", features = [ "full" ] }
+tokio = { version = "1.24", features = [ "full" ] }
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
 reqwest = { version = "0.11", features = ["json", "stream"] }
 hex = "0.4"
