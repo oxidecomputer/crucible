@@ -139,6 +139,21 @@ impl<'a> Instance<'a> {
         Snapshots::new(self)
     }
 
+    /**
+     * Helper function to get the running snapshot for this instance, if one
+     * exists.
+     *
+     * # Errors
+     *
+     * Returns [`ScfError::NoRunningSnapshot`] if this instance does not have a
+     * `running` snapshot. May return other errors if querying for the running
+     * snapshot fails.
+     */
+    pub fn get_running_snapshot(&self) -> Result<Snapshot> {
+        let maybe_snapshot = self.get_snapshot("running")?;
+        maybe_snapshot.ok_or(ScfError::NoRunningSnapshot)
+    }
+
     pub fn get_snapshot(&self, name: &str) -> Result<Option<Snapshot>> {
         let name = CString::new(name).unwrap();
         let snap = Snapshot::new(self)?;
