@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
     Ro,

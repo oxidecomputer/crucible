@@ -471,11 +471,11 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
 /// Always open sqlite with journaling, and synchronous.
 /// Note: these pragma_updates are not durable
 fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
-    let metadb = Connection::open(&path)?;
+    let metadb = Connection::open(path)?;
 
     assert!(metadb.is_autocommit());
-    metadb.pragma_update(None, "journal_mode", &"WAL")?;
-    metadb.pragma_update(None, "synchronous", &"FULL")?;
+    metadb.pragma_update(None, "journal_mode", "WAL")?;
+    metadb.pragma_update(None, "synchronous", "FULL")?;
 
     // rusqlite provides an LRU Cache (a cache which, when full, evicts the
     // least-recently-used value). This caches prepared statements, allowing
@@ -2688,7 +2688,7 @@ mod test {
     #[should_panic]
     fn bad_import_region() {
         let _ = Region::open(
-            &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
+            "/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
             false,
             false,

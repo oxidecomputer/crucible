@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
     let cfg = omicron_zone_package::config::parse("package-manifest.toml")?;
 
     let output_dir = Path::new("out");
-    create_dir_all(&output_dir)?;
+    create_dir_all(output_dir)?;
 
     for (name, package) in cfg.packages {
         package.create(&name, output_dir).await?;

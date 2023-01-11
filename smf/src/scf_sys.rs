@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use libc::{size_t, ssize_t};
+use std::marker::{PhantomData, PhantomPinned};
 use std::os::raw::{c_char, c_int, c_ulong};
 
 type scf_version_t = c_ulong;
@@ -21,7 +22,16 @@ pub const SMF_AT_NEXT_BOOT: c_int = 0x4;
 
 macro_rules! opaque_handle {
     ($type_name:ident) => {
-        pub enum $type_name {}
+        #[repr(C)]
+        pub struct $type_name {
+            _data: [u8; 0],
+            /*
+             * See https://doc.rust-lang.org/nomicon/ffi.html; this marker
+             * guarantees our type does not implement `Send`, `Sync`, or
+             * `Unpin`.
+             */
+            _marker: PhantomData<(*mut u8, PhantomPinned)>,
+        }
         impl Copy for $type_name {}
         impl Clone for $type_name {
             fn clone(&self) -> $type_name {
@@ -102,6 +112,11 @@ pub const SCF_LIMIT_MAX_PG_TYPE_LENGTH: u32 = 0xfffff82e;
 pub const SCF_LIMIT_MAX_FMRI_LENGTH: u32 = 0xfffff82d;
 
 pub const SCF_SCOPE_LOCAL: &[u8] = b"localhost\0";
+
+pub const SCF_DECODE_FMRI_EXACT: c_int = 0x00000001;
+pub const SCF_DECODE_FMRI_TRUNCATE: c_int = 0x00000002;
+pub const SCF_DECODE_FMRI_REQUIRE_INSTANCE: c_int = 0x00000004;
+pub const SCF_DECODE_FMRI_REQUIRE_NO_INSTANCE: c_int = 0x00000008;
 
 #[cfg(target_os = "illumos")]
 #[link(name = "scf")]
@@ -407,6 +422,17 @@ extern "C" {
     pub fn smf_disable_instance(instance: *const c_char, flags: c_int)
         -> c_int;
     pub fn smf_enable_instance(instance: *const c_char, flags: c_int) -> c_int;
+
+    pub fn scf_handle_decode_fmri(
+        handle: *mut scf_handle_t,
+        fmri: *const c_char,
+        out_scope: *mut scf_scope_t,
+        out_service: *mut scf_service_t,
+        out_instance: *mut scf_instance_t,
+        out_pg: *mut scf_propertygroup_t,
+        out_prop: *mut scf_property_t,
+        flags: c_int,
+    ) -> c_int;
 }
 
 #[cfg(not(target_os = "illumos"))]
@@ -907,6 +933,19 @@ mod dummy {
     }
     pub unsafe fn smf_enable_instance(
         instance: *const c_char,
+        flags: c_int,
+    ) -> c_int {
+        unimplemented!()
+    }
+
+    pub unsafe fn scf_handle_decode_fmri(
+        handle: *mut scf_handle_t,
+        fmri: *const c_char,
+        out_scope: *mut scf_scope_t,
+        out_service: *mut scf_service_t,
+        out_instance: *mut scf_instance_t,
+        out_pg: *mut scf_propertygroup_t,
+        out_prop: *mut scf_property_t,
         flags: c_int,
     ) -> c_int {
         unimplemented!()

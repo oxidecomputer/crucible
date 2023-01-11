@@ -837,6 +837,7 @@ async fn proc_stream(
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UpstairsConnection {
     upstairs_id: Uuid,
@@ -2346,6 +2347,7 @@ impl Work {
  * We may not need Done or Error.  At the moment all we actually look
  * at is New or InProgress.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkState {
     New,
@@ -2438,8 +2440,7 @@ pub fn build_downstairs_for_region(
             Logger::root(drain.fuse(), o!())
         }
     };
-    let region =
-        Region::open(&data, Default::default(), true, read_only, &log)?;
+    let region = Region::open(data, Default::default(), true, read_only, &log)?;
 
     info!(log, "UUID: {:?}", region.def().uuid());
     info!(

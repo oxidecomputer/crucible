@@ -22,6 +22,7 @@ pub struct CliAction {
     cmd: CliCommand,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 pub enum DscCommand {
     /// Connect to the default DSC server (http://127.0.0.1:9998)
@@ -83,6 +84,7 @@ pub enum DscCommand {
  * an actual BlockOpt, but some are processed locally, and some happen
  * on the cli_server side.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 #[clap(name = "", term_width = 80, no_binary_name = true)]
 enum CliCommand {

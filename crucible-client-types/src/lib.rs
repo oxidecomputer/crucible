@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 #[allow(clippy::large_enum_variant)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VolumeConstructionRequest {
@@ -34,6 +35,7 @@ pub enum VolumeConstructionRequest {
     },
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
     Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq,
 )]

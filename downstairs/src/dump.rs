@@ -45,7 +45,7 @@ pub fn dump_region(
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(&dir, Default::default(), false, true, &log)?;
+        let region = Region::open(dir, Default::default(), false, true, &log)?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -481,12 +481,11 @@ fn show_extent(
     print!("DIRTY    ");
     for dir_index in 0..dir_count {
         if let Some(em) = ei_hm.get(&(dir_index as u32)) {
-            let dirty;
-            if em.dirty {
-                dirty = "D".to_string();
+            let dirty = if em.dirty {
+                "D".to_string()
             } else {
-                dirty = " ".to_string();
-            }
+                " ".to_string()
+            };
             print!("{:>8} ", dirty);
         } else {
             print!("- ");
@@ -533,7 +532,7 @@ fn show_extent(
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
             let region =
-                Region::open(&dir, Default::default(), false, true, &log)?;
+                Region::open(dir, Default::default(), false, true, &log)?;
 
             let mut responses = region.region_read(
                 &[ReadRequest {
@@ -645,7 +644,7 @@ fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(&dir, Default::default(), false, true, &log)?;
+        let region = Region::open(dir, Default::default(), false, true, &log)?;
 
         let mut responses = region.region_read(
             &[ReadRequest {
