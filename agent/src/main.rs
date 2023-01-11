@@ -928,19 +928,19 @@ fn worker_region_create(
     if let Some(cert_pem) = &region.cert_pem {
         let mut path = dir.to_path_buf();
         path.push("cert.pem");
-        std::fs::write(path, &cert_pem)?;
+        std::fs::write(path, cert_pem)?;
     }
 
     if let Some(key_pem) = &region.key_pem {
         let mut path = dir.to_path_buf();
         path.push("key.pem");
-        std::fs::write(path, &key_pem)?;
+        std::fs::write(path, key_pem)?;
     }
 
     if let Some(root_pem) = &region.root_pem {
         let mut path = dir.to_path_buf();
         path.push("root.pem");
-        std::fs::write(path, &root_pem)?;
+        std::fs::write(path, root_pem)?;
     }
 
     /*

@@ -232,7 +232,7 @@ impl DownstairsInfo {
 
         let region_dir = self.region_dir.clone();
         let cmd = Command::new(self.ds_bin.clone())
-            .args(&["run", "-p", &port_value, "-d", &region_dir])
+            .args(["run", "-p", &port_value, "-d", &region_dir])
             .stdout(Stdio::from(outputs))
             .stderr(Stdio::from(errors))
             .spawn()
@@ -308,7 +308,7 @@ impl DscInfo {
                     "Creating region directory at: {}",
                     rd.clone().into_os_string().into_string().unwrap()
                 );
-                fs::create_dir_all(&rd)
+                fs::create_dir_all(rd)
                     .context("Failed to create region directory")?;
             }
 
@@ -351,9 +351,8 @@ impl DscInfo {
         // If we only have one region directory, then use that for all
         // three downstairs.  If we have three, then each downstairs can
         // have its own.
-        let rv;
-        if region_dir.len() == 1 {
-            rv = vec![
+        let rv = if region_dir.len() == 1 {
+            vec![
                 region_dir[0]
                     .clone()
                     .into_os_string()
@@ -369,10 +368,10 @@ impl DscInfo {
                     .into_os_string()
                     .into_string()
                     .unwrap(),
-            ];
+            ]
         } else {
             assert_eq!(region_dir.len(), 3);
-            rv = vec![
+            vec![
                 region_dir[0]
                     .clone()
                     .into_os_string()
@@ -388,8 +387,8 @@ impl DscInfo {
                     .into_os_string()
                     .into_string()
                     .unwrap(),
-            ];
-        }
+            ]
+        };
 
         assert_eq!(rv.len(), 3);
         let rs = RegionSet {
@@ -937,6 +936,7 @@ enum DownstairsState {
 ///
 /// This is used to send actions between the main task and a task that
 /// is responsible stopping/starting/restarting a downstairs process.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 enum DownstairsAction {
     // Stop the downstairs
@@ -954,6 +954,7 @@ enum DownstairsAction {
 ///
 /// These are the commands the main dsc task can accept from the dropshot
 /// control server.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 enum DscCmd {
     /// Start the downstairs at the given client index.
@@ -1321,7 +1322,7 @@ fn cleanup(output_dir: PathBuf, region_dir: Vec<PathBuf>) -> Result<()> {
     for rd in region_dir.iter() {
         if Path::new(&rd).exists() {
             println!("Removing existing region {:?}", rd);
-            std::fs::remove_dir_all(&rd)?;
+            std::fs::remove_dir_all(rd)?;
         }
     }
     Ok(())
@@ -1411,7 +1412,7 @@ fn main() -> Result<()> {
                 for rd in region_dir.iter() {
                     if Path::new(&rd).exists() {
                         println!("Removing existing region {:?}", rd);
-                        std::fs::remove_dir_all(&rd)?;
+                        std::fs::remove_dir_all(rd)?;
                     }
                 }
             }

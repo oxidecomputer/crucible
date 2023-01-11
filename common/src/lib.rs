@@ -19,6 +19,7 @@ pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CrucibleError {
     #[error("Error: {0}")]

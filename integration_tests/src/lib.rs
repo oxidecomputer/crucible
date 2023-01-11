@@ -171,7 +171,7 @@ mod test {
 
             // Generate random data for our key
             let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-            let key_string = encode(&key_bytes);
+            let key_string = encode(key_bytes);
 
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),

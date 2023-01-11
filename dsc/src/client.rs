@@ -5,6 +5,7 @@ use dsc_client::Client;
 
 use anyhow::Result;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 pub enum ClientCommand {
     /// Disable random stopping of downstairs
