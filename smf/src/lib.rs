@@ -202,7 +202,8 @@ impl Scf {
         }
     }
 
-    /** From within a running service instance, get our own [`Instance`].
+    /**
+     * From within a running service instance, get our own [`Instance`].
      *
      * If you are using this to look up the current value of your properties,
      * you almost certainly want to call [`Instance::get_running_snapshot()`]
