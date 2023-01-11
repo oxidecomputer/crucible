@@ -38,7 +38,7 @@ serde_json = "1"
 slog-async = "2.7"
 slog-dtrace = "0.2"
 slog-term = "2.9"
-tokio = { version = "1.23.0", features = ["full"] }
+tokio = { version = "1.23.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 tokio-rustls = { version = "0.23.4" }
 toml = "0.5"
@@ -54,7 +54,7 @@ version = "2.7"
 features = [ "max_level_trace", "release_max_level_debug" ]
 
 [dev-dependencies]
-expectorate = "1.0.5"
+expectorate = "1.0.6"
 openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 tokio-test = "*"

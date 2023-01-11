@@ -14,6 +14,7 @@ use crucible_common::CrucibleError;
 /// Messages sent between the CLI client and the CLI server.
 /// Note that the server does the work, sends any write data,
 /// checks any read data.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CliMessage {
     Activate(u64),
@@ -106,7 +107,7 @@ impl Encoder<&CliMessage> for CliEncoder {
         m: &CliMessage,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        let len = CliEncoder::serialized_size(&m)?;
+        let len = CliEncoder::serialized_size(m)?;
 
         dst.reserve(len);
         dst.put_u32_le(len as u32);

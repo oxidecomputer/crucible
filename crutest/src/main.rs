@@ -26,6 +26,7 @@ use crucible::*;
  * The various tests this program supports.
  */
 /// Client: A Crucible Upstairs test program
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 #[clap(name = "workload", term_width = 80)]
 #[clap(about = "Workload the program will execute.", long_about = None)]
@@ -200,6 +201,7 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_log yet, but perhaps someday..
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegionInfo {
     block_size: u64,
@@ -282,6 +284,7 @@ async fn get_region_info(
  *
  * The "seed" is the current counter as a u8 for a given block.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WriteLog {
     count_cur: Vec<u32>,
@@ -1039,6 +1042,7 @@ fn fill_vec(
  * should be written back out, and future calls to verify_vec will
  * expect the same value (i.e. we cut off any higher write count).
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 enum ValidateStatus {
     Good,

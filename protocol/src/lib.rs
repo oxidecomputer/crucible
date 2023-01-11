@@ -12,6 +12,7 @@ const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
 use crucible_common::{Block, CrucibleError, RegionDefinition};
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Write {
     pub eid: u64,
@@ -21,6 +22,7 @@ pub struct Write {
     pub block_context: BlockContext,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
     pub eid: u64,
@@ -29,6 +31,7 @@ pub struct ReadRequest {
 
 // Note: if you change this, you may have to add to the dump commands that show
 // block specific data.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponse {
     pub eid: u64,
@@ -51,6 +54,7 @@ impl ReadResponse {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
@@ -76,6 +80,7 @@ pub struct BlockContext {
     pub encryption_context: Option<EncryptionContext>,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: Vec<u8>,
@@ -121,11 +126,13 @@ impl ReadResponse {
 /**
  * These enums are for messages sent between an Upstairs and a Downstairs
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SnapshotDetails {
     pub snapshot_name: String,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     /**
@@ -511,7 +518,7 @@ impl Encoder<&Message> for CrucibleEncoder {
         m: &Message,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        let len = CrucibleEncoder::serialized_size(&m)?;
+        let len = CrucibleEncoder::serialized_size(m)?;
 
         dst.reserve(len);
         dst.put_u32_le(len as u32);
