@@ -178,17 +178,14 @@ impl Scf {
 
     pub fn get_instance_from_fmri(&self, fmri: &str) -> Result<Instance<'_>> {
         let fmri = CString::new(fmri).unwrap();
-
-        let scope = Scope::new(self)?;
-        let service = Service::new(self)?;
         let instance = Instance::new(self)?;
 
         let ret = unsafe {
             scf_handle_decode_fmri(
                 self.handle.as_ptr(),
                 fmri.as_ptr(),
-                scope.scope.as_ptr(),
-                service.service.as_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
                 instance.instance.as_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
