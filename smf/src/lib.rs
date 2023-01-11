@@ -87,8 +87,8 @@ pub enum ScfError {
     CallbackFailed,
     #[error("internal error")]
     Internal,
-    #[error("environment variable SMF_FMRI not found")]
-    MissingSmfFmriEnvironmentVariable,
+    #[error("not running under SMF (environment variable SMF_FMRI not found)")]
+    NotRunningUnderSmf,
     #[error("unknown error ({0})")]
     Unknown(u32),
 }
@@ -215,8 +215,8 @@ impl Scf {
     /// This method looks up our own FMRI via the `SMF_FMRI` environment
     /// variable, which is supplied by `smf` to running instances.
     pub fn get_self_instance(&self) -> Result<Instance<'_>> {
-        let fmri = env::var("SMF_FMRI")
-            .map_err(|_| ScfError::MissingSmfFmriEnvironmentVariable)?;
+        let fmri =
+            env::var("SMF_FMRI").map_err(|_| ScfError::NotRunningUnderSmf)?;
 
         self.get_instance_from_fmri(&fmri)
     }
