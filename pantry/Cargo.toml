@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.20"
+base64 = "0.21"
 chrono = { version = "0.4", features = [ "serde" ] }
 clap = { version = "4.0", features = ["derive"] }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
