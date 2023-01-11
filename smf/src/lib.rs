@@ -192,10 +192,7 @@ impl Scf {
                 instance.instance.as_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
-                // `fmri` _must_ have an instance, but is allowed to also
-                // specify a propertygroup / property; ignore those if present
-                // via `SCF_DECODE_FMRI_TRUNCATE`.
-                SCF_DECODE_FMRI_REQUIRE_INSTANCE | SCF_DECODE_FMRI_TRUNCATE,
+                SCF_DECODE_FMRI_REQUIRE_INSTANCE | SCF_DECODE_FMRI_EXACT,
             )
         };
 
