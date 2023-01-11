@@ -213,7 +213,7 @@ impl Scf {
      * on the returned instance.
      *
      * This method looks up our own FMRI via the `SMF_FMRI` environment
-     * variable, which is supplied by `smf` to running instances.
+     * variable, which is supplied by SMF to running instances.
      */
     pub fn get_self_instance(&self) -> Result<Instance<'_>> {
         let fmri =
