@@ -7,7 +7,7 @@ mod test {
     use std::sync::Arc;
 
     use anyhow::*;
-    use base64::encode;
+    use base64::{engine, Engine};
     use crucible::{Bytes, *};
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
@@ -171,7 +171,8 @@ mod test {
 
             // Generate random data for our key
             let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-            let key_string = encode(key_bytes);
+            let key_string =
+                engine::general_purpose::STANDARD.encode(key_bytes);
 
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
@@ -3087,7 +3088,8 @@ mod test {
                     &volume_id.to_string(),
                     &crucible_pantry_client::types::BulkWriteRequest {
                         offset: i * 512,
-                        base64_encoded_data: base64::encode(vec![i as u8; 512]),
+                        base64_encoded_data: engine::general_purpose::STANDARD
+                            .encode(vec![i as u8; 512]),
                     },
                 )
                 .await
@@ -3187,17 +3189,20 @@ mod test {
             .await
             .unwrap();
 
+        let base64_encoded_data = engine::general_purpose::STANDARD.encode(
+            vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
+        );
+
         client
             .bulk_write(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::BulkWriteRequest {
                     offset: 0,
-                    base64_encoded_data: base64::encode(
-                        vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE]
-                    ),
+                    base64_encoded_data,
                 },
             )
-            .await.unwrap();
+            .await
+            .unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
 
