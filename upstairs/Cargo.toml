@@ -14,7 +14,7 @@ asm = ["usdt/asm"]
 
 [dependencies]
 anyhow = "1"
-async-trait = "0.1.60"
+async-trait = "0.1.61"
 async-recursion = "1.0.0"
 base64 = "0.21.0"
 bitvec = "1"
