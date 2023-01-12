@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
@@ -938,6 +938,7 @@ mod dummy {
         unimplemented!()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn scf_handle_decode_fmri(
         handle: *mut scf_handle_t,
         fmri: *const c_char,

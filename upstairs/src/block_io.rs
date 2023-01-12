@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 use super::*;
 
@@ -26,7 +26,7 @@ impl FileBlockIO {
                 Ok(Self {
                     uuid: id,
                     block_size,
-                    total_size: total_size as u64,
+                    total_size,
                     file: Mutex::new(f),
                 })
             }
@@ -165,7 +165,7 @@ impl ReqwestBlockIO {
         Ok(Self {
             uuid: id,
             block_size,
-            total_size: total_size as u64,
+            total_size,
             client,
             url,
             count: AtomicU32::new(0),

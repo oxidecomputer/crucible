@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 use super::*;
 use async_recursion::async_recursion;
@@ -562,9 +562,8 @@ impl BlockIO for Volume {
 
             for sub_volume in &self.sub_volumes {
                 // Range is [start, end), meaning 0..10 is 10
-                total_blocks += (sub_volume.lba_range.end
-                    - sub_volume.lba_range.start)
-                    as u64;
+                total_blocks +=
+                    sub_volume.lba_range.end - sub_volume.lba_range.start;
             }
 
             Ok(total_blocks * self.block_size)

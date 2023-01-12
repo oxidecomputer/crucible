@@ -1,4 +1,4 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -137,9 +137,8 @@ async fn main() -> Result<()> {
         })
         .collect();
 
-    let read_buffers: Vec<Buffer> = (0..io_depth)
-        .map(|_| Buffer::new(io_size as usize))
-        .collect();
+    let read_buffers: Vec<Buffer> =
+        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
 
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;
@@ -152,7 +151,7 @@ async fn main() -> Result<()> {
 
         for i in 0..io_depth {
             let offset: u64 =
-                rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz as u64);
+                rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz);
 
             if rng.gen::<bool>() {
                 let future = guest.write_to_byte_offset(
