@@ -1,5 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 
+use base64::{engine, Engine};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -56,8 +57,9 @@ impl CrucibleOpts {
     pub fn key_bytes(&self) -> Option<Vec<u8>> {
         if let Some(key) = &self.key {
             // For xts, key size must be 32 bytes
-            let decoded_key =
-                base64::decode(key).expect("could not base64 decode key!");
+            let decoded_key = engine::general_purpose::STANDARD
+                .decode(key)
+                .expect("could not base64 decode key!");
 
             if decoded_key.len() != 32 {
                 panic!("Key length must be 32 bytes!");

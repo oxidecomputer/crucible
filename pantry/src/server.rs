@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use base64::{engine, Engine};
 use dropshot::endpoint;
 use dropshot::HttpError;
 use dropshot::HttpResponseDeleted;
@@ -193,7 +194,8 @@ async fn bulk_write(
     let body = body.into_inner();
     let pantry = rc.context();
 
-    let data = base64::decode(body.base64_encoded_data)
+    let data = engine::general_purpose::STANDARD
+        .decode(body.base64_encoded_data)
         .map_err(|e| HttpError::for_bad_request(None, e.to_string()))?;
 
     pantry
