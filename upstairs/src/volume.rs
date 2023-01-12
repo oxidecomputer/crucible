@@ -1848,7 +1848,7 @@ mod test {
             read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
-                    end: parent.total_size().await? / BLOCK_SIZE as u64,
+                    end: parent.total_size().await? / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
             })),
@@ -1887,7 +1887,7 @@ mod test {
             read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
-                    end: parent.total_size().await.unwrap() / BLOCK_SIZE as u64,
+                    end: parent.total_size().await.unwrap() / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
             })),
@@ -1921,7 +1921,7 @@ mod test {
             read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
-                    end: parent.total_size().await.unwrap() / BLOCK_SIZE as u64,
+                    end: parent.total_size().await.unwrap() / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
             })),
