@@ -17,12 +17,12 @@ pub enum ClientCommand {
     },
     /// Disable auto restart on all downstairs
     DisableRestartAll,
-    /// Disable restart on the given client ID
+    /// Enable automatic restart of the given client ID
     EnableRestart {
         #[clap(long, short, action)]
         cid: u32,
     },
-    /// Enable random stopping of downstairs
+    /// Enable the random stopping of any downstairs
     EnableRandomStop,
     /// Set the minimum random stop time (in seconds)
     EnableRandomMin {
