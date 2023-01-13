@@ -14,8 +14,9 @@ use uuid::Uuid;
  * on what a block is. It wouldn't make sense to pass Block { 2, 9 } when the
  * downstairs expects Block { 2, 12 }.
  */
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Deserialize, Serialize, Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(
+    Deserialize, Serialize, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord,
+)]
 pub struct Block {
     // Value could mean a size or offset
     pub value: u64,
