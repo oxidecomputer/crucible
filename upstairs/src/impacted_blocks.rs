@@ -1108,7 +1108,7 @@ mod test {
     ) {
         let shift = ddef.block_size().trailing_zeros();
         let first = Block::new(first_block, shift);
-        let num_blocks = Block::new(n_blocks as u64, shift);
+        let num_blocks = Block::new(n_blocks, shift);
 
         prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
     }
@@ -1126,7 +1126,7 @@ mod test {
     ) {
         let shift = ddef.block_size().trailing_zeros();
         let first = Block::new(first_block, shift);
-        let num_blocks = Block::new(n_blocks as u64, shift);
+        let num_blocks = Block::new(n_blocks, shift);
 
         prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
     }
