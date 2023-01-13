@@ -4400,7 +4400,7 @@ impl Upstairs {
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
          */
-        let ddef = self.ddef.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
         let fl = create_flush(
             next_id,
             dep,
@@ -4408,7 +4408,7 @@ impl Upstairs {
             gw_id,
             self.get_generation().await,
             snapshot_details,
-            ImpactedBlocks::new(ddef.get_def().unwrap()),
+            ImpactedBlocks::new(ddef),
         );
 
         let mut sub = HashMap::new();
@@ -4462,6 +4462,22 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        /*
+         * Verify IO is in range for our region.  If not give up now and
+         * report error.
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e).await;
+                }
+                return Err(());
+            }
+        }
+
         self.set_flush_need().await;
 
         /*
@@ -4469,11 +4485,10 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span two extents, and eventually XXX, two regions.
          */
-        let ddef = self.ddef.lock().await;
         let impacted_blocks = extent_from_offset(
-            ddef.get_def().unwrap(),
+            ddef,
             offset,
-            Block::from_bytes(data.len(), &ddef.get_def().unwrap()),
+            Block::from_bytes(data.len(), &ddef),
         );
 
         /*
@@ -4559,7 +4574,7 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.tuples().len());
 
         for (eid, bo) in impacted_blocks.tuples() {
-            let byte_len: usize = ddef.get_def().unwrap().block_size() as usize;
+            let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
                 &self.encryption_context
@@ -4668,6 +4683,21 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        /*
+         * Verify IO is in range for our region
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e).await;
+                }
+                return Err(());
+            }
+        }
+
         self.set_flush_need().await;
 
         /*
@@ -4675,12 +4705,10 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span many extents, and eventually, TODO, regions.
          */
-        let ddef_state = self.ddef.lock().await;
-        let ddef = &ddef_state.get_def().unwrap();
         let impacted_blocks = extent_from_offset(
-            *ddef,
+            ddef,
             offset,
-            Block::from_bytes(data.len(), ddef),
+            Block::from_bytes(data.len(), &ddef),
         );
 
         /*
