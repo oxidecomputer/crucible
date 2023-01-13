@@ -30,6 +30,56 @@ mod up_test {
         (eid, Block::new_512(offset))
     }
 
+    fn generic_read_request() -> (ReadRequest, ImpactedBlocks) {
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+        };
+        let iblocks = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+        );
+        (request, iblocks)
+    }
+
+    fn generic_write_request() -> (crucible_protocol::Write, ImpactedBlocks) {
+        let request = crucible_protocol::Write {
+            eid: 0,
+            offset: Block::new_512(7),
+            data: Bytes::from(vec![1]),
+            block_context: BlockContext {
+                encryption_context: None,
+                hash: 0,
+            },
+        };
+        let iblocks = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+        );
+        (request, iblocks)
+    }
+
+    fn create_generic_read_eob(ds_id: u64) -> (ReadRequest, DownstairsIO) {
+        let (request, iblocks) = generic_read_request();
+
+        let op =
+            create_read_eob(ds_id, vec![], 10, vec![request.clone()], iblocks);
+
+        (request, op)
+    }
+
     #[test]
     fn test_iospan() {
         let span = IOSpan::new(512, 1024, 512);
@@ -232,12 +282,10 @@ mod up_test {
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn off_to_extent_length_too_big() {
         let up = make_upstairs();
-        assert_eq!(
-            up_efo(&up, Block::new_512(0), 1001).await,
-            up_efo(&up, Block::new_512(0), 1000).await
-        );
+        up_efo(&up, Block::new_512(0), 1001).await;
     }
 
     #[tokio::test]
@@ -247,9 +295,10 @@ mod up_test {
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
-        assert_eq!(up_efo(&up, Block::new_512(1000), 1).await, vec![]);
+        up_efo(&up, Block::new_512(1000), 1).await;
     }
 
     #[tokio::test]
@@ -901,26 +950,7 @@ mod up_test {
 
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -969,26 +999,7 @@ mod up_test {
 
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -1041,26 +1052,7 @@ mod up_test {
 
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -1116,26 +1108,7 @@ mod up_test {
 
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (_request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -1190,11 +1163,7 @@ mod up_test {
         let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-
+        let (request, iblocks) = generic_read_request();
         let next_id = {
             let mut ds = upstairs.downstairs.lock().await;
 
@@ -1205,16 +1174,7 @@ mod up_test {
                 vec![],
                 10,
                 vec![request.clone()],
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -1276,26 +1236,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1334,26 +1275,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1389,26 +1311,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1448,26 +1351,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1507,26 +1391,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1566,26 +1431,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1618,26 +1464,7 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(id);
 
         ds.enqueue(op);
 
@@ -1684,30 +1511,14 @@ mod up_test {
 
         // send a write, and clients 0 and 1 will return errors
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             next_id,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
 
         ds.enqueue(op);
@@ -1754,26 +1565,7 @@ mod up_test {
         // The others should be skipped.
 
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -1809,26 +1601,7 @@ mod up_test {
 
         // send a read, and clients 0 and 1 will return errors
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -1885,26 +1658,7 @@ mod up_test {
         // (reads shouldn't cause a Failed transition)
 
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -1965,26 +1719,7 @@ mod up_test {
         // Build our read, put it into the work queue
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
 
@@ -2116,57 +1851,25 @@ mod up_test {
         let id1 = ds.next_id();
         let id2 = ds.next_id();
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id1,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id2,
             vec![],
-            1,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            20,
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
@@ -2303,21 +2006,14 @@ mod up_test {
         // Build our write IO.
         let next_id = ds.next_id();
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             next_id,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::Empty,
+            iblocks,
         );
         // Put the write on the queue.
         ds.enqueue(op);
@@ -2444,57 +2140,25 @@ mod up_test {
         let id1 = ds.next_id();
         let id2 = ds.next_id();
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id1,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id2,
             vec![],
             1,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
@@ -2619,26 +2283,7 @@ mod up_test {
 
         // Build our read IO and submit it to the work queue.
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
         ds.enqueue(op);
 
         // Submit the read to all three downstairs
@@ -2680,26 +2325,7 @@ mod up_test {
 
         // Build a read and put it on the work queue.
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
         ds.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -2763,26 +2389,7 @@ mod up_test {
 
         // Create the read and put it on the work queue.
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
         ds.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -2861,26 +2468,7 @@ mod up_test {
 
         // Create the read and put it on the work queue.
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
         ds.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -2958,26 +2546,7 @@ mod up_test {
 
         // Create the read and put it on the work queue.
         let next_id = ds.next_id();
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
         ds.enqueue(op);
 
         // Submit the read to each downstairs.
@@ -3058,30 +2627,14 @@ mod up_test {
 
         // Create the write and put it on the work queue.
         let id1 = ds.next_id();
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id1,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
@@ -3142,30 +2695,14 @@ mod up_test {
 
         // Create the write and put it on the work queue.
         let id1 = ds.next_id();
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id1,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
@@ -3296,30 +2833,14 @@ mod up_test {
         // Build a write, put it on the work queue.
         let id1 = ds.next_id();
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id1,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
@@ -3489,30 +3010,14 @@ mod up_test {
         // Build a write, put it on the work queue.
         let id1 = ds.next_id();
 
+        let (request, iblocks) = generic_write_request();
         let op = create_write_eob(
             id1,
             vec![],
             10,
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(7),
-                data: Bytes::from(vec![1]),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
-            }],
+            vec![request],
             is_write_unwritten,
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
+            iblocks,
         );
         ds.enqueue(op);
 
@@ -4392,27 +3897,7 @@ mod up_test {
 
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         let context = Arc::new(EncryptionContext::new(
             vec![
@@ -4482,27 +3967,7 @@ mod up_test {
 
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         ds.enqueue(op);
         ds.in_progress(next_id, 0);
@@ -4542,27 +4007,7 @@ mod up_test {
         let mut ds = Downstairs::new(csl());
         let next_id = ds.next_id();
 
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
-
-        let op = create_read_eob(
-            next_id,
-            vec![],
-            10,
-            vec![request.clone()],
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 7,
-                },
-            ),
-        );
+        let (request, op) = create_generic_read_eob(next_id);
 
         let context = Arc::new(EncryptionContext::new(
             vec![
@@ -5020,30 +4465,14 @@ mod up_test {
 
             let next_id = ds.next_id();
 
+            let (request, iblocks) = generic_write_request();
             let op = create_write_eob(
                 next_id,
                 vec![],
                 10,
-                vec![crucible_protocol::Write {
-                    eid: 0,
-                    offset: Block::new_512(7),
-                    data: Bytes::from(vec![1]),
-                    block_context: BlockContext {
-                        encryption_context: None,
-                        hash: 0,
-                    },
-                }],
+                vec![request],
                 false,
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -5116,30 +4545,14 @@ mod up_test {
 
             let next_id = ds.next_id();
 
+            let (request, iblocks) = generic_write_request();
             let op = create_write_eob(
                 next_id,
                 vec![],
                 10,
-                vec![crucible_protocol::Write {
-                    eid: 0,
-                    offset: Block::new_512(7),
-                    data: Bytes::from(vec![1]),
-                    block_context: BlockContext {
-                        encryption_context: None,
-                        hash: 0,
-                    },
-                }],
+                vec![request],
                 false,
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -5183,10 +4596,7 @@ mod up_test {
         up.downstairs.lock().await.ack(next_id);
 
         // Now, do a read.
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
+        let (request, iblocks) = generic_read_request();
 
         let next_id = {
             let mut ds = up.downstairs.lock().await;
@@ -5197,16 +4607,7 @@ mod up_test {
                 vec![],
                 10,
                 vec![request.clone()],
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -5300,30 +4701,14 @@ mod up_test {
 
             let next_id = ds.next_id();
 
+            let (request, iblocks) = generic_write_request();
             let op = create_write_eob(
                 next_id,
                 vec![],
                 10,
-                vec![crucible_protocol::Write {
-                    eid: 0,
-                    offset: Block::new_512(7),
-                    data: Bytes::from(vec![1]),
-                    block_context: BlockContext {
-                        encryption_context: None,
-                        hash: 0,
-                    },
-                }],
+                vec![request],
                 false,
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -5371,11 +4756,8 @@ mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
 
         // Now, do a read.
-        let request = ReadRequest {
-            eid: 0,
-            offset: Block::new_512(7),
-        };
 
+        let (request, iblocks) = generic_read_request();
         let next_id = {
             let mut ds = up.downstairs.lock().await;
 
@@ -5386,16 +4768,7 @@ mod up_test {
                 vec![],
                 10,
                 vec![request.clone()],
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -5434,30 +4807,14 @@ mod up_test {
 
             let next_id = ds.next_id();
 
+            let (request, iblocks) = generic_write_request();
             let op = create_write_eob(
                 next_id,
                 vec![],
                 10,
-                vec![crucible_protocol::Write {
-                    eid: 0,
-                    offset: Block::new_512(7),
-                    data: Bytes::from(vec![1]),
-                    block_context: BlockContext {
-                        encryption_context: None,
-                        hash: 0,
-                    },
-                }],
+                vec![request],
                 false,
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);
@@ -5506,30 +4863,14 @@ mod up_test {
 
             let next_id = ds.next_id();
 
+            let (request, iblocks) = generic_write_request();
             let op = create_write_eob(
                 next_id,
                 vec![],
                 10,
-                vec![crucible_protocol::Write {
-                    eid: 0,
-                    offset: Block::new_512(7),
-                    data: Bytes::from(vec![1]),
-                    block_context: BlockContext {
-                        encryption_context: None,
-                        hash: 0,
-                    },
-                }],
+                vec![request],
                 false,
-                ImpactedBlocks::new(
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                    ImpactedAddr {
-                        extent_id: 0,
-                        block: 7,
-                    },
-                ),
+                iblocks,
             );
 
             ds.enqueue(op);

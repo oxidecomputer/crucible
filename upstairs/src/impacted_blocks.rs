@@ -127,11 +127,12 @@ impl ImpactedBlocks {
         first_impacted: ImpactedAddr,
         last_impacted: ImpactedAddr,
     ) -> Self {
-        if first_impacted <= last_impacted {
-            ImpactedBlocks::InclusiveRange(first_impacted, last_impacted)
-        } else {
-            ImpactedBlocks::Empty
-        }
+        assert!(last_impacted >= first_impacted);
+        ImpactedBlocks::InclusiveRange(first_impacted, last_impacted)
+    }
+
+    pub fn empty() -> Self {
+        ImpactedBlocks::Empty
     }
 
     /// Create a new ImpactedBlocks range starting at a given offset, and
@@ -142,13 +143,15 @@ impl ImpactedBlocks {
         first_impacted: ImpactedAddr,
         n_blocks: u64,
     ) -> Self {
-        debug_assert!(extent_size > 0);
+        assert!(extent_size > 0);
 
         if n_blocks == 0 {
             return ImpactedBlocks::Empty;
         }
 
-        // So because we're inclusive, if we have 1 block then the first impacted should be the same as the last impacted. If we have 2 blocks, it's +1. etc.
+        // So because we're inclusive, if we have 1 block then the first
+        // impacted should be the same as the last impacted. If we have
+        // 2 blocks, it's +1. etc.
         let ending_block = n_blocks + first_impacted.block - 1;
 
         let last_impacted = ImpactedAddr {
@@ -265,38 +268,29 @@ pub fn extent_from_offset(
     num_blocks: Block,
 ) -> ImpactedBlocks {
     let extent_size = ddef.extent_size().value;
-
-    // I don't really think these assertions belong here, but we have a test
-    // for it I guess
     let shift = ddef.block_size().trailing_zeros();
-    debug_assert_eq!(offset.shift, shift);
-    debug_assert_eq!(num_blocks.shift, shift);
+
+    // If we get invalid data at this point, something has gone terribly
+    // wrong further up the stack. So here's the assumptions we're making:
+    // First, our blocks are actually the same size as this region's blocks
+    assert_eq!(offset.shift, shift);
+    assert_eq!(num_blocks.shift, shift);
+
+    // Second, the offset is actually within the region
+    assert!(offset.value < ddef.extent_count() as u64 * extent_size);
+
+    // Third, the last block is also within the region
+    assert!(
+        offset.value + num_blocks.value
+            <= ddef.extent_count() as u64 * extent_size
+    );
 
     let fst = ImpactedAddr {
         extent_id: offset.value / extent_size,
         block: offset.value % extent_size,
     };
 
-    // If offset is outside the region, Empty
-    if fst.extent_id >= ddef.extent_count() as u64 {
-        return ImpactedBlocks::Empty;
-    }
-
-    let mut impact = ImpactedBlocks::from_offset(
-        ddef.extent_size().value,
-        fst,
-        num_blocks.value,
-    );
-
-    // Clamp range to last block in region
-    if let ImpactedBlocks::InclusiveRange(_, lst) = &mut impact {
-        if lst.extent_id >= ddef.extent_count() as u64 {
-            lst.extent_id = ddef.extent_count() as u64 - 1;
-            lst.block = extent_size - 1;
-        }
-    }
-
-    impact
+    ImpactedBlocks::from_offset(extent_size, fst, num_blocks.value)
 }
 
 #[cfg(test)]
@@ -304,7 +298,7 @@ mod test {
     use super::*;
     use proptest::prelude::*;
     use std::panic;
-    use std::panic::AssertUnwindSafe;
+    use std::panic::UnwindSafe;
     use test_strategy::{proptest, Arbitrary};
 
     fn extent_tuple(eid: u64, offset: u64) -> (u64, Block) {
@@ -446,37 +440,38 @@ mod test {
     }
 
     #[test]
+    #[should_panic]
     /// If we create an impacted range where the last block comes before the
     /// first block, that range should be empty.
-    fn test_new_range_empty_when_last_before_first() {
+    fn test_new_range_panics_when_last_extent_before_first() {
         // Extent id ordering works
-        assert_eq!(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 1,
-                    block: 0,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 0,
-                },
-            ),
-            ImpactedBlocks::Empty
+        let _ = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: 1,
+                block: 0,
+            },
+            ImpactedAddr {
+                extent_id: 0,
+                block: 0,
+            },
         );
+    }
 
+    #[test]
+    #[should_panic]
+    /// If we create an impacted range where the last block comes before the
+    /// first block, that range should be empty.
+    fn test_new_range_panics_when_last_block_before_first() {
         // Block ordering works
-        assert_eq!(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 1,
-                },
-                ImpactedAddr {
-                    extent_id: 0,
-                    block: 0,
-                },
-            ),
-            ImpactedBlocks::Empty
+        let _ = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: 0,
+                block: 1,
+            },
+            ImpactedAddr {
+                extent_id: 0,
+                block: 0,
+            },
         );
     }
 
@@ -568,6 +563,19 @@ mod test {
     }
 
     // Proptest time
+
+    /// prop_assert that something should panic
+    fn prop_should_panic<F: FnOnce() -> R + UnwindSafe, R>(
+        f: F,
+    ) -> Result<(), TestCaseError> {
+        let original_panic_hook = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let unwind = panic::catch_unwind(f);
+        panic::set_hook(original_panic_hook);
+
+        prop_assert!(unwind.is_err());
+        Ok(())
+    }
 
     #[derive(Arbitrary, Debug)]
     struct ArbitraryRegionDefinition {
@@ -849,7 +857,7 @@ mod test {
         start_block: u64,
         n_blocks: u64,
     ) {
-        let unwind = panic::catch_unwind(AssertUnwindSafe(|| {
+        prop_should_panic(|| {
             ImpactedBlocks::from_offset(
                 0,
                 ImpactedAddr {
@@ -858,14 +866,13 @@ mod test {
                 },
                 n_blocks,
             )
-        }));
-        prop_assert!(unwind.is_err());
+        })?;
     }
 
     #[proptest]
     /// Make sure that when the right address is less than the left address,
-    /// ImpactedBlocks::new() returns Empty
-    fn iblocks_new_is_empty_for_flipped_polarity(
+    /// ImpactedBlocks::new() panics
+    fn iblocks_new_panics_for_flipped_polarity(
         #[strategy(0..=u64::MAX - 1)] start_eid: u64,
         #[strategy(0..=u64::MAX - 1)] start_block: u64,
 
@@ -882,12 +889,7 @@ mod test {
             block: end_block,
         };
 
-        // Now define the impacted blocks backwards, with end of the left
-        // and start on the right
-        prop_assert_eq!(
-            ImpactedBlocks::new(end_addr, start_addr),
-            ImpactedBlocks::Empty
-        );
+        prop_should_panic(|| ImpactedBlocks::new(end_addr, start_addr))?;
     }
 
     #[proptest]
@@ -1093,13 +1095,14 @@ mod test {
     }
 
     #[proptest]
-    fn extent_from_offset_clamps_num_blocks_to_region(
+    fn extent_from_offset_panics_when_num_blocks_outside_region(
         // First block should be inside the region
         #[strategy(0..#ddef.extent_count() as u64 * #ddef.extent_size().value)]
         first_block: u64,
 
-        // At least one block
-        #[strategy(1..=u64::MAX)] n_blocks: u64,
+        // Last block should be outside the region
+        #[strategy(((#ddef.extent_count() as u64 * #ddef.extent_size().value) - #first_block + 1)..=u64::MAX)]
+        n_blocks: u64,
 
         #[strategy(region_def_strategy())] ddef: RegionDefinition,
     ) {
@@ -1107,22 +1110,11 @@ mod test {
         let first = Block::new(first_block, shift);
         let num_blocks = Block::new(n_blocks as u64, shift);
 
-        let clamped = extent_from_offset(&ddef, first, num_blocks);
-
-        // New ImpactedBlocks should fit within region
-        let (first_clamped_eid, first_clamped_block) =
-            clamped.blocks(&ddef).next().unwrap();
-        let (last_clamped_eid, last_clamped_block) =
-            clamped.blocks(&ddef).last().unwrap();
-
-        prop_assert!(first_clamped_eid < ddef.extent_count() as u64);
-        prop_assert!(first_clamped_block.value < ddef.extent_size().value);
-        prop_assert!(last_clamped_eid < ddef.extent_count() as u64);
-        prop_assert!(last_clamped_block.value < ddef.extent_size().value);
+        prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
     }
 
     #[proptest]
-    fn extent_from_offset_is_empty_for_offsets_outside_region(
+    fn extent_from_offset_panics_for_offsets_outside_region(
         // First block should be outside the region
         #[strategy(#ddef.extent_count() as u64 * #ddef.extent_size().value..u64::MAX)]
         first_block: u64,
@@ -1136,9 +1128,7 @@ mod test {
         let first = Block::new(first_block, shift);
         let num_blocks = Block::new(n_blocks as u64, shift);
 
-        let empty = extent_from_offset(&ddef, first, num_blocks);
-
-        prop_assert!(empty.is_empty());
+        prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
     }
 
     #[proptest]
@@ -1146,8 +1136,8 @@ mod test {
         eid_a: u64,
         block_a: u64,
 
-        eid_b: u64,
-        block_b: u64,
+        #[strategy(#eid_a..=u64::MAX)] eid_b: u64,
+        #[strategy(#block_a..=u64::MAX)] block_b: u64,
     ) {
         let addr_a = ImpactedAddr {
             extent_id: eid_a,
@@ -1158,12 +1148,6 @@ mod test {
             block: block_b,
         };
         let iblocks = ImpactedBlocks::new(addr_a, addr_b);
-
-        if addr_a > addr_b {
-            // Should be empty in this case because polarity is flipped
-            prop_assert_eq!(iblocks.extents(), None);
-        } else {
-            prop_assert_eq!(iblocks.extents(), Some(eid_a..=eid_b));
-        }
+        prop_assert_eq!(iblocks.extents(), Some(eid_a..=eid_b));
     }
 }

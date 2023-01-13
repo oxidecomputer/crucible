@@ -6039,7 +6039,8 @@ impl fmt::Display for DsState {
  */
 #[derive(Debug)]
 struct DownstairsIO {
-    ds_id: u64,    // This MUST match our hashmap index
+    ds_id: u64, // This MUST match our hashmap index
+
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
 
