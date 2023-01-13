@@ -11,6 +11,7 @@ mod up_test {
     use std::iter::FromIterator;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use base64::{engine, Engine};
     use itertools::Itertools;
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
@@ -261,9 +262,9 @@ mod up_test {
     pub fn test_upstairs_encryption_context_ok() -> Result<()> {
         use rand::{thread_rng, Rng};
 
-        let key_bytes =
-            base64::decode("ClENKTXD2bCyXSHnKXY7GGnk+NvQKbwpatjWP2fJzk0=")
-                .unwrap();
+        let key_bytes = engine::general_purpose::STANDARD
+            .decode("ClENKTXD2bCyXSHnKXY7GGnk+NvQKbwpatjWP2fJzk0=")
+            .unwrap();
         let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
@@ -284,9 +285,9 @@ mod up_test {
     pub fn test_upstairs_encryption_context_wrong_nonce() -> Result<()> {
         use rand::{thread_rng, Rng};
 
-        let key_bytes =
-            base64::decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
-                .unwrap();
+        let key_bytes = engine::general_purpose::STANDARD
+            .decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
+            .unwrap();
         let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
@@ -318,9 +319,9 @@ mod up_test {
     pub fn test_upstairs_encryption_context_wrong_tag() -> Result<()> {
         use rand::{thread_rng, Rng};
 
-        let key_bytes =
-            base64::decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
-                .unwrap();
+        let key_bytes = engine::general_purpose::STANDARD
+            .decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
+            .unwrap();
         let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];

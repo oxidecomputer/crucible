@@ -1,9 +1,6 @@
-// Copyright 2022 Oxide Computer Company
-#![cfg_attr(not(usdt_stable_asm), feature(asm))]
-#![cfg_attr(
-    all(target_os = "macos", not(usdt_stable_asm_sym)),
-    feature(asm_sym)
-)]
+// Copyright 2023 Oxide Computer Company
+#![cfg_attr(usdt_need_asm, feature(asm))]
+#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
