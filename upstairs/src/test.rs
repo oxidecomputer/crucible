@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 #[cfg(test)]
 use super::*;
@@ -698,7 +698,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_flush_three_ok() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -763,7 +763,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_flush_one_error_then_ok() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -828,7 +828,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_flush_two_errors_equals_fail() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -893,7 +893,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_read_one_ok() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -952,7 +952,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_read_one_bad_two_ok() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1015,7 +1015,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_read_two_bad_one_ok() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1081,7 +1081,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_read_three_bad() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1149,7 +1149,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_read_two_ok_one_bad() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
 
         let request = ReadRequest {
@@ -1223,7 +1223,7 @@ mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch() {
         // Test that a hash mismatch will trigger a panic.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1272,7 +1272,7 @@ mod up_test {
     async fn work_read_hash_mismatch_ack() {
         // Test that a hash mismatch will trigger a panic.
         // We check here after a ACK, because that is a different location.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1368,7 +1368,7 @@ mod up_test {
     async fn work_read_hash_mismatch_third_ack() {
         // Test that a hash mismatch on the third response will trigger a panic.
         // This one checks after an ACK.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1418,7 +1418,7 @@ mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_inside() {
         // Test that a hash length mismatch will panic
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1468,7 +1468,7 @@ mod up_test {
     async fn work_read_hash_mismatch_no_data() {
         // Test that empty data first, then data later will trigger
         // hash mismatch panic.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1511,7 +1511,7 @@ mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_no_data_next() {
         // Test that missing data on the 2nd read response will panic
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1566,7 +1566,7 @@ mod up_test {
     async fn work_transfer_of_read_after_downstairs_errors(
         is_write_unwritten: bool,
     ) {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1673,7 +1673,7 @@ mod up_test {
 
     #[tokio::test]
     async fn work_assert_reads_do_not_cause_failure_state_transition() {
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1812,7 +1812,7 @@ mod up_test {
     async fn work_completed_read_flush() {
         // Verify that a read remains on the active queue until a flush
         // comes through and clears it.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -1953,7 +1953,7 @@ mod up_test {
         // we only complete 2/3 for each IO.  We later come back and finish
         // the 3rd IO and the flush, which then allows the work to be
         // completed.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2123,7 +2123,7 @@ mod up_test {
     async fn work_completed_writeio_flush(is_write_unwritten: bool) {
         // Verify that a write or write_unwritten remains on the active
         // queue until a flush comes through and clears it.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2263,7 +2263,7 @@ mod up_test {
         // complete 2 of 3 for each IO.  We later come back and finish the
         // 3rd IO and the flush, which then allows the work to be completed.
         // Also, we mix up which client finishes which job first.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2422,7 +2422,7 @@ mod up_test {
     #[tokio::test]
     async fn work_completed_read_replay() {
         // Verify that a single read will replay and move back from AckReady
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2474,7 +2474,7 @@ mod up_test {
     async fn work_completed_two_read_replay() {
         // Verify that a read will replay and move not back from AckReady if
         // there is more than one done read.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2548,7 +2548,7 @@ mod up_test {
     async fn work_completed_ack_read_replay() {
         // Verify that a read we Acked will still replay if that downstairs
         // goes away. Make sure everything still finishes ok.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2637,7 +2637,7 @@ mod up_test {
         // For the test below, we don't actually need to do a write, we
         // can just change the "data" we fill the response with like we
         // received different data than the original read.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2725,7 +2725,7 @@ mod up_test {
         // For the test below, we don't actually need to do a write, we
         // can just change the "data" we fill the response with like we
         // received different data than the original read.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2816,7 +2816,7 @@ mod up_test {
         // Verify that a replay when we have two completed writes or
         // write_unwritten will change state from AckReady back to NotAcked.
         // If we then redo the work, it should go back to AckReady.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2891,7 +2891,7 @@ mod up_test {
     async fn work_completed_write_acked_replay(is_write_unwritten: bool) {
         // Verify that a replay when we have acked a write or write_unwritten
         // will not undo that ack.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -2959,7 +2959,7 @@ mod up_test {
     async fn downstairs_transition_normal() {
         // Verify the correct downstairs progression
         // New -> WA -> WQ -> Active
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.ds_transition(0, DsState::Active).await;
@@ -2968,7 +2968,7 @@ mod up_test {
     #[tokio::test]
     async fn downstairs_transition_replay() {
         // Verify offline goes to replay
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.set_active().await.unwrap();
@@ -2980,7 +2980,7 @@ mod up_test {
     #[tokio::test]
     async fn downstairs_transition_deactivate() {
         // Verify deactivate goes to new
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.ds_transition(0, DsState::Active).await;
@@ -2993,7 +2993,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_deactivate_not_new() {
         // Verify deactivate goes to new
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::Deactivated).await;
     }
 
@@ -3001,7 +3001,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_deactivate_not_wa() {
         // Verify no deactivate from wa
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::Deactivated).await;
     }
@@ -3010,7 +3010,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_deactivate_not_wq() {
         // Verify no deactivate from wq
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.ds_transition(0, DsState::Deactivated).await;
@@ -3170,7 +3170,7 @@ mod up_test {
         // Verify after all three downstairs are deactivated, we can
         // transition the upstairs back to init.
 
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
         ds.ds_state[0] = DsState::Active;
@@ -3307,7 +3307,7 @@ mod up_test {
         // we are deactivating.
         // TODO: This test should change when we support this behavior.
 
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         assert!(up.set_deactivate(None).await.is_err());
         up.set_active().await.unwrap();
         up.set_deactivate(None).await.unwrap();
@@ -3318,7 +3318,7 @@ mod up_test {
     async fn deactivate_ds_not_when_active() {
         // No ds can deactivate when upstairs is not deactivating.
 
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
         ds.ds_state[0] = DsState::Active;
@@ -3343,7 +3343,7 @@ mod up_test {
     async fn deactivate_ds_not_when_initializing() {
         // No deactivate of downstairs when upstairs not active.
 
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
 
         // Verify we cannot deactivate before the upstairs is active
         assert!(!up.ds_deactivate(0).await);
@@ -3361,7 +3361,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_same_wa() {
         // Verify we can't go to the same state we are in
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitActive).await;
     }
@@ -3369,7 +3369,7 @@ mod up_test {
     #[tokio::test]
     #[should_panic]
     async fn downstairs_transition_same_wq() {
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
@@ -3378,7 +3378,7 @@ mod up_test {
     #[tokio::test]
     #[should_panic]
     async fn downstairs_transition_same_active() {
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.ds_transition(0, DsState::Active).await;
@@ -3388,7 +3388,7 @@ mod up_test {
     #[tokio::test]
     #[should_panic]
     async fn downstairs_transition_same_offline() {
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::Offline).await;
         up.ds_transition(0, DsState::Offline).await;
     }
@@ -3398,7 +3398,7 @@ mod up_test {
     async fn downstairs_transition_backwards() {
         // Verify state can't go backwards
         // New -> WA -> WQ -> WA
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
         up.ds_transition(0, DsState::WaitActive).await;
@@ -3408,7 +3408,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_bad_transition_wq() {
         // Verify error when going straight to WQ
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitQuorum).await;
     }
 
@@ -3416,7 +3416,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_bad_replay() {
         // Verify new goes to replay will fail
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::Replay).await;
     }
 
@@ -3424,7 +3424,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_bad_offline() {
         // Verify offline cannot go to WQ
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::Offline).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
     }
@@ -3433,7 +3433,7 @@ mod up_test {
     #[should_panic]
     async fn downstairs_transition_bad_active() {
         // Verify offline cannot go to WQ
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::Active).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
     }
@@ -3441,7 +3441,7 @@ mod up_test {
     #[tokio::test]
     async fn reconcile_not_ready() {
         // Verify reconcile returns false when a downstairs is not ready
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         up.ds_transition(0, DsState::WaitActive).await;
         up.ds_transition(0, DsState::WaitQuorum).await;
 
@@ -3475,7 +3475,7 @@ mod up_test {
     #[tokio::test]
     async fn reconcile_rep_in_progress_none() {
         // No repairs on the queue, should return None
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let mut ds = up.downstairs.lock().await;
         ds.ds_state[0] = DsState::Repair;
         ds.ds_state[1] = DsState::Repair;
@@ -3489,7 +3489,7 @@ mod up_test {
         // Verify that rep_in_progress will not give out work if a
         // downstairs is not in the correct state, and that it will
         // clear the work queue and mark other downstairs as failed.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3526,7 +3526,7 @@ mod up_test {
         // Verify that rep_done still works even after we have a downstairs
         // in the FailedRepair state. Verify that attempts to get new work
         // after a failed repair now return none.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3579,7 +3579,7 @@ mod up_test {
     async fn reconcile_repair_workflow_repair_later() {
         // Verify that a downstairs not in repair mode will ignore new
         // work requests until it transitions to repair.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3615,7 +3615,7 @@ mod up_test {
     #[should_panic]
     async fn reconcile_rep_in_progress_bad1() {
         // Verify the same downstairs can't mark a job in progress twice
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3642,7 +3642,7 @@ mod up_test {
     #[should_panic]
     async fn reconcile_rep_done_too_soon() {
         // Verify a job can't go new -> done
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3666,7 +3666,7 @@ mod up_test {
 
     #[tokio::test]
     async fn reconcile_repair_workflow_1() {
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let mut rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3728,7 +3728,7 @@ mod up_test {
     #[should_panic]
     async fn reconcile_leave_no_job_behind() {
         // Verify we can't start a new job before the old is finished.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3774,7 +3774,7 @@ mod up_test {
     #[tokio::test]
     async fn reconcile_repair_workflow_2() {
         // Verify Done or Skipped works for rep_done
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3815,7 +3815,7 @@ mod up_test {
     #[should_panic]
     async fn reconcile_repair_inprogress_not_done() {
         // Verify Done or Skipped works for rep_done
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3851,7 +3851,7 @@ mod up_test {
     #[should_panic]
     async fn reconcile_repair_workflow_too_soon() {
         // Verify that jobs must be in progress before done.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
@@ -3881,7 +3881,7 @@ mod up_test {
         // Convert an extent fix to the crucible repair messages that
         // are sent to the downstairs.  Verify that the resulting
         // messages are what we expect
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let mut ds = up.downstairs.lock().await;
         let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
         let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
@@ -3998,7 +3998,7 @@ mod up_test {
         // Convert another extent fix to the crucible repair messages that
         // are sent to the downstairs.  Verify that the resulting
         // messages are what we expect
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         let mut ds = up.downstairs.lock().await;
         let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
         let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
@@ -4114,7 +4114,7 @@ mod up_test {
     async fn bad_decryption_means_panic() {
         // Failure to decrypt means panic.
         // This result has a valid hash, but won't decrypt.
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -4195,7 +4195,7 @@ mod up_test {
     #[tokio::test]
     async fn bad_read_hash_means_panic() {
         // Verify that a bad hash on a read will panic
-        let upstairs = Upstairs::default();
+        let upstairs = Upstairs::test_default();
         upstairs.set_active().await.unwrap();
         let mut ds = upstairs.downstairs.lock().await;
 
@@ -4708,7 +4708,7 @@ mod up_test {
         // downstairs clients to failed.
         // This test also makes sure proper mutex behavior is used in
         // process_ds_operation.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         for cid in 0..3 {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
@@ -4794,7 +4794,7 @@ mod up_test {
         //
         // Verify after acking IOs, we can then send a flush and
         // clear the jobs (some now failed/skipped) from the work queue.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         for cid in 0..3 {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
@@ -4960,7 +4960,7 @@ mod up_test {
     #[tokio::test]
     async fn read_after_two_write_fail_is_alright() {
         // Verify that if two writes fail, a read can still be acked.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         for cid in 0..3 {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
@@ -5076,7 +5076,7 @@ mod up_test {
         // Verify that if a single write fails on a downstairs, a second
         // write can still be acked.
         // Then, send a flush and verify the work queue is cleared.
-        let up = Upstairs::default();
+        let up = Upstairs::test_default();
         for cid in 0..3 {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;

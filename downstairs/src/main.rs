@@ -272,7 +272,7 @@ async fn main() -> Result<()> {
         } => {
             // Open Region read only
             region = region::Region::open(
-                &data,
+                data,
                 Default::default(),
                 true,
                 true,

@@ -1,4 +1,4 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use std::borrow::Cow;
 use std::net::SocketAddr;
 
@@ -264,7 +264,7 @@ async fn rand_write(
      */
     let size = 1;
     let block_max = ri.total_blocks - size + 1;
-    let block_index = rng.gen_range(0..block_max) as usize;
+    let block_index = rng.gen_range(0..block_max);
 
     cli_write(guest, ri, block_index, size).await
 }
@@ -752,7 +752,7 @@ async fn process_cli_command(
             } else {
                 let mut vec: Vec<u8> = vec![255; 2];
                 vec[0] = (offset % 255) as u8;
-                vec[1] = (ri.write_log.get_seed(offset) % 255) as u8;
+                vec[1] = ri.write_log.get_seed(offset) % 255;
                 fw.send(CliMessage::ExpectedResponse(offset, vec)).await
             }
         }
