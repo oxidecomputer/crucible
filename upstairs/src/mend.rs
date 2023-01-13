@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use super::*;
 
 /*
@@ -112,7 +112,7 @@ impl DownstairsMend {
                 let ef = make_repair_list(i, c0, c1, c2, log_mrl);
                 dsm.mend.insert(i, ef);
             } else {
-                to_check.push(i as usize);
+                to_check.push(i);
             }
         }
 

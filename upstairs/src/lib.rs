@@ -4047,7 +4047,7 @@ pub struct Upstairs {
 }
 
 impl Upstairs {
-    pub fn default() -> Arc<Self> {
+    pub fn test_default() -> Arc<Self> {
         let opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![],

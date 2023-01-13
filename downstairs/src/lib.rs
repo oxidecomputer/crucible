@@ -2401,7 +2401,7 @@ pub fn create_region(
     region_options.set_uuid(uuid);
     region_options.set_encrypted(encrypted);
 
-    let mut region = Region::create(&data, region_options, log)?;
+    let mut region = Region::create(data, region_options, log)?;
     region.extend(extent_count as u32)?;
 
     Ok(region)
