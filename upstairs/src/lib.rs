@@ -4400,7 +4400,6 @@ impl Upstairs {
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
          */
-        let ddef = self.ddef.lock().await.get_def().unwrap();
         let fl = create_flush(
             next_id,
             dep,
@@ -4408,7 +4407,7 @@ impl Upstairs {
             gw_id,
             self.get_generation().await,
             snapshot_details,
-            ImpactedBlocks::new(ddef),
+            ImpactedBlocks::Empty,
         );
 
         let mut sub = HashMap::new();
@@ -4486,7 +4485,7 @@ impl Upstairs {
          * and length may span two extents, and eventually XXX, two regions.
          */
         let impacted_blocks = extent_from_offset(
-            ddef,
+            &ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
         );
@@ -4571,9 +4570,9 @@ impl Upstairs {
         }
 
         let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(impacted_blocks.tuples().len());
+            Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        for (eid, bo) in impacted_blocks.tuples() {
+        for (eid, offset) in impacted_blocks.blocks(&ddef) {
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
@@ -4616,7 +4615,7 @@ impl Upstairs {
 
             writes.push(crucible_protocol::Write {
                 eid,
-                offset: bo,
+                offset,
                 data: sub_data,
                 block_context: BlockContext {
                     hash,
@@ -4706,7 +4705,7 @@ impl Upstairs {
          * and length may span many extents, and eventually, TODO, regions.
          */
         let impacted_blocks = extent_from_offset(
-            ddef,
+            &ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
         );
@@ -4767,10 +4766,10 @@ impl Upstairs {
          * from extent_from_offset.
          */
         let mut requests: Vec<ReadRequest> =
-            Vec::with_capacity(impacted_blocks.len());
+            Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        for (eid, bo) in impacted_blocks.tuples() {
-            requests.push(ReadRequest { eid, offset: bo });
+        for (eid, offset) in impacted_blocks.blocks(&ddef) {
+            requests.push(ReadRequest { eid, offset });
         }
 
         sub.insert(next_id, 0); // XXX does this value matter?
@@ -6069,7 +6068,8 @@ impl fmt::Display for DsState {
  */
 #[derive(Debug)]
 struct DownstairsIO {
-    ds_id: u64,    // This MUST match our hashmap index
+    ds_id: u64, // This MUST match our hashmap index
+
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
 
