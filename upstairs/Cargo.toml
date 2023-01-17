@@ -58,7 +58,7 @@ openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 tokio-test = "*"
 tempfile = "3"
-test-strategy = "0.2.1"
+test-strategy = "0.3.0"
 proptest = "1.0.0"
 
 [build-dependencies]
