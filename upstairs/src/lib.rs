@@ -4461,6 +4461,22 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        /*
+         * Verify IO is in range for our region.  If not give up now and
+         * report error.
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e).await;
+                }
+                return Err(());
+            }
+        }
+
         self.set_flush_need().await;
 
         /*
@@ -4468,11 +4484,10 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span two extents, and eventually XXX, two regions.
          */
-        let ddef = &self.ddef.lock().await.get_def().unwrap();
         let impacted_blocks = extent_from_offset(
-            ddef,
+            &ddef,
             offset,
-            Block::from_bytes(data.len(), ddef),
+            Block::from_bytes(data.len(), &ddef),
         );
 
         /*
@@ -4555,9 +4570,9 @@ impl Upstairs {
         }
 
         let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(impacted_blocks.len(ddef));
+            Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        for (eid, offset) in impacted_blocks.blocks(ddef) {
+        for (eid, offset) in impacted_blocks.blocks(&ddef) {
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
@@ -4667,6 +4682,21 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        /*
+         * Verify IO is in range for our region
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e).await;
+                }
+                return Err(());
+            }
+        }
+
         self.set_flush_need().await;
 
         /*
@@ -4674,11 +4704,10 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span many extents, and eventually, TODO, regions.
          */
-        let ddef = &self.ddef.lock().await.get_def().unwrap();
         let impacted_blocks = extent_from_offset(
-            ddef,
+            &ddef,
             offset,
-            Block::from_bytes(data.len(), ddef),
+            Block::from_bytes(data.len(), &ddef),
         );
 
         /*
@@ -4737,9 +4766,9 @@ impl Upstairs {
          * from extent_from_offset.
          */
         let mut requests: Vec<ReadRequest> =
-            Vec::with_capacity(impacted_blocks.len(ddef));
+            Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        for (eid, offset) in impacted_blocks.blocks(ddef) {
+        for (eid, offset) in impacted_blocks.blocks(&ddef) {
             requests.push(ReadRequest { eid, offset });
         }
 

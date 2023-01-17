@@ -3,6 +3,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::*;
+
 /*
  * Where the unit is blocks, not bytes, make sure to reflect that in the
  * types used.
@@ -181,6 +183,26 @@ impl RegionDefinition {
     pub fn get_encrypted(&self) -> bool {
         self.encrypted
     }
+
+    /*
+     * Validate an IO would fit inside this region
+     */
+    pub fn validate_io(
+        &self,
+        offset: Block,
+        length: usize,
+    ) -> Result<(), CrucibleError> {
+        if offset.shift != self.extent_size.shift {
+            return Err(CrucibleError::BlockSizeMismatch);
+        }
+
+        let final_offset = offset.byte_value() + length as u64;
+
+        if final_offset > self.total_size() {
+            return Err(CrucibleError::OffsetInvalid);
+        }
+        Ok(())
+    }
 }
 
 /**
@@ -284,5 +306,134 @@ impl Default for RegionOptions {
             uuid: Uuid::nil(),
             encrypted: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_basic_region() {
+        /*
+         * Test basic RegionDefinition methods
+         */
+
+        let mut rd = RegionDefinition::default();
+        rd.set_block_size(512);
+        assert_eq!(rd.block_size(), 512);
+
+        rd.set_extent_size(Block::new(4, 9));
+        assert_eq!(rd.extent_size(), Block::new(4, 9));
+
+        rd.set_extent_count(1);
+        assert_eq!(rd.extent_count(), 1);
+
+        assert_eq!(rd.total_size(), 2048);
+    }
+
+    #[test]
+    fn test_region_validate_io() {
+        /*
+         * Test validate io method of RegionDefinition
+         * This is our region, 4 blocks:
+         *   |---|---|---|---|
+         * So, we test various IO sizes to verify how each pass/fail
+         */
+
+        let mut rd = RegionDefinition::default();
+        rd.set_block_size(512);
+        rd.set_extent_size(Block::new(4, 9));
+        rd.set_extent_count(1);
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO     |---|
+         */
+        assert_eq!(rd.validate_io(Block::new(0, 9), 512), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO         |---|
+         */
+        assert_eq!(rd.validate_io(Block::new(1, 9), 512), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO             |---|
+         */
+        assert_eq!(rd.validate_io(Block::new(2, 9), 512), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO                 |---|
+         */
+        assert_eq!(rd.validate_io(Block::new(3, 9), 512), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO                     |---|
+         */
+        assert!(rd.validate_io(Block::new(4, 9), 512).is_err());
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO     |---|---|
+         */
+        assert_eq!(rd.validate_io(Block::new(0, 9), 1024), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO         |---|---|
+         */
+        assert_eq!(rd.validate_io(Block::new(1, 9), 1024), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO             |---|---|
+         */
+        assert_eq!(rd.validate_io(Block::new(2, 9), 1024), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO                 |---|---|
+         */
+        assert!(rd.validate_io(Block::new(3, 9), 1024).is_err());
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO                     |---|---|
+         */
+        assert!(rd.validate_io(Block::new(4, 9), 1024).is_err());
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO     |---|---|---|
+         */
+        assert_eq!(rd.validate_io(Block::new(0, 9), 1536), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO         |---|---|---|
+         */
+        assert_eq!(rd.validate_io(Block::new(1, 9), 1536), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO             |---|---|---|
+         */
+        assert!(rd.validate_io(Block::new(2, 9), 1536).is_err());
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO     |---|---|---|---|
+         */
+        assert_eq!(rd.validate_io(Block::new(0, 9), 2048), Ok(()));
+
+        /*
+         *   Region |---|---|---|---|
+         *   IO         |---|---|---|---|
+         */
+        assert!(rd.validate_io(Block::new(1, 9), 2048).is_err());
     }
 }
