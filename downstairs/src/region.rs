@@ -260,23 +260,21 @@ impl Inner {
         &mut self,
         extent_block_indexes_and_hashes: Vec<(usize, u64)>,
     ) -> Result<()> {
-        let tx = self.metadb.transaction()?;
-
-        let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
-        let mut stmt = tx.prepare_cached(stmt)?;
-
         let n_blocks = extent_block_indexes_and_hashes.len();
-
         cdt::extent__context__truncate__start!(|| n_blocks as u64);
-        for (block, on_disk_hash) in extent_block_indexes_and_hashes {
-            let _rows_affected =
-                stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
+
+        let tx = self.metadb.transaction()?;
+        {
+            let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
+            let mut stmt = tx.prepare_cached(stmt)?;
+            for (block, on_disk_hash) in extent_block_indexes_and_hashes {
+                let _rows_affected =
+                    stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
+            }
         }
-        cdt::extent__context__truncate__done!(|| ());
-
-        drop(stmt);
-
         tx.commit()?;
+
+        cdt::extent__context__truncate__done!(|| ());
 
         Ok(())
     }
@@ -624,8 +622,8 @@ impl Extent {
             })),
         };
 
-        // Clean out any irrelevant block contexts, which may be present if downstairs
-        // crashed between a write() and a flush().
+        // Clean out any irrelevant block contexts, which may be present if
+        // downstairs crashed between a write() and a flush().
         extent.fully_rehash_and_clean_all_stale_contexts(false)?;
 
         Ok(extent)
@@ -1410,11 +1408,18 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        // XXX should we be clearing the dirty flag here? If we do, should we
-        // also increment the generation/flush number like flush() does?
-        // We don't have them coming in during the open, so if we updated them
-        // we'd need to increment the database values, and who are we to assume
-        // we're an authority on the matter here?
+        // Intentionally not clearing the dirty flag - we want to know that the
+        // extent is still considered dirty.
+
+        // Let's also clear out the internal map of hashes, in case it has any.
+        // This shouldn't be necessary, for two reasons
+        // 1. aside from tests, this function is only called before any writes
+        //    are issued.
+        // 2. this function should always produce results that match the state
+        //    of that map _anyway_.
+        // But, I never trust a cache, and may as well avoid keeping memory
+        // around at least right?
+        inner.dirty_blocks.clear();
 
         Ok(())
     }
@@ -3549,11 +3554,12 @@ mod test {
     }
 
     #[tokio::test]
-    fn test_flush_removes_partial_writes() -> Result<()> {
-        // Validate that incorrect context rows are removed by a full rehash,
-        // so that opening an extent will get rid of partial writes' block
-        // context rows. This is necessary for write_unwritten to work after
-        // a crash.
+    fn test_region_open_removes_partial_writes() -> Result<()> {
+        // Opening a dirty extent should fully rehash the extent to remove any
+        // contexts that don't correlate with data on disk. This is necessary
+        // for write_unwritten to work after a crash, and to move us into a
+        // good state for flushes (flushes only clear out contexts for blocks
+        // written since the last flush)
         //
         // Specifically, this test checks for the case where we had a brand new
         // block and a write to that blocks that failed such that only the
@@ -3566,7 +3572,6 @@ mod test {
         region.extend(1)?;
 
         // A write of some sort only wrote a block context row
-
         {
             let ext = &region.extents[0];
             let mut inner = ext.inner().await;
@@ -3629,6 +3634,183 @@ mod test {
         let response = &responses[0];
 
         assert_eq!(response.data.to_vec(), vec![0x55; 512]);
+
+        Ok(())
+    }
+
+    #[test]
+    /// It's very important that only_write_unwritten always works correctly.
+    /// We should never add contexts for blocks that haven't been written by
+    /// an upstairs.
+    fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
+    ) -> Result<()> {
+        // Make a region. It's empty, and should stay that way
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(1)?;
+
+        let ext = &region.extents[0];
+
+        // Write a block, but don't flush.
+        {
+            let data = Bytes::from(vec![0x55; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            ext.write(10, &[&write], false)?;
+        }
+
+        // We haven't flushed, but this should leave our context in place.
+        ext.fully_rehash_and_clean_all_stale_contexts(false)?;
+
+        // Therefore, we expect that write_unwritten to the first block won't
+        // do anything.
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            ext.write(20, &[&write], true)?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            };
+            ext.read(21, &[&read], &mut resp)?;
+
+            // We should not get back our data, because block 0 was written.
+            assert_ne!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        // But, writing to the second block still should!
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(1),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            ext.write(30, &[&write], true)?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+            };
+            ext.read(31, &[&read], &mut resp)?;
+
+            // We should get back our data! Block 1 was never written.
+            assert_eq!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(1),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        Ok(())
+    }
+
+    /// If a write successfully put a context into the database, but it never
+    /// actually got the data onto the disk, that block should revert back to
+    /// being "unwritten". After all, the data never was truly written.
+    ///
+    /// This test is very similar to test_region_open_removes_partial_writes,
+    /// but is distinct in that it call fully_rehash directly, without closing
+    /// and re-opening the extent.
+    #[test]
+    fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
+    ) -> Result<()> {
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(1)?;
+
+        let ext = &region.extents[0];
+
+        // Partial write, the data never hits disk, but there's a context
+        // in the DB
+        {
+            let mut inner = ext.inner();
+            inner.set_block_contexts(&[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 1024,
+                },
+                block: 0,
+                on_disk_hash: 65536,
+            }])?;
+        }
+
+        // Run a full rehash, which should clear out that partial write.
+        ext.fully_rehash_and_clean_all_stale_contexts(false)?;
+
+        // Writing to block 0 should succeed with only_write_unwritten
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            ext.write(30, &[&write], true)?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            };
+            ext.read(31, &[&read], &mut resp)?;
+
+            // We should get back our data! Block 1 was never written.
+            assert_eq!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
 
         Ok(())
     }
