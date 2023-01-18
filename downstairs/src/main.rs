@@ -261,7 +261,8 @@ async fn main() -> Result<()> {
                 only_show_differences,
                 no_color,
                 log,
-            ).await?;
+            )
+            .await?;
             Ok(())
         }
         Args::Export {

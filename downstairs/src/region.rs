@@ -1792,7 +1792,9 @@ impl Region {
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
-            extent.write(job_id, &writes[..], only_write_unwritten).await?;
+            extent
+                .write(job_id, &writes[..], only_write_unwritten)
+                .await?;
         }
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id);
@@ -1830,7 +1832,9 @@ impl Region {
                     batched_reads.push(request);
                 } else {
                     let extent = &self.extents[_eid as usize];
-                    extent.read(job_id, &batched_reads[..], &mut responses).await?;
+                    extent
+                        .read(job_id, &batched_reads[..], &mut responses)
+                        .await?;
 
                     eid = Some(request.eid);
                     batched_reads.clear();
@@ -1845,7 +1849,9 @@ impl Region {
 
         if let Some(_eid) = eid {
             let extent = &self.extents[_eid as usize];
-            extent.read(job_id, &batched_reads[..], &mut responses).await?;
+            extent
+                .read(job_id, &batched_reads[..], &mut responses)
+                .await?;
         }
         cdt::os__read__done!(|| job_id);
 
@@ -1873,7 +1879,9 @@ impl Region {
         );
 
         let extent = &self.extents[eid];
-        extent.flush_block(flush_number, gen_number, 0, &self.log).await?;
+        extent
+            .flush_block(flush_number, gen_number, 0, &self.log)
+            .await?;
 
         Ok(())
     }
@@ -1901,7 +1909,9 @@ impl Region {
         cdt::os__flush__start!(|| job_id);
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number, gen_number, job_id, &self.log).await?;
+            extent
+                .flush_block(flush_number, gen_number, job_id, &self.log)
+                .await?;
         }
         cdt::os__flush__done!(|| job_id);
 

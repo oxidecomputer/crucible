@@ -599,12 +599,16 @@ where
                     flush_number,
                     gen_number
                 );
-                match d.region.region_flush_extent(
-                    *extent_id,
-                    *flush_number,
-                    *gen_number,
-                    *repair_id,
-                ).await {
+                match d
+                    .region
+                    .region_flush_extent(
+                        *extent_id,
+                        *flush_number,
+                        *gen_number,
+                        *repair_id,
+                    )
+                    .await
+                {
                     Ok(()) => Message::RepairAckId {
                         repair_id: *repair_id,
                     },
