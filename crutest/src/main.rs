@@ -420,13 +420,8 @@ impl WriteLog {
                 self.count_cur[index],
             );
 
-            if s_value >= self.count_min[index]
-                && s_value <= self.count_cur[index]
-            {
-                res = true
-            } else {
-                res = false
-            };
+            res = s_value >= self.count_min[index]
+                && s_value <= self.count_cur[index];
 
             // Only update if requested and the range was valid.
             if update && res && self.count_cur[index] != s_value {
@@ -1997,6 +1992,33 @@ async fn burst_workload(
 /*
  * issue some random number of IOs, then wait for an ACK for all.
  * We try to exit this test and leave jobs outstanding.
+ * The write log works by counting the number of writes to a block, and
+ * writing that value in the block as the data. When we write, we add one
+ * to the write counter.  We use that write counter to verify that each
+ * block has a number that we expect. It crude, but does add some value.
+ *
+ * When we issue a flush, we replace the minimum with the current and
+ * continue. This gives us a "window" of possible values for our write counter. When
+ * dealing with this test, we intentionally try to issue writes without a flush and then let
+ * the repair happen, but we can only verify a "range" of possible values, as we don't actually
+ * know what write finished last, and with repair, we only know if a block is dirty, we don't
+ * know which block has the "newest" dirty data, so it's possible that during repair we
+ * actually go back to a previous write (up to the most recent flush).
+ *
+ * The repair test does 30 IOs, but will issue a "commit" of the internal write log if it issues
+ * (and gets and ACK) back from a flush. This commit of the write means we know the write
+ * counter on disk is "at least" as high as the current (and after the commit, the minimum) in
+ * our write log.
+ *
+ * The problem would be that the test would do a bunch of IO, but never issue a flush, then the
+ * test would quit and restart, and then the next test would run, but the first thing the test
+ * does is "commit" the current write log. This initial commit is not correct, as we never had
+ * a flush, so we can't yet update the minimum.
+ *
+ * This was also a rare occurrence as usually their would be 1 flush in 30 operations, and even
+ * if there was no a flush, we also have to have a block having data older than the write logs
+ * current value at the time of the new test starting and issuing the commit (meaning a repair
+ * happened, and it did pick the extent with "older" data).
  */
 async fn repair_workload(
     guest: &Arc<Guest>,
