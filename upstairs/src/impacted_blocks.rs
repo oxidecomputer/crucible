@@ -122,7 +122,7 @@ impl FusedIterator for ImpactedBlockIter {}
 
 impl ImpactedBlocks {
     /// Create a new ImpactedBlocks range from first and last impacted blocks
-    /// (inclusive) Returns Empty if last_impacted < first_impacted.
+    /// (inclusive). Panics if last_impacted < first_impacted.
     pub fn new(
         first_impacted: ImpactedAddr,
         last_impacted: ImpactedAddr,
