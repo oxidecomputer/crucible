@@ -1,4 +1,4 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -233,8 +233,8 @@ async fn get_region_info(
      */
     const MAX_IO_BYTES: usize = 1024 * 1024;
     let mut max_block_io = MAX_IO_BYTES / block_size as usize;
-    if total_blocks < max_block_io as usize {
-        max_block_io = total_blocks as usize;
+    if total_blocks < max_block_io {
+        max_block_io = total_blocks;
     }
 
     println!(
@@ -1142,7 +1142,7 @@ fn validate_vec(
                 );
             }
         }
-        data_offset += bs as usize;
+        data_offset += bs;
     }
     res
 }
@@ -1290,13 +1290,13 @@ async fn generic_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10) as usize;
+            let size = rng.gen_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = ri.total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max) as usize;
+            let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset =
@@ -1386,7 +1386,7 @@ async fn dirty_workload(
     let block_max = ri.total_blocks - size + 1;
     let count_width = count.to_string().len();
     for c in 1..=count {
-        let block_index = rng.gen_range(0..block_max) as usize;
+        let block_index = rng.gen_range(0..block_max);
         /*
          * Convert offset and length to their byte values.
          */
@@ -1457,11 +1457,11 @@ pub fn perf_csv(
     // Convert all Durations to u64 nanoseconds.
     let times = iotimes
         .iter()
-        .map(|x| (x.as_secs() as u64 * 100000000) + x.subsec_nanos() as u64)
+        .map(|x| (x.as_secs() * 100000000) + x.subsec_nanos() as u64)
         .collect::<Vec<u64>>();
 
     let time_in_nsec =
-        duration.as_secs() as u64 * 100000000 + duration.subsec_nanos() as u64;
+        duration.as_secs() * 100000000 + duration.subsec_nanos() as u64;
 
     wtr.serialize(Record {
         label: msg.to_string(),
@@ -1609,9 +1609,8 @@ async fn perf_workload(
             )
         })
         .collect();
-    let read_buffers: Vec<Buffer> = (0..io_depth)
-        .map(|_| Buffer::new(io_size as usize))
-        .collect();
+    let read_buffers: Vec<Buffer> =
+        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
 
     let es = ri.extent_size.value;
     let ec = ri.total_blocks as u64 / es;
@@ -1742,7 +1741,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
      */
     let size = 1;
     let block_max = ri.total_blocks - size + 1;
-    let block_index = rng.gen_range(0..block_max) as usize;
+    let block_index = rng.gen_range(0..block_max);
 
     /*
      * Convert offset and length to their byte values.
@@ -1880,7 +1879,7 @@ async fn rand_workload(
          * Pick a random size (in blocks) for the IO, up to the size of the
          * entire region.
          */
-        let size = rng.gen_range(1..=ri.max_block_io) as usize;
+        let size = rng.gen_range(1..=ri.max_block_io);
 
         /*
          * Once we have our IO size, decide where the starting offset should
@@ -1888,7 +1887,7 @@ async fn rand_workload(
          * IO size.
          */
         let block_max = ri.total_blocks - size + 1;
-        let block_index = rng.gen_range(0..block_max) as usize;
+        let block_index = rng.gen_range(0..block_max);
 
         /*
          * Convert offset and length to their byte values.
@@ -2040,13 +2039,13 @@ async fn repair_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10) as usize;
+            let size = rng.gen_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = ri.total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max) as usize;
+            let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset =
@@ -2138,13 +2137,13 @@ async fn demo_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10) as usize;
+            let size = rng.gen_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = ri.total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max) as usize;
+            let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset =

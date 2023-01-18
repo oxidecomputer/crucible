@@ -1,9 +1,6 @@
-// Copyright 2021 Oxide Computer Company
-#![cfg_attr(not(usdt_stable_asm), feature(asm))]
-#![cfg_attr(
-    all(target_os = "macos", not(usdt_stable_asm_sym)),
-    feature(asm_sym)
-)]
+// Copyright 2023 Oxide Computer Company
+#![cfg_attr(usdt_need_asm, feature(asm))]
+#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
 use futures::executor;
 use futures::lock::{Mutex, MutexGuard};
@@ -223,7 +220,9 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
         let mut writes = vec![];
-        for (eid, offset) in extent_from_offset(rm, offset, nblocks).tuples() {
+        for (eid, offset) in
+            extent_from_offset(&rm, offset, nblocks).blocks(&rm)
+        {
             let len = Block::new_with_ddef(1, &region.def());
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
@@ -2404,7 +2403,7 @@ pub fn create_region(
     region_options.set_uuid(uuid);
     region_options.set_encrypted(encrypted);
 
-    let mut region = Region::create(&data, region_options, log)?;
+    let mut region = Region::create(data, region_options, log)?;
     region.extend(extent_count as u32)?;
 
     Ok(region)

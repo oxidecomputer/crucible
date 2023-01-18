@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
@@ -1425,7 +1425,7 @@ impl Region {
         }
 
         for eid in to_open {
-            self.reopen_extent(eid as usize)?;
+            self.reopen_extent(eid)?;
         }
 
         Ok(())
@@ -1656,7 +1656,7 @@ impl Region {
         // been synced so that change is persistent.
         let current_dir = extent_dir(&self.dir, eid as u32);
 
-        sync_path(&current_dir, &self.log)?;
+        sync_path(current_dir, &self.log)?;
         Ok(())
     }
 

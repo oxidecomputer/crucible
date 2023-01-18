@@ -1,4 +1,4 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
@@ -1660,7 +1660,7 @@ mod test {
                 *port,
             )
             .unwrap();
-            fs::create_dir_all(&ds_region_dir).unwrap();
+            fs::create_dir_all(ds_region_dir).unwrap();
         }
 
         // Verify that we can find the existing region directories.
@@ -1690,7 +1690,7 @@ mod test {
                 *port,
             )
             .unwrap();
-            fs::create_dir_all(&ds_region_dir).unwrap();
+            fs::create_dir_all(ds_region_dir).unwrap();
         }
 
         // Verify that the missing region will return error.

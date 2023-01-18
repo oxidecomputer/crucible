@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 bytes = "1"
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.1", features = ["derive"] }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
@@ -17,7 +17,7 @@ futures-core = "0.3"
 ringbuffer = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.23.1", features = ["full"] }
+tokio = { version = "1.24.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.5"
 nbd = "0.2.3"

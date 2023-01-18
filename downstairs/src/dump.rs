@@ -493,9 +493,14 @@ fn show_extent(
     }
     println!();
     println!();
+    // Width for BLOCKS column
+    let max_block =
+        blocks_per_extent * cmp_extent as u64 + blocks_per_extent - 1;
+    // Get the max possible width for a single block
+    let block_width = std::cmp::max(3, max_block.to_string().len());
 
     // Print the header
-    print!("{0:5} ", "BLOCK");
+    print!("{:>0width$} ", "BLOCK", width = block_width);
     for (index, _) in region_dir.iter().enumerate() {
         print!(" {0:^2}", format!("D{}", index));
     }
@@ -580,7 +585,7 @@ fn show_extent(
         // Now that we have collected all the results, print them
         let real_block = (blocks_per_extent * cmp_extent as u64) + block;
         if !only_show_differences || different {
-            print!("{:5} ", real_block);
+            print!("{:0width$} ", real_block, width = block_width);
 
             for column in data_columns.iter().take(dir_count) {
                 print!("  {}", column);

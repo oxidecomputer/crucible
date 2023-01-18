@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -133,14 +133,9 @@ async fn main() -> Result<()> {
         let guest = Arc::new(Guest::new());
 
         let gen: u64 = i as u64 + opt.gen;
-        let _join_handle = up_main(
-            crucible_opts.clone(),
-            gen as u64,
-            None,
-            guest.clone(),
-            None,
-        )
-        .await?;
+        let _join_handle =
+            up_main(crucible_opts.clone(), gen, None, guest.clone(), None)
+                .await?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

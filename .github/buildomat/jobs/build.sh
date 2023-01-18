@@ -3,7 +3,7 @@
 #: name = "build"
 #: variety = "basic"
 #: target = "helios"
-#: rust_toolchain = "nightly-2021-11-24"
+#: rust_toolchain = "1.66"
 #: output_rules = [
 #:	"/work/bins/*",
 #:	"/work/scripts/*",
