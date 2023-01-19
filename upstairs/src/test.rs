@@ -4870,15 +4870,9 @@ mod up_test {
 
         let id = ds.next_id();
 
-		let (request, iblocks) = generic_write_request();
-		let op = create_write_eob(
-			id,
-			vec![],
-			10,
-			vec![request],
-			false,
-			iblocks,
-		);
+        let (request, iblocks) = generic_write_request();
+        let op =
+            create_write_eob(id, vec![], 10, vec![request], false, iblocks);
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         if make_in_progress {
