@@ -55,7 +55,7 @@ pub struct Inner {
 
     /// Map of block number to on_disk_hash of the block. Stores blocks that
     /// have been written since the last flush.
-    dirty_blocks: HashMap<usize, u64>,
+    dirty_blocks: HashSet<usize>,
 }
 
 impl Inner {
@@ -618,7 +618,7 @@ impl Extent {
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
-                dirty_blocks: HashMap::new(),
+                dirty_blocks: HashSet::new(),
             })),
         };
 
@@ -782,7 +782,7 @@ impl Extent {
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
-                dirty_blocks: HashMap::new(),
+                dirty_blocks: HashSet::new(),
             })),
         })
     }
@@ -1153,7 +1153,7 @@ impl Extent {
             // and handles this as well.
             let _ = inner
                 .dirty_blocks
-                .insert(write.offset.value as usize, on_disk_hash);
+                .insert(write.offset.value as usize);
         }
         tx.commit()?;
 
@@ -1302,16 +1302,59 @@ impl Extent {
             (job_id, self.number, self.extent_size.value)
         });
 
-        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> =
-            inner.dirty_blocks.drain().collect();
+        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> = Vec::with_capacity(inner.dirty_blocks.len());
+        let mut dirty_blocks: Vec<usize> = inner.dirty_blocks.drain().collect();
+        dirty_blocks.sort_unstable();
+
+        // Rehash any parts of the file that we wrote data to since the last
+        // flush
+        if !dirty_blocks.is_empty() {
+            let mut inner_file_buffered =
+                BufReader::with_capacity(64 * 1024, &inner.file);
+
+            let mut dirty_block_iter = dirty_blocks.iter().copied();
+            let mut run_start = dirty_block_iter.next().unwrap();
+            let mut prev_block = run_start;
+            let mut block_data = vec![0; self.block_size as usize];
+
+            // Iterate, and process all but the last contiguous run
+            for next in dirty_block_iter {
+                if next != prev_block + 1 {
+                    inner_file_buffered.seek(SeekFrom::Start(run_start as u64 * self.block_size))?;
+                    for block_idx in run_start..=prev_block {
+                        inner_file_buffered.read_exact(&mut block_data)?;
+                        extent_block_indexes_and_hashes
+                            .push((block_idx, integrity_hash(&[&block_data])));
+                    }
+                    run_start = next;
+                    prev_block = next;
+                }
+            }
+
+            // Process last contiguous run
+            inner_file_buffered.seek(SeekFrom::Start(run_start as u64 * self.block_size))?;
+            for block_idx in run_start..=prev_block {
+                inner_file_buffered.read_exact(&mut block_data)?;
+                extent_block_indexes_and_hashes
+                    .push((block_idx, integrity_hash(&[&block_data])));
+            }
+        }
+
+        // inner.dirty_blocks.clear();
+
+
+
+
+        // Iterate over file contents on disk, rehashing only the blocks that
+        // we've written to since the last write
 
         // Sorting here is extremely important to get good performance out of
         // truncate_encryption_contexts_and_hashes() later.
         //
         // Benchmarks show that sorting by just block doubles how fast this sort
         // happens compared to a sort_unstable() that considers block and value.
-        extent_block_indexes_and_hashes
-            .sort_unstable_by(|(l, _), (r, _)| l.cmp(r));
+        // extent_block_indexes_and_hashes
+        //     .sort_unstable_by(|(l, _), (r, _)| l.cmp(r));
 
         // We could shrink this to 0, but it's nice not to have to expand the
         // dirty_blocks HashMap on small writes. They have a hard enough time
@@ -2337,7 +2380,7 @@ mod test {
         let inn = Inner {
             file: ff,
             metadb: Connection::open_in_memory().unwrap(),
-            dirty_blocks: HashMap::new(),
+            dirty_blocks: HashSet::new(),
         };
 
         /*
