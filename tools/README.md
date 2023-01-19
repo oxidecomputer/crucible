@@ -5,21 +5,6 @@ Various scripts used for Crucible
 ## create-generic-sd.sh
 A simple script to create three downstairs regions at var/88[1-3]0
 
-## downstairs_daemon.sh
-NOTE: don't use this if you can, use the `dsc` binary instead.
-A highly custom script that starts three downstairs in a loop and will
-keep them restarted when they are killed.  A bunch of assumptions are made
-around where the region directory is and which ports the downstairs use.
-You can pause the downstairs kill by creating the /tmp/ds_test/up file.
-To stop the script all together, create the /tmp/ds_test/stop file.
-
-After starting the downstairs, the user can hit enter and the script
-will randomly kill (and then restart) a downstairs process.
-
-If a downstairs dies for any other reason then being killed with the
-generic default kill signal, the script will stop everything and leave
-the logs behind in /tmp/ds_test/
-
 ## dtrace
 A collection of dtrace scripts for use on Crucible.  A README.md in that
 directory contains more information.
@@ -29,6 +14,11 @@ A loop test that runs the crucible-hammer test in a loop.  It is expected
 that you already have downstairs running on port 88[1-3]0.
 The test will check for panic or assert in the output and stop if it
 detects them or a test exits with an error.
+
+## make-nightly.sh
+A simple script to build and package all that is required to run the
+test_nightly.sh script.  Use this when you want to manually create and
+run the nightly tests on a system.
 
 ## show_ox_propolis.sh
 A sample script that uses `oxdb` and `jq` to dump some oximeter stats
