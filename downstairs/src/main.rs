@@ -227,12 +227,12 @@ async fn main() -> Result<()> {
             )?;
 
             if let Some(ref ip) = import_path {
-                downstairs_import(&mut region, ip).unwrap();
+                downstairs_import(&mut region, ip).await.unwrap();
                 /*
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None, 0)?;
+                region.region_flush(1, 0, &None, 0).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
@@ -261,7 +261,8 @@ async fn main() -> Result<()> {
                 only_show_differences,
                 no_color,
                 log,
-            )?;
+            )
+            .await?;
             Ok(())
         }
         Args::Export {
@@ -279,7 +280,7 @@ async fn main() -> Result<()> {
                 &log,
             )?;
 
-            downstairs_export(&mut region, export_path, skip, count).unwrap();
+            downstairs_export(&mut region, export_path, skip, count).await?;
             Ok(())
         }
         Args::Run {

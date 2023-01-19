@@ -336,7 +336,7 @@ mod test {
         region.extend(3)?;
 
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
+        ext_one.close().await?;
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);
