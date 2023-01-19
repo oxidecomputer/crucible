@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
@@ -329,7 +329,7 @@ impl WriteLog {
     // volume, then update_wc() should be called first to increment the
     // counter before we get a new seed.
     fn get_seed(&self, index: usize) -> u8 {
-        (self.count_cur[index] % 250) as u8
+        (self.count_cur[index] & 0xff) as u8
     }
 
     // This is called before a test where we expect to be recovering and we
@@ -358,38 +358,83 @@ impl WriteLog {
         value: u8,
         update: bool,
     ) -> bool {
-        let max = (self.count_cur[index] % 250) as u8;
-        let min = (self.count_min[index] % 250) as u8;
-
         let res;
-        let mut new_max = self.count_cur[index];
-        // A little bit of work here when max rolls over and is < min.
-        // Because we need to handle the update case, we also need
-        // to determine what the "correct" count_cur should be if we
-        // are going to update our internal counter to match the value
-        // passed to us from the caller.
-        if min > max {
-            if value >= min && value < 250 {
+
+        if self.count_min[index] & 0xff > self.count_cur[index] & 0xff {
+            // Special case when the min and max cross a u8 boundary.
+            let min_adjusted_value = (self.count_min[index] & 0xff) as u8;
+            let cur_adjusted_value = (self.count_cur[index] & 0xff) as u8;
+            println!(
+                "SPEC  v:{}  min_av:{} cur_av:{}  cm:{} cc:{}",
+                value,
+                min_adjusted_value,
+                cur_adjusted_value,
+                self.count_min[index],
+                self.count_cur[index],
+            );
+
+            let mut new_cur = value as u32;
+            if value >= min_adjusted_value {
                 res = true;
-                new_max = self.count_cur[index] + 250 - value as u32;
-            } else if value <= max {
+                // Figure out the delta between value and the minimum,
+                // then add that to the non-adjusted minimum and make
+                // that our new maximum.
+                let delta = (value - min_adjusted_value) as u32;
+                new_cur = self.count_min[index] + delta;
+                println!("new cur is {} from min", new_cur);
+            } else if value <= cur_adjusted_value {
                 res = true;
-                new_max = self.count_cur[index] + (max - value) as u32;
+                // Figure out the delta between value and the max(cur)
+                // and then subtract that from the current cur to set
+                // our new expected value.
+                let delta = (cur_adjusted_value - value) as u32;
+                new_cur = self.count_cur[index] - delta;
+                println!("new cur is {} from cur", new_cur);
             } else {
+                // The value in not in the expected range
                 res = false;
             }
-        } else if value >= min && value <= max {
-            res = true;
-            new_max = self.count_cur[index] - (max - value) as u32;
+
+            // If update requested (and we are in the range) then update
+            // the counter to reflect the new "max".
+            if update && res {
+                if new_cur != self.count_cur[index] {
+                    println!("Adjusting new cur to {}", new_cur);
+                    self.count_cur[index] = new_cur;
+                } else {
+                    println!("No adjustment necessary");
+                }
+            }
         } else {
-            res = false;
-        }
-        if update {
+            // The regular case, just be sure we are between the
+            // lower and upper expected values.
+            let shift = self.count_min[index] / 256;
+
+            let s_value = value as u32 + (256 * shift);
             println!(
-                "Update block {} to {} (min:{} max:{} res:{}",
-                index, new_max, min, max, res
+                "Shift {}, v:{} sv:{} min:{} cur:{}",
+                shift,
+                value,
+                s_value,
+                self.count_min[index],
+                self.count_cur[index],
             );
-            self.count_cur[index] = new_max;
+
+            res = s_value >= self.count_min[index]
+                && s_value <= self.count_cur[index];
+
+            // Only update if requested and the range was valid.
+            if update && res && self.count_cur[index] != s_value {
+                println!(
+                    "Update block {} to {} (min:{} max:{} res:{})",
+                    index,
+                    s_value,
+                    self.count_min[index],
+                    self.count_cur[index],
+                    res,
+                );
+                self.count_cur[index] = s_value;
+            }
         }
         res
     }
@@ -876,6 +921,8 @@ async fn verify_volume(
         ri.total_blocks, range
     );
 
+    let mut result = Ok(());
+
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
@@ -910,19 +957,23 @@ async fn verify_volume(
             range,
         ) {
             ValidateStatus::Bad => {
-                pb.finish_with_message("Error");
-                bail!(
+                println!(
                     "Error in block range {} -> {}",
                     block_index,
                     block_index + next_io_blocks
                 );
+                result = Err(anyhow!("Validation error".to_string()));
             }
             ValidateStatus::InRange => {
                 if range {
                     {}
                 } else {
-                    pb.finish_with_message("Error");
-                    bail!("Error at block {}", block_index);
+                    println!(
+                        "Error in block range {} -> {}",
+                        block_index,
+                        block_index + next_io_blocks
+                    );
+                    result = Err(anyhow!("Validation error".to_string()));
                 }
             }
             ValidateStatus::Good => {}
@@ -932,7 +983,7 @@ async fn verify_volume(
         pb.set_position(block_index as u64);
     }
     pb.finish();
-    Ok(())
+    result
 }
 
 /*
@@ -1050,35 +1101,40 @@ fn validate_vec(
         let seed = wl.get_seed(block_offset);
         for i in 1..bs {
             if data[data_offset + i] != seed {
+                // Our data is not what we expect.
+                // Figure out if it is in range if requested, and print a
+                // message reflecting what the situation is.
                 let byte_offset = bs as u64 * block_offset as u64;
-                println!(
-                    "Mismatch in Block:{} Volume offset:{}  Expected:{} Got:{}",
-                    block_offset,
-                    byte_offset + i as u64,
-                    seed,
-                    data[data_offset + i],
-                );
+                let msg;
                 if range {
                     if wl.validate_seed_range(
                         block_offset,
                         data[data_offset + i],
                         true,
                     ) {
-                        println!(
-                            "Block {} is in valid seed range",
-                            block_offset
-                        );
-                        res = ValidateStatus::InRange;
+                        msg = "In Range   Block:".to_string();
+                        // Only change if it is currently good.
+                        if res == ValidateStatus::Good {
+                            res = ValidateStatus::InRange;
+                        }
                     } else {
-                        println!(
-                            "Block {} Also fails valid seed range",
-                            block_offset
-                        );
+                        msg = "Out of Range Block:".to_string();
                         res = ValidateStatus::Bad;
                     }
                 } else {
+                    msg = "Mismatch     Block:".to_string();
                     res = ValidateStatus::Bad;
                 }
+
+                println!(
+                    "{}:{} bo:{} Volume offset:{}  Expected:{} Got:{}",
+                    msg,
+                    block_offset,
+                    i,
+                    byte_offset + i as u64,
+                    seed,
+                    data[data_offset + i],
+                );
             }
         }
         data_offset += bs;
@@ -1945,9 +2001,6 @@ async fn repair_workload(
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    // Any state coming in should have been verified, so we can
-    // consider the current write log to be the minimum possible values.
-    ri.write_log.commit();
     // TODO: Allow user to request r/w/f percentage (how???)
     // We want at least one write, otherwise there will be nothing to
     // repair.
@@ -2005,18 +2058,23 @@ async fn repair_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                println!(
+                print!(
                     "{:>0width$}/{:>0width$} Write \
-                    block {:>bw$}  len {:>sw$}  data:{:>3}",
+                    block {:>bw$}  len {:>sw$}  data:",
                     c,
                     count,
                     offset.value,
                     data.len(),
-                    data[1],
                     width = count_width,
                     bw = block_width,
                     sw = size_width,
                 );
+                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                for i in 0..size {
+                    print!("{:>3} ", ri.write_log.get_seed(block_index + i));
+                }
+                println!();
+
                 guest.write(offset, data).await?;
             } else {
                 // Read
@@ -2388,14 +2446,29 @@ mod test {
 
     #[test]
     fn test_wl_update_rollover() {
-        // Rollover of u8 at 250
+        // Rollover of u8 at 255
         let mut write_log = WriteLog::new(10);
         write_log.set_wc(0, 249);
         assert_eq!(write_log.get_seed(0), 249);
         write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 250);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 251);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 252);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 253);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 254);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 255);
+
+        write_log.update_wc(0);
         assert_eq!(write_log.get_seed(0), 0);
         // Seed at zero does not mean the counter is zero
         assert!(!write_log.unwritten(0));
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 1);
     }
 
     #[test]
@@ -2419,7 +2492,7 @@ mod test {
     fn test_wl_update_commit_rollover() {
         // Write log returns highest after a commit, but before u8 conversion
         let mut write_log = WriteLog::new(10);
-        write_log.set_wc(0, 249);
+        write_log.set_wc(0, 255);
         write_log.commit();
         write_log.update_wc(0);
         assert_eq!(write_log.get_seed(0), 0);
@@ -2515,6 +2588,7 @@ mod test {
         assert!(write_log.validate_seed_range(1, 3, true));
         assert_eq!(write_log.get_seed(1), 3);
     }
+
     #[test]
     fn test_wl_commit_range_update_min() {
         // Verify that a validate_seed_range also updates the internal
@@ -2548,22 +2622,312 @@ mod test {
     }
 
     #[test]
-    fn test_wl_commit_range_rollover() {
-        // validate seed range works if write log seed rolls over.
+    fn test_wl_commit_range_rollover_range() {
+        // validate seed range works if write log seed rolls over and
+        // the min max are away from the rollover point
         let mut write_log = WriteLog::new(10);
-        write_log.set_wc(0, 248);
+        write_log.set_wc(0, 254);
         write_log.commit();
-        write_log.update_wc(0); // 249
+        write_log.update_wc(0); // 255
         write_log.update_wc(0); // 0
         write_log.update_wc(0); // 1
         assert_eq!(write_log.get_seed(0), 1);
-        assert!(!write_log.validate_seed_range(0, 247, false));
-        assert!(write_log.validate_seed_range(0, 248, false));
-        assert!(write_log.validate_seed_range(0, 249, false));
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
         assert!(write_log.validate_seed_range(0, 0, false));
         assert!(write_log.validate_seed_range(0, 1, false));
         assert!(!write_log.validate_seed_range(0, 2, false));
     }
+
+    #[test]
+    fn test_wl_commit_range_rollover_min_at() {
+        // validate seed range works if write log seed rolls over and
+        // the min is at the rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 255);
+        write_log.commit();
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert!(!write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_rollover_max_at() {
+        // validate seed range works if write log seed rolls over and
+        // the max is at the rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 253);
+        write_log.commit();
+        write_log.update_wc(0); // 254
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        assert_eq!(write_log.get_seed(0), 0);
+        assert!(!write_log.validate_seed_range(0, 252, false));
+        assert!(write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_update_rollover_below() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is below the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, true));
+        // Once we make a new max, the old range is invalid.
+        assert!(!write_log.validate_seed_range(0, 255, false));
+        assert!(!write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_update_rollover_above() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is across the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        // Below the range is not okay.
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        // Pick a "new" range just above the roll over point.
+        assert!(write_log.validate_seed_range(0, 0, true));
+        // Lower range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        // Anything above is no longer valid.
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_no_update_below_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is below the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+
+        // Below the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 253, true));
+        assert_eq!(write_log.count_cur[0], 257);
+
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_no_update_above_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is above in the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        // The actual count continues above 255
+        assert_eq!(write_log.count_cur[0], 257);
+
+        // Above the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 2, true));
+        assert_eq!(write_log.count_cur[0], 257);
+
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+    }
+
+    // More rollover tests, but starting at the second rollover point
+    #[test]
+    fn test_wl_commit_1024_range_rollover_range() {
+        // validate seed range works if write log seed rolls over
+        // at the second rollover point and the min max are away
+        // from the second rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255 or 1023
+        write_log.update_wc(0); // 0 or 1024
+        write_log.update_wc(0); // 1 or 1025
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_rollover_min_at() {
+        // validate seed range works if write log seed rolls over and
+        // the min is at the second rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1023);
+        write_log.commit();
+        write_log.update_wc(0); // 0 or 1024
+        write_log.update_wc(0); // 1 or 1025
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        assert!(!write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_rollover_max_at() {
+        // validate seed range works if write log seed rolls over and
+        // the max is at the rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1021);
+        write_log.commit();
+        write_log.update_wc(0); // 254
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        assert_eq!(write_log.get_seed(0), 0);
+        assert_eq!(write_log.count_cur[0], 1024);
+        assert!(!write_log.validate_seed_range(0, 252, false));
+        assert!(write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_update_rollover_below() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is below the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, true));
+        // The new cur value goes back to 1022
+        assert_eq!(write_log.count_cur[0], 1022);
+        // Once we make a new max, the old range is invalid.
+        assert!(!write_log.validate_seed_range(0, 255, false));
+        assert!(!write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_update_rollover_above() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is across the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        // Below the range is not okay.
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        // Pick a "new" range just above the roll over point.
+        assert!(write_log.validate_seed_range(0, 0, true));
+        assert_eq!(write_log.count_cur[0], 1024);
+        // Lower range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        // Anything above is no longer valid.
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_no_update_below_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is below the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        // Below the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 253, true));
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_no_update_above_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is above in the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        // Above the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 2, true));
+        assert_eq!(write_log.count_cur[0], 1025);
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+    }
+    // End rollover range tests
 
     #[test]
     fn test_wl_set() {

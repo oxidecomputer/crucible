@@ -12,7 +12,8 @@ use tempfile::NamedTempFile;
 
 mod region;
 pub use region::{
-    Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
+    Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MAX_SHIFT,
+    MIN_BLOCK_SIZE, MIN_SHIFT,
 };
 
 pub mod x509;

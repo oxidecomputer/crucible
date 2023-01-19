@@ -2568,6 +2568,77 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn integration_test_io_out_of_range() {
+        // Test reads and writes outside the valid region return error.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        let _join_handle = up_main(opts, 1, None, gc, None).await.unwrap();
+
+        guest.activate().await.unwrap();
+
+        // Write a block past the end of the extent
+        let res = guest
+            .write(
+                Block::new(11, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE]),
+            )
+            .await;
+
+        assert!(res.is_err());
+
+        // Read a block past the end of the extent
+        let buffer = Buffer::new(BLOCK_SIZE);
+        let res = guest
+            .read(Block::new(11, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await;
+
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn integration_test_io_span_out_of_range() {
+        // Test reads and writes that start inside and extend
+        // past the end of the region will return error.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        let _join_handle = up_main(opts, 1, None, gc, None).await.unwrap();
+
+        guest.activate().await.unwrap();
+
+        // Write a block with a buffer that extends past the end of the region
+        let res = guest
+            .write(
+                Block::new(10, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+            )
+            .await;
+
+        assert!(res.is_err());
+
+        // Read a block with buffer that extends past the end of the region
+        let buffer = Buffer::new(BLOCK_SIZE * 2);
+        let res = guest
+            .read(Block::new(10, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await;
+
+        assert!(res.is_err());
+    }
+
     // The following tests are for the Pantry
 
     #[tokio::test]

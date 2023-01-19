@@ -36,7 +36,7 @@ pub enum DscCommand {
     },
     /// Disable auto restart on all downstairs
     DisableRestartAll,
-    /// Disable restart on the given client ID
+    /// Enable restart on the given client ID
     EnableRestart {
         #[clap(long, short, action)]
         cid: u32,
@@ -287,10 +287,20 @@ async fn cli_write(
 
     /*
      * Update the write count for the block we plan to write to.
+     * Unless, we are trying to write off the end of the volume.
+     * If so, then don't update any write counts and just make
+     * the correct size buffer with all zeros.
      */
-    ri.write_log.update_wc(block_index);
+    let vec = if block_index + size > ri.total_blocks {
+        println!("Skip write log for invalid size {}", ri.total_blocks);
+        vec![0; size * ri.block_size as usize]
+    } else {
+        for bi in block_index..block_index + size {
+            ri.write_log.update_wc(bi);
+        }
+        fill_vec(block_index, size, &ri.write_log, ri.block_size)
+    };
 
-    let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
     let data = Bytes::from(vec);
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());

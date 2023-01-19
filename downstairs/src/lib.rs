@@ -220,7 +220,9 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         let nblocks = Block::from_bytes(total, &rm);
         let mut pos = Block::from_bytes(0, &rm);
         let mut writes = vec![];
-        for (eid, offset) in extent_from_offset(rm, offset, nblocks).tuples() {
+        for (eid, offset) in
+            extent_from_offset(&rm, offset, nblocks).blocks(&rm)
+        {
             let len = Block::new_with_ddef(1, &region.def());
             let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
             let mut buffer = BytesMut::with_capacity(data.len());
