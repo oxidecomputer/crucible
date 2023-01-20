@@ -35,8 +35,7 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -82,8 +81,7 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -112,8 +110,7 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -187,8 +184,7 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -217,8 +213,7 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -281,8 +276,7 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -311,8 +305,7 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -365,8 +358,7 @@
               "type": "integer",
               "format": "uint",
               "minimum": 0
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {

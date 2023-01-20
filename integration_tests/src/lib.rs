@@ -2709,9 +2709,9 @@ mod test {
                 &crucible_pantry_client::types::ImportFromUrlRequest {
                     url: url.clone(),
                     expected_digest: Some(
-                        crucible_pantry_client::types::ExpectedDigest {
-                            sha256: sha256_digest.to_string(),
-                        },
+                        crucible_pantry_client::types::ExpectedDigest::Sha256(
+                            sha256_digest.to_string(),
+                        ),
                     ),
                 },
             )
@@ -2852,9 +2852,9 @@ mod test {
                 &crucible_pantry_client::types::ImportFromUrlRequest {
                     url: format!("{}/OVMF_CODE_20220922.fd", base_url),
                     expected_digest: Some(
-                        crucible_pantry_client::types::ExpectedDigest {
-                            sha256: sha256_digest.to_string(),
-                        },
+                        crucible_pantry_client::types::ExpectedDigest::Sha256(
+                            sha256_digest.to_string(),
+                        ),
                     ),
                 },
             )

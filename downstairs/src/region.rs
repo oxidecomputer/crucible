@@ -16,7 +16,6 @@ use repair_client::types::FileType;
 use repair_client::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use tokio::macros::support::Pin;
 use tracing::instrument;
 
 use super::*;
@@ -2133,13 +2132,7 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
  */
 pub async fn save_stream_to_file(
     mut file: File,
-    mut stream: Pin<
-        Box<
-            dyn futures::Stream<
-                    Item = std::result::Result<crucible::Bytes, reqwest::Error>,
-                > + std::marker::Send,
-        >,
-    >,
+    mut stream: repair_client::ByteStream,
 ) -> Result<(), CrucibleError> {
     loop {
         match stream.try_next().await {

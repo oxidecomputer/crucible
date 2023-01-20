@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use super::*;
 
-pub(crate) fn build_api() -> ApiDescription<UpstairsInfo> {
+pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
     api.register(take_snapshot).unwrap();
@@ -60,7 +60,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
      * The functions that implement our API endpoints will share this
      * context.
      */
-    let api_context = UpstairsInfo::new(up);
+    let api_context = Arc::new(UpstairsInfo::new(up));
 
     /*
      * Set up the server.
@@ -119,7 +119,7 @@ struct UpstairsStats {
     unpublished = false,
 }]
 async fn upstairs_fill_info(
-    rqctx: Arc<RequestContext<UpstairsInfo>>,
+    rqctx: RequestContext<Arc<UpstairsInfo>>,
 ) -> Result<HttpResponseOk<UpstairsStats>, HttpError> {
     let api_context = rqctx.context();
 
@@ -159,7 +159,7 @@ pub struct TakeSnapshotResponse {
     path = "/snapshot"
 }]
 async fn take_snapshot(
-    rqctx: Arc<RequestContext<UpstairsInfo>>,
+    rqctx: RequestContext<Arc<UpstairsInfo>>,
     take_snapshot_params: TypedBody<TakeSnapshotParams>,
 ) -> Result<HttpResponseCreated<TakeSnapshotResponse>, HttpError> {
     let apictx = rqctx.context();

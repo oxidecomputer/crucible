@@ -45,9 +45,9 @@ pub struct DownstairsRunningResponse {
     path = "/regions/{uuid}/downstairs"
 }]
 pub async fn run_downstairs_for_region(
-    rqctx: Arc<RequestContext<Arc<ServerContext>>>,
-    run_params: TypedBody<RunDownstairsForRegionParams>,
+    rqctx: RequestContext<Arc<ServerContext>>,
     path_param: Path<RunDownstairsforRegionPath>,
+    run_params: TypedBody<RunDownstairsForRegionParams>,
 ) -> Result<HttpResponseCreated<DownstairsRunningResponse>, HttpError> {
     let apictx = rqctx.context();
     let run_params = run_params.into_inner();
