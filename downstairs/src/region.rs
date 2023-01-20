@@ -1325,24 +1325,25 @@ impl Extent {
             let mut run_start = dirty_block_iter.next().unwrap();
             let mut prev_block = run_start;
 
-            // Iterate, and process all but the last contiguous run
+            // Group blocks into contiguous runs for optimal IO, and rehash
             loop {
                 let next = dirty_block_iter.next();
                 // We rehash a run when there's a run discontinuity, and when
-                // we hit the end of the iterator. If we're still finding the
-                // end of the run, this is None
+                // we hit the end of the iterator. `run_to_rehash` will be
+                // Some in those cases. Otherwise, it will be None to
+                // indicate there's no rehashing to do on this iteration.
                 let run_to_rehash = match next {
                     Some(next) => {
-                        if next != prev_block + 1 {
+                        if next == prev_block + 1 {
+                            // Run is continuing
+                            None
+                        } else {
                             // Run discontinuity, we should rehash and start a new run
                             let run_to_rehash =
                                 (run_start, prev_block - run_start + 1);
                             run_start = next;
                             prev_block = next;
                             Some(run_to_rehash)
-                        } else {
-                            // Run is continuing
-                            None
                         }
                     }
                     None => {
@@ -1351,27 +1352,35 @@ impl Extent {
                     }
                 };
 
+                // Do we have a complete run we should process?
                 if let Some((start_block, n_blocks)) = run_to_rehash {
-                    // We have a run we should process
+                    // If so, then it's time to re-read the file and rehash.
                     inner.file.seek(SeekFrom::Start(
                         start_block as u64 * self.block_size,
                     ))?;
 
-                    let mut remaining = n_blocks * self.block_size as usize;
+                    let mut remaining_bytes =
+                        n_blocks * self.block_size as usize;
                     let mut next_block = start_block;
-                    while remaining > 0 {
-                        let slice = &mut buffer[0..BUFFER_SIZE.min(remaining)];
+                    while remaining_bytes > 0 {
+                        // A run may be larger than our IO buffer, in which
+                        // case we only process what fits in the buffer for
+                        // this iteration of the loop.
+                        let slice =
+                            &mut buffer[0..remaining_bytes.min(BUFFER_SIZE)];
                         inner.file.read_exact(slice)?;
                         for block_data in
                             slice.chunks_exact(self.block_size as usize)
                         {
+                            // Here's where we do the actual rehashing and
+                            // push it into our vec
                             extent_block_indexes_and_hashes.push((
                                 next_block,
-                                integrity_hash(&[&block_data]),
+                                integrity_hash(&[block_data]),
                             ));
                             next_block += 1;
                         }
-                        remaining -= slice.len();
+                        remaining_bytes -= slice.len();
                     }
                 }
 
