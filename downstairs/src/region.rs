@@ -1262,7 +1262,7 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        // Mainly used for profiling
+        // Used for profiling
         let n_dirty_blocks = inner.dirty_blocks.len() as u64;
 
         cdt::extent__flush__start!(|| {
@@ -1318,52 +1318,68 @@ impl Extent {
         // Rehash any parts of the file that we wrote data to since the last
         // flush
         if !dirty_blocks.is_empty() {
+            // Rehashes a contiguous range of blocks
             const BUFFER_SIZE: usize = 64 * 1024;
             let mut buffer = [0u8; BUFFER_SIZE];
-
-            // Rehashes a contiguous range of blocks
-            let mut rehash_blocks = |start_block: usize,
-                                     n_blocks: usize|
-             -> Result<()> {
-                inner.file.seek(SeekFrom::Start(
-                    start_block as u64 * self.block_size,
-                ))?;
-
-                let mut remaining = n_blocks * self.block_size as usize;
-                let mut next_block = start_block;
-                // Buffered IO
-                while remaining > 0 {
-                    let slice = &mut buffer[0..BUFFER_SIZE.min(remaining)];
-                    inner.file.read_exact(slice)?;
-                    // Here's where the actual rehashing finally happens
-                    for block_data in
-                        slice.chunks_exact(self.block_size as usize)
-                    {
-                        extent_block_indexes_and_hashes
-                            .push((next_block, integrity_hash(&[&block_data])));
-                        next_block += 1;
-                    }
-                    remaining -= slice.len();
-                }
-
-                Ok(())
-            };
-
             let mut dirty_block_iter = dirty_blocks.iter().copied();
             let mut run_start = dirty_block_iter.next().unwrap();
             let mut prev_block = run_start;
 
             // Iterate, and process all but the last contiguous run
-            for next in dirty_block_iter {
-                if next != prev_block + 1 {
-                    // Run discontinuity, read current run and start a new one.
-                    rehash_blocks(run_start, prev_block - run_start + 1)?;
-                    run_start = next;
-                    prev_block = next;
+            loop {
+                let next = dirty_block_iter.next();
+                // We rehash a run when there's a run discontinuity, and when
+                // we hit the end of the iterator. If we're still finding the
+                // end of the run, this is None
+                let run_to_rehash = match next {
+                    Some(next) => {
+                        if next != prev_block + 1 {
+                            // Run discontinuity, we should rehash and start a new run
+                            let run_to_rehash =
+                                (run_start, prev_block - run_start + 1);
+                            run_start = next;
+                            prev_block = next;
+                            Some(run_to_rehash)
+                        } else {
+                            // Run is continuing
+                            None
+                        }
+                    }
+                    None => {
+                        // End of the blocks, so we should rehash the final run
+                        Some((run_start, prev_block - run_start + 1))
+                    }
+                };
+
+                if let Some((start_block, n_blocks)) = run_to_rehash {
+                    // We have a run we should process
+                    inner.file.seek(SeekFrom::Start(
+                        start_block as u64 * self.block_size,
+                    ))?;
+
+                    let mut remaining = n_blocks * self.block_size as usize;
+                    let mut next_block = start_block;
+                    while remaining > 0 {
+                        let slice = &mut buffer[0..BUFFER_SIZE.min(remaining)];
+                        inner.file.read_exact(slice)?;
+                        for block_data in
+                            slice.chunks_exact(self.block_size as usize)
+                        {
+                            extent_block_indexes_and_hashes.push((
+                                next_block,
+                                integrity_hash(&[&block_data]),
+                            ));
+                            next_block += 1;
+                        }
+                        remaining -= slice.len();
+                    }
+                }
+
+                if next.is_none() {
+                    // End of the iterator
+                    break;
                 }
             }
-            // Process last contiguous run
-            rehash_blocks(run_start, prev_block - run_start + 1)?;
         }
 
         // We could shrink this to 0, but it's nice not to have to expand the
@@ -1394,9 +1410,7 @@ impl Extent {
 
         inner.set_flush_number(new_flush, new_gen)?;
 
-        cdt::extent__flush__done!(|| {
-            (job_id, self.number, n_dirty_blocks)
-        });
+        cdt::extent__flush__done!(|| { (job_id, self.number, n_dirty_blocks) });
 
         Ok(())
     }
