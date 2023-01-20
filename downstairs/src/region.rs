@@ -1151,9 +1151,7 @@ impl Extent {
             // us easily test specific edge-cases of the database state.
             // Could make another function that wraps tx_set_block_context
             // and handles this as well.
-            let _ = inner
-                .dirty_blocks
-                .insert(write.offset.value as usize);
+            let _ = inner.dirty_blocks.insert(write.offset.value as usize);
         }
         tx.commit()?;
 
@@ -1264,8 +1262,11 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
+        // Mainly used for profiling
+        let n_dirty_blocks = inner.dirty_blocks.len() as u64;
+
         cdt::extent__flush__start!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
 
         /*
@@ -1273,7 +1274,7 @@ impl Extent {
          * This must be done before we update the flush number.
          */
         cdt::extent__flush__file__start!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
         if let Err(e) = inner.file.sync_all() {
             /*
@@ -1287,74 +1288,83 @@ impl Extent {
             );
         }
         cdt::extent__flush__file__done!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
 
         // Clear old block contexts. In order to be crash consistent, only
-        // perform this after the extent fsync is done. For each block written
-        // since the last flush, remove all block context rows where the integrity
-        // hash does not map the last-written value. This is safe, because we
-        // know the process has not crashed since those values were written.
-        // When the region is first opened, the entire file is rehashed, since
-        // in that case we don't have that luxury.
+        // perform this after the extent fsync is done. For each block
+        // written since the last flush, remove all block context rows where
+        // the integrity hash does not map the last-written value. This is
+        // safe, because we know the process has not crashed since those
+        // values were written. When the region is first opened, the entire
+        // file is rehashed, since in that case we don't have that luxury.
 
         cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
 
-        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> = Vec::with_capacity(inner.dirty_blocks.len());
+        // We'll fill this up in a moment
+        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> =
+            Vec::with_capacity(inner.dirty_blocks.len());
+
+        // All blocks that may have changed since the last flush
         let mut dirty_blocks: Vec<usize> = inner.dirty_blocks.drain().collect();
+
+        // Sorting here is extremely important to get good performance out of
+        // truncate_encryption_contexts_and_hashes() later. It also means we
+        // can efficiently re-read only the dirty parts of the file.
         dirty_blocks.sort_unstable();
 
         // Rehash any parts of the file that we wrote data to since the last
         // flush
         if !dirty_blocks.is_empty() {
-            let mut inner_file_buffered =
-                BufReader::with_capacity(64 * 1024, &inner.file);
+            const BUFFER_SIZE: usize = 64 * 1024;
+            let mut buffer = [0u8; BUFFER_SIZE];
+
+            // Rehashes a contiguous range of blocks
+            let mut rehash_blocks = |start_block: usize,
+                                     n_blocks: usize|
+             -> Result<()> {
+                inner.file.seek(SeekFrom::Start(
+                    start_block as u64 * self.block_size,
+                ))?;
+
+                let mut remaining = n_blocks * self.block_size as usize;
+                let mut next_block = start_block;
+                // Buffered IO
+                while remaining > 0 {
+                    let slice = &mut buffer[0..BUFFER_SIZE.min(remaining)];
+                    inner.file.read_exact(slice)?;
+                    // Here's where the actual rehashing finally happens
+                    for block_data in
+                        slice.chunks_exact(self.block_size as usize)
+                    {
+                        extent_block_indexes_and_hashes
+                            .push((next_block, integrity_hash(&[&block_data])));
+                        next_block += 1;
+                    }
+                    remaining -= slice.len();
+                }
+
+                Ok(())
+            };
 
             let mut dirty_block_iter = dirty_blocks.iter().copied();
             let mut run_start = dirty_block_iter.next().unwrap();
             let mut prev_block = run_start;
-            let mut block_data = vec![0; self.block_size as usize];
 
             // Iterate, and process all but the last contiguous run
             for next in dirty_block_iter {
                 if next != prev_block + 1 {
-                    inner_file_buffered.seek(SeekFrom::Start(run_start as u64 * self.block_size))?;
-                    for block_idx in run_start..=prev_block {
-                        inner_file_buffered.read_exact(&mut block_data)?;
-                        extent_block_indexes_and_hashes
-                            .push((block_idx, integrity_hash(&[&block_data])));
-                    }
+                    // Run discontinuity, read current run and start a new one.
+                    rehash_blocks(run_start, prev_block - run_start + 1)?;
                     run_start = next;
                     prev_block = next;
                 }
             }
-
             // Process last contiguous run
-            inner_file_buffered.seek(SeekFrom::Start(run_start as u64 * self.block_size))?;
-            for block_idx in run_start..=prev_block {
-                inner_file_buffered.read_exact(&mut block_data)?;
-                extent_block_indexes_and_hashes
-                    .push((block_idx, integrity_hash(&[&block_data])));
-            }
+            rehash_blocks(run_start, prev_block - run_start + 1)?;
         }
-
-        // inner.dirty_blocks.clear();
-
-
-
-
-        // Iterate over file contents on disk, rehashing only the blocks that
-        // we've written to since the last write
-
-        // Sorting here is extremely important to get good performance out of
-        // truncate_encryption_contexts_and_hashes() later.
-        //
-        // Benchmarks show that sorting by just block doubles how fast this sort
-        // happens compared to a sort_unstable() that considers block and value.
-        // extent_block_indexes_and_hashes
-        //     .sort_unstable_by(|(l, _), (r, _)| l.cmp(r));
 
         // We could shrink this to 0, but it's nice not to have to expand the
         // dirty_blocks HashMap on small writes. They have a hard enough time
@@ -1365,17 +1375,17 @@ impl Extent {
         inner.dirty_blocks.shrink_to(16);
 
         cdt::extent__flush__collect__hashes__done!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
         cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
 
         // Reset the file's seek offset to 0, and set the flush number and gen
@@ -1385,7 +1395,7 @@ impl Extent {
         inner.set_flush_number(new_flush, new_gen)?;
 
         cdt::extent__flush__done!(|| {
-            (job_id, self.number, self.extent_size.value)
+            (job_id, self.number, n_dirty_blocks)
         });
 
         Ok(())
