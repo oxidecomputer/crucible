@@ -1327,41 +1327,25 @@ impl Extent {
 
             // Group blocks into contiguous runs for optimal IO, and rehash
             loop {
-                let next = dirty_block_iter.next();
-                // We rehash a run when there's a run discontinuity, and when
-                // we hit the end of the iterator. `run_to_rehash` will be
-                // Some in those cases. Otherwise, it will be None to
-                // indicate there's no rehashing to do on this iteration.
-                let run_to_rehash = match next {
-                    Some(next) => {
-                        if next == prev_block + 1 {
-                            // Run is continuing
-                            None
-                        } else {
-                            // Run discontinuity, we should rehash and start a new run
-                            let run_to_rehash =
-                                (run_start, prev_block - run_start + 1);
-                            run_start = next;
-                            prev_block = next;
-                            Some(run_to_rehash)
-                        }
-                    }
-                    None => {
-                        // End of the blocks, so we should rehash the final run
-                        Some((run_start, prev_block - run_start + 1))
-                    }
-                };
+                let cur_block = dirty_block_iter.next();
 
-                // Do we have a complete run we should process?
-                if let Some((start_block, n_blocks)) = run_to_rehash {
-                    // If so, then it's time to re-read the file and rehash.
+                // We rehash if there is either a run discontinuity, or when
+                // we hit the end of the iterator.
+                if cur_block == Some(prev_block + 1) {
+                    // Run is continuing
+                    prev_block = prev_block + 1;
+                } else {
+                    // Discontinuity or end of iteration.
+
+                    // First, do the rehash
                     inner.file.seek(SeekFrom::Start(
-                        start_block as u64 * self.block_size,
+                        run_start as u64 * self.block_size,
                     ))?;
 
+                    let run_length = prev_block - run_start + 1;
                     let mut remaining_bytes =
-                        n_blocks * self.block_size as usize;
-                    let mut next_block = start_block;
+                        run_length * self.block_size as usize;
+                    let mut block_being_hashed = run_start;
                     while remaining_bytes > 0 {
                         // A run may be larger than our IO buffer, in which
                         // case we only process what fits in the buffer for
@@ -1375,18 +1359,23 @@ impl Extent {
                             // Here's where we do the actual rehashing and
                             // push it into our vec
                             extent_block_indexes_and_hashes.push((
-                                next_block,
+                                block_being_hashed,
                                 integrity_hash(&[block_data]),
                             ));
-                            next_block += 1;
+                            block_being_hashed += 1;
                         }
                         remaining_bytes -= slice.len();
                     }
-                }
 
-                if next.is_none() {
-                    // End of the iterator
-                    break;
+                    // Start a new run if there's more data to process, or
+                    // break out of the loop.
+                    match cur_block {
+                        None => break,
+                        Some(cur_block) => {
+                            run_start = cur_block;
+                            prev_block = cur_block;
+                        }
+                    }
                 }
             }
         }
