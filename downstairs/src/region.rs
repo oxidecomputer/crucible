@@ -53,8 +53,7 @@ pub struct Inner {
     file: File,
     metadb: Connection,
 
-    /// Map of block number to on_disk_hash of the block. Stores blocks that
-    /// have been written since the last flush.
+    /// Set of blocks that have been written since last flush.
     dirty_blocks: HashSet<usize>,
 }
 
@@ -1147,8 +1146,8 @@ impl Extent {
             // into that function too. This might be nice, since then a block
             // context could never be set without marking the block as dirty.
             // On the other paw, our test suite very much likes the fact that
-            // tx_set_block_context would mark blocks as dirty, since it lets
-            // us easily test specific edge-cases of the database state.
+            // tx_set_block_context doesn't mark blocks as dirty, since it
+            // lets us easily test specific edge-cases of the database state.
             // Could make another function that wraps tx_set_block_context
             // and handles this as well.
             let _ = inner.dirty_blocks.insert(write.offset.value as usize);
@@ -1159,9 +1158,6 @@ impl Extent {
             (job_id, self.number, writes.len() as u64)
         });
 
-        // Buffer writes for fewer syscalls. The 65536 buffer size here is
-        // chosen somewhat arbitrarily.
-        let mut write_buffer = [0u8; 65536];
 
         // PERFORMANCE TODO: While sqlite is the bulk of our performance cost
         // in writes, we're still paying quite the price on small writes
@@ -1183,21 +1179,28 @@ impl Extent {
         // issued over multiple write commands by letting us batch them into
         // a larger write, and(speculation) may benefit non-contiguous writes
         // by cutting down the number of sqlite transactions. But, it
-        // introduces complexity.
+        // introduces complexity. The time spent implementing that would
+        // probably better be spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
             (job_id, self.number, writes.len() as u64)
         });
+        // Buffer writes for fewer syscalls. The 65536 buffer size here is
+        // chosen somewhat arbitrarily.
+        let mut write_buffer = [0u8; 65536];
         let mut bytes_in_run = 0;
         let mut next_block_in_run = u64::MAX;
         for write in writes {
             let block = write.offset.value;
+            // TODO, can this be `only_write_unwritten &&
+            // write_to_skip.contains()`?
             if writes_to_skip.contains(&block) {
                 debug_assert!(only_write_unwritten);
                 continue;
             }
 
             // If the current write isn't contiguous with previous writes,
-            // write our buffer to the file and seek.
+            // write our buffer to the file and seek. This is also the
+            // avenue by which we seek for the first write.
             if block != next_block_in_run {
                 if bytes_in_run > 0 {
                     inner.file.write_all(&write_buffer[..bytes_in_run])?;
