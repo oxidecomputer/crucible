@@ -2821,7 +2821,8 @@ pub async fn build_downstairs_for_region(
             Logger::root(drain.fuse(), o!())
         }
     };
-    let region = Region::open(data, Default::default(), true, read_only, &log).await?;
+    let region =
+        Region::open(data, Default::default(), true, read_only, &log).await?;
 
     info!(log, "UUID: {:?}", region.def().uuid());
     info!(
@@ -3201,7 +3202,8 @@ mod test {
             false,
             false,
             Some(csl()),
-        ).await?;
+        )
+        .await?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -5026,7 +5028,8 @@ mod test {
             false, // flush errors
             read_only,
             Some(csl()),
-        ).await
+        )
+        .await
     }
 
     #[tokio::test]
@@ -5468,7 +5471,8 @@ mod test {
             false,
             false,
             Some(csl()),
-        ).await?;
+        )
+        .await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -5562,7 +5566,8 @@ mod test {
             false,
             false,
             Some(csl()),
-        ).await?;
+        )
+        .await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -5656,7 +5661,8 @@ mod test {
             false,
             false,
             Some(csl()),
-        ).await?;
+        )
+        .await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
