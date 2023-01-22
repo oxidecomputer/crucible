@@ -521,7 +521,7 @@ impl Extent {
      * Open an existing extent file at the location requested.
      * Read in the metadata from the first block of the file.
      */
-    fn open<P: AsRef<Path>>(
+    async fn open<P: AsRef<Path>>(
         dir: P,
         def: &RegionDefinition,
         number: u32,
@@ -623,7 +623,7 @@ impl Extent {
 
         // Clean out any irrelevant block contexts, which may be present if
         // downstairs crashed between a write() and a flush().
-        extent.fully_rehash_and_clean_all_stale_contexts(false)?;
+        extent.fully_rehash_and_clean_all_stale_contexts(false).await?;
 
         Ok(extent)
     }
@@ -1426,7 +1426,7 @@ impl Extent {
     /// This override should generally not be necessary, as the dirty flag
     /// is set before any contexts are written.
     #[instrument]
-    fn fully_rehash_and_clean_all_stale_contexts(
+    async fn fully_rehash_and_clean_all_stale_contexts(
         &self,
         force_override_dirty: bool,
     ) -> Result<(), CrucibleError> {
@@ -1509,7 +1509,7 @@ impl Region {
     /**
      * Create a new region based on the given RegionOptions
      */
-    pub fn create<P: AsRef<Path>>(
+    pub async fn create<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
         log: Logger,
@@ -1541,7 +1541,7 @@ impl Region {
             log,
         };
 
-        region.open_extents(true)?;
+        region.open_extents(true).await?;
 
         Ok(region)
     }
@@ -1549,7 +1549,7 @@ impl Region {
     /**
      * Open an existing region file
      */
-    pub fn open<P: AsRef<Path>>(
+    pub async fn open<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
         verbose: bool,
@@ -1583,7 +1583,7 @@ impl Region {
             log: log.clone(),
         };
 
-        region.open_extents(false)?;
+        region.open_extents(false).await?;
 
         Ok(region)
     }
@@ -1603,25 +1603,37 @@ impl Region {
      * If create is true, we expect to create new extent files, and will
      * return error if the file is already present.
      */
-    fn open_extents(&mut self, create: bool) -> Result<()> {
+    async fn open_extents(&mut self, create: bool) -> Result<()> {
         let next_eid = self.extents.len() as u32;
 
-        let these_extents = (next_eid..self.def.extent_count())
-            .into_iter()
-            .map(|eid| {
+        let eid_range = next_eid..self.def.extent_count();
+        let mut these_extent_handles = Vec::with_capacity(eid_range.len());
+
+        for eid in eid_range {
+            let dir = self.dir.clone();
+            let def = self.def.clone();
+            let read_only = self.read_only;
+            let log = self.log.clone();
+            let handle = tokio::spawn(async move {
                 if create {
-                    Extent::create(&self.dir, &self.def, eid)
+                    Extent::create(&dir, &def, eid)
                 } else {
                     Extent::open(
-                        &self.dir,
-                        &self.def,
+                        dir,
+                        &def,
                         eid,
-                        self.read_only,
-                        &self.log,
-                    )
+                        read_only,
+                        &log,
+                    ).await
                 }
-            })
-            .collect::<Result<Vec<Extent>>>()?;
+            });
+            these_extent_handles.push(handle);
+        }
+
+        let mut these_extents = Vec::with_capacity(these_extent_handles.len());
+        for handle in these_extent_handles  {
+            these_extents.push(handle.await??);
+        }
 
         self.extents.extend(these_extents);
 
@@ -1637,7 +1649,7 @@ impl Region {
      * Walk the list of all extents and find any that are not open.
      * Open any extents that are not.
      */
-    pub fn reopen_all_extents(&mut self) -> Result<()> {
+    pub async fn reopen_all_extents(&mut self) -> Result<()> {
         let mut to_open = Vec::new();
         for (i, extent) in self.extents.iter().enumerate() {
             if extent.inner.is_none() {
@@ -1646,7 +1658,7 @@ impl Region {
         }
 
         for eid in to_open {
-            self.reopen_extent(eid)?;
+            self.reopen_extent(eid).await?;
         }
 
         Ok(())
@@ -1655,7 +1667,7 @@ impl Region {
     /**
      * Re open an extent that was previously closed
      */
-    pub fn reopen_extent(&mut self, eid: usize) -> Result<(), CrucibleError> {
+    pub async fn reopen_extent(&mut self, eid: usize) -> Result<(), CrucibleError> {
         /*
          * Make sure the extent :
          *
@@ -1673,7 +1685,7 @@ impl Region {
             eid as u32,
             self.read_only,
             &self.log,
-        )?;
+        ).await?;
         self.extents[eid] = new_extent;
         Ok(())
     }
@@ -1885,7 +1897,7 @@ impl Region {
      * if there is a difference between what our actual extent_count is
      * and what is requested, go out and create the new extent files.
      */
-    pub fn extend(&mut self, newsize: u32) -> Result<()> {
+    pub async fn extend(&mut self, newsize: u32) -> Result<()> {
         if self.read_only {
             // XXX return CrucibleError instead of anyhow?
             bail!(CrucibleError::ModifyingReadOnlyRegion.to_string());
@@ -1902,7 +1914,7 @@ impl Region {
         if newsize > self.def.extent_count() {
             self.def.set_extent_count(newsize);
             write_json(config_path(&self.dir), &self.def, true)?;
-            self.open_extents(true)?;
+            self.open_extents(true).await?;
         }
         Ok(())
     }
@@ -2101,7 +2113,7 @@ impl Region {
 
         let extent = &self.extents[eid];
         extent
-            .flush_block(flush_number, gen_number, 0, &self.log)
+            .flush(flush_number, gen_number, 0, &self.log)
             .await?;
 
         Ok(())
@@ -2131,7 +2143,7 @@ impl Region {
         for eid in 0..self.def.extent_count() {
             let extent = &self.extents[eid as usize];
             extent
-                .flush_block(flush_number, gen_number, job_id, &self.log)
+                .flush(flush_number, gen_number, job_id, &self.log)
                 .await?;
         }
         cdt::os__flush__done!(|| job_id);
@@ -2444,14 +2456,14 @@ mod test {
         region_options
     }
 
-    #[test]
-    fn copy_extent_dir() -> Result<()> {
+    #[tokio::test]
+    async fn copy_extent_dir() -> Result<()> {
         // Create the region, make three extents
         // Create the copy directory, make sure it exists.
         // Remove the copy directory, make sure it goes away.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ext_one = &mut region.extents[1];
         let cp = copy_dir(&dir, 1);
@@ -2463,15 +2475,15 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn copy_extent_dir_twice() -> Result<()> {
+    #[tokio::test]
+    async fn copy_extent_dir_twice() -> Result<()> {
         // Create the region, make three extents
         // Create the copy directory, make sure it exists.
         // Verify a second create will fail.
         let dir = tempdir().unwrap();
         let mut region =
-            Region::create(&dir, new_region_options(), csl()).unwrap();
-        region.extend(3).unwrap();
+            Region::create(&dir, new_region_options(), csl()).await.unwrap();
+        region.extend(3).await.unwrap();
 
         let ext_one = &mut region.extents[1];
         ext_one.create_copy_dir(&dir).unwrap();
@@ -2484,8 +2496,8 @@ mod test {
     async fn close_extent() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
@@ -2501,7 +2513,7 @@ mod test {
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2522,8 +2534,8 @@ mod test {
         // opened with that directory present.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
@@ -2534,7 +2546,7 @@ mod test {
         let cp = ext_one.create_copy_dir(&dir)?;
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2552,8 +2564,8 @@ mod test {
         // when an extent is re-opened.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
@@ -2572,7 +2584,7 @@ mod test {
         rename(rd.clone(), cd.clone())?;
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2593,8 +2605,8 @@ mod test {
         // metadata files.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
@@ -2632,7 +2644,7 @@ mod test {
         // action is taken when we (re)open the extent.
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         let ext_one = &mut region.extents[1];
         assert!(ext_one.inner.is_some());
@@ -2658,8 +2670,8 @@ mod test {
         // extent after the reopen has cleaned them up.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
@@ -2706,7 +2718,7 @@ mod test {
         // when we (re)open the extent.
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Make sure there is no longer a db-shm and db-wal
         dest_path.set_extension("db-shm");
@@ -2729,8 +2741,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn reopen_extent_no_replay_readonly() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_extent_no_replay_readonly() -> Result<()> {
         // Verify on a read-only region a replacement directory will
         // be ignored.  This is required by the dump command, as it would
         // be tragic if the command to inspect a region changed that
@@ -2738,8 +2750,8 @@ mod test {
 
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Make copy directory for this extent
         let ext_one = &mut region.extents[1];
@@ -2765,7 +2777,7 @@ mod test {
 
         // Open up the region read_only now.
         let mut region =
-            Region::open(&dir, new_region_options(), false, true, &csl())?;
+            Region::open(&dir, new_region_options(), false, true, &csl()).await?;
 
         // Verify extent 1 has opened again.
         let ext_one = &mut region.extents[1];
@@ -2877,8 +2889,8 @@ mod test {
     async fn reopen_all_extents() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(5)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(5).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
@@ -2891,7 +2903,7 @@ mod test {
         assert!(ext_four.inner.is_none());
 
         // Reopen all extents
-        region.reopen_all_extents()?;
+        region.reopen_all_extents().await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2909,24 +2921,24 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn new_region() -> Result<()> {
+    #[tokio::test]
+    async fn new_region() -> Result<()> {
         let dir = tempdir()?;
-        let _ = Region::create(&dir, new_region_options(), csl());
+        let _ = Region::create(&dir, new_region_options(), csl()).await;
         Ok(())
     }
 
-    #[test]
-    fn new_existing_region() -> Result<()> {
+    #[tokio::test]
+    async fn new_existing_region() -> Result<()> {
         let dir = tempdir()?;
-        let _ = Region::create(&dir, new_region_options(), csl());
+        let _ = Region::create(&dir, new_region_options(), csl()).await;
         let _ = Region::open(&dir, new_region_options(), false, false, &csl());
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[should_panic]
-    fn bad_import_region() {
+    async fn bad_import_region() {
         let _ = Region::open(
             "/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
@@ -2934,7 +2946,7 @@ mod test {
             false,
             &csl(),
         )
-        .unwrap();
+        .await.unwrap();
     }
 
     #[test]
@@ -3109,8 +3121,8 @@ mod test {
          * Create a region, give it actual size
          */
         let dir = tempdir()?;
-        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
-        r1.extend(2)?;
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).await.unwrap();
+        r1.extend(2).await?;
 
         /*
          * Build the Vec for our region dir
@@ -3135,11 +3147,11 @@ mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).await.unwrap();
         let mut r2 =
-            Region::create(&dir2, new_region_options(), csl()).unwrap();
-        r1.extend(2)?;
-        r2.extend(2)?;
+            Region::create(&dir2, new_region_options(), csl()).await.unwrap();
+        r1.extend(2).await?;
+        r2.extend(2).await?;
 
         /*
          * Build the Vec for our region dirs
@@ -3169,11 +3181,11 @@ mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
-        r1.extend(3)?;
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).await.unwrap();
+        r1.extend(3).await?;
         let mut r2 =
-            Region::create(&dir2, new_region_options(), csl()).unwrap();
-        r2.extend(3)?;
+            Region::create(&dir2, new_region_options(), csl()).await.unwrap();
+        r2.extend(3).await?;
 
         /*
          * Build the Vec for our region dirs
@@ -3195,8 +3207,8 @@ mod test {
     #[tokio::test]
     async fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let ext = &region.extents[0];
         let mut inner = ext.inner().await;
@@ -3348,8 +3360,8 @@ mod test {
     #[tokio::test]
     async fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let ext = &region.extents[0];
         let mut inner = ext.inner().await;
@@ -3543,8 +3555,8 @@ mod test {
     #[tokio::test]
     async fn test_big_write() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -3622,7 +3634,7 @@ mod test {
     }
 
     #[tokio::test]
-    fn test_region_open_removes_partial_writes() -> Result<()> {
+    async fn test_region_open_removes_partial_writes() -> Result<()> {
         // Opening a dirty extent should fully rehash the extent to remove any
         // contexts that don't correlate with data on disk. This is necessary
         // for write_unwritten to work after a crash, and to move us into a
@@ -3636,8 +3648,8 @@ mod test {
         // context row.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // A write of some sort only wrote a block context row
         {
@@ -3655,9 +3667,9 @@ mod test {
 
         // This should clear out the invalid context
         for extent in &mut region.extents {
-            extent.close()?;
+            extent.close().await?;
         }
-        region.reopen_all_extents()?;
+        region.reopen_all_extents().await?;
 
 
         // Verify no block context rows exist
@@ -3706,16 +3718,16 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     /// It's very important that only_write_unwritten always works correctly.
     /// We should never add contexts for blocks that haven't been written by
     /// an upstairs.
-    fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
+    async fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
     ) -> Result<()> {
         // Make a region. It's empty, and should stay that way
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let ext = &region.extents[0];
 
@@ -3732,11 +3744,11 @@ mod test {
                     hash,
                 },
             };
-            ext.write(10, &[&write], false)?;
+            ext.write(10, &[&write], false).await?;
         }
 
         // We haven't flushed, but this should leave our context in place.
-        ext.fully_rehash_and_clean_all_stale_contexts(false)?;
+        ext.fully_rehash_and_clean_all_stale_contexts(false).await?;
 
         // Therefore, we expect that write_unwritten to the first block won't
         // do anything.
@@ -3753,14 +3765,14 @@ mod test {
                 data: data.clone(),
                 block_context: block_context.clone(),
             };
-            ext.write(20, &[&write], true)?;
+            ext.write(20, &[&write], true).await?;
 
             let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            ext.read(21, &[&read], &mut resp)?;
+            ext.read(21, &[&read], &mut resp).await?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
@@ -3788,14 +3800,14 @@ mod test {
                 data: data.clone(),
                 block_context: block_context.clone(),
             };
-            ext.write(30, &[&write], true)?;
+            ext.write(30, &[&write], true).await?;
 
             let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            ext.read(31, &[&read], &mut resp)?;
+            ext.read(31, &[&read], &mut resp).await?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -3819,19 +3831,19 @@ mod test {
     /// This test is very similar to test_region_open_removes_partial_writes,
     /// but is distinct in that it call fully_rehash directly, without closing
     /// and re-opening the extent.
-    #[test]
-    fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
+    #[tokio::test]
+    async fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
     ) -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let ext = &region.extents[0];
 
         // Partial write, the data never hits disk, but there's a context
         // in the DB
         {
-            let mut inner = ext.inner();
+            let mut inner = ext.inner().await;
             inner.set_block_contexts(&[&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
@@ -3843,7 +3855,7 @@ mod test {
         }
 
         // Run a full rehash, which should clear out that partial write.
-        ext.fully_rehash_and_clean_all_stale_contexts(false)?;
+        ext.fully_rehash_and_clean_all_stale_contexts(false).await?;
 
         // Writing to block 0 should succeed with only_write_unwritten
         {
@@ -3859,14 +3871,14 @@ mod test {
                 data: data.clone(),
                 block_context: block_context.clone(),
             };
-            ext.write(30, &[&write], true)?;
+            ext.write(30, &[&write], true).await?;
 
             let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            ext.read(31, &[&read], &mut resp)?;
+            ext.read(31, &[&read], &mut resp).await?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -3886,8 +3898,8 @@ mod test {
     #[tokio::test]
     async fn test_ok_hash_ok() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let data = BytesMut::from(&[1u8; 512][..]);
 
@@ -3917,8 +3929,8 @@ mod test {
         // Verify that a read fill does write to a block when there is
         // no data written yet.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // Fill a buffer with "9"'s (random)
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -3966,8 +3978,8 @@ mod test {
         // Verify that a read fill does not write to the block when
         // there is data written already.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // Fill a buffer with "9"'s (random)
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -4034,8 +4046,8 @@ mod test {
         // there is data written already.  This time run a flush after the
         // first write.  Verify correct state of dirty bit as well.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // Fill a buffer with "9"'s
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -4120,8 +4132,8 @@ mod test {
         // Do a multi block write where all blocks start new (unwritten)
         // Verify only empty blocks have data.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -4202,8 +4214,8 @@ mod test {
         // only_write_unwritten set. Verify block zero is the first write, and
         // the remaining blocks have the contents from the multi block fill.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -4317,8 +4329,8 @@ mod test {
         // the other blocks have the data from the multi block fill.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -4434,8 +4446,8 @@ mod test {
         // three blocks have the data from the multi block read fill.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(5)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(5).await?;
 
         let ddef = region.def();
         // A bunch of things expect a 512, so let's make it explicit.
@@ -4539,8 +4551,8 @@ mod test {
         // Do a multi block write_unwritten where a few different blocks have
         // data. Verify only unwritten blocks get the data.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(4)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(4).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -4767,8 +4779,8 @@ mod test {
     #[tokio::test]
     async fn test_bad_hash_bad() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let data = BytesMut::from(&[1u8; 512][..]);
 
@@ -4807,8 +4819,8 @@ mod test {
     #[tokio::test]
     async fn test_blank_block_read_ok() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let responses = region
             .region_read(

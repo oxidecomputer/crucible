@@ -281,8 +281,8 @@ mod test {
         // the expected names of files here in that test, rather than
         // determine them through some programmatic means.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Determine the directory and name for expected extent files.
         let ed = extent_dir(&dir, 1);
@@ -301,8 +301,8 @@ mod test {
         // what we expect. In this case we expect the extent data file and
         // the .db file, but not the .db-shm or .db-wal database files.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);
@@ -332,8 +332,8 @@ mod test {
         // We close the extent here first, and on illumos that behaves
         // a little different than elsewhere.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ext_one = &mut region.extents[1];
         ext_one.close().await?;
@@ -364,8 +364,8 @@ mod test {
         // Verify that we get an error if the expected extent.db file
         // is missing.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 2);
@@ -386,8 +386,8 @@ mod test {
         // Verify that we get an error if the expected extent file
         // is missing.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region = Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);

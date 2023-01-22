@@ -71,6 +71,7 @@ pub async fn run_downstairs_for_region(
         run_params.read_only,
         None,
     )
+    .await
     .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     let _join_handle = start_downstairs(

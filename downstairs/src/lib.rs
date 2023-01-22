@@ -156,7 +156,7 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          * Extend the region to fit the file.
          */
         println!("Extending region to fit image");
-        region.extend(extents_needed as u32)?;
+        region.extend(extents_needed as u32).await?;
     } else {
         println!("Region already large enough for image");
     }
@@ -911,7 +911,7 @@ where
             let msg = {
                 let mut d = ad.lock().await;
                 info!(d.log, "{} Reopen extent {}", repair_id, extent_id);
-                match d.region.reopen_extent(*extent_id) {
+                match d.region.reopen_extent(*extent_id).await {
                     Ok(()) => Message::RepairAckId {
                         repair_id: *repair_id,
                     },
@@ -2265,7 +2265,7 @@ impl Downstairs {
                     assert_eq!(self.active_upstairs.len(), 1);
 
                     // Re-open any closed extents
-                    self.region.reopen_all_extents()?;
+                    self.region.reopen_all_extents().await?;
 
                     info!(
                         self.log,
@@ -2405,7 +2405,7 @@ impl Downstairs {
                     assert_eq!(self.active_upstairs.len(), 1);
 
                     // Re-open any closed extents
-                    self.region.reopen_all_extents()?;
+                    self.region.reopen_all_extents().await?;
 
                     info!(
                         self.log,
@@ -2766,7 +2766,7 @@ enum WrappedStream {
     Https(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
 }
 
-pub fn create_region(
+pub async fn create_region(
     block_size: u64,
     data: PathBuf,
     extent_size: u64,
@@ -2785,8 +2785,8 @@ pub fn create_region(
     region_options.set_uuid(uuid);
     region_options.set_encrypted(encrypted);
 
-    let mut region = Region::create(data, region_options, log)?;
-    region.extend(extent_count as u32)?;
+    let mut region = Region::create(data, region_options, log).await?;
+    region.extend(extent_count as u32).await?;
 
     Ok(region)
 }
@@ -2794,7 +2794,7 @@ pub fn create_region(
 // Build the downstairs struct given a region directory and some additional
 // needed information.  If a logger is passed in, we will use that, otherwise
 // a logger will be created.
-pub fn build_downstairs_for_region(
+pub async fn build_downstairs_for_region(
     data: &Path,
     lossy: bool,
     read_errors: bool,
@@ -2821,7 +2821,7 @@ pub fn build_downstairs_for_region(
             Logger::root(drain.fuse(), o!())
         }
     };
-    let region = Region::open(data, Default::default(), true, read_only, &log)?;
+    let region = Region::open(data, Default::default(), true, read_only, &log).await?;
 
     info!(log, "UUID: {:?}", region.def().uuid());
     info!(
@@ -3189,8 +3189,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
@@ -3201,7 +3201,7 @@ mod test {
             false,
             false,
             Some(csl()),
-        )?;
+        ).await?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -4701,8 +4701,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(10).await?;
 
         // create random file
 
@@ -4770,8 +4770,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(10).await?;
 
         // create random file (100 fewer bytes than region size)
 
@@ -4853,8 +4853,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(10).await?;
 
         // create random file (100 more bytes than region size)
 
@@ -4937,8 +4937,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(10).await?;
 
         // create random file
 
@@ -4995,7 +4995,7 @@ mod test {
         Ok(())
     }
 
-    fn build_test_downstairs(
+    async fn build_test_downstairs(
         read_only: bool,
     ) -> Result<Arc<Mutex<Downstairs>>> {
         let block_size: u64 = 512;
@@ -5013,8 +5013,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
 
@@ -5026,12 +5026,12 @@ mod test {
             false, // flush errors
             read_only,
             Some(csl()),
-        )
+        ).await
     }
 
     #[tokio::test]
     async fn test_promote_to_active_one_read_write() -> Result<()> {
-        let ads = build_test_downstairs(false)?;
+        let ads = build_test_downstairs(false).await?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5052,7 +5052,7 @@ mod test {
 
     #[tokio::test]
     async fn test_promote_to_active_one_read_only() -> Result<()> {
-        let ads = build_test_downstairs(true)?;
+        let ads = build_test_downstairs(true).await?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5076,7 +5076,7 @@ mod test {
     ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
         // Upstairs) but with the same gen should be blocked
-        let ads = build_test_downstairs(false)?;
+        let ads = build_test_downstairs(false).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5127,7 +5127,7 @@ mod test {
     ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
         // Upstairs) but with a lower gen should be blocked.
-        let ads = build_test_downstairs(false)?;
+        let ads = build_test_downstairs(false).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5181,7 +5181,7 @@ mod test {
         // Attempting to activate multiple read-write (where it's the same
         // Upstairs but a different session) will block the "new" connection
         // if it has the same generation number.
-        let ads = build_test_downstairs(false)?;
+        let ads = build_test_downstairs(false).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5231,7 +5231,7 @@ mod test {
         // Attempting to activate multiple read-write where it's the same
         // Upstairs, but a different session, and with a larger generation
         // should allow the new connection to take over.
-        let ads = build_test_downstairs(false)?;
+        let ads = build_test_downstairs(false).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5275,7 +5275,7 @@ mod test {
     ) -> Result<()> {
         // Activating multiple read-only with different Upstairs UUIDs should
         // work.
-        let ads = build_test_downstairs(true)?;
+        let ads = build_test_downstairs(true).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5318,7 +5318,7 @@ mod test {
     async fn test_promote_to_active_multi_read_only_same_uuid() -> Result<()> {
         // Activating multiple read-only with the same Upstairs UUID should
         // kick out the other active one.
-        let ads = build_test_downstairs(true)?;
+        let ads = build_test_downstairs(true).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5360,7 +5360,7 @@ mod test {
     #[tokio::test]
     async fn test_multiple_read_only_no_job_id_collision() -> Result<()> {
         // Two read-only Upstairs shouldn't see each other's jobs
-        let ads = build_test_downstairs(true)?;
+        let ads = build_test_downstairs(true).await?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5456,8 +5456,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
@@ -5468,7 +5468,7 @@ mod test {
             false,
             false,
             Some(csl()),
-        )?;
+        ).await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -5550,8 +5550,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
@@ -5562,7 +5562,7 @@ mod test {
             false,
             false,
             Some(csl()),
-        )?;
+        ).await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -5644,8 +5644,8 @@ mod test {
         let dir = tempdir()?;
         mkdir_for_file(dir.path())?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        let mut region = Region::create(&dir, region_options, csl()).await?;
+        region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
@@ -5656,7 +5656,7 @@ mod test {
             false,
             false,
             Some(csl()),
-        )?;
+        ).await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {

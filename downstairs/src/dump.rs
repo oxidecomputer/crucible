@@ -45,7 +45,7 @@ pub async fn dump_region(
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(dir, Default::default(), false, true, &log)?;
+        let region = Region::open(dir, Default::default(), false, true, &log).await?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -539,7 +539,7 @@ async fn show_extent(
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
             let region =
-                Region::open(dir, Default::default(), false, true, &log)?;
+                Region::open(dir, Default::default(), false, true, &log).await?;
 
             let mut responses = region
                 .region_read(
@@ -653,7 +653,7 @@ async fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(dir, Default::default(), false, true, &log)?;
+        let region = Region::open(dir, Default::default(), false, true, &log).await?;
 
         let mut responses = region
             .region_read(

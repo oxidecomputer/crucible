@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
                 uuid,
                 encrypted,
                 log.clone(),
-            )?;
+            ).await?;
 
             if let Some(ref ip) = import_path {
                 downstairs_import(&mut region, ip).await.unwrap();
@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
                 true,
                 true,
                 &log,
-            )?;
+            ).await?;
 
             downstairs_export(&mut region, export_path, skip, count).await?;
             Ok(())
@@ -334,7 +334,7 @@ async fn main() -> Result<()> {
                 flush_errors,
                 read_only,
                 Some(log),
-            )?;
+            ).await?;
 
             let downstairs_join_handle = start_downstairs(
                 d,

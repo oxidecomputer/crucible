@@ -53,7 +53,7 @@ mod test {
                 Uuid::new_v4(),
                 encrypted,
                 csl(),
-            )?;
+            ).await?;
 
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
@@ -63,7 +63,7 @@ mod test {
                 false, /* flush errors */
                 read_only,
                 Some(csl()),
-            )?;
+            ).await?;
 
             let _join_handle = start_downstairs(
                 downstairs.clone(),
@@ -93,7 +93,7 @@ mod test {
                 false, /* flush errors */
                 true,
                 Some(csl()),
-            )?;
+            ).await?;
 
             let _join_handle = start_downstairs(
                 self.downstairs.clone(),
