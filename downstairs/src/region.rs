@@ -1608,26 +1608,22 @@ impl Region {
         let next_eid = self.extents.len() as u32;
 
         let eid_range = next_eid..self.def.extent_count();
-        let mut these_extent_handles = Vec::with_capacity(eid_range.len());
+        let mut these_extents = Vec::with_capacity(eid_range.len());
 
         for eid in eid_range {
-            let dir = self.dir.clone();
-            let def = self.def.clone();
-            let read_only = self.read_only;
-            let log = self.log.clone();
-            let handle = tokio::spawn(async move {
-                if create {
-                    Extent::create(&dir, &def, eid)
-                } else {
-                    Extent::open(dir, &def, eid, read_only, &log).await
-                }
-            });
-            these_extent_handles.push(handle);
-        }
-
-        let mut these_extents = Vec::with_capacity(these_extent_handles.len());
-        for handle in these_extent_handles {
-            these_extents.push(handle.await??);
+            let extent = if create {
+                Extent::create(&self.dir, &self.def, eid)
+            } else {
+                Extent::open(
+                    &self.dir,
+                    &self.def,
+                    eid,
+                    self.read_only,
+                    &self.log,
+                )
+                .await
+            };
+            these_extents.push(extent?);
         }
 
         self.extents.extend(these_extents);
