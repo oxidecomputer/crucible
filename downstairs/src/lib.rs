@@ -599,12 +599,13 @@ where
                     flush_number,
                     gen_number
                 );
+
                 match d
                     .region
                     .region_flush_extent(
                         *extent_id,
-                        *flush_number,
                         *gen_number,
+                        *flush_number,
                         *repair_id,
                     )
                     .await
@@ -632,9 +633,12 @@ where
                 info!(d.log, "{} Close extent {}", repair_id, extent_id);
                 match d.region.extents.get_mut(*extent_id) {
                     Some(ext) => {
-                        ext.close().await?;
-                        Message::RepairAckId {
+                        let (gen, flush, dirty) = ext.close().await?;
+                        Message::ExtentCloseAck {
                             repair_id: *repair_id,
+                            gen_number: gen,
+                            flush_number: flush,
+                            dirty,
                         }
                     }
                     None => Message::ExtentError {

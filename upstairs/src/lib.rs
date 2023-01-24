@@ -1839,13 +1839,29 @@ where
                         }
                     }
                     Some(Message::UuidMismatch { expected_id }) => {
-                        up.ds_transition(up_coms.client_id, DsState::Disabled).await;
+                        up.ds_transition(
+                            up_coms.client_id,
+                            DsState::Disabled
+                        ).await;
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
                             up_coms.client_id, expected_id
                         );
                     }
                     Some(Message::RepairAckId { repair_id }) => {
+                        if up.downstairs.lock().await.rep_done(
+                            up_coms.client_id, repair_id
+                        ) {
+                            up.ds_repair_done_notify(
+                                up_coms.client_id,
+                                repair_id,
+                                &up_coms.ds_reconcile_done_tx,
+                            ).await?;
+                        }
+                    }
+                    Some(Message::ExtentCloseAck {
+                        repair_id, gen_number: _, flush_number: _, dirty: _,
+                    }) => {
                         if up.downstairs.lock().await.rep_done(
                             up_coms.client_id, repair_id
                         ) {
@@ -2873,8 +2889,15 @@ impl Downstairs {
             let current = self.ds_state[cid as usize];
             // If a downstairs is faulted, we can move that job directly
             // to IOState::Skipped
+            // If a downstairs is in repair, then we need to see if this
+            // IO is on a repaired extent or not.
             match current {
-                DsState::Faulted | DsState::OnlineRepair => {
+                DsState::Faulted => {
+                    io.state.insert(cid, IOState::Skipped);
+                    self.io_state_count.incr(&IOState::Skipped, cid);
+                    skipped += 1;
+                }
+                DsState::OnlineRepair => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;

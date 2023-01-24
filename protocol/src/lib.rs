@@ -236,6 +236,17 @@ pub enum Message {
     RepairAckId {
         repair_id: u64,
     },
+    /// The given extent flush repair job ID has finished without error.
+    /// Included are the gen and flush numbers that were committed as
+    /// part of this flush request.  Note that if the extent is not
+    /// dirty, then these numbers may be different than the flush/gen
+    /// that was sent with the original flush
+    ExtentCloseAck {
+        repair_id: u64,
+        gen_number: u64,
+        flush_number: u64,
+        dirty: bool,
+    },
 
     /// A problem with the given extent
     ExtentError {
