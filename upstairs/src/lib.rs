@@ -1465,7 +1465,7 @@ where
                 {
                     warn!(
                         up_c.log,
-                        "[{}] ZZZZ Error processing message: {}",
+                        "[{}] Error processing message: {}",
                         up_coms_c.client_id,
                         e
                     );
