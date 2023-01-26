@@ -5394,7 +5394,10 @@ impl Upstairs {
      * Verify the guest given gen number is highest.
      * Decide if we need repair, and if so create the repair list
      */
-    async fn collate_downstairs(&self, ds: &mut Downstairs) -> Result<bool> {
+    async fn collate_downstairs(
+        &self,
+        ds: &mut Downstairs,
+    ) -> Result<bool, CrucibleError> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -5452,7 +5455,7 @@ impl Upstairs {
         let requested_gen = self.get_generation().await;
         if requested_gen == 0 {
             error!(self.log, "generation number should be at least 1");
-            bail!("Generation number should be at least 1");
+            crucible_bail!(GenerationNumberTooLow, "Generation 0 illegal");
         } else if requested_gen < max_gen {
             /*
              * We refuse to connect. The provided generation number is not
@@ -5460,12 +5463,13 @@ impl Upstairs {
              */
             error!(
                 self.log,
-                "found/using gen number {}, larger than requested: {}",
+                "found generation number {}, larger than requested: {}",
                 max_gen,
                 requested_gen,
             );
-            bail!(
-                "found/using gen number {}, larger than requested: {}",
+            crucible_bail!(
+                GenerationNumberTooLow,
+                "found generation number {}, larger than requested: {}",
                 max_gen,
                 requested_gen,
             );
@@ -5685,10 +5689,7 @@ impl Upstairs {
          * Determine the highest flush number and make sure our generation
          * is high enough.
          */
-        let need_repair;
-        let repair_commands;
-        let failed_collate;
-        {
+        let collate_status = {
             let active = self.active.lock().await;
             if active.up_state != UpState::Initializing {
                 return Ok(());
@@ -5721,164 +5722,161 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            match self.collate_downstairs(&mut ds).await {
-                Ok(res) => {
-                    need_repair = res;
-                    failed_collate = false;
-                }
-                Err(e) => {
-                    need_repair = false;
-                    failed_collate = true;
-                    error!(self.log, "Failed collate with {}", e);
-                }
-            }
-            repair_commands = ds.reconcile_task_list.len();
-        }
+            self.collate_downstairs(&mut ds).await
+        };
 
-        if failed_collate {
-            // We failed to collate the three downstairs, so we need
-            // to reset that activation request, and kick all the downstairs
-            // to FailedRepair
-            //
-            self.set_inactive(CrucibleError::RegionAssembleError).await;
-            let _active = self.active.lock().await;
-            let mut ds = self.downstairs.lock().await;
+        match collate_status {
+            Err(e) => {
+                error!(self.log, "Failed downstairs collate with: {}", e);
+                // We failed to collate the three downstairs, so we need
+                // to reset that activation request, and kick all the
+                // downstairs to FailedRepair
+                self.set_inactive(e).await;
+                let _active = self.active.lock().await;
+                let mut ds = self.downstairs.lock().await;
 
-            // While collating, downstairs should all be DsState::Repair.
-            // As we have released then locked the downstairs, we have to
-            // verify that the downstairs are all in the state we expect them
-            // to be.  Any change means that downstairs went away, but any
-            // downstairs still repairing should be moved to failed repair.
-            assert_eq!(ds.ds_active.len(), 0);
-            assert_eq!(ds.reconcile_task_list.len(), 0);
+                // While collating, downstairs should all be DsState::Repair.
+                // As we have released then locked the downstairs, we have to
+                // verify that the downstairs are all in the state we expect
+                // them to be.  Any change means that downstairs went away,
+                // but any downstairs still repairing should be moved to
+                // failed repair.
+                assert_eq!(ds.ds_active.len(), 0);
+                assert_eq!(ds.reconcile_task_list.len(), 0);
 
-            for (i, s) in ds.ds_state.iter_mut().enumerate() {
-                if *s == DsState::WaitQuorum {
-                    *s = DsState::FailedRepair;
-                    warn!(
-                        self.log,
-                        "Mark {} as FAILED Collate in final check", i
-                    );
-                } else {
-                    warn!(
-                        self.log,
-                        "downstairs in state {} after failed collate", *s
-                    );
-                }
-            }
-        } else if need_repair {
-            self.do_reconciliation(
-                dst,
-                lastcast,
-                ds_reconcile_done_rx,
-                repair_commands,
-            )
-            .await?;
-
-            let mut active = self.active.lock().await;
-            let mut ds = self.downstairs.lock().await;
-            /*
-             * Now that we have completed reconciliation, we move all
-             * the downstairs to the next state.  If we fail here, it means
-             * something interrupted our repair and we have to start over.
-             *
-             * As we repaired, downstairs should all be DsState::Repair.
-             *
-             * As we have released the downstairs lock while repairing, we
-             * have to verify that the downstairs are all in the state we
-             * expect them to be.  Any change means we abort and require
-             * all downstairs to reconnect, even if repair work is finished
-             * as a disconnected DS does not yet know it is all done with
-             * work and could have its state reset to New.
-             */
-
-            assert_eq!(ds.ds_active.len(), 0);
-            assert_eq!(ds.reconcile_task_list.len(), 0);
-
-            let ready = ds
-                .ds_state
-                .iter()
-                .filter(|s| **s == DsState::Repair)
-                .count();
-
-            if ready != 3 {
-                /*
-                 * Some downstairs was not in the proper state any longer,
-                 * so we need to abort this reconciliation and start
-                 * everyone over.  Move all the downstairs that thought
-                 * they were still repairing to FailedRepair which will
-                 * trigger a reconnect.
-                 */
                 for (i, s) in ds.ds_state.iter_mut().enumerate() {
-                    if *s == DsState::Repair {
+                    if *s == DsState::WaitQuorum {
                         *s = DsState::FailedRepair;
                         warn!(
                             self.log,
-                            "Mark {} as FAILED REPAIR in final check", i
+                            "Mark {} as FAILED Collate in final check", i
+                        );
+                    } else {
+                        warn!(
+                            self.log,
+                            "downstairs in state {} after failed collate", *s
                         );
                     }
                 }
-                /*
-                 * We don't exit here, as we want the downstairs to all
-                 * be notified there is a need to reset and go back through
-                 * repair because someone did not complete it.
-                 */
-            } else {
-                info!(self.log, "All required repair work is now completed");
-                info!(
-                    self.log,
-                    "Set Downstairs and Upstairs active after repairs"
-                );
-                if active.up_state != UpState::Initializing {
-                    bail!("Upstairs in unexpected state while reconciling");
-                }
-
-                for s in ds.ds_state.iter_mut() {
-                    *s = DsState::Active;
-                }
-                active.set_active().await?;
-                info!(
-                    self.log,
-                    "{} is now active with session: {}",
-                    self.uuid,
-                    self.session_id
-                );
-                self.stats.add_activation().await;
             }
-        } else {
-            /*
-             * No repair was needed, but make sure all DS are in the state
-             * we expect them to be.
-             */
-            let mut active = self.active.lock().await;
-            let mut ds = self.downstairs.lock().await;
+            Ok(true) => {
+                let repair_commands =
+                    self.downstairs.lock().await.reconcile_task_list.len();
+                self.do_reconciliation(
+                    dst,
+                    lastcast,
+                    ds_reconcile_done_rx,
+                    repair_commands,
+                )
+                .await?;
 
-            let ready = ds
-                .ds_state
-                .iter()
-                .filter(|s| **s == DsState::WaitQuorum)
-                .count();
+                let mut active = self.active.lock().await;
+                let mut ds = self.downstairs.lock().await;
+                /*
+                 * Now that we have completed reconciliation, we move all
+                 * the downstairs to the next state.  If we fail here, it means
+                 * something interrupted our repair and we have to start over.
+                 *
+                 * As we repaired, downstairs should all be DsState::Repair.
+                 *
+                 * As we have released the downstairs lock while repairing, we
+                 * have to verify that the downstairs are all in the state we
+                 * expect them to be.  Any change means we abort and require
+                 * all downstairs to reconnect, even if repair work is finished
+                 * as a disconnected DS does not yet know it is all done with
+                 * work and could have its state reset to New.
+                 */
 
-            if ready != 3 {
-                bail!("Unexpected Downstairs state after collation.");
-            } else {
-                info!(self.log, "No repair work was required");
-                info!(self.log, "Set Downstairs and Upstairs active");
-                if active.up_state != UpState::Initializing {
-                    bail!("Upstairs in unexpected state while reconciling");
+                assert_eq!(ds.ds_active.len(), 0);
+                assert_eq!(ds.reconcile_task_list.len(), 0);
+
+                let ready = ds
+                    .ds_state
+                    .iter()
+                    .filter(|s| **s == DsState::Repair)
+                    .count();
+
+                if ready != 3 {
+                    /*
+                     * Some downstairs was not in the proper state any longer,
+                     * so we need to abort this reconciliation and start
+                     * everyone over.  Move all the downstairs that thought
+                     * they were still repairing to FailedRepair which will
+                     * trigger a reconnect.
+                     */
+                    for (i, s) in ds.ds_state.iter_mut().enumerate() {
+                        if *s == DsState::Repair {
+                            *s = DsState::FailedRepair;
+                            warn!(
+                                self.log,
+                                "Mark {} as FAILED REPAIR in final check", i
+                            );
+                        }
+                    }
+                    /*
+                     * We don't exit here, as we want the downstairs to all
+                     * be notified there is a need to reset and go back through
+                     * repair because someone did not complete it.
+                     */
+                } else {
+                    info!(self.log, "All required repair work is completed");
+                    info!(
+                        self.log,
+                        "Set Downstairs and Upstairs active after repairs"
+                    );
+                    if active.up_state != UpState::Initializing {
+                        bail!("Upstairs in unexpected state while reconciling");
+                    }
+
+                    for s in ds.ds_state.iter_mut() {
+                        *s = DsState::Active;
+                    }
+                    active.set_active().await?;
+                    info!(
+                        self.log,
+                        "{} is now active with session: {}",
+                        self.uuid,
+                        self.session_id
+                    );
+                    self.stats.add_activation().await;
                 }
-                for s in ds.ds_state.iter_mut() {
-                    *s = DsState::Active;
+            }
+            Ok(false) => {
+                info!(self.log, "No downstairs repair required");
+                /*
+                 * No repair was needed, but make sure all DS are in the state
+                 * we expect them to be.
+                 */
+                let mut active = self.active.lock().await;
+                let mut ds = self.downstairs.lock().await;
+
+                let ready = ds
+                    .ds_state
+                    .iter()
+                    .filter(|s| **s == DsState::WaitQuorum)
+                    .count();
+
+                if ready != 3 {
+                    bail!("Unexpected Downstairs state after collation.");
+                } else {
+                    info!(self.log, "No repair work was required");
+                    info!(self.log, "Set Downstairs and Upstairs active");
+                    if active.up_state != UpState::Initializing {
+                        bail!("Upstairs in unexpected state while reconciling");
+                    }
+                    for s in ds.ds_state.iter_mut() {
+                        *s = DsState::Active;
+                    }
+                    active.set_active().await?;
+                    info!(
+                        self.log,
+                        "{} is now active with session: {}",
+                        self.uuid,
+                        self.session_id
+                    );
+                    self.stats.add_activation().await;
+                    info!(self.log, "{} Set Active after no repair", self.uuid);
                 }
-                active.set_active().await?;
-                info!(
-                    self.log,
-                    "{} is now active with session: {}",
-                    self.uuid,
-                    self.session_id
-                );
-                self.stats.add_activation().await;
-                info!(self.log, "{} Set Active after no repair", self.uuid);
             }
         }
 
