@@ -616,11 +616,14 @@ impl Extent {
     /**
      * Close an extent and the metadata db files for it.
      */
-    pub async fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<(u64, u64, bool), anyhow::Error> {
         let inner = self.inner.as_ref().unwrap().lock().await;
+        let gen = inner.gen_number().unwrap();
+        let flush = inner.flush_number().unwrap();
+        let dirty = inner.dirty().unwrap();
         drop(inner);
         self.inner = None;
-        Ok(())
+        Ok((gen, flush, dirty))
     }
 
     /**
@@ -1866,8 +1869,8 @@ impl Region {
     pub async fn region_flush_extent(
         &self,
         eid: usize,
-        flush_number: u64,
         gen_number: u64,
+        flush_number: u64,
         job_id: u64,
     ) -> Result<(), CrucibleError> {
         info!(
@@ -2264,8 +2267,14 @@ mod test {
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close().await?;
+        let (gen, flush, dirty) = ext_one.close().await?;
+
+        // Verify inner is gone, and we returned the expected gen, flush
+        // and dirty values for a new unwritten extent.
         assert!(ext_one.inner.is_none());
+        assert_eq!(gen, 0);
+        assert_eq!(flush, 0);
+        assert!(!dirty);
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -4218,6 +4227,127 @@ mod test {
         assert_eq!(buffer, read_from_region);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_flush_close_correct_result() {
+        // Verify that a close of an extent will return the correct gen
+        // flush and dirty bits for that extent.
+        let dir = tempdir().unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1).unwrap();
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
+            }];
+
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Flush extent with eid, fn, gen, job_id.
+        region
+            .region_flush_extent(eid as usize, 3, 2, 1)
+            .await
+            .unwrap();
+
+        // Close extent 0
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Verify inner is gone, and we returned the expected gen, flush
+        // and dirty values for a new unwritten extent.
+        assert_eq!(gen, 3);
+        assert_eq!(flush, 2);
+        assert!(!dirty);
+    }
+
+    #[tokio::test]
+    async fn test_close_reopen_flush_close_correct_result() {
+        // Do several open close operations, verifying that the
+        // gen/flush/dirty return values are as expected.
+        let dir = tempdir().unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1).unwrap();
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
+            }];
+
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Close extent 0 without a flush
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Because we did not flush yet, this extent should still have
+        // the values for an unwritten extent, except for the dirty bit.
+        assert_eq!(gen, 0);
+        assert_eq!(flush, 0);
+        assert!(dirty);
+
+        // Open the extent, then close it again, the values should remain
+        // the same as the previous check (testing here that dirty remains
+        // dirty).
+        region.reopen_extent(eid as usize).unwrap();
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Verify everything is the same, and dirty is still set.
+        assert_eq!(gen, 0);
+        assert_eq!(flush, 0);
+        assert!(dirty);
+
+        // Reopen, then flush extent with eid, fn, gen, job_id.
+        region.reopen_extent(eid as usize).unwrap();
+        region
+            .region_flush_extent(eid as usize, 4, 9, 1)
+            .await
+            .unwrap();
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Verify after flush that g,f are updated, and that dirty
+        // is no longer set.
+        assert_eq!(gen, 4);
+        assert_eq!(flush, 9);
+        assert!(!dirty);
     }
 
     #[tokio::test]
