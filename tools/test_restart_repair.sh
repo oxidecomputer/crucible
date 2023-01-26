@@ -76,9 +76,9 @@ for bin in $cds $ct $dsc; do
     fi
 done
 
-if pgrep -fl -U "$(id -u)" crucible-downstairs; then
+if pgrep -fl -U "$(id -u)" "$cds"; then
     echo "Downstairs already running" >&2
-    echo Run: pkill -f -U "$(id -u)" crucible-downstairs >&2
+    echo Run: pkill -f -U "$(id -u)" "$cds" >&2
     exit 1
 fi
 
