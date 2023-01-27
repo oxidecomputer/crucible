@@ -616,7 +616,7 @@ impl Extent {
     /**
      * Close an extent and the metadata db files for it.
      */
-    pub async fn close(&mut self) -> Result<(u64, u64, bool), anyhow::Error> {
+    pub async fn close(&mut self) -> Result<(u64, u64, bool), CrucibleError> {
         let inner = self.inner.as_ref().unwrap().lock().await;
         let gen = inner.gen_number().unwrap();
         let flush = inner.flush_number().unwrap();
@@ -4230,9 +4230,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_flush_close_correct_result() {
-        // Verify that a close of an extent will return the correct gen
-        // flush and dirty bits for that extent.
+    async fn test_extent_write_flush_close() {
+        // Verify that a write then close of an extent will return the
+        // expected gen flush and dirty bits for that extent.
         let dir = tempdir().unwrap();
         let mut region =
             Region::create(&dir, new_region_options(), csl()).unwrap();
@@ -4273,15 +4273,15 @@ mod test {
         let (gen, flush, dirty) = ext_zero.close().await.unwrap();
 
         // Verify inner is gone, and we returned the expected gen, flush
-        // and dirty values for a new unwritten extent.
+        // and dirty values for the write that should be flushed now.
         assert_eq!(gen, 3);
         assert_eq!(flush, 2);
         assert!(!dirty);
     }
 
     #[tokio::test]
-    async fn test_close_reopen_flush_close_correct_result() {
-        // Do several open close operations, verifying that the
+    async fn test_extent_close_reopen_flush_close() {
+        // Do several extent open close operations, verifying that the
         // gen/flush/dirty return values are as expected.
         let dir = tempdir().unwrap();
         let mut region =

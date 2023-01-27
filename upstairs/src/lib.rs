@@ -553,6 +553,100 @@ where
                 })
                 .await?
             }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent: _,
+            } => {
+                // This command should never exist on the upstairs side.
+                // We only construct it for downstairs IO, after
+                // receiving ExtentLiveClose from the upstairs.
+                panic!("[{}] Received illegal IOop::ExtentClose", client_id);
+            }
+            IOop::ExtentFlushClose {
+                dependencies,
+                extent,
+                flush_number,
+                gen_number,
+                source_downstairs,
+                repair_downstairs,
+            } => {
+                // TODO: Add dtrace probe point
+                if source_downstairs == client_id {
+                    fw.send(Message::ExtentLiveFlushClose {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: dependencies.clone(),
+                        extent_id: extent,
+                        flush_number,
+                        gen_number,
+                    })
+                    .await?
+                } else if repair_downstairs.contains(&client_id) {
+                    // We are the downstairs being repaired, so just close.
+                    fw.send(Message::ExtentLiveClose {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: dependencies.clone(),
+                        extent_id: extent,
+                    })
+                    .await?
+                } else {
+                    // We need to maybe send this job to the downstairs as
+                    // a no-op so dependencies for this job are met.  Or, maybe
+                    // we can move this job to "Skipped" right here?  That
+                    // seems like it's going to special case too much.
+                    // So, yeah, back to a new "noop" command idea.
+                }
+            }
+            IOop::ExtentLiveRepair {
+                dependencies,
+                extent,
+                source_downstairs,
+                source_repair_address,
+                repair_downstairs,
+            } => {
+                // TODO: Add dtrace probe point
+                if repair_downstairs.contains(&client_id) {
+                    fw.send(Message::ExtentLiveRepair {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: dependencies.clone(),
+                        extent_id: extent,
+                        source_client_id: source_downstairs,
+                        source_repair_address,
+                    })
+                    .await?
+                } else {
+                    // TODO: Send NOOP command for this.
+                }
+            }
+            IOop::ExtentLiveReopen {
+                dependencies,
+                extent,
+            } => {
+                // TODO: Add dtrace probe point
+                fw.send(Message::ExtentLiveReopen {
+                    upstairs_id: u.uuid,
+                    session_id: u.session_id,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                    extent_id: extent,
+                })
+                .await?
+            }
+            IOop::ExtentLiveNoOp { dependencies } => {
+                // TODO: Add dtrace probe point
+                fw.send(Message::ExtentLiveNoOp {
+                    upstairs_id: u.uuid,
+                    session_id: u.session_id,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                })
+                .await?
+            }
         }
     }
     Ok(false)
@@ -629,27 +723,40 @@ where
 
         // Verify we are in a valid state at this point.
         match my_state {
-            DsState::New
-            | DsState::Disconnected
-            | DsState::Faulted
-            | DsState::Offline => {} // Okay.
+            DsState::New | DsState::Disconnected | DsState::Faulted => {} // Ok
+
+            DsState::Offline => {
+                /*
+                 * This is only applicable for a downstairs that is
+                 * returning from being disconnected. Mark any in progress
+                 * jobs since the last good flush back to New, as we have
+                 * reconnected to this downstairs and will need to replay
+                 * any work that we were holding that we did not flush.
+                 */
+                ds.re_new(up_coms.client_id);
+            }
+            DsState::OnlineRepair => {
+                /*
+                 * Write more code here, when a downstairs is being repaired
+                 * and disconnects, we have to basically move it back to
+                 * the beginning of the line and start over, I think.
+                 * Any outstanding jobs need to be discarded, all extents
+                 * that were closed need to re-open, and then the repair
+                 * starts over from the beginning.  Something like that.
+                 * Similar, but not quite the same, as the re_new.
+                 */
+                warn!(
+                    up.log,
+                    "[{}] Reconnect while repair in progress",
+                    up_coms.client_id
+                );
+            }
             _ => {
                 panic!(
                     "[{}] failed proc with state {:?}",
                     up_coms.client_id, my_state
                 );
             }
-        }
-
-        /*
-         * This is only applicable for a downstairs that is returning from
-         * being disconnected. Mark any in progress jobs since the
-         * last good flush back to New, as we have reconnected to
-         * this downstairs and will need to replay any work that we
-         * were holding that we did not flush.
-         */
-        if my_state == DsState::Offline {
-            ds.re_new(up_coms.client_id);
         }
     }
 
@@ -1145,6 +1252,13 @@ where
                                 negotiated = 4;
                                 fw.send(Message::ExtentVersionsPlease).await?;
                             }
+                            DsState::OnlineRepair => {
+                                /*
+                                 * Ask for the current version of all extents.
+                                 */
+                                negotiated = 4;
+                                fw.send(Message::ExtentVersionsPlease).await?;
+                            }
                             bad_state => {
                                 panic!(
                                     "[{}] join from invalid state {:?} {} {}",
@@ -1175,7 +1289,8 @@ where
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            up.last_flush_id(up_coms.client_id).await, last_flush_number
+                            up.last_flush_id(up_coms.client_id).await,
+                            last_flush_number
                         );
                         up.ds_transition(
                             up_coms.client_id, DsState::Replay
@@ -1401,15 +1516,13 @@ where
             }
             DsState::OnlineRepair => {
                 drop(ds);
+                // Start some task here to handle the requests
                 info!(
                     up.log,
-                    "[{}] {} Enter Repair loop, never to return",
+                    "[{}] {} Enter Online Repair mode",
                     up_coms.client_id,
                     up.uuid
                 );
-                loop {
-                    tokio::time::sleep(Duration::from_secs(38)).await;
-                }
             }
             bad_state => {
                 error!(
@@ -1571,8 +1684,8 @@ where
                             // our UUID. We shouldn't have received this
                             // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
-                                uuid and our gen {} >= new gen {}!",
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
                                 up.get_generation().await,
@@ -1617,7 +1730,10 @@ where
                          * XXX Can a bad downstairs sending us a bad
                          * UUID be used as a denial of service?
                          */
-                        up.ds_transition(up_coms.client_id, DsState::Disabled).await;
+                        up.ds_transition(
+                                up_coms.client_id,
+                                DsState::Disabled
+                            ).await;
                         up.set_inactive(CrucibleError::UuidMismatch).await;
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
@@ -1700,9 +1816,6 @@ where
                  * should be handled when the downstairs ack's the flush
                  * generated by the disconnect request.
                  */
-                // I think, ":think:" that we could put this on the select
-                // and not have to wait for ping_interval to figure out it
-                // is time to deactivate.
                 if up.ds_deactivate(up_coms.client_id).await {
                     bail!("[{}] exits ping deactivation", up_coms.client_id);
                 }
@@ -1849,19 +1962,6 @@ where
                         );
                     }
                     Some(Message::RepairAckId { repair_id }) => {
-                        if up.downstairs.lock().await.rep_done(
-                            up_coms.client_id, repair_id
-                        ) {
-                            up.ds_repair_done_notify(
-                                up_coms.client_id,
-                                repair_id,
-                                &up_coms.ds_reconcile_done_tx,
-                            ).await?;
-                        }
-                    }
-                    Some(Message::ExtentCloseAck {
-                        repair_id, gen_number: _, flush_number: _, dirty: _,
-                    }) => {
                         if up.downstairs.lock().await.rep_done(
                             up_coms.client_id, repair_id
                         ) {
@@ -2913,7 +3013,7 @@ impl Downstairs {
         self.ds_active.insert(ds_id, io);
 
         // If we skipped all three jobs, then it's possible no downstairs
-        // task is around to tell ds_up_listen() that this job is done, so
+        // task is around to tell up_ds_listen() that this job is done, so
         // do that work here.
         if skipped == 3 {
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
@@ -2978,7 +3078,7 @@ impl Downstairs {
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
         /*
-         * XXX: this code assumes that 3 downstairs is the max that we'll
+         * This code assumes that 3 downstairs is the max that we'll
          * ever support.
          */
         let bad_job = match &job.work {
@@ -3000,6 +3100,32 @@ impl Downstairs {
                 gen_number: _gen_number,
                 snapshot_details: _,
             } => wc.error >= 2,
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                panic!("Received illegal IOop::ExtentClose: {}", extent);
+            }
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => wc.error >= 1,
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => wc.error >= 1,
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent: _,
+            } => wc.error >= 1,
+            IOop::ExtentLiveNoOp { dependencies: _ } => wc.error >= 1,
         };
 
         if bad_job {
@@ -3060,6 +3186,47 @@ impl Downstairs {
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
                 stats.add_flush().await;
+            }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                panic!(
+                    "job: {} gw: {}  Received illegal IOop::ExtentClose {}",
+                    ds_id, gw_id, extent,
+                );
+            }
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
+            }
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
+            }
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent: _,
+            } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
+            }
+            IOop::ExtentLiveNoOp { dependencies: _ } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
             }
         }
     }
@@ -3434,6 +3601,39 @@ impl Downstairs {
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
                         }
+                        IOop::ExtentClose {
+                            dependencies: _,
+                            extent: _,
+                        }
+                        | IOop::ExtentFlushClose {
+                            dependencies: _,
+                            extent: _,
+                            flush_number: _,
+                            gen_number: _,
+                            source_downstairs: _,
+                            repair_downstairs: _,
+                        }
+                        | IOop::ExtentLiveRepair {
+                            dependencies: _,
+                            extent: _,
+                            source_downstairs: _,
+                            source_repair_address: _,
+                            repair_downstairs: _,
+                        }
+                        | IOop::ExtentLiveReopen {
+                            dependencies: _,
+                            extent: _,
+                        }
+                        | IOop::ExtentLiveNoOp { dependencies: _ } => {
+                            // Errors during repair, this is a mess, we
+                            // need to unwind this whole repair and start
+                            // over?  Or just hang?  Retry forever?  Notify
+                            // nexus?
+                            panic!(
+                                "Error in repair {:?}, Write more code!",
+                                job
+                            );
+                        }
                         IOop::Read {
                             dependencies: _,
                             requests: _,
@@ -3626,6 +3826,63 @@ impl Downstairs {
                         }
                     }
                     self.ds_last_flush[client_id as usize] = ds_id;
+                }
+                IOop::ExtentClose {
+                    dependencies: _,
+                    extent,
+                } => {
+                    panic!(
+                        "job: {:?} Received illegal IOop::ExtentClose {}",
+                        job, extent,
+                    );
+                }
+                IOop::ExtentFlushClose {
+                    dependencies: _,
+                    extent: _,
+                    flush_number: _,
+                    gen_number: _,
+                    source_downstairs: _,
+                    repair_downstairs: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
+                }
+                IOop::ExtentLiveRepair {
+                    dependencies: _,
+                    extent: _,
+                    source_downstairs: _,
+                    source_repair_address: _,
+                    repair_downstairs: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
+                }
+                IOop::ExtentLiveReopen {
+                    dependencies: _,
+                    extent: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
+                }
+                IOop::ExtentLiveNoOp { dependencies: _ } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
                 }
             }
         }
@@ -4810,7 +5067,7 @@ impl Upstairs {
          *   1 | W     | 0
          *   2 | W     | 0,1
          *
-         * op 2 depends on both op 1 and op 0. if dependencies are transitive
+         * op 2 depends on both op 1 and op 0. If dependencies are transitive
          * with an existing job, it would be nice if those were removed from
          * this job's dependencies.
          */
@@ -5095,6 +5352,7 @@ impl Upstairs {
             DsState::Deactivated => DsState::New,
             DsState::Repair => DsState::New,
             DsState::FailedRepair => DsState::New,
+            DsState::OnlineRepair => DsState::OnlineRepair,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -6472,6 +6730,7 @@ impl DownstairsIO {
      * Return the size of the IO in bytes
      * Depending on the IO (write or read) we have to look in a different
      * location to get the size.
+     * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
         match &self.work {
@@ -6500,6 +6759,30 @@ impl DownstairsIO {
                     0
                 }
             }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent: _,
+            } => 0,
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => 0,
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => 0,
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent: _,
+            } => 0,
+            IOop::ExtentLiveNoOp { dependencies: _ } => 0,
         }
     }
 }
@@ -6544,6 +6827,35 @@ pub enum IOop {
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
     },
+    /*
+     * These operations are for repairing a bad downstairs
+     */
+    ExtentClose {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+    },
+    ExtentFlushClose {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+        flush_number: u64,
+        gen_number: u64,
+        source_downstairs: u8,
+        repair_downstairs: Vec<u8>,
+    },
+    ExtentLiveRepair {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+        source_downstairs: u8,
+        source_repair_address: SocketAddr,
+        repair_downstairs: Vec<u8>,
+    },
+    ExtentLiveReopen {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+    },
+    ExtentLiveNoOp {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+    },
 }
 
 impl IOop {
@@ -6555,7 +6867,7 @@ impl IOop {
             } => dependencies,
             IOop::Flush {
                 dependencies,
-                flush_number: _flush_number,
+                flush_number: _,
                 gen_number: _,
                 snapshot_details: _,
             } => dependencies,
@@ -6567,6 +6879,30 @@ impl IOop {
                 dependencies,
                 writes: _,
             } => dependencies,
+            IOop::ExtentClose {
+                dependencies,
+                extent: _,
+            } => dependencies,
+            IOop::ExtentFlushClose {
+                dependencies,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => dependencies,
+            IOop::ExtentLiveRepair {
+                dependencies,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => dependencies,
+            IOop::ExtentLiveReopen {
+                dependencies,
+                extent: _,
+            } => dependencies,
+            IOop::ExtentLiveNoOp { dependencies } => dependencies,
         }
     }
 
@@ -8640,6 +8976,45 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     snapshot_details: _,
                 } => {
                     let job_type = "Flush".to_string();
+                    (job_type, 0)
+                }
+                IOop::ExtentClose {
+                    dependencies: _,
+                    extent,
+                } => {
+                    let job_type = "EClose".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentFlushClose {
+                    dependencies: _,
+                    extent,
+                    flush_number: _,
+                    gen_number: _,
+                    source_downstairs: _,
+                    repair_downstairs: _,
+                } => {
+                    let job_type = "FClose".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentLiveRepair {
+                    dependencies: _,
+                    extent,
+                    source_downstairs: _,
+                    source_repair_address: _,
+                    repair_downstairs: _,
+                } => {
+                    let job_type = "Repair".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentLiveReopen {
+                    dependencies: _,
+                    extent,
+                } => {
+                    let job_type = "Reopen".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentLiveNoOp { dependencies: _ } => {
+                    let job_type = "NoOp".to_string();
                     (job_type, 0)
                 }
             };

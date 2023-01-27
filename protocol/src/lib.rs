@@ -196,11 +196,14 @@ pub enum Message {
     Imok,
 
     /*
-     * Repair related
+     * Reconciliation related
+     * These messages are used only during the initial startup process
+     * when the upstairs is making all three downstairs consistent with
+     * each other.
      * We use rep_id here (Repair ID) instead of job_id to be clear that
-     * this is repair work and not actual IO.  The repair work uses a
-     * different work queue  and each repair job must finish on all three
-     * downstairs before the next one can be sent.
+     * this is reconciliation work and not actual IO.  The reconciliation work
+     * uses a different work queue and each reconciliation job must finish on
+     * all three downstairs before the next one can be sent.
      */
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
@@ -236,23 +239,88 @@ pub enum Message {
     RepairAckId {
         repair_id: u64,
     },
-    /// The given extent flush repair job ID has finished without error.
-    /// Included are the gen and flush numbers that were committed as
-    /// part of this flush request.  Note that if the extent is not
-    /// dirty, then these numbers may be different than the flush/gen
-    /// that was sent with the original flush
-    ExtentCloseAck {
-        repair_id: u64,
-        gen_number: u64,
-        flush_number: u64,
-        dirty: bool,
-    },
 
     /// A problem with the given extent
     ExtentError {
         repair_id: u64,
         extent_id: usize,
         error: CrucibleError,
+    },
+
+    /*
+     * Live Repair related.
+     * These messages are used to repair a downstairs while the upstairs
+     * is active and receiving IOs.  These messages are sent from the
+     * upstairs to the downstairs.
+     */
+    /// Close an extent
+    ExtentLiveClose {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+    },
+    /// Flush and then close an extent.
+    ExtentLiveFlushClose {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+        flush_number: u64,
+        gen_number: u64,
+    },
+    /// Live Repair of an extent
+    ExtentLiveRepair {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+        source_client_id: u8,
+        source_repair_address: SocketAddr,
+    },
+    /// Reopen this extent, for use when upstairs is active.
+    ExtentLiveReopen {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+    },
+    /// There is no real work to do, but we need to complete this job id
+    ExtentLiveNoOp {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+    },
+
+    /*
+     * Live Repair response messages.
+     */
+    /// The extent closed successfully
+    /// Included are the gen and flush numbers that were committed as
+    /// part of this flush request.  Note that if the extent is not
+    /// dirty, then these numbers may be different than the flush/gen
+    /// that was sent with the original flush
+    /// This result is used for both the ExtentLiveClose and the
+    /// ExtentLiveFlushClose messages.
+    ExtentLiveCloseAck {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        result: Result<(u64, u64, bool), CrucibleError>,
+    },
+
+    /// The given "ExtentLive" message ID was completed.  This message
+    /// will be from ExtentLiveRepair, ExtentLiveReopen, or ExtentLiveNoOp
+    ExtentLiveAckId {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
     },
 
     /*
