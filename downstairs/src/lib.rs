@@ -466,6 +466,37 @@ pub mod cdt {
     fn extent__read__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
 }
 
+// Check if a Message is valid on this downstairs or not.
+// If not, then send the correct error on the provided channel, return false.
+// If correct, then return true.
+async fn is_message_valid<WT>(
+    upstairs_connection: UpstairsConnection,
+    upstairs_id: Uuid,
+    session_id: Uuid,
+    fw: &mut Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
+) -> Result<bool>
+where
+    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
+{
+    if upstairs_connection.upstairs_id != upstairs_id {
+        let mut fw = fw.lock().await;
+        fw.send(Message::UuidMismatch {
+            expected_id: upstairs_connection.upstairs_id,
+        })
+        .await?;
+        Ok(false)
+    } else if upstairs_connection.session_id != session_id {
+        let mut fw = fw.lock().await;
+        fw.send(Message::UuidMismatch {
+            expected_id: upstairs_connection.session_id,
+        })
+        .await?;
+        Ok(false)
+    } else {
+        Ok(true)
+    }
+}
+
 /*
  * A new IO request has been received.
  * If the message is a ping or negotiation message, send the correct
@@ -490,20 +521,14 @@ where
             dependencies,
             writes,
         } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
                 return Ok(());
             }
             cdt::submit__write__start!(|| *job_id);
@@ -526,20 +551,14 @@ where
             gen_number,
             snapshot_details,
         } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
                 return Ok(());
             }
             cdt::submit__flush__start!(|| *job_id);
@@ -562,20 +581,14 @@ where
             dependencies,
             writes,
         } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
                 return Ok(());
             }
             cdt::submit__writeunwritten__start!(|| *job_id);
@@ -596,20 +609,14 @@ where
             dependencies,
             requests,
         } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
                 return Ok(());
             }
             cdt::submit__read__start!(|| *job_id);
@@ -623,6 +630,159 @@ where
             d.add_work(upstairs_connection, *job_id, new_read).await?;
             Some(*job_id)
         }
+        // These are for repair while taking live IO
+        Message::ExtentLiveClose {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            extent_id,
+        } => {
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+
+            // TODO: Add dtrace probes
+            let ext_close = IOop::ExtentClose {
+                dependencies: dependencies.to_vec(),
+                extent: *extent_id,
+            };
+
+            let mut d = ad.lock().await;
+            d.add_work(upstairs_connection, *job_id, ext_close).await?;
+            Some(*job_id)
+        }
+        Message::ExtentLiveFlushClose {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            extent_id,
+            flush_number,
+            gen_number,
+        } => {
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+
+            // TODO: Add dtrace probes
+            // Do both the flush, and then the close
+            let new_flush = IOop::ExtentFlushClose {
+                dependencies: dependencies.to_vec(),
+                extent: *extent_id,
+                flush_number: *flush_number,
+                gen_number: *gen_number,
+                source_downstairs: 0, // Unused in the downstairs
+                repair_downstairs: vec![], // Unused in the downstairs
+            };
+
+            let mut d = ad.lock().await;
+            d.add_work(upstairs_connection, *job_id, new_flush).await?;
+            Some(*job_id)
+        }
+        Message::ExtentLiveRepair {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            extent_id,
+            source_client_id,
+            source_repair_address,
+        } => {
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+
+            // TODO: Add dtrace probes
+            // Do both the flush, and then the close
+            let new_flush = IOop::ExtentLiveRepair {
+                dependencies: dependencies.to_vec(),
+                extent: *extent_id,
+                source_downstairs: *source_client_id,
+                source_repair_address: *source_repair_address,
+                repair_downstairs: vec![],
+            };
+
+            let mut d = ad.lock().await;
+            d.add_work(upstairs_connection, *job_id, new_flush).await?;
+            Some(*job_id)
+        }
+        Message::ExtentLiveReopen {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            extent_id,
+        } => {
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            // TODO: add dtrace stat
+
+            let new_open = IOop::ExtentLiveReopen {
+                dependencies: dependencies.to_vec(),
+                extent: *extent_id,
+            };
+
+            let mut d = ad.lock().await;
+            d.add_work(upstairs_connection, *job_id, new_open).await?;
+            Some(*job_id)
+        }
+        Message::ExtentLiveNoOp {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+        } => {
+            if !is_message_valid(
+                upstairs_connection,
+                *upstairs_id,
+                *session_id,
+                fw,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            // TODO: Create new dtrace stat
+            let new_open = IOop::ExtentLiveNoOp {
+                dependencies: dependencies.to_vec(),
+            };
+
+            let mut d = ad.lock().await;
+            d.add_work(upstairs_connection, *job_id, new_open).await?;
+            Some(*job_id)
+        }
+
+        // These messages arrive during initial reconciliation.
         Message::ExtentFlush {
             repair_id,
             extent_id,
@@ -665,189 +825,6 @@ where
             fw.send(msg).await?;
             return Ok(());
         }
-        // These are for repair while taking live IO
-        Message::ExtentLiveClose {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-        } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
-                return Ok(());
-            }
-
-            // TODO: Add dtrace probes
-            let ext_close = IOop::ExtentClose {
-                dependencies: dependencies.to_vec(),
-                extent: *extent_id,
-            };
-
-            let mut d = ad.lock().await;
-            d.add_work(upstairs_connection, *job_id, ext_close).await?;
-            Some(*job_id)
-        }
-        Message::ExtentLiveFlushClose {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-            flush_number,
-            gen_number,
-        } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
-                return Ok(());
-            }
-
-            // TODO: Add dtrace probes
-            // Do both the flush, and then the close
-            let new_flush = IOop::ExtentFlushClose {
-                dependencies: dependencies.to_vec(),
-                extent: *extent_id,
-                flush_number: *flush_number,
-                gen_number: *gen_number,
-                source_downstairs: 0, // Unused in the downstairs
-                repair_downstairs: vec![], // Unused in the downstairs
-            };
-
-            let mut d = ad.lock().await;
-            d.add_work(upstairs_connection, *job_id, new_flush).await?;
-            Some(*job_id)
-        }
-        Message::ExtentLiveRepair {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-            source_client_id,
-            source_repair_address,
-        } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
-                return Ok(());
-            }
-
-            // TODO: Add dtrace probes
-            // Do both the flush, and then the close
-            let new_flush = IOop::ExtentLiveRepair {
-                dependencies: dependencies.to_vec(),
-                extent: *extent_id,
-                source_downstairs: *source_client_id,
-                source_repair_address: *source_repair_address,
-                repair_downstairs: vec![],
-            };
-
-            let mut d = ad.lock().await;
-            d.add_work(upstairs_connection, *job_id, new_flush).await?;
-            Some(*job_id)
-        }
-        Message::ExtentLiveReopen {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-        } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            // TODO: add dtrace stat
-
-            let new_open = IOop::ExtentLiveReopen {
-                dependencies: dependencies.to_vec(),
-                extent: *extent_id,
-            };
-
-            let mut d = ad.lock().await;
-            d.add_work(upstairs_connection, *job_id, new_open).await?;
-            Some(*job_id)
-        }
-        Message::ExtentLiveNoOp {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-        } => {
-            if upstairs_connection.upstairs_id != *upstairs_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.upstairs_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            if upstairs_connection.session_id != *session_id {
-                let mut fw = fw.lock().await;
-                fw.send(Message::UuidMismatch {
-                    expected_id: upstairs_connection.session_id,
-                })
-                .await?;
-                return Ok(());
-            }
-            // TODO: Create new dtrace stat
-            let new_open = IOop::ExtentLiveNoOp {
-                dependencies: dependencies.to_vec(),
-            };
-
-            let mut d = ad.lock().await;
-            d.add_work(upstairs_connection, *job_id, new_open).await?;
-            Some(*job_id)
-        }
-
-        // These messages arrive during initial reconciliation.
         Message::ExtentClose {
             repair_id,
             extent_id,
