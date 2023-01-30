@@ -7522,7 +7522,7 @@ mod up_test {
         assert_eq!(jobs[0].ds_id, read);
         assert!(matches!(jobs[0].work, IOop::Read { .. }));
 
-        // complete and ack the read, then do another flush. this should retire
+        // complete and ack the read, then do another flush. This should retire
         // everything.
         for client_id in 0..3 {
             ds.in_progress(read, client_id);
