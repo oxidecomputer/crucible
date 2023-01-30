@@ -1954,7 +1954,7 @@ impl Downstairs {
                 dependencies: _,
                 extent,
             } => {
-                println!("Closing extent {}", extent);
+                info!(self.log, "Closing extent {}", extent);
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
@@ -1979,7 +1979,7 @@ impl Downstairs {
                 source_downstairs: _,
                 repair_downstairs: _,
             } => {
-                println!("Flush then Closing extent {}", extent);
+                info!(self.log, "Flush then Closing extent {}", extent);
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
@@ -2019,11 +2019,12 @@ impl Downstairs {
             }
             IOop::ExtentLiveRepair {
                 dependencies: _,
-                extent: _,
+                extent,
                 source_downstairs: _,
                 source_repair_address: _,
                 repair_downstairs: _,
             } => {
+                info!(self.log, "TODO: write code to repair extent {}", extent);
                 // TODO: Implement the actual repair
                 Ok(Some(Message::ExtentLiveAckId {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2266,7 +2267,8 @@ impl Downstairs {
                         .get(&currently_active_upstairs_uuids[0])
                         .unwrap();
 
-                    println!(
+                    warn!(
+                        self.log,
                         "Attempting RW takeover from {:?} to {:?}",
                         active_upstairs.upstairs_connection,
                         upstairs_connection,

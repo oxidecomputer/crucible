@@ -593,11 +593,7 @@ where
                     })
                     .await?
                 } else {
-                    // We need to maybe send this job to the downstairs as
-                    // a no-op so dependencies for this job are met.  Or, maybe
-                    // we can move this job to "Skipped" right here?  That
-                    // seems like it's going to special case too much.
-                    // So, yeah, back to a new "noop" command idea.
+                    // TODO: Send the IOop::NoOp command here.
                 }
             }
             IOop::ExtentLiveRepair {
@@ -737,9 +733,9 @@ where
             }
             DsState::OnlineRepair => {
                 /*
-                 * Write more code here, when a downstairs is being repaired
-                 * and disconnects, we have to basically move it back to
-                 * the beginning of the line and start over, I think.
+                 * TODO: Write more code here, when a downstairs is being
+                 * repaired and disconnects, we have to basically move it back
+                 * to the beginning of the line and start over, I think.
                  * Any outstanding jobs need to be discarded, all extents
                  * that were closed need to re-open, and then the repair
                  * starts over from the beginning.  Something like that.
@@ -1516,7 +1512,11 @@ where
             }
             DsState::OnlineRepair => {
                 drop(ds);
-                // Start some task here to handle the requests
+                // TODO: Repair doing something.
+                // For repair to actually do something, there must be a
+                // responsible task started to coordinate it.  Either do
+                // that here, or signal to an existing task that it must
+                // drive the repair.
                 info!(
                     up.log,
                     "[{}] {} Enter Online Repair mode",
@@ -3625,10 +3625,12 @@ impl Downstairs {
                             extent: _,
                         }
                         | IOop::ExtentLiveNoOp { dependencies: _ } => {
-                            // Errors during repair, this is a mess, we
-                            // need to unwind this whole repair and start
-                            // over?  Or just hang?  Retry forever?  Notify
-                            // nexus?
+                            // TODO: Figure out a plan on how to handle
+                            // errors during repair.  We must invalidate
+                            // any jobs dependent on the repair success as
+                            // well as throw out the whole repair and start
+                            // over as we can no longer trust results from
+                            // the downstairs under repair.
                             panic!(
                                 "Error in repair {:?}, Write more code!",
                                 job
