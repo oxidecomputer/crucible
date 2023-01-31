@@ -421,15 +421,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "const_panic"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58baae561b85ca19b3122a9ddd35c8ec40c3bcd14fe89921824eae73f7baffbf"
-dependencies = [
- "konst_kernel",
-]
-
-[[package]]
 name = "convert_case"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1874,12 +1865,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "konst_kernel"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7771682454392dfe62a909aba2c6efc6674e2ad0b678fbc33b154e2e1bd59b89"
-
-[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3216,12 +3201,9 @@ dependencies = [
 
 [[package]]
 name = "ringbuffer"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "034f2f6835eab90a8942169db360776272fe3fce9eb13b9bdefaceea67cabd68"
-dependencies = [
- "const_panic",
-]
+checksum = "1973f95452ec56a4b2c683f5eabc15617e38f4faf2776ed4a0011d5070ecb37e"
 
 [[package]]
 name = "rusqlite"

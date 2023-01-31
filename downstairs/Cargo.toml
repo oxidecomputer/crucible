@@ -28,7 +28,7 @@ oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 rand = "0.8.5"
 repair-client = { path = "../repair-client" }
 reqwest = { version = "0.11", features = ["json"] }
-ringbuffer = "0.11"
+ringbuffer = "0.12"
 rusqlite = { version = "0.28" }
 schemars = { version = "0.8.11", features = [ "uuid1" ] }
 serde = { version = "1", features = ["derive"] }
