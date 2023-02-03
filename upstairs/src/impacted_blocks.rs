@@ -293,6 +293,22 @@ pub fn extent_from_offset(
     ImpactedBlocks::from_offset(extent_size, fst, num_blocks.value)
 }
 
+pub fn extent_to_impacted_blocks(
+    ddef: &RegionDefinition,
+    eid: u32,
+) -> ImpactedBlocks {
+    assert!(eid < ddef.extent_count());
+    let one = ImpactedAddr {
+        extent_id: eid as u64,
+        block: 0,
+    };
+    let two = ImpactedAddr {
+        extent_id: eid as u64,
+        block: ddef.extent_size().value - 1,
+    };
+    ImpactedBlocks::InclusiveRange(one, two)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -314,6 +330,93 @@ mod test {
         ddef.set_extent_size(Block::new_512(extent_size));
         ddef.set_extent_count(extent_count);
         ddef
+    }
+
+    /// extent_to_impacted blocks should return all the blocks for a
+    /// given extent.
+    #[test]
+    fn test_extent_to_impacted_blocks() {
+        let ddef = &basic_region_definition(2, 10);
+
+        // First
+        assert_eq!(
+            extent_to_impacted_blocks(ddef, 0)
+                .blocks(ddef)
+                .collect::<Vec<(u64, Block)>>(),
+            vec![extent_tuple(0, 0), extent_tuple(0, 1)],
+        );
+        // Somewhere in the middle
+        assert_eq!(
+            extent_to_impacted_blocks(ddef, 3)
+                .blocks(ddef)
+                .collect::<Vec<(u64, Block)>>(),
+            vec![extent_tuple(3, 0), extent_tuple(3, 1)],
+        );
+        // Last
+        assert_eq!(
+            extent_to_impacted_blocks(ddef, 9)
+                .blocks(ddef)
+                .collect::<Vec<(u64, Block)>>(),
+            vec![extent_tuple(9, 0), extent_tuple(9, 1)],
+        );
+    }
+
+    #[test]
+    fn test_large_extent_to_impacted_blocks() {
+        // Test a slightly larger number of blocks per extent, and
+        // an odd number of blocks per extent.
+        let ddef = &basic_region_definition(9, 5);
+
+        assert_eq!(
+            extent_to_impacted_blocks(ddef, 0)
+                .blocks(ddef)
+                .collect::<Vec<(u64, Block)>>(),
+            vec![
+                extent_tuple(0, 0),
+                extent_tuple(0, 1),
+                extent_tuple(0, 2),
+                extent_tuple(0, 3),
+                extent_tuple(0, 4),
+                extent_tuple(0, 5),
+                extent_tuple(0, 6),
+                extent_tuple(0, 7),
+                extent_tuple(0, 8),
+            ],
+        );
+        // Somewhere in the middle
+        assert_eq!(
+            extent_to_impacted_blocks(ddef, 2)
+                .blocks(ddef)
+                .collect::<Vec<(u64, Block)>>(),
+            vec![
+                extent_tuple(2, 0),
+                extent_tuple(2, 1),
+                extent_tuple(2, 2),
+                extent_tuple(2, 3),
+                extent_tuple(2, 4),
+                extent_tuple(2, 5),
+                extent_tuple(2, 6),
+                extent_tuple(2, 7),
+                extent_tuple(2, 8),
+            ],
+        );
+        // Last
+        assert_eq!(
+            extent_to_impacted_blocks(ddef, 4)
+                .blocks(ddef)
+                .collect::<Vec<(u64, Block)>>(),
+            vec![
+                extent_tuple(4, 0),
+                extent_tuple(4, 1),
+                extent_tuple(4, 2),
+                extent_tuple(4, 3),
+                extent_tuple(4, 4),
+                extent_tuple(4, 5),
+                extent_tuple(4, 6),
+                extent_tuple(4, 7),
+                extent_tuple(4, 8),
+            ],
+        );
     }
 
     #[test]
