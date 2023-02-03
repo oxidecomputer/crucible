@@ -1317,7 +1317,7 @@ mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
-        let mut ds = Downstairs::new(csl());
+        let mut ds = Downstairs::new(csl(), Vec::new());
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let id = ds.next_id();
@@ -3287,14 +3287,12 @@ mod up_test {
         up.ds_transition(1, DsState::WaitActive).await;
         up.ds_transition(1, DsState::WaitQuorum).await;
 
-        let (ds_work_tx, _) = watch::channel(1);
+        let (ds_work_tx, _) = mpsc::channel(500);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         let (ds_reconcile_work_tx, _) = watch::channel(1);
         let (ds_active_tx, _) = watch::channel(1);
         let (_, mut ds_reconcile_done_rx) = mpsc::channel::<Repair>(32);
-        let t = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let dst = Target {
-            target: t,
             ds_work_tx,
             ds_done_tx,
             ds_active_tx,
@@ -4070,7 +4068,7 @@ mod up_test {
     #[tokio::test]
     async fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let mut ds = Downstairs::new(csl());
+        let mut ds = Downstairs::new(csl(), Vec::new());
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         let next_id = ds.next_id();
 
