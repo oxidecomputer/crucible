@@ -278,7 +278,7 @@ pub enum Message {
         job_id: u64,
         dependencies: Vec<u64>,
         extent_id: usize,
-        source_client_id: u8,
+        source_client_id: usize,
         source_repair_address: SocketAddr,
     },
     /// Reopen this extent, for use when upstairs is active.
