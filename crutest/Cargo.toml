@@ -32,5 +32,5 @@ serde_json = "1"
 statistical = "1.0.0"
 tokio = { version = "1.25.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
-toml = "0.5"
+toml = "0.7"
 uuid = { version = "1.2.2", features = [ "serde", "v4" ] }
