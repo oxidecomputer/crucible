@@ -301,7 +301,8 @@ pub fn deadline_secs(secs: u64) -> Instant {
 async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
-    up_coms: UpComs,
+    client_id: u8,
+    ds_done_tx: &mpsc::Sender<u64>,
 ) -> Result<()> {
     let (upstairs_id, session_id, ds_id, result) = match m {
         Message::Imok => return Ok(()),
@@ -311,7 +312,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__io__done!(|| (job_id, up_coms.client_id as u64));
+            cdt::ds__write__io__done!(|| (job_id, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -325,10 +326,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__unwritten__io__done!(|| (
-                job_id,
-                up_coms.client_id as u64
-            ));
+            cdt::ds__write__unwritten__io__done!(|| (job_id, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -342,7 +340,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__flush__io__done!(|| (job_id, up_coms.client_id as u64));
+            cdt::ds__flush__io__done!(|| (job_id, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -356,7 +354,7 @@ async fn process_message(
             job_id,
             responses,
         } => {
-            cdt::ds__read__io__done!(|| (job_id, up_coms.client_id as u64));
+            cdt::ds__read__io__done!(|| (job_id, client_id as u64));
             (*upstairs_id, *session_id, *job_id, responses.clone())
         }
         /*
@@ -364,10 +362,7 @@ async fn process_message(
          * I don't think there is anything else we can do.
          */
         x => {
-            warn!(
-                u.log,
-                "{} unexpected frame {:?}, IGNORED", up_coms.client_id, x
-            );
+            warn!(u.log, "{} unexpected frame {:?}, IGNORED", client_id, x);
             return Ok(());
         }
     };
@@ -376,7 +371,7 @@ async fn process_message(
         warn!(
             u.log,
             "[{}] u.uuid {:?} != job {} upstairs_id {:?}!",
-            up_coms.client_id,
+            client_id,
             u.uuid,
             ds_id,
             upstairs_id,
@@ -389,7 +384,7 @@ async fn process_message(
         warn!(
             u.log,
             "[{}] u.session_id {:?} != job {} session_id {:?}!",
-            up_coms.client_id,
+            client_id,
             u.session_id,
             ds_id,
             session_id,
@@ -402,10 +397,8 @@ async fn process_message(
     // job being ready to ACK, then send a message on the ds_done
     // channel.  Note that a failed IO still needs to ACK that failure
     // back to the guest.
-    if u.process_ds_operation(ds_id, up_coms.client_id, result)
-        .await?
-    {
-        up_coms.ds_done_tx.send(ds_id).await?;
+    if u.process_ds_operation(ds_id, client_id, result).await? {
+        ds_done_tx.send(ds_id).await?;
     }
 
     Ok(())
@@ -1560,7 +1553,8 @@ where
     info!(up.log, "[{}] Starts cmd_loop", up_coms.client_id);
     let pm_task = {
         let up_c = up.clone();
-        let up_coms_c = up_coms.clone();
+        let ds_done_tx = up_coms.ds_done_tx.clone();
+        let client_id = up_coms.client_id;
 
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
@@ -1574,13 +1568,11 @@ where
                  * handle it.
                  */
                 if let Err(e) =
-                    process_message(&up_c, &m, up_coms_c.clone()).await
+                    process_message(&up_c, &m, client_id, &ds_done_tx).await
                 {
                     warn!(
                         up_c.log,
-                        "[{}] Error processing message: {}",
-                        up_coms_c.client_id,
-                        e
+                        "[{}] Error processing message: {}", client_id, e
                     );
                 }
 
@@ -1590,23 +1582,22 @@ where
                  * tear down this connection and require the downstairs to
                  * reconnect and go into OnlineRepair mode.
                  */
-                if up_c.downstairs.lock().await.ds_state
-                    [up_coms_c.client_id as usize]
+                if up_c.downstairs.lock().await.ds_state[client_id as usize]
                     == DsState::Faulted
                 {
                     warn!(
                         up_c.log,
                         "[{}] exits pm_task, this downstairs faulted",
-                        up_coms_c.client_id
+                        client_id
                     );
                     bail!(
                         "[{}] exits pm_task, this downstairs faulted",
-                        up_coms_c.client_id
+                        client_id
                     );
                 }
 
-                if up_c.ds_deactivate(up_coms_c.client_id).await {
-                    bail!("[{}] exits after deactivation", up_coms_c.client_id);
+                if up_c.ds_deactivate(client_id).await {
+                    bail!("[{}] exits after deactivation", client_id);
                 }
             }
             Ok(())
@@ -1745,7 +1736,7 @@ where
                     }
                 }
             }
-            _ = up_coms.ds_work_rx.changed() => {
+            _ = up_coms.ds_work_rx.recv() => {
                 /*
                  * A change here indicates the work hashmap has changed
                  * and we should go look for new work to do. It is possible
@@ -2186,7 +2177,7 @@ where
  * Things that allow the various tasks of Upstairs to communicate
  * with each other.
  */
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct UpComs {
     /**
      * The client ID (a downstairs) who will be using these channels.
@@ -2197,7 +2188,7 @@ struct UpComs {
      * (possibly) arrived on the work queue and this client should go
      * see what new work has arrived
      */
-    ds_work_rx: watch::Receiver<u64>,
+    ds_work_rx: mpsc::Receiver<u64>,
     /**
      * This channel is used to transmit that the state of the connection
      * to this downstairs has changed.  The receiver is the up_listen task.
@@ -2247,7 +2238,6 @@ enum WrappedStream {
  * instance.  This task will run forever.
  */
 async fn looper(
-    target: SocketAddr,
     tls_context: Arc<
         tokio::sync::Mutex<Option<crucible_common::x509::TLSContext>>,
     >,
@@ -2264,6 +2254,10 @@ async fn looper(
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        // Get the specific information for the downstairs we will operate on.
+        let ds = up.downstairs.lock().await;
+        let target: SocketAddr = ds.ds_target[up_coms.client_id as usize];
+        drop(ds);
 
         /*
          * Make connection to this downstairs.
@@ -2425,6 +2419,11 @@ struct Downstairs {
     ds_uuid: HashMap<u8, Uuid>,
 
     /*
+     * The IP:Port of each of the downstairs
+     */
+    ds_target: Vec<SocketAddr>,
+
+    /*
      * The IP:Port for repair when contacting the downstairs, hashed by
      * the client index the upstairs gives it.
      */
@@ -2489,9 +2488,10 @@ struct Downstairs {
 }
 
 impl Downstairs {
-    fn new(log: Logger) -> Self {
+    fn new(log: Logger, ds_target: Vec<SocketAddr>) -> Self {
         Self {
             ds_uuid: HashMap::new(),
+            ds_target,
             ds_repair: HashMap::new(),
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
@@ -4409,7 +4409,10 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(log.clone())),
+            downstairs: Mutex::new(Downstairs::new(
+                log.clone(),
+                opt.target.to_owned(),
+            )),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(rd_status),
             encryption_context,
@@ -8060,8 +8063,7 @@ struct Repair {
  * Send a message there is repair work to do.
  */
 pub struct Target {
-    target: SocketAddr,
-    ds_work_tx: watch::Sender<u64>,
+    ds_work_tx: mpsc::Sender<u64>,
     ds_done_tx: mpsc::Sender<u64>,
     ds_active_tx: watch::Sender<u64>,
     ds_reconcile_work_tx: watch::Sender<u64>,
@@ -8078,13 +8080,13 @@ struct Condition {
  * Send work to all the targets.
  * If a send fails, report an error.
  */
-fn send_work(t: &[Target], val: u64) {
-    for d_client in t.iter() {
-        let res = d_client.ds_work_tx.send(val);
+async fn send_work(t: &[Target], val: u64) {
+    for (client_id, d_client) in t.iter().enumerate() {
+        let res = d_client.ds_work_tx.send(val).await;
         if let Err(e) = res {
             println!(
-                "ERROR {:#?} Failed to notify {:?} of work {}",
-                e, d_client.target, val,
+                "ERROR {:#?} Failed to notify client {} of work {}",
+                e, client_id, val,
             );
         }
     }
@@ -8095,12 +8097,12 @@ fn send_work(t: &[Target], val: u64) {
  * If a send fails, report an error.
  */
 fn send_reconcile_work(t: &[Target], val: u64) {
-    for d_client in t.iter() {
+    for (client_id, d_client) in t.iter().enumerate() {
         let res = d_client.ds_reconcile_work_tx.send(val);
         if let Err(e) = res {
             println!(
-                "ERROR {:#?} Failed to notify {:?} of reconcile work {}",
-                e, d_client.target, val,
+                "ERROR {:#?} Failed to notify client {} of reconcile work {}",
+                e, client_id, val,
             );
         }
     }
@@ -8111,13 +8113,13 @@ fn send_reconcile_work(t: &[Target], val: u64) {
  * If a send fails, print an error.
  */
 fn send_active(t: &[Target], gen: u64) {
-    for d_client in t.iter() {
-        // println!("#### send to client {:?}", d_client.target);
+    for (client_id, d_client) in t.iter().enumerate() {
+        // println!("#### send to client {:?}", client_id);
         let res = d_client.ds_active_tx.send(gen);
         if let Err(e) = res {
             println!(
-                "#### error {:#?} Failed 'active' notification to {:?}",
-                e, d_client.target
+                "ERROR {:#?} Failed 'active' notification to client {}",
+                e, client_id
             );
         }
     }
@@ -8266,7 +8268,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::Read { offset, data } => {
@@ -8277,7 +8279,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
@@ -8288,7 +8290,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::WriteUnwritten { offset, data } => {
@@ -8299,7 +8301,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::Flush { snapshot_details } => {
@@ -8323,7 +8325,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         // Query ops
@@ -8404,7 +8406,7 @@ async fn process_new_io(
                 req.send_err(CrucibleError::UpstairsInactive).await;
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
     }
@@ -8514,7 +8516,7 @@ async fn up_listen(
                 if let Some(c) = c {
                     info!(
                         up.log,
-                        "[{}] {:?} new connection:{:?}",
+                        "[{}] {} task reports connection:{:?}",
                         c.client_id, c.target, c.connected,
                     );
                     up.ds_state_show().await;
@@ -8537,8 +8539,8 @@ async fn up_listen(
                     } else {
                         info!(
                             up.log,
-                            "[{}] goes offline {}",
-                            c.client_id, c.target
+                            "[{}] {} task reports offline",
+                            c.client_id, c.target,
                         );
                     }
                 } else {
@@ -8549,7 +8551,7 @@ async fn up_listen(
                      * bug somewhere, at least we are leaving this
                      * breadcrumb behind.
                      */
-                    info!(up.log, "up_listen reports status_rx -> None ");
+                    warn!(up.log, "up_listen reports status_rx -> None ");
                 }
             }
             req = up.guest.recv() => {
@@ -8583,7 +8585,7 @@ async fn up_listen(
                         error!(up.log, "flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
-                        send_work(&dst, 1);
+                        send_work(&dst, 1).await;
                     }
                 }
                 /*
@@ -8689,56 +8691,48 @@ pub async fn up_main(
     };
     let tls_context = Arc::new(tokio::sync::Mutex::new(tls_context));
 
-    let mut client_id = 0;
     /*
-     * Create one downstairs task (dst) for each target in the opt
-     * structure that was passed to us.
+     * Create one downstairs task structure (dst) for the three downstairs
+     * tasks.
      */
-    let dst = opt
-        .target
-        .iter()
-        .map(|dst| {
-            /*
-             * Create the channel that we will use to request that the loop
-             * check for work to do in the central structure.
-             */
-            let (ds_work_tx, ds_work_rx) = watch::channel(1);
-            /*
-             * Create the channel used to submit reconcile work to each
-             * downstairs (when work is required).
-             */
-            let (ds_reconcile_work_tx, ds_reconcile_work_rx) =
-                watch::channel(1);
+    let mut dst = Vec::new();
+    for client_id in 0..3 {
+        /*
+         * Create the channel that we will use to request that the loop
+         * check for work to do in the central structure.
+         */
+        let (ds_work_tx, ds_work_rx) = mpsc::channel(500);
+        /*
+         * Create the channel used to submit reconcile work to each
+         * downstairs (when work is required).
+         */
+        let (ds_reconcile_work_tx, ds_reconcile_work_rx) = watch::channel(1);
 
-            // Notify when it's time to go active.
-            let (ds_active_tx, ds_active_rx) = watch::channel(0);
+        // Notify when it's time to go active.
+        let (ds_active_tx, ds_active_rx) = watch::channel(0);
 
-            let up = Arc::clone(&up);
-            let t0 = *dst;
-            let up_coms = UpComs {
-                client_id,
-                ds_work_rx,
-                ds_status_tx: ds_status_tx.clone(),
-                ds_done_tx: ds_done_tx.clone(),
-                ds_active_rx,
-                ds_reconcile_work_rx,
-                ds_reconcile_done_tx: ds_reconcile_done_tx.clone(),
-            };
-            let tls_context = tls_context.clone();
-            tokio::spawn(async move {
-                looper(t0, tls_context, &up, up_coms).await;
-            });
-            client_id += 1;
+        let up = Arc::clone(&up);
+        let up_coms = UpComs {
+            client_id,
+            ds_work_rx,
+            ds_status_tx: ds_status_tx.clone(),
+            ds_done_tx: ds_done_tx.clone(),
+            ds_active_rx,
+            ds_reconcile_work_rx,
+            ds_reconcile_done_tx: ds_reconcile_done_tx.clone(),
+        };
+        let tls_context = tls_context.clone();
+        tokio::spawn(async move {
+            looper(tls_context, &up, up_coms).await;
+        });
 
-            Target {
-                target: *dst,
-                ds_work_tx,
-                ds_done_tx: ds_done_tx.clone(),
-                ds_active_tx,
-                ds_reconcile_work_tx,
-            }
-        })
-        .collect::<Vec<_>>();
+        dst.push(Target {
+            ds_work_tx,
+            ds_done_tx: ds_done_tx.clone(),
+            ds_active_tx,
+            ds_reconcile_work_tx,
+        });
+    }
 
     // Drop here, otherwise receivers will be kept waiting if looper quits
     drop(ds_done_tx);
