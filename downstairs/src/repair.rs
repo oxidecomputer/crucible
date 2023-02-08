@@ -30,7 +30,7 @@ pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
     Ok(())
 }
 
-fn build_api() -> ApiDescription<FileServerContext> {
+fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     let mut api = ApiDescription::new();
     api.register(get_extent_file).unwrap();
     api.register(get_files_for_extent).unwrap();
@@ -72,9 +72,10 @@ pub async fn repair_main(
     /*
      * Set up the server.
      */
-    let server = HttpServerStarter::new(&config_dropshot, api, context, log)
-        .map_err(|error| format!("failed to create server: {}", error))?
-        .start();
+    let server =
+        HttpServerStarter::new(&config_dropshot, api, context.into(), log)
+            .map_err(|error| format!("failed to create server: {}", error))?
+            .start();
     let local_addr = server.local_addr();
 
     tokio::spawn(async move {
@@ -119,7 +120,7 @@ pub struct FileSpec {
     path = "/newextent/{eid}/{file_type}",
 }]
 async fn get_extent_file(
-    rqctx: Arc<RequestContext<FileServerContext>>,
+    rqctx: RequestContext<Arc<FileServerContext>>,
     path: Path<FileSpec>,
 ) -> Result<Response<Body>, HttpError> {
     let fs = path.into_inner();
@@ -192,7 +193,7 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
     path = "/extent/{eid}/files",
 }]
 async fn get_files_for_extent(
-    rqctx: Arc<RequestContext<FileServerContext>>,
+    rqctx: RequestContext<Arc<FileServerContext>>,
     path: Path<Eid>,
 ) -> Result<HttpResponseOk<Vec<String>>, HttpError> {
     let eid = path.into_inner().eid;
