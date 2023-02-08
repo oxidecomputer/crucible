@@ -2060,7 +2060,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.reopen_extent(*extent)
+                    self.region.reopen_extent(*extent).await
                 };
                 Ok(Some(Message::ExtentLiveAckId {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -3261,7 +3261,7 @@ mod test {
 
     // Test function to create a simple downstairs with the given block
     // and extent values.  Returns the Downstairs.
-    fn create_test_downstairs(
+    async fn create_test_downstairs(
         block_size: u64,
         extent_size: u64,
         extent_count: u32,
@@ -3278,8 +3278,8 @@ mod test {
         region_options.set_uuid(Uuid::new_v4());
 
         mkdir_for_file(dir.path())?;
-        let mut region = Region::create(dir, region_options, csl())?;
-        region.extend(extent_count)?;
+        let mut region = Region::create(dir, region_options, csl()).await?;
+        region.extend(extent_count).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let ads = build_downstairs_for_region(
@@ -3290,7 +3290,8 @@ mod test {
             false,
             false,
             Some(csl()),
-        )?;
+        )
+        .await?;
 
         Ok(ads)
     }
@@ -3309,7 +3310,8 @@ mod test {
         let extent_size = 4;
         let dir = tempdir()?;
 
-        let ads = create_test_downstairs(block_size, extent_size, 5, &dir)?;
+        let ads =
+            create_test_downstairs(block_size, extent_size, 5, &dir).await?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3398,7 +3400,8 @@ mod test {
         let dir = tempdir()?;
         let gen = 10;
 
-        let ads = create_test_downstairs(block_size, extent_size, 5, &dir)?;
+        let ads =
+            create_test_downstairs(block_size, extent_size, 5, &dir).await?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3570,7 +3573,8 @@ mod test {
         let dir = tempdir()?;
         let gen = 10;
 
-        let ads = create_test_downstairs(block_size, extent_size, 5, &dir)?;
+        let ads =
+            create_test_downstairs(block_size, extent_size, 5, &dir).await?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -3690,7 +3694,8 @@ mod test {
         let dir = tempdir()?;
         let gen = 10;
 
-        let ads = create_test_downstairs(block_size, extent_size, 5, &dir)?;
+        let ads =
+            create_test_downstairs(block_size, extent_size, 5, &dir).await?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -3798,7 +3803,8 @@ mod test {
         let dir = tempdir()?;
         let gen = 10;
 
-        let ads = create_test_downstairs(block_size, extent_size, 5, &dir)?;
+        let ads =
+            create_test_downstairs(block_size, extent_size, 5, &dir).await?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3915,7 +3921,8 @@ mod test {
         let dir = tempdir()?;
         let gen = 10;
 
-        let ads = create_test_downstairs(block_size, extent_size, 5, &dir)?;
+        let ads =
+            create_test_downstairs(block_size, extent_size, 5, &dir).await?;
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),

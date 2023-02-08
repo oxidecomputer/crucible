@@ -4686,9 +4686,10 @@ mod test {
         // Verify that a write then close of an extent will return the
         // expected gen flush and dirty bits for that extent.
         let dir = tempdir().unwrap();
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).unwrap();
-        region.extend(1).unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -4736,9 +4737,10 @@ mod test {
         // Do several extent open close operations, verifying that the
         // gen/flush/dirty return values are as expected.
         let dir = tempdir().unwrap();
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).unwrap();
-        region.extend(1).unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -4777,7 +4779,7 @@ mod test {
         // Open the extent, then close it again, the values should remain
         // the same as the previous check (testing here that dirty remains
         // dirty).
-        region.reopen_extent(eid as usize).unwrap();
+        region.reopen_extent(eid as usize).await.unwrap();
         let ext_zero = &mut region.extents[eid as usize];
         let (gen, flush, dirty) = ext_zero.close().await.unwrap();
 
@@ -4787,7 +4789,7 @@ mod test {
         assert!(dirty);
 
         // Reopen, then flush extent with eid, fn, gen, job_id.
-        region.reopen_extent(eid as usize).unwrap();
+        region.reopen_extent(eid as usize).await.unwrap();
         region
             .region_flush_extent(eid as usize, 4, 9, 1)
             .await
@@ -4800,6 +4802,96 @@ mod test {
         assert_eq!(gen, 4);
         assert_eq!(flush, 9);
         assert!(!dirty);
+    }
+
+    #[tokio::test]
+    /// We need to make sure that a flush will properly adjust the DB hashes
+    /// after issuing multiple writes to different disconnected sections of
+    /// an extent
+    async fn test_flush_after_multiple_disjoint_writes() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region_opts = new_region_options();
+        region_opts.set_extent_size(Block::new_512(1024));
+        let mut region =
+            Region::create(&dir, region_opts, csl()).await.unwrap();
+        region.extend(1).await.unwrap();
+
+        // Write some data to 3 different areas
+        let ranges = [(0..120), (243..244), (487..903)];
+
+        // We will write these ranges multiple times so that there's multiple
+        // hashes in the DB, so we need multiple sets of data.
+        let writes: Vec<Vec<Vec<crucible_protocol::Write>>> = (0..3)
+            .map(|_| {
+                ranges
+                    .iter()
+                    .map(|range| {
+                        range
+                            .clone()
+                            .map(|idx| {
+                                // Generate data for this block
+                                let data = thread_rng().gen::<[u8; 512]>();
+                                let hash = integrity_hash(&[&data]);
+                                crucible_protocol::Write {
+                                    eid: 0,
+                                    offset: Block::new_512(idx),
+                                    data: Bytes::copy_from_slice(&data),
+                                    block_context: BlockContext {
+                                        hash,
+                                        encryption_context: None,
+                                    },
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Write all the writes
+        for write_iteration in &writes {
+            for write_chunk in write_iteration {
+                region.region_write(write_chunk, 0, false).await?;
+            }
+        }
+
+        // Flush
+        region.region_flush(1, 2, &None, 3).await?;
+
+        // We are gonna compare against the last write iteration
+        let last_writes = &writes[2];
+
+        let ext = &region.extents[0];
+        let inner = ext.inner().await;
+        for (i, range) in ranges.iter().enumerate() {
+            // Get the contexts for the range
+            let ctxts = inner
+                .get_block_contexts(range.start, range.end - range.start)?;
+
+            // Every block should have at most 1 block
+            assert_eq!(
+                ctxts.iter().map(|block_ctxts| block_ctxts.len()).max(),
+                Some(1)
+            );
+
+            // Now that we've checked that, flatten out for an easier eq
+            let actual_ctxts: Vec<_> = ctxts
+                .iter()
+                .flatten()
+                .map(|downstairs_context| &downstairs_context.block_context)
+                .collect();
+
+            // What we expect is the hashes for the last write we did
+            let expected_ctxts: Vec<_> = last_writes[i]
+                .iter()
+                .map(|write| &write.block_context)
+                .collect();
+
+            // Check that they're right.
+            assert_eq!(expected_ctxts, actual_ctxts);
+        }
+
+        Ok(())
     }
 
     #[tokio::test]
