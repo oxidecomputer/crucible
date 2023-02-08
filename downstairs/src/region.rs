@@ -4859,7 +4859,7 @@ mod test {
         region.region_flush(1, 2, &None, 3).await?;
 
         // We are gonna compare against the last write iteration
-        let last_writes = &writes[2];
+        let last_writes = writes.last().unwrap();
 
         let ext = &region.extents[0];
         let inner = ext.inner().await;
@@ -4890,6 +4890,83 @@ mod test {
             // Check that they're right.
             assert_eq!(expected_ctxts, actual_ctxts);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    /// We need to make sure that a flush will properly adjust the DB hashes
+    /// after issuing multiple writes to different disconnected sections of
+    /// an extent
+    async fn test_big_extent_full_write_and_flush() -> Result<()> {
+        let dir = tempdir()?;
+
+        const EXTENT_SIZE: u64 = 4096;
+        let mut region_opts = new_region_options();
+        region_opts.set_extent_size(Block::new_512(EXTENT_SIZE));
+        let mut region =
+            Region::create(&dir, region_opts, csl()).await.unwrap();
+        region.extend(1).await.unwrap();
+
+        // writing the entire region a few times over before the flush.
+        let writes: Vec<Vec<crucible_protocol::Write>> = (0..3)
+            .map(|_| {
+                (0..EXTENT_SIZE)
+                    .map(|idx| {
+                        // Generate data for this block
+                        let data = thread_rng().gen::<[u8; 512]>();
+                        let hash = integrity_hash(&[&data]);
+                        crucible_protocol::Write {
+                            eid: 0,
+                            offset: Block::new_512(idx),
+                            data: Bytes::copy_from_slice(&data),
+                            block_context: BlockContext {
+                                hash,
+                                encryption_context: None,
+                            },
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Write all the writes
+        for write_iteration in &writes {
+            region.region_write(write_iteration, 0, false).await?;
+        }
+
+        // Flush
+        region.region_flush(1, 2, &None, 3).await?;
+
+        // compare against the last write iteration
+        let last_writes = writes.last().unwrap();
+
+        let ext = &region.extents[0];
+        let inner = ext.inner().await;
+        // Get the contexts for the range
+        let ctxts = inner.get_block_contexts(0, EXTENT_SIZE)?;
+
+        // Every block should have at most 1 block
+        assert_eq!(
+            ctxts.iter().map(|block_ctxts| block_ctxts.len()).max(),
+            Some(1)
+        );
+
+        // Now that we've checked that, flatten out for an easier eq
+        let actual_ctxts: Vec<_> = ctxts
+            .iter()
+            .flatten()
+            .map(|downstairs_context| &downstairs_context.block_context)
+            .collect();
+
+        // What we expect is the hashes for the last write we did
+        let expected_ctxts: Vec<_> = last_writes
+            .iter()
+            .map(|write| &write.block_context)
+            .collect();
+
+        // Check that they're right.
+        assert_eq!(expected_ctxts, actual_ctxts);
 
         Ok(())
     }
