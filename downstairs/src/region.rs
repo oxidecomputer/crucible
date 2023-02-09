@@ -4895,9 +4895,8 @@ mod test {
     }
 
     #[tokio::test]
-    /// We need to make sure that a flush will properly adjust the DB hashes
-    /// after issuing multiple writes to different disconnected sections of
-    /// an extent
+    /// This test ensures that our flush logic works even for full-extent
+    /// flushes. That's the case where the set of modified blocks will be full.
     async fn test_big_extent_full_write_and_flush() -> Result<()> {
         let dir = tempdir()?;
 
