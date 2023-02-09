@@ -5,6 +5,34 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/downstairs/fault/{cid}": {
+      "post": {
+        "operationId": "fault_downstairs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint8",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/info": {
       "get": {
         "summary": "Fetch the current value for all the stats in the UpstairsStats struct",

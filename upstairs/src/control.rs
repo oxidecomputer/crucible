@@ -7,7 +7,9 @@ use dropshot::ConfigLoggingLevel;
 use dropshot::HttpError;
 use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
+use dropshot::HttpResponseUpdatedNoContent;
 use dropshot::HttpServerStarter;
+use dropshot::Path;
 use dropshot::RequestContext;
 use dropshot::TypedBody;
 use schemars::JsonSchema;
@@ -20,6 +22,7 @@ use super::*;
 pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
+    api.register(fault_downstairs).unwrap();
     api.register(take_snapshot).unwrap();
 
     api
@@ -139,6 +142,55 @@ async fn upstairs_fill_info(
         repair_done,
         repair_needed,
     }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Cid {
+    cid: u8,
+}
+
+#[endpoint {
+    method = POST,
+    path = "/downstairs/fault/{cid}",
+    unpublished = false,
+}]
+async fn fault_downstairs(
+    rqctx: RequestContext<Arc<UpstairsInfo>>,
+    path: Path<Cid>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let api_context = rqctx.context();
+    let path = path.into_inner();
+    let cid = path.cid;
+
+    if cid > 2 {
+        return Err(HttpError::for_bad_request(
+            Some(String::from("BadInput")),
+            format!("Invalid downstairs client id: {}", cid),
+        ));
+    }
+
+    /*
+     * Verify the downstairs is currently in a state where we can
+     * transition it to faulted without causing a panic in the
+     * upstairs.
+     */
+    let active = api_context.up.active.lock().await;
+    let up_state = active.up_state;
+    let ds = api_context.up.downstairs.lock().await;
+    if ds.ds_state[cid as usize] != DsState::Active {
+        return Err(HttpError::for_bad_request(
+            Some(String::from("InvalidState")),
+            format!("downstairs {} not in Active state", cid),
+        ));
+    }
+    drop(active);
+
+    api_context
+        .up
+        .ds_transition_with_lock(ds, up_state, cid, DsState::Faulted);
+
+    Ok(HttpResponseUpdatedNoContent())
 }
 
 /**
