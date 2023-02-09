@@ -486,6 +486,7 @@ async fn cmd_write<T: BlockIO>(
         if early_shutdown.try_recv().is_ok() {
             eprintln!("shutting down early in response to SIGUSR1");
             join_all(futures).await?;
+            crucible.flush(None).await?;
             return Ok(total_bytes_written);
         }
     }
@@ -521,6 +522,9 @@ async fn cmd_write<T: BlockIO>(
             futures,
         )
         .await?;
+    } else {
+        join_all(futures).await?;
+        crucible.flush(None).await?;
     }
 
     Ok(total_bytes_written)
