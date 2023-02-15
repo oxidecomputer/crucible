@@ -5077,22 +5077,6 @@ impl Upstairs {
          * incorrect read. It's important to search for write dependencies in
          * the list of all active jobs.
          *
-         * Take another example. Again say that a flush was a barrier to
-         * searching for write dependencies:
-         *
-         *       block
-         * op# | 0 1 2 | deps
-         * ----|-------------
-         *   0 | W     |
-         *   1 |   W   |
-         *   2 | FFFFF | 0,1
-         *   3 | W     | 2
-         *   4 |   W   | 2
-         *
-         * Without dependencies between ops 0 and 3, and 1 and 4, there's
-         * nothing that prevents an aggressively parallel downstairs from
-         * executing these writes in the wrong order.
-         *
          * TODO: any overlap of impacted blocks will create a dependency.
          * take this an example (this shows three writes, all to the
          * same block, along with the dependency list for each
