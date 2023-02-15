@@ -7598,7 +7598,7 @@ mod up_test {
         // ----|----------------|-----
         //   0 |  R  R          |
         //   1 | FFFFFFFFFFFFFFF|
-        //   2 |     W  W       |
+        //   2 |     W  W       | 0,1
 
         let upstairs = make_upstairs();
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
