@@ -717,6 +717,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-staticfile",
+ "libc",
  "mime_guess",
  "omicron-common",
  "openapi-lint",

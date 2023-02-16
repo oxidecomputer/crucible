@@ -19,6 +19,8 @@ use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use repair_client::types::FileType;
 use repair_client::Client;
 
+use std::os::fd::AsRawFd;
+
 use super::*;
 
 #[derive(Debug)]
@@ -27,6 +29,7 @@ pub struct Extent {
     read_only: bool,
     block_size: u64,
     extent_size: Block,
+    iov_max: usize,
     /// Inner contains information about the actual extent file that holds
     /// the data, and the metadata (stored in the database) about that
     /// extent.
@@ -613,6 +616,7 @@ impl Extent {
             read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
+            iov_max: unsafe { libc::sysconf(libc::_SC_IOV_MAX) as usize },
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
@@ -779,6 +783,7 @@ impl Extent {
             read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
+            iov_max: unsafe { libc::sysconf(libc::_SC_IOV_MAX) as usize },
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
@@ -858,7 +863,7 @@ impl Extent {
         cdt::extent__read__start!(|| {
             (job_id, self.number, requests.len() as u64)
         });
-        let mut inner = self.inner().await;
+        let inner = self.inner().await;
 
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls and sqlite
@@ -876,22 +881,33 @@ impl Extent {
             // contiguous with the request before it. Since we're counting
             // pairs, and the number of pairs is one less than the number of
             // requests, we need to add 1 to get our actual run length.
-            let n_contiguous_requests = requests[req_run_start..]
-                .windows(2)
-                .take_while(|reqs| {
-                    reqs[0].offset.value + 1 == reqs[1].offset.value
-                })
-                .count()
-                + 1;
+            let mut n_contiguous_requests = 1;
+
+            for request_window in requests[req_run_start..].windows(2) {
+                if (request_window[0].offset.value + 1
+                    == request_window[1].offset.value)
+                    && ((n_contiguous_requests + 1) < self.iov_max)
+                {
+                    n_contiguous_requests += 1;
+                } else {
+                    break;
+                }
+            }
 
             // Create our responses and push them into the output. While we're
-            // at it, check for overflows
+            // at it, check for overflows. Create iovecs alongside the
+            // responses.
             let resp_run_start = responses.len();
+            let mut iovecs = Vec::with_capacity(n_contiguous_requests);
             for req in requests[req_run_start..][..n_contiguous_requests].iter()
             {
                 let resp =
                     ReadResponse::from_request(req, self.block_size as usize);
                 self.check_input(req.offset, &resp.data)?;
+                iovecs.push(libc::iovec {
+                    iov_base: resp.data.as_ptr() as *mut libc::c_void,
+                    iov_len: resp.data.len(),
+                });
                 responses.push(resp);
             }
 
@@ -899,14 +915,20 @@ impl Extent {
             cdt::extent__read__file__start!(|| {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
-            inner.file.seek(SeekFrom::Start(
-                first_req.offset.value * self.block_size,
-            ))?;
-            let mut read_buffer = BytesMut::with_capacity(
-                n_contiguous_requests * self.block_size as usize,
-            );
-            read_buffer.resize(read_buffer.capacity(), 0);
-            inner.file.read_exact(&mut read_buffer)?;
+
+            let bytes_read = unsafe {
+                libc::preadv(
+                    inner.file.as_raw_fd(),
+                    iovecs.as_ptr(),
+                    iovecs.len() as libc::c_int,
+                    first_req.offset.value as i64 * self.block_size as i64,
+                )
+            };
+
+            if bytes_read == -1 {
+                crucible_bail!(GenericError, "preadv failed!");
+            }
+
             cdt::extent__read__file__done!(|| {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
@@ -923,7 +945,7 @@ impl Extent {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
 
-            // Now it's time to put everything into the responses.
+            // Now it's time to put block contexts into the responses.
             // We use into_iter here to move values out of enc_ctxts/hashes,
             // avoiding a clone(). For code consistency, we use iters for the
             // response and data chunks too. These iters will be the same length
@@ -931,20 +953,10 @@ impl Extent {
             let resp_iter =
                 responses[resp_run_start..][..n_contiguous_requests].iter_mut();
             let ctx_iter = block_contexts.into_iter();
-            let data_iter = read_buffer.chunks_exact(self.block_size as usize);
 
-            // We could make this a little cleaner if we pulled in itertools and
-            // used multizip from that, but i don't think it's worth it.
-            for ((resp, r_ctx), r_data) in
-                resp_iter.zip(ctx_iter).zip(data_iter)
-            {
-                // Shove everything into the response
+            for (resp, r_ctx) in resp_iter.zip(ctx_iter) {
                 resp.block_contexts =
                     r_ctx.into_iter().map(|x| x.block_context).collect();
-
-                // XXX if resp.data was Bytes instead of BytesMut we could avoid
-                // a copy here and instead assign it to a frozen subslice.
-                resp.data.copy_from_slice(r_data);
             }
 
             req_run_start += n_contiguous_requests;
@@ -1159,75 +1171,52 @@ impl Extent {
             (job_id, self.number, writes.len() as u64)
         });
 
-        // PERFORMANCE TODO: While sqlite is the bulk of our performance cost
-        // in writes, we're still paying quite the price on small writes
-        // here. It would be nice if we could improve that a bit. An easy win
-        // would be to replace the seek+write with the syscall that does both
-        // in one go. I also wonder whether memory-mapping would be
-        // advantageous here.
+        // PERFORMANCE TODO:
         //
-        // Something else worth considering for small writes is that, based on
+        // Something worth considering for small writes is that, based on
         // my memory of conversations we had with propolis folks about what
         // OSes expect out of an NVMe driver, I believe our contract with the
         // upstairs doesn't require us to have the writes inside the file
         // until after a flush() returns. If that is indeed true, we could
         // buffer a certain amount of writes, only actually writing that
         // buffer when either a flush is issued or the buffer exceeds some
-        // set size(based on our memory constraints). This would have
+        // set size (based on our memory constraints). This would have
         // benefits on any workload that frequently writes to the same block
         // between flushes, would have benefits for small contiguous writes
         // issued over multiple write commands by letting us batch them into
-        // a larger write, and(speculation) may benefit non-contiguous writes
+        // a larger write, and (speculation) may benefit non-contiguous writes
         // by cutting down the number of sqlite transactions. But, it
         // introduces complexity. The time spent implementing that would
         // probably better be spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
             (job_id, self.number, writes.len() as u64)
         });
-        // Buffer writes for fewer syscalls. The 65536 buffer size here is
-        // chosen somewhat arbitrarily.
-        let mut write_buffer = [0u8; 65536];
-        let mut bytes_in_run = 0;
-        let mut next_block_in_run = u64::MAX;
+
+        // Now, batch writes into iovecs and use pwritev to write them all out.
+        let mut batched_pwritev = BatchedPwritev::new(
+            inner.file.as_raw_fd(),
+            writes.len(),
+            self.block_size,
+            self.iov_max,
+        );
+
         for write in writes {
             let block = write.offset.value;
+
             // TODO, can this be `only_write_unwritten &&
             // write_to_skip.contains()`?
             if writes_to_skip.contains(&block) {
                 debug_assert!(only_write_unwritten);
+                batched_pwritev.flush()?;
                 continue;
             }
 
-            // If the current write isn't contiguous with previous writes,
-            // write our buffer to the file and seek. This is also the
-            // avenue by which we seek for the first write.
-            if block != next_block_in_run {
-                if bytes_in_run > 0 {
-                    inner.file.write_all(&write_buffer[..bytes_in_run])?;
-                    bytes_in_run = 0;
-                }
-
-                // Write any buffered data, and then seek
-                inner.file.seek(SeekFrom::Start(block * self.block_size))?;
-            }
-
-            // If the write buffer is full, write out to the file
-            if write_buffer.len() - bytes_in_run < self.block_size as usize {
-                inner.file.write_all(&write_buffer[..bytes_in_run])?;
-                bytes_in_run = 0;
-            }
-
-            write_buffer[bytes_in_run..][..self.block_size as usize]
-                .copy_from_slice(&write.data);
-            bytes_in_run += self.block_size as usize;
-
-            next_block_in_run = block + 1;
+            batched_pwritev.add_write(write)?;
         }
 
-        // Write any remaining buffered data
-        if bytes_in_run > 0 {
-            inner.file.write_all(&write_buffer[..bytes_in_run])?;
-        }
+        // Write any remaining data
+        batched_pwritev.flush()?;
+
         cdt::extent__write__file__done!(|| {
             (job_id, self.number, writes.len() as u64)
         });
@@ -1448,7 +1437,7 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        // Buffer the file so we dont spend all day waiting on syscall
+        // Buffer the file so we dont spend all day waiting on syscalls
         let mut inner_file_buffered =
             BufReader::with_capacity(64 * 1024, &inner.file);
 
@@ -1473,8 +1462,6 @@ impl Extent {
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
-
-        inner.file.seek(SeekFrom::Start(0))?;
 
         // Intentionally not clearing the dirty flag - we want to know that the
         // extent is still considered dirty.
@@ -2379,6 +2366,130 @@ pub async fn save_stream_to_file(
     Ok(())
 }
 
+struct BatchedPwritevState {
+    byte_offset: u64,
+    next_block_in_run: u64,
+}
+
+struct BatchedPwritev {
+    fd: std::os::fd::RawFd,
+    iovecs: Vec<libc::iovec>,
+    state: Option<BatchedPwritevState>,
+    block_size: u64,
+    iov_max: usize,
+}
+
+impl BatchedPwritev {
+    pub fn new(
+        fd: std::os::fd::RawFd,
+        capacity: usize,
+        block_size: u64,
+        iov_max: usize,
+    ) -> Self {
+        Self {
+            fd,
+            iovecs: Vec::with_capacity(capacity),
+            state: None,
+            block_size,
+            iov_max,
+        }
+    }
+
+    /// Add a write to the batch. If the write would cause the list of iovecs to
+    /// be larger than IOV_MAX, then flush() is called.
+    pub fn add_write(
+        &mut self,
+        write: &crucible_protocol::Write,
+    ) -> Result<(), CrucibleError> {
+        let block = write.offset.value;
+
+        let should_flush = if let Some(state) = &self.state {
+            // Is this write contiguous with the last?
+            if block == state.next_block_in_run {
+                // If so, then add it to the list. Make sure to flush if the
+                // total size would become larger than IOV_MAX.
+                (self.iovecs.len() + 1) >= self.iov_max
+            } else {
+                // If not, then flush, and start the state all over.
+                true
+            }
+        } else {
+            false
+        };
+
+        if should_flush {
+            self.flush()?;
+        }
+
+        // If flush was called above, then state will be None.
+        if let Some(ref mut state) = self.state {
+            if block == state.next_block_in_run {
+                self.iovecs.push(libc::iovec {
+                    iov_base: write.data.as_ptr() as *mut libc::c_void,
+                    iov_len: write.data.len(),
+                });
+
+                state.next_block_in_run += 1;
+            } else {
+                // we previously flushed, so start fresh
+                self.state = Some(BatchedPwritevState {
+                    byte_offset: write.offset.value * self.block_size,
+                    next_block_in_run: block + 1,
+                });
+
+                self.iovecs.push(libc::iovec {
+                    iov_base: write.data.as_ptr() as *mut libc::c_void,
+                    iov_len: write.data.len(),
+                });
+            }
+        } else {
+            // start fresh
+            self.state = Some(BatchedPwritevState {
+                byte_offset: write.offset.value * self.block_size,
+                next_block_in_run: block + 1,
+            });
+
+            self.iovecs.push(libc::iovec {
+                iov_base: write.data.as_ptr() as *mut libc::c_void,
+                iov_len: write.data.len(),
+            });
+        }
+
+        Ok(())
+    }
+
+    // Write bytes out to file target
+    pub fn flush(&mut self) -> Result<(), CrucibleError> {
+        if !self.iovecs.is_empty() {
+            if let Some(ref mut state) = self.state {
+                let bytes_written = unsafe {
+                    libc::pwritev(
+                        self.fd,
+                        self.iovecs.as_ptr(),
+                        self.iovecs.len() as libc::c_int,
+                        state.byte_offset as i64,
+                    )
+                };
+
+                if bytes_written == -1 {
+                    crucible_bail!(GenericError, "pwritev failed!");
+                }
+
+                self.iovecs.clear();
+                self.state = None;
+            } else {
+                crucible_bail!(
+                    GenericError,
+                    "call to BatchedPwritev::Flush with byte_offset = None!"
+                );
+                // XXX panic?
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::fs::rename;
@@ -2415,6 +2526,7 @@ mod test {
             read_only: false,
             block_size: 512,
             extent_size: Block::new_512(100),
+            iov_max: unsafe { libc::sysconf(libc::_SC_IOV_MAX) as usize },
             inner: Some(Mutex::new(inn)),
         }
     }
