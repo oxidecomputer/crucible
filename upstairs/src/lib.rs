@@ -1590,10 +1590,9 @@ where
                         "[{}] exits pm_task, this downstairs faulted",
                         client_id
                     );
-                    bail!(
-                        "[{}] exits pm_task, this downstairs faulted",
-                        client_id
-                    );
+                    // Until OnlineRepair is actually supported, we are
+                    // doing more harm than good by remaining up.
+                    panic!("[{}] received Write/WU/Flush error ", client_id);
                 }
 
                 if up_c.ds_deactivate(client_id).await {
@@ -1756,16 +1755,8 @@ where
                 }
             }
             _ = sleep_until(more_work_interval), if more_work => {
-                warn!(up.log, "[{}] flow control sending more work",
-                    up_coms.client_id
-                );
-
-                let more = io_send(up, &mut fw, up_coms.client_id).await?;
-
-                if more {
-                    more_work = true;
-                } else {
-                    more_work = false;
+                more_work = io_send(up, &mut fw, up_coms.client_id).await?;
+                if !more_work {
                     warn!(up.log, "[{}] flow control end ", up_coms.client_id);
                 }
 
