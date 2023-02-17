@@ -289,6 +289,11 @@ mod cdt {
     fn volume__write__done(_: u32, _: Uuid) {}
     fn volume__writeunwritten__done(_: u32, _: Uuid) {}
     fn volume__flush__done(_: u32, _: Uuid) {}
+    fn proc__loop(_: u8, _: u32) {}
+    fn pmtask__loop(_: u8, _: u32) {}
+    fn cmdloop__loop(_: u8, _: u32) {}
+    fn looper__loop(_: u8, _: u32) {}
+    fn process__new__io(_: u32) {}
 }
 
 pub fn deadline_secs(secs: u64) -> Instant {
@@ -860,7 +865,10 @@ where
      *    upstairs. We set the downstairs to DsState::Replay and the while
      *    loop is exited.
      */
+    let mut lc = 0;
     while !(*connected) {
+        cdt::proc__loop!(|| (up_coms.client_id, lc));
+        lc += 1;
         tokio::select! {
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -1563,7 +1571,10 @@ where
         let up_coms_c = up_coms.clone();
 
         tokio::spawn(async move {
+            let mut lc = 0;
             while let Some(m) = rx.recv().await {
+                cdt::pmtask__loop!(|| (up_coms_c.client_id, lc));
+                lc = lc + 1;
                 /*
                  * TODO: Add a check here to make sure we are
                  * connected and in the proper state before we
@@ -1614,7 +1625,10 @@ where
     };
 
     tokio::pin!(pm_task);
+    let mut lc = 0;
     loop {
+        cdt::cmdloop__loop!(|| (up_coms.client_id, lc));
+        lc = lc + 1;
         tokio::select! {
             /*
              * We set biased so the loop will:
@@ -1765,13 +1779,8 @@ where
                 }
             }
             _ = sleep_until(more_work_interval), if more_work => {
-                warn!(up.log, "[{}] flow control sending more work",
-                    up_coms.client_id
-                );
 
-                let more = io_send(up, &mut fw, up_coms.client_id).await?;
-
-                if more {
+                if io_send(up, &mut fw, up_coms.client_id).await? {
                     more_work = true;
                 } else {
                     more_work = false;
@@ -2257,8 +2266,11 @@ async fn looper(
     let mut firstgo = true;
     let mut connected = false;
 
+    let mut lc = 0;
     let log = up.log.new(o!("looper" => up_coms.client_id.to_string()));
     'outer: loop {
+        cdt::looper__loop!(|| (up_coms.client_id, lc));
+        lc += 1;
         if firstgo {
             firstgo = false;
         } else {
@@ -6479,6 +6491,7 @@ impl Upstairs {
                         client_id,
                         DsState::Faulted,
                     );
+                    panic!("[{}] panic error on job {}", client_id, ds_id);
                 }
             }
         }
@@ -8503,6 +8516,7 @@ async fn up_listen(
     up.stat_update("start").await;
     let mut flush_check = deadline_secs(flush_timeout.into());
     let mut show_work_interval = deadline_secs(5);
+    let mut lc = 0;
     loop {
         /*
          * Wait for all three downstairs to connect (for each region set).
@@ -8553,6 +8567,8 @@ async fn up_listen(
                 }
             }
             req = up.guest.recv() => {
+                cdt::process__new__io!(|| (lc));
+                lc += 1;
                 process_new_io(up, &dst, req, &mut lastcast).await;
             }
             _ = sleep_until(leak_deadline) => {

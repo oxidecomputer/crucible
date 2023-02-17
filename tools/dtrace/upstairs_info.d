@@ -32,7 +32,7 @@ crucible_upstairs*:::up-status
 {
     show = show + 1;
     /*
-     * State for the three downstiars
+     * State for the three downstairs
      */
     printf("%13s", json(copyinstr(arg1), "ok.ds_state[0]"));
     printf(" %13s", json(copyinstr(arg1), "ok.ds_state[1]"));

@@ -21,6 +21,7 @@ use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
+use serde::Serialize;
 use slog::{error, info, o, warn, Drain, Logger};
 use slog_dtrace::{with_drain, ProbeRegistration};
 use tokio::net::TcpListener;
@@ -375,11 +376,19 @@ pub async fn show_work(ds: &mut Downstairs) {
         println!("--------------------------------------");
     }
 }
+/**
+ *  * Stat counters struct used by DTrace
+ *   */
+#[derive(Clone, Debug, Serialize)]
+pub struct Stats {
+    alan: u64,
+    work_count: WorkStateCount,
+}
 
 // DTrace probes for the downstairs
 #[usdt::provider(provider = "crucible_downstairs")]
 pub mod cdt {
-    use crate::Arg;
+    use crate::Stats;
     fn submit__read__start(_: u64) {}
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
@@ -464,6 +473,40 @@ pub mod cdt {
     }
     fn extent__read__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__read__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+
+    // The main downstairs task makes another select loop.
+    fn resp__loop(_: u64) {}
+
+    // A new IO was received from the upstairs. Send that IO to proc_frame
+    fn resp__new__io(_: u64) {}
+
+    // A new IO request received from the upstairs is now being processed
+    // buy the proc_frame task, converted to IOop, and put on the work queue.
+    fn proc__frame(_: u64) {}
+
+    // A message for a new job was received by the do work task.
+    fn do__work__task(_: u64) {}
+
+    // Do work task is actually doing some work now
+    fn do__some__work(_: u64) {}
+
+    // Work was completed by the downstairs and we have a response.
+    fn do__some__work__done(_: u64) {}
+
+    // Ack for completed work was sent.
+    fn do__some__work__acked(_: u64) {}
+
+    // ??? WTH happend
+    fn do__some__work__err(_: u64) {}
+
+    fn ping__acked(_: u64) {}
+
+    // Generic work stats
+    fn work__ready(_: u64) {}
+    fn work__total(_: u64) {}
+
+    // Update the work queue stats
+    fn stat__update(work_count: Stats) {}
 }
 
 // Check if a Message is valid on this downstairs or not.
@@ -934,31 +977,46 @@ where
     /*
      * job_channel_rx is a notification that we should look for new work.
      */
+    let mut lc = 0;
+    let mut lc1= 0;
+    let mut lc2= 0;
+    let mut lc3= 0;
+    let mut lc4= 0;
     while job_channel_rx.recv().await.is_some() {
+        cdt::do__work__task!(|| lc);
+        lc += 1;
         // Add a little time to completion for this operation.
+        println!("   ZZZ do_work_task get ads.lock");
         if ads.lock().await.lossy && random() && random() {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        println!("   ZZZ do_work_task get ads.lock done");
 
+        println!("   ZZZ do_work_task isa  ads.lock ");
         if !ads.lock().await.is_active(upstairs_connection) {
             // We are not an active downstairs, wait until we are
+            println!("   ZZZ do_work_task isa  ads.lock done");
             continue;
         }
+        println!("   ZZZ do_work_task isa  ads.lock done");
 
         /*
          * Build ourselves a list of all the jobs on the work hashmap that
          * are New or DepWait.
          */
         let mut new_work = {
+            println!("   ZZZ do_work_task nw   ads.lock");
             if let Ok(new_work) =
                 ads.lock().await.new_work(upstairs_connection).await
             {
                 new_work
             } else {
                 // This means we couldn't unblock jobs for this UUID
+                println!("   ZZZ do_work_task nw   ads.lock done");
                 continue;
             }
         };
+        println!("   ZZZ do_work_task nw   ads.lock done2");
 
         /*
          * We don't have to do jobs in order, but the dependencies are, at
@@ -969,45 +1027,70 @@ where
         new_work.sort_unstable();
 
         for new_id in new_work.iter() {
+            println!("   ZZZ do_work_task new_work.iter ads.lock");
             if ads.lock().await.lossy && random() && random() {
                 // Skip a job that needs to be done. Sometimes
+                println!("   ZZZ do_work_task new_work.iter ads.lock cont");
                 continue;
             }
+            println!("   ZZZ do_work_task new_work.iter ads.lock done");
 
             /*
              * If this job is still new, take it and go to work. The
              * in_progress method will only return a job if all
              * dependencies are met.
              */
+            println!("   ZZZ do_work_task job_id   ads.lock");
             let job_id = ads
                 .lock()
                 .await
                 .in_progress(upstairs_connection, *new_id)
                 .await?;
+            println!("   ZZZ do_work_task job_id   ads.lock done");
             if let Some(job_id) = job_id {
+                cdt::do__some__work!(|| (lc1));
+                lc1 += 1;
+                println!("   ZZZ do_work_task job_idSS ads.lock  and do work");
                 let m = ads
                     .lock()
                     .await
                     .do_work(upstairs_connection, job_id)
                     .await?;
 
+                println!("   ZZZ do_work_task job_idSS ads.lock done");
                 if let Some(m) = m {
+                    cdt::do__some__work__done!(|| (lc2));
+                    lc2 += 1;
+                    println!("   ZZZ do_work_task compeete  stat ads.lock");
                     ads.lock()
                         .await
                         .complete_work_stat(upstairs_connection, &m, job_id)
                         .await?;
+                    println!("   ZZZ do_work_task compeete  stat ads.lock done");
                     // Notify the upstairs before completing work
                     let mut fw = fw.lock().await;
                     fw.send(&m).await?;
                     drop(fw);
 
+                    cdt::do__some__work__acked!(|| (lc3));
+                    lc3 += 1;
+                    println!("   ZZZ do_work_task compeete ads.lock");
                     ads.lock()
                         .await
                         .complete_work(upstairs_connection, job_id, m)
                         .await?;
+                    println!("   ZZZ do_work_task compeete ads.lock done");
+                } else {
+                    // Should this panic?  We tried to do work, but
+                    // nothing came back to send to the upstairs, so this
+                    // path is a dead end..
+                    cdt::do__some__work__err!(|| (lc4));
+                    lc4 += 1;
                 }
             }
+            println!("   ZZZ do_work_task inew_work.iter loop bottom");
         }
+        println!("   ZZZ do_work_task work was worked, back to waiting");
     }
 
     // None means the channel is closed
@@ -1081,7 +1164,9 @@ where
         channel::<UpstairsConnection>(1);
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
+    println!("   ZZZ do_work_task procloge ads.lock");
     let log = ads.lock().await.log.new(o!("task" => "proc".to_string()));
+    println!("   ZZZ do_work_task procloge ads.lock done");
     /*
      * See the comment in the proc() function on the upstairs side that
      * describes how this negotiation takes place.
@@ -1162,6 +1247,7 @@ where
                 match new_read.transpose()? {
                     None => {
                         // Upstairs disconnected
+                        println!("   ZZZ new_read none ads.lock");
                         let mut ds = ads.lock().await;
 
                         if let Some(upstairs_connection) = upstairs_connection {
@@ -1183,6 +1269,7 @@ where
                             info!(log, "unknown upstairs disconnected");
                         }
 
+                        println!("   ZZZ new_read none ads.lock done");
                         return Ok(());
                     }
                     Some(Message::Ruok) => {
@@ -1210,14 +1297,17 @@ where
                         // of expectation, and terminate the connection - the
                         // Upstairs will not be able to successfully negotiate.
                         {
+                            println!("   ZZZ HereIAM       ads.lock");
                             let ds = ads.lock().await;
                             if ds.read_only != read_only {
+                                // ZZZ XXX fw.lock with ads lock?
                                 let mut fw = fw.lock().await;
 
                                 fw.send(Message::ReadOnlyMismatch {
                                     expected: ds.read_only,
                                 }).await?;
 
+                                println!("   ZZZ HereIAM       ads.lock done");
                                 bail!("closing connection due to read-only \
                                     mismatch");
                             }
@@ -1229,9 +1319,11 @@ where
                                     expected: ds.encrypted,
                                 }).await?;
 
+                                println!("   ZZZ HereIAM       ads.lock done2");
                                 bail!("closing connection due to encryption \
                                     mismatch");
                             }
+                            println!("   ZZZ HereIAM       ads.lock done3");
                         }
 
                         negotiated = 1;
@@ -1299,12 +1391,14 @@ where
                             }
 
                             {
+                                println!("   ZZZ PromoteToActi ads.lock");
                                 let mut ds = ads.lock().await;
 
                                 ds.promote_to_active(
                                     *upstairs_connection,
                                     another_upstairs_active_tx.clone()
                                 ).await?;
+                                println!("   ZZZ PromoteToActi ads.lock done");
                             }
                             negotiated = 2;
 
@@ -1322,10 +1416,12 @@ where
                                 negotiated);
                         }
                         negotiated = 3;
+                        println!("   ZZZ RegionInfoP   ads.lock");
                         let region_def = {
                             let ds = ads.lock().await;
                             ds.region.def()
                         };
+                        println!("   ZZZ RegionInfoP   ads.lock done");
 
                         let mut fw = fw.lock().await;
                         fw.send(Message::RegionInfo { region_def }).await?;
@@ -1339,7 +1435,9 @@ where
                         negotiated = 4;
 
                         {
+                            println!("   ZZZ LastFlush     ads.lock");
                             let mut ds = ads.lock().await;
+                            println!("   ZZZ LastFlush     ads.lock work lock");
                             let mut work = ds.work_lock(
                                 upstairs_connection.unwrap(),
                             ).await?;
@@ -1347,6 +1445,7 @@ where
                             info!(
                                 log,
                                 "Set last flush {}", last_flush_number);
+                            println!("   ZZZ LastFlush     ads.lock & work lock done");
                         }
 
                         let mut fw = fw.lock().await;
@@ -1365,10 +1464,12 @@ where
                                 negotiated);
                         }
                         negotiated = 4;
+                        println!("   ZZZ EV please     ads.lock");
                         let ds = ads.lock().await;
                         let flush_numbers = ds.region.flush_numbers().await?;
                         let gen_numbers = ds.region.gen_numbers().await?;
                         let dirty_bits = ds.region.dirty().await?;
+                        println!("   ZZZ EV please     ads.lock done");
                         drop(ds);
 
                         let mut fw = fw.lock().await;
@@ -1424,7 +1525,9 @@ where
 {
     let mut lossy_interval = deadline_secs(5);
     // Create the log for this task to use.
+    println!("   ZZZ resp_loop log ads.lock");
     let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
+    println!("   ZZZ resp_loop log ads.lock done");
 
     // XXX flow control size to double what Upstairs has for upper limit?
     let (_job_channel_tx, job_channel_rx) = channel(200);
@@ -1465,7 +1568,10 @@ where
         let tx = job_channel_tx.clone();
         let mut fwc = fw.clone();
         tokio::spawn(async move {
+            let mut lc = 0;
             while let Some(m) = message_channel_rx.recv().await {
+                cdt::proc__frame!(|| (lc));
+                lc += 1;
                 if let Err(e) =
                     proc_frame(upstairs_connection, &mut adc, &m, &mut fwc, &tx)
                         .await
@@ -1476,11 +1582,19 @@ where
             Ok(())
         })
     };
+    println!("   ZZZ resp_loop lossy ads.lock");
     let lossy = ads.lock().await.lossy;
+    println!("   ZZZ resp_loop lossy ads.lock done");
 
     tokio::pin!(dw_task);
     tokio::pin!(pf_task);
+    let mut lc = 0;
+    let mut lc1 = 0;
+    let mut lc2 = 0;
     loop {
+        cdt::resp__loop!(|| (lc));
+        lc += 1;
+        println!("ZZZ enter another select loop");
         tokio::select! {
             e = &mut dw_task => {
                 bail!("do_work_task task has ended: {:?}", e);
@@ -1505,7 +1619,8 @@ where
              * XXX Timeouts, timeouts: always wrong!  Some too short and
              * some too long.
              */
-            _ = sleep_until(deadline_secs(50)) => {
+            _ = sleep_until(deadline_secs(500)) => {
+                println!(" ZZZ Inactivity timeout");
                 bail!("inactivity timeout");
             }
 
@@ -1521,6 +1636,7 @@ where
              * this signal).
              */
             new_upstairs_connection = another_upstairs_active_rx.recv() => {
+                println!(" ZZZ new upstairs");
                 match new_upstairs_connection {
                     None => {
                         // There shouldn't be a path through the code where we
@@ -1560,10 +1676,15 @@ where
                 }
             }
             new_read = fr.next() => {
+                println!(" ZZZ new read from upstairs");
+                cdt::resp__new__io!(|| (lc1));
+                lc1 += 1;
                 match new_read {
                     None => {
                         // Upstairs disconnected
+                        println!("   ZZZ select loop get ads.lock");
                         let mut ds = ads.lock().await;
+                        println!("   ZZZ select loop get ads.lock done");
 
                         warn!(
                             log,
@@ -1580,11 +1701,17 @@ where
                         return Ok(());
                     }
                     Some(Ok(msg)) => {
+                        println!(" ZZZ upstairs send us a message check");
                         if matches!(msg, Message::Ruok) {
+                            println!(" ZZZ upstairs send us a message: PING");
+                            cdt::ping__acked!(|| (lc2));
+                            lc2 += 1;
                             // Respond instantly to pings, don't wait.
                             let mut fw = fw.lock().await;
                             fw.send(Message::Imok).await?;
+                            println!(" ZZZ upstairs send us a message: PING ACK");
                         } else {
+                            println!(" ZZZ upstairs send us a message: send");
                             message_channel_tx.send(msg).await?;
                         }
                     }
@@ -1594,6 +1721,17 @@ where
                         return Err(e);
                     }
                 }
+                println!(" ZZZ new read from upstairs done");
+            }
+            _ = sleep_until(deadline_secs(10)) => {
+                println!("   ZZZ stat_interval loops (no lock attempted)");
+                /*
+                println!("   ZZZ stat_interval ads");
+                let mut ds = ads.lock().await;
+                println!("   ZZZ stat_interval ads got, now stat_update");
+                let _ = ds.stat_update(upstairs_connection).await;
+                println!("   ZZZ stat_interval ads and stat done");
+                */
             }
         }
     }
@@ -1726,11 +1864,30 @@ impl Downstairs {
         Ok(active_upstairs.work.lock().await)
     }
 
+    async fn stat_update(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+    ) -> Result<()> {
+        let work = self.work_lock(upstairs_connection).await?;
+        let wsc = work.work_state_count.clone();
+        println!("Updated stats: {:?}", wsc);
+        drop(work);
+        cdt::stat__update!(|| {
+            let work_count = Stats {
+                alan: 8,
+                work_count: wsc
+             };
+             work_count
+        });
+        Ok(())
+    }
     async fn jobs(
         &mut self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<usize> {
+        println!("  ZZZ jobs wants work lock");
         let work = self.work_lock(upstairs_connection).await?;
+        println!("  ZZZ jobs wants work lock done");
         Ok(work.jobs())
     }
 
@@ -1738,7 +1895,9 @@ impl Downstairs {
         &mut self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<Vec<u64>> {
+        println!("  ZZZ new_work wants work lock");
         let work = self.work_lock(upstairs_connection).await?;
+        println!("  ZZZ new_work wants work lock done");
         Ok(work.new_work(upstairs_connection))
     }
 
@@ -1776,8 +1935,10 @@ impl Downstairs {
             state: WorkState::New,
         };
 
+        println!("  ZZZ add_work wants work lock");
         let mut work = self.work_lock(upstairs_connection).await?;
         work.add_work(ds_id, dsw);
+        println!("  ZZZ add_work wants work lock done");
 
         Ok(())
     }
@@ -1788,7 +1949,9 @@ impl Downstairs {
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
     ) -> Result<DownstairsWork> {
+        println!("  ZZZ get_job  wants work lock");
         let mut work = self.work_lock(upstairs_connection).await?;
+        println!("  ZZZ get_job  wants work lock done");
         Ok(work.get_job(ds_id))
     }
 
@@ -1800,6 +1963,7 @@ impl Downstairs {
     ) -> Result<Option<u64>> {
         let job = {
             let log = self.log.new(o!("role" => "work".to_string()));
+            println!("  ZZZ in_progr wants work lock");
             let mut work = self.work_lock(upstairs_connection).await?;
             work.in_progress(ds_id, log)
         };
@@ -1812,8 +1976,10 @@ impl Downstairs {
                 panic!("Don't return a job for a non-active connection!");
             }
 
+            println!("  ZZZ in_progr wants work lock done some");
             Ok(Some(job_id))
         } else {
+            println!("  ZZZ in_progr wants work lock none");
             Ok(None)
         }
     }
@@ -1831,6 +1997,7 @@ impl Downstairs {
         job_id: u64,
     ) -> Result<Option<Message>> {
         let job = {
+            println!("  ZZZ do_work  wants work lock");
             let mut work = self.work_lock(upstairs_connection).await?;
             let job = work.get_ready_job(job_id).await;
 
@@ -1839,11 +2006,13 @@ impl Downstairs {
             // outdated job IDs. If that happens, `get_ready_job` will return a
             // None, so bail early here.
             if job.is_none() {
+                println!("  ZZZ do_work  wants work lock none");
                 return Ok(None);
             }
 
             job.unwrap()
         };
+        println!("  ZZZ do_work  wants work lock done");
 
         assert_eq!(job.ds_id, job_id);
         match &job.work {
@@ -2083,6 +2252,7 @@ impl Downstairs {
         ds_id: u64,
         m: Message,
     ) -> Result<()> {
+        println!("  ZZZ complete wants work lock");
         let mut work = self.work_lock(upstairs_connection).await?;
 
         // Complete the job
@@ -2096,15 +2266,22 @@ impl Downstairs {
         // Work struct, because there's now two tasks running for the same
         // UpstairsConnection, and we're the one that should be on the way out
         // due to a message on the terminate_sender channel.
-        if work.active.remove(&ds_id).is_some() {
-            if is_flush {
-                work.last_flush = ds_id;
-                work.completed = Vec::with_capacity(32);
-            } else {
-                work.completed.push(ds_id);
+        match work.active.remove(&ds_id) {
+            Some(job) => {
+                assert_eq!(job.state, WorkState::InProgress);
+                work.work_state_count.decr(job.state);
+                work.work_state_count.incr(WorkState::Done);
+                if is_flush {
+                    work.last_flush = ds_id;
+                    work.completed = Vec::with_capacity(32);
+                } else {
+                    work.completed.push(ds_id);
+                }
             }
+            None => { /* XXX Maybe add a counter for this? */ }
         }
 
+        println!("  ZZZ complete wants work lock done");
         Ok(())
     }
 
@@ -2157,6 +2334,7 @@ impl Downstairs {
             if let Some(active_upstairs) =
                 self.active_upstairs.get(&upstairs_connection.upstairs_id)
             {
+                println!("  ZZZ promote  wants work lock");
                 let mut work = active_upstairs.work.lock().await;
 
                 info!(
@@ -2211,6 +2389,7 @@ impl Downstairs {
                 // we just throw out what we have and let the upstairs resend
                 // anything to us that it did not get an ACK for.
                 work.clear();
+                println!("  ZZZ promote  wants work lock done");
             } else {
                 // There is no current session for this Upstairs UUID.
             }
@@ -2318,6 +2497,7 @@ impl Downstairs {
                         .remove(&currently_active_upstairs_uuids[0])
                         .unwrap();
 
+                    println!("  ZZZ promote2 wants work lock");
                     let mut work = active_upstairs.work.lock().await;
 
                     warn!(
@@ -2395,6 +2575,7 @@ impl Downstairs {
                         "{:?} is now active (read-write)", upstairs_connection,
                     );
 
+                    println!("  ZZZ promote2 wants work lock");
                     Ok(())
                 }
 
@@ -2430,9 +2611,11 @@ impl Downstairs {
         &mut self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<()> {
+        println!("  ZZZ clear_ac wants work lock");
         let mut work = self.work_lock(upstairs_connection).await?;
         work.clear();
         drop(work);
+        println!("  ZZZ clear_ac wants work lock done");
 
         self.active_upstairs
             .remove(&upstairs_connection.upstairs_id);
@@ -2457,6 +2640,7 @@ pub struct Work {
      */
     last_flush: u64,
     completed: Vec<u64>,
+    work_state_count: WorkStateCount,
 }
 
 #[derive(Debug, Clone)]
@@ -2474,6 +2658,7 @@ impl Work {
             outstanding_deps: HashMap::new(),
             last_flush: 0,
             completed: Vec::with_capacity(32),
+            work_state_count: WorkStateCount::new(),
         }
     }
 
@@ -2482,6 +2667,7 @@ impl Work {
         self.outstanding_deps = HashMap::new();
         self.last_flush = 0;
         self.completed = Vec::with_capacity(32);
+        self.work_state_count = WorkStateCount::new();
     }
 
     fn jobs(&self) -> usize {
@@ -2507,11 +2693,15 @@ impl Work {
 
         result.sort_unstable();
 
+        cdt::work__ready!(|| (result.len() as u64));
+        cdt::work__total!(|| (self.active.len() as u64));
         result
     }
 
     fn add_work(&mut self, ds_id: u64, dsw: DownstairsWork) {
+        cdt::work__total!(|| (self.active.len() as u64) + 1);
         self.active.insert(ds_id, dsw);
+        self.work_state_count.incr(WorkState::New);
     }
 
     #[cfg(test)]
@@ -2642,6 +2832,8 @@ impl Work {
                      */
                     if job.state == WorkState::New {
                         job.state = WorkState::DepWait;
+                        self.work_state_count.decr(WorkState::New);
+                        self.work_state_count.incr(WorkState::DepWait);
                     }
 
                     return None;
@@ -2651,6 +2843,8 @@ impl Work {
                  * We had no dependencies, or they are all completed, we
                  * can go ahead and work on this job.
                  */
+                self.work_state_count.decr(job.state);
+                self.work_state_count.incr(WorkState::InProgress);
                 job.state = WorkState::InProgress;
 
                 Some((job.ds_id, job.upstairs_connection))
@@ -2712,7 +2906,7 @@ impl Work {
  * at is New or InProgress.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum WorkState {
     New,
     DepWait,
@@ -2739,6 +2933,56 @@ impl fmt::Display for WorkState {
             WorkState::Error => {
                 write!(f, " Err")
             }
+        }
+    }
+}
+
+/*
+ * For tracking the state of jobs in the downstairs work queue
+ */
+#[derive(Debug, Clone, Serialize)]
+struct WorkStateCount {
+    new: u32,
+    dep_wait: u32,
+    in_progress: u32,
+    done: u32,
+    error: u32,
+}
+
+impl Default for WorkStateCount {
+    fn default() -> Self {
+        WorkStateCount::new()
+    }
+}
+
+impl WorkStateCount {
+    fn new() -> WorkStateCount {
+        WorkStateCount {
+            new: 0,
+            dep_wait: 0,
+            in_progress: 0,
+            done: 0,
+            error: 0,
+        }
+    }
+
+    pub fn incr(&mut self, state: WorkState) {
+        match state {
+            WorkState::New => { self.new = self.new.wrapping_add(1); }
+            WorkState::DepWait => { self.dep_wait += 1; }
+            WorkState::InProgress => { self.in_progress += 1; }
+            WorkState::Done => { self.done += 1; }
+            WorkState::Error => { self.error += 1; }
+        }
+    }
+
+    pub fn decr(&mut self, state: WorkState) {
+        match state {
+            WorkState::New => { self.new -= 1; }
+            WorkState::DepWait => { self.dep_wait -= 1; }
+            WorkState::InProgress => { self.in_progress -= 1; }
+            WorkState::Done => { self.done -= 1; }
+            WorkState::Error => { self.error -= 1; }
         }
     }
 }
@@ -2961,30 +3205,36 @@ pub async fn start_downstairs(
                 WrappedStream::Http(sock)
             };
 
-            info!(log, "accepted connection from {:?}", raddr);
+            // info!(log, "accepted connection from {:?}", raddr);
+            println!("accepted connection from {:?}", raddr);
             {
                 /*
                  * Add one to the counter every time we have a connection
                  * from an upstairs
                  */
+                println!("   ZZZ accept conn    ads.lock");
                 let mut ds = d.lock().await;
                 ds.dss.add_connection().await;
+                println!("   ZZZ accept conn    ads.lock done");
             }
 
             let mut dd = d.clone();
 
+            let proc_log = log.clone();
             tokio::spawn(async move {
                 if let Err(e) = proc_stream(&mut dd, stream).await {
+                    println!("   ZZZ proc_stream_err NO ads.lock");
                     error!(
-                        dd.lock().await.log,
+                        proc_log,
                         "connection({}): {:?}", raddr, e
                     );
                 } else {
                     info!(
-                        dd.lock().await.log,
+                        proc_log,
                         "connection({}): all done", raddr
                     );
                 }
+                println!("   ZZZ proc_stream_err NO ads.lock done");
             });
         }
     });
