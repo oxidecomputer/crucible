@@ -1336,7 +1336,7 @@ impl Extent {
                 // we hit the end of the iterator.
                 if cur_block == Some(prev_block + 1) {
                     // Run is continuing
-                    prev_block = prev_block + 1;
+                    prev_block += 1;
                 } else {
                     // Discontinuity or end of iteration.
 

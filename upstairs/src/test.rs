@@ -5994,7 +5994,7 @@ mod up_test {
         // ----|-------|-----
         //   0 | W     |
         //   1 | FFFFF | 0
-        //   2 | W     | 1
+        //   2 | W     | 0,1
 
         let upstairs = make_upstairs();
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
@@ -6036,9 +6036,12 @@ mod up_test {
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]);
+        assert!(jobs[0].work.deps().is_empty()); // write (op 0)
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush (op 1)
+        assert_eq!(
+            hashset(jobs[2].work.deps()),
+            hashset(&[jobs[0].ds_id, jobs[1].ds_id]),
+        ); // write (op 2)
     }
 
     #[tokio::test]
@@ -6631,9 +6634,9 @@ mod up_test {
         //   1 | W     | 0
         //   2 |   W   | 0
         //   3 | FFFFF | 0,1,2
-        //   4 | W     | 3
-        //   5 |   W   | 3
-        //   6 |     W | 3
+        //   4 | W     | 0,1,3
+        //   5 |   W   | 0,2,3
+        //   6 |     W | 0,3
         //   7 | FFFFF | 3,4,5,6
 
         let upstairs = make_upstairs();
@@ -6698,13 +6701,24 @@ mod up_test {
         assert_eq!(jobs[2].work.deps(), &vec![jobs[0].ds_id]); // write (op 2)
 
         assert_eq!(
-            hashset(jobs[3].work.deps()), // flush (op 3)
+            hashset(jobs[3].work.deps()),
             hashset(&[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]),
-        );
+        ); // flush (op 3)
 
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write (op 4)
-        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write (op 5)
-        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write (op 6)
+        assert_eq!(
+            hashset(jobs[4].work.deps()),
+            hashset(&[jobs[0].ds_id, jobs[1].ds_id, jobs[3].ds_id]),
+        ); // write (op 4)
+
+        assert_eq!(
+            hashset(jobs[5].work.deps()),
+            hashset(&[jobs[0].ds_id, jobs[2].ds_id, jobs[3].ds_id]),
+        ); // write (op 5)
+
+        assert_eq!(
+            hashset(jobs[6].work.deps()),
+            hashset(&[jobs[0].ds_id, jobs[3].ds_id]),
+        ); // write (op 6)
 
         assert_eq!(
             hashset(jobs[7].work.deps()), // flush (op 7)
@@ -7573,5 +7587,68 @@ mod up_test {
         ds.retire_check(flush);
 
         assert_eq!(ds.ds_active.keys().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_read_flush_write_hash_mismatch() {
+        // Test that the following job dependency graph is made:
+        //
+        //     |      block     |
+        // op# | 95 96 97 98 99 | deps
+        // ----|----------------|-----
+        //   0 |  R  R          |
+        //   1 | FFFFFFFFFFFFFFF|
+        //   2 |     W  W       | 0,1
+
+        let upstairs = make_upstairs();
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        upstairs.set_active().await.unwrap();
+
+        // op 0
+        upstairs
+            .submit_read(
+                Block::new_512(95),
+                Buffer::new(512 * 2),
+                None,
+                ds_done_tx.clone(),
+            )
+            .await
+            .unwrap();
+
+        // op 1
+        upstairs
+            .submit_flush(None, None, ds_done_tx.clone())
+            .await
+            .unwrap();
+
+        // op 2
+        upstairs
+            .submit_write(
+                Block::new_512(96),
+                Bytes::from(vec![0xff; 512 * 2]),
+                None,
+                false,
+                ds_done_tx.clone(),
+            )
+            .await
+            .unwrap();
+
+        let ds = upstairs.downstairs.lock().await;
+        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let jobs: Vec<&DownstairsIO> =
+            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        assert_eq!(jobs.len(), 3);
+
+        // assert read has no deps
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+
+        // assert flush has no deps
+        assert!(jobs[1].work.deps().is_empty()); // op 1
+
+        // assert write depends on both the read and flush
+        assert_eq!(
+            hashset(jobs[2].work.deps()),
+            hashset(&[jobs[0].ds_id, jobs[1].ds_id])
+        ); // op 2
     }
 }

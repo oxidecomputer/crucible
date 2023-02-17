@@ -5047,9 +5047,26 @@ impl Upstairs {
          * Construct a list of dependencies for this write based on the
          * following rules:
          *
-         * - ignore everything that happened before the last flush
          * - writes have to depend on the last flush completing
          * - any overlap of impacted blocks requires a dependency
+         *
+         * It's important to remember that jobs may arrive at different
+         * Downstairs in different orders (they should still complete in job
+         * dependency order!). For example, say that searching for the
+         * dependency of a write stopped at the last flush. Then say that the
+         * following set of jobs were submitted:
+         *
+         *       block
+         * op# | 0 1 2 | deps
+         * ----|-------------
+         *   0 | R R   |
+         *   1 | F F F |
+         *   2 |   W W | 1
+         *
+         * Without any dependencies, a downstairs could choose to perform op 0
+         * at any time, including after the write! This would result in an
+         * incorrect read. It's important to search for write dependencies in
+         * the list of all active jobs.
          *
          * TODO: any overlap of impacted blocks will create a dependency.
          * take this an example (this shows three writes, all to the
@@ -5081,11 +5098,10 @@ impl Upstairs {
         {
             let job = &downstairs.ds_active[job_id];
 
-            // Depend on the last flush, then break - flushes are a barrier for
+            // Depend on the last flush - flushes are a barrier for
             // all writes.
             if job.work.is_flush() {
                 dep.push(**job_id);
-                break;
             }
 
             // If this job impacts the same blocks as something already active,

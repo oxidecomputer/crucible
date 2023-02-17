@@ -1001,6 +1001,7 @@ where
                 .await
                 .in_progress(upstairs_connection, *new_id)
                 .await?;
+
             if let Some(job_id) = job_id {
                 let m = ads
                     .lock()
