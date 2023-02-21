@@ -3,13 +3,14 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use tokio::sync::{Mutex, MutexGuard};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use futures::TryStreamExt;
+use nix::unistd::{sysconf, SysconfVar};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -519,6 +520,12 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 }
 
 impl Extent {
+    fn get_iov_max() -> Result<usize> {
+        let i: i64 = sysconf(SysconfVar::IOV_MAX)?
+            .ok_or_else(|| anyhow!("IOV_MAX returned None!"))?;
+        Ok(i.try_into()?)
+    }
+
     /**
      * Open an existing extent file at the location requested.
      * Read in the metadata from the first block of the file.
@@ -616,7 +623,7 @@ impl Extent {
             read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            iov_max: unsafe { libc::sysconf(libc::_SC_IOV_MAX) as usize },
+            iov_max: Extent::get_iov_max()?,
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
@@ -783,7 +790,7 @@ impl Extent {
             read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            iov_max: unsafe { libc::sysconf(libc::_SC_IOV_MAX) as usize },
+            iov_max: Extent::get_iov_max()?,
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
@@ -895,8 +902,7 @@ impl Extent {
             }
 
             // Create our responses and push them into the output. While we're
-            // at it, check for overflows. Create iovecs alongside the
-            // responses.
+            // at it, check for overflows.
             let resp_run_start = responses.len();
             let mut iovecs = Vec::with_capacity(n_contiguous_requests);
             for req in requests[req_run_start..][..n_contiguous_requests].iter()
@@ -904,11 +910,14 @@ impl Extent {
                 let resp =
                     ReadResponse::from_request(req, self.block_size as usize);
                 self.check_input(req.offset, &resp.data)?;
-                iovecs.push(libc::iovec {
-                    iov_base: resp.data.as_ptr() as *mut libc::c_void,
-                    iov_len: resp.data.len(),
-                });
                 responses.push(resp);
+            }
+
+            // Create what amounts to an iovec for each response data buffer.
+            for resp in
+                &mut responses[resp_run_start..][..n_contiguous_requests]
+            {
+                iovecs.push(IoSliceMut::new(&mut resp.data[..]));
             }
 
             // Finally we get to read the actual data. That's why we're here
@@ -916,18 +925,12 @@ impl Extent {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
 
-            let bytes_read = unsafe {
-                libc::preadv(
-                    inner.file.as_raw_fd(),
-                    iovecs.as_ptr(),
-                    iovecs.len() as libc::c_int,
-                    first_req.offset.value as i64 * self.block_size as i64,
-                )
-            };
-
-            if bytes_read == -1 {
-                crucible_bail!(GenericError, "preadv failed!");
-            }
+            nix::sys::uio::preadv(
+                inner.file.as_raw_fd(),
+                &mut iovecs,
+                first_req.offset.value as i64 * self.block_size as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
             cdt::extent__read__file__done!(|| {
                 (job_id, self.number, n_contiguous_requests as u64)
@@ -2371,15 +2374,15 @@ struct BatchedPwritevState {
     next_block_in_run: u64,
 }
 
-struct BatchedPwritev {
+struct BatchedPwritev<'a> {
     fd: std::os::fd::RawFd,
-    iovecs: Vec<libc::iovec>,
+    iovecs: Vec<IoSlice<'a>>,
     state: Option<BatchedPwritevState>,
     block_size: u64,
     iov_max: usize,
 }
 
-impl BatchedPwritev {
+impl<'a> BatchedPwritev<'a> {
     pub fn new(
         fd: std::os::fd::RawFd,
         capacity: usize,
@@ -2399,7 +2402,7 @@ impl BatchedPwritev {
     /// be larger than IOV_MAX, then flush() is called.
     pub fn add_write(
         &mut self,
-        write: &crucible_protocol::Write,
+        write: &'a crucible_protocol::Write,
     ) -> Result<(), CrucibleError> {
         let block = write.offset.value;
 
@@ -2424,10 +2427,7 @@ impl BatchedPwritev {
         // If flush was called above, then state will be None.
         if let Some(ref mut state) = self.state {
             if block == state.next_block_in_run {
-                self.iovecs.push(libc::iovec {
-                    iov_base: write.data.as_ptr() as *mut libc::c_void,
-                    iov_len: write.data.len(),
-                });
+                self.iovecs.push(IoSlice::new(&write.data));
 
                 state.next_block_in_run += 1;
             } else {
@@ -2437,10 +2437,7 @@ impl BatchedPwritev {
                     next_block_in_run: block + 1,
                 });
 
-                self.iovecs.push(libc::iovec {
-                    iov_base: write.data.as_ptr() as *mut libc::c_void,
-                    iov_len: write.data.len(),
-                });
+                self.iovecs.push(IoSlice::new(&write.data));
             }
         } else {
             // start fresh
@@ -2449,10 +2446,7 @@ impl BatchedPwritev {
                 next_block_in_run: block + 1,
             });
 
-            self.iovecs.push(libc::iovec {
-                iov_base: write.data.as_ptr() as *mut libc::c_void,
-                iov_len: write.data.len(),
-            });
+            self.iovecs.push(IoSlice::new(&write.data));
         }
 
         Ok(())
@@ -2462,18 +2456,12 @@ impl BatchedPwritev {
     pub fn flush(&mut self) -> Result<(), CrucibleError> {
         if !self.iovecs.is_empty() {
             if let Some(ref mut state) = self.state {
-                let bytes_written = unsafe {
-                    libc::pwritev(
-                        self.fd,
-                        self.iovecs.as_ptr(),
-                        self.iovecs.len() as libc::c_int,
-                        state.byte_offset as i64,
-                    )
-                };
-
-                if bytes_written == -1 {
-                    crucible_bail!(GenericError, "pwritev failed!");
-                }
+                nix::sys::uio::pwritev(
+                    self.fd,
+                    &self.iovecs[..],
+                    state.byte_offset as i64,
+                )
+                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
                 self.iovecs.clear();
                 self.state = None;
@@ -2526,7 +2514,7 @@ mod test {
             read_only: false,
             block_size: 512,
             extent_size: Block::new_512(100),
-            iov_max: unsafe { libc::sysconf(libc::_SC_IOV_MAX) as usize },
+            iov_max: Extent::get_iov_max().unwrap(),
             inner: Some(Mutex::new(inn)),
         }
     }
@@ -3725,6 +3713,7 @@ mod test {
             read_from_files.append(&mut data);
         }
 
+        assert_eq!(buffer.len(), read_from_files.len());
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
@@ -3748,6 +3737,7 @@ mod test {
             read_from_region.append(&mut response.data.to_vec());
         }
 
+        assert_eq!(buffer.len(), read_from_region.len());
         assert_eq!(buffer, read_from_region);
 
         Ok(())

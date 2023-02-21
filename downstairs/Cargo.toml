@@ -21,7 +21,7 @@ hex = "0.4"
 http = "0.2.8"
 hyper = { version = "0.14", features = [ "full" ] }
 hyper-staticfile = "0.9"
-libc = "0.2.139"
+nix = { version = "0.26", features = [ "feature", "uio" ] }
 mime_guess = "2.0.4"
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
