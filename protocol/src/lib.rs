@@ -370,6 +370,11 @@ pub enum Message {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
+        /*
+         * The ending extent where a flush should stop.
+         * This value is unique per downstairs.
+         */
+        extent_limit: Option<usize>,
     },
     FlushAck {
         upstairs_id: Uuid,

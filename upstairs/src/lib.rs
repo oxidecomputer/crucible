@@ -481,6 +481,11 @@ where
             continue;
         }
 
+        // ZZZ if this is a flush, then we have to determine if there is
+        // an extent_limit value for this downstairs.
+        // Ah, store a downstairs<hm, client_id> value for each. if it's
+        // We can just take whatever value is in that and plop it directly
+        // into the flush.
         active_count += 1;
         match job.unwrap() {
             IOop::Write {
@@ -519,7 +524,10 @@ where
                 flush_number,
                 gen_number,
                 snapshot_details,
+                extent_limit: _,
             } => {
+                let extent_limit =
+                    u.downstairs.lock().await.extent_limit[client_id as usize];
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
@@ -529,6 +537,7 @@ where
                     flush_number,
                     gen_number,
                     snapshot_details,
+                    extent_limit,
                 })
                 .await?
             }
@@ -2476,6 +2485,16 @@ struct Downstairs {
      * Counters for the in flight work for the downstairs
      */
     io_state_count: IOStateCount,
+
+    /**
+     * Extent limit, if set, should be the extent where a flush
+     * of a region will stop.  It is assumed that the flush will
+     * walk extents from 0 to extent_limit, and any extent above
+     * the limit will not be issued a flush.
+     * This is used during online repair, and will only ever be
+     * set on a downstairs that is undergoing live repair.
+     */
+    extent_limit: Vec<Option<usize>>,
 }
 
 impl Downstairs {
@@ -2497,6 +2516,7 @@ impl Downstairs {
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             io_state_count: IOStateCount::new(),
+            extent_limit: vec![None; 3],
         }
     }
 
@@ -3090,6 +3110,7 @@ impl Downstairs {
                 flush_number: _flush_number,
                 gen_number: _gen_number,
                 snapshot_details: _,
+                extent_limit: _,
             } => wc.error >= 2,
             IOop::ExtentClose {
                 dependencies: _,
@@ -3174,6 +3195,7 @@ impl Downstairs {
                 flush_number: _,
                 gen_number: _,
                 snapshot_details: _,
+                extent_limit: _,
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
                 stats.add_flush().await;
@@ -3583,6 +3605,7 @@ impl Downstairs {
                             flush_number: _,
                             gen_number: _,
                             snapshot_details: _,
+                            extent_limit: _,
                         } => {
                             let errors: u64 =
                                 match self.downstairs_errors.get(&client_id) {
@@ -3677,6 +3700,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                     snapshot_details: _,
+                    extent_limit: _,
                 } => {
                     self.ds_last_flush[client_id as usize] = ds_id;
                 }
@@ -3795,6 +3819,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                     snapshot_details: _,
+                    extent_limit: _,
                 } => {
                     assert!(read_data.is_empty());
                     /*
@@ -3992,6 +4017,7 @@ impl Downstairs {
                 flush_number: _flush_number,
                 gen_number: _gen_number,
                 snapshot_details: _,
+                extent_limit: _,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -4933,6 +4959,7 @@ impl Upstairs {
             self.get_generation().await,
             snapshot_details,
             ImpactedBlocks::Empty,
+            None,
         );
 
         let mut sub = HashMap::new();
@@ -6468,6 +6495,7 @@ impl Upstairs {
                         flush_number: _,
                         gen_number: _,
                         snapshot_details: _,
+                        extent_limit: _,
                     } | IOop::WriteUnwritten {
                         dependencies: _,
                         writes: _,
@@ -6759,6 +6787,7 @@ impl DownstairsIO {
                 flush_number: _flush_number,
                 gen_number: _,
                 snapshot_details: _,
+                extent_limit: _,
             } => 0,
             IOop::Read {
                 dependencies: _,
@@ -6838,6 +6867,7 @@ pub enum IOop {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
+        extent_limit: Option<usize>,
     },
     /*
      * These operations are for repairing a bad downstairs
@@ -6882,6 +6912,7 @@ impl IOop {
                 flush_number: _,
                 gen_number: _,
                 snapshot_details: _,
+                extent_limit: _,
             } => dependencies,
             IOop::Read {
                 dependencies,
@@ -8858,6 +8889,7 @@ fn create_read_eob(
 /*
  * Create a flush DownstairsIO structure.
  */
+#[allow(clippy::too_many_arguments)]
 fn create_flush(
     ds_id: u64,
     dependencies: Vec<u64>,
@@ -8866,12 +8898,14 @@ fn create_flush(
     gen_number: u64,
     snapshot_details: Option<SnapshotDetails>,
     impacted_blocks: ImpactedBlocks,
+    extent_limit: Option<usize>,
 ) -> DownstairsIO {
     let flush = IOop::Flush {
         dependencies,
         flush_number,
         gen_number,
         snapshot_details,
+        extent_limit,
     };
 
     let mut state = HashMap::new();
@@ -8977,6 +9011,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                     snapshot_details: _,
+                    extent_limit: _,
                 } => {
                     let job_type = "Flush".to_string();
                     (job_type, 0)

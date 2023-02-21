@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None, 0).await?;
+                region.region_flush(1, 0, &None, 0, None).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
