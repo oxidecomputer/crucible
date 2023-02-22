@@ -3,7 +3,6 @@
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
 use futures::executor;
-use futures::lock::{Mutex, MutexGuard};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
@@ -13,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 
 use crucible::*;
 use crucible_common::{Block, CrucibleError, MAX_BLOCK_SIZE};
@@ -28,6 +28,9 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tracing::instrument;
+use tracing::span;
+use tracing::Instrument;
 use usdt::register_probes;
 use uuid::Uuid;
 
@@ -97,7 +100,7 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
 
                 let mut responses = region
                     .region_read(
-                        &[ReadRequest {
+                        vec![ReadRequest {
                             eid: eid as u64,
                             offset: Block::new_with_ddef(
                                 block_offset,
@@ -245,7 +248,7 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(writes, 0, false).await?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -523,7 +526,7 @@ where
  */
 async fn proc_frame<WT>(
     upstairs_connection: UpstairsConnection,
-    ad: &mut Arc<Mutex<Downstairs>>,
+    ad: &mut Arc<RwLock<Downstairs>>,
     m: &Message,
     fw: &mut Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
     job_channel_tx: &Arc<Mutex<Sender<u64>>>,
@@ -556,7 +559,7 @@ where
                 writes: writes.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
@@ -590,7 +593,7 @@ where
                 extent_limit: *extent_limit,
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
@@ -618,7 +621,7 @@ where
                 writes: writes.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
@@ -646,7 +649,7 @@ where
                 requests: requests.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_read).await?;
             Some(*job_id)
         }
@@ -675,7 +678,7 @@ where
                 extent: *extent_id,
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, ext_close).await?;
             Some(*job_id)
         }
@@ -710,7 +713,7 @@ where
                 repair_downstairs: vec![], // Unused in the downstairs
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
@@ -744,7 +747,7 @@ where
                 repair_downstairs: vec![],
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
@@ -772,7 +775,7 @@ where
                 extent: *extent_id,
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_open).await?;
             Some(*job_id)
         }
@@ -797,7 +800,7 @@ where
                 dependencies: dependencies.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.read().await;
             d.add_work(upstairs_connection, *job_id, new_open).await?;
             Some(*job_id)
         }
@@ -811,7 +814,7 @@ where
             gen_number,
         } => {
             let msg = {
-                let d = ad.lock().await;
+                let d = ad.read().await;
                 info!(
                     d.log,
                     "{} Flush extent {} with f:{} g:{}",
@@ -850,9 +853,10 @@ where
             extent_id,
         } => {
             let msg = {
-                let mut d = ad.lock().await;
+                let d = ad.read().await;
                 info!(d.log, "{} Close extent {}", repair_id, extent_id);
-                match d.region.extents.get_mut(*extent_id) {
+                let extents = d.region.extents.read().await;
+                match extents.get(*extent_id) {
                     Some(ext) => {
                         let (_, _, _) = ext.close().await?;
                         Message::RepairAckId {
@@ -878,7 +882,7 @@ where
             dest_clients,
         } => {
             let msg = {
-                let mut d = ad.lock().await;
+                let d = ad.read().await;
                 info!(
                     d.log,
                     "{} Repair extent {} source:[{}] {:?} dest:{:?}",
@@ -912,7 +916,7 @@ where
             extent_id,
         } => {
             let msg = {
-                let mut d = ad.lock().await;
+                let d = ad.read().await;
                 info!(d.log, "{} Reopen extent {}", repair_id, extent_id);
                 match d.region.reopen_extent(*extent_id).await {
                     Ok(()) => Message::RepairAckId {
@@ -942,25 +946,27 @@ where
     Ok(())
 }
 
+#[instrument(skip_all)]
 async fn do_work_task<T>(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &mut Arc<RwLock<Downstairs>>,
     upstairs_connection: UpstairsConnection,
     mut job_channel_rx: Receiver<u64>,
+    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
     fw: &mut Arc<Mutex<FramedWrite<T, CrucibleEncoder>>>,
 ) -> Result<()>
 where
-    T: tokio::io::AsyncWrite + std::marker::Unpin,
+    T: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
 {
     /*
      * job_channel_rx is a notification that we should look for new work.
      */
     while job_channel_rx.recv().await.is_some() {
         // Add a little time to completion for this operation.
-        if ads.lock().await.lossy && random() && random() {
+        if ads.read().await.lossy && random() && random() {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        if !ads.lock().await.is_active(upstairs_connection) {
+        if !ads.read().await.is_active(upstairs_connection) {
             // We are not an active downstairs, wait until we are
             continue;
         }
@@ -971,7 +977,7 @@ where
          */
         let mut new_work = {
             if let Ok(new_work) =
-                ads.lock().await.new_work(upstairs_connection).await
+                ads.read().await.new_work(upstairs_connection).await
             {
                 new_work
             } else {
@@ -989,7 +995,7 @@ where
         new_work.sort_unstable();
 
         for new_id in new_work.iter() {
-            if ads.lock().await.lossy && random() && random() {
+            if ads.read().await.lossy && random() && random() {
                 // Skip a job that needs to be done. Sometimes
                 continue;
             }
@@ -1000,33 +1006,30 @@ where
              * dependencies are met.
              */
             let job_id = ads
-                .lock()
+                .read()
                 .await
                 .in_progress(upstairs_connection, *new_id)
                 .await?;
 
             if let Some(job_id) = job_id {
-                let m = ads
-                    .lock()
-                    .await
-                    .do_work(upstairs_connection, job_id)
-                    .await?;
+                let ads = ads.clone();
+                let fw = fw.clone();
+                let tx = job_channel_tx.clone();
+                let span = span!(tracing::Level::INFO, "job", job_id);
 
-                if let Some(m) = m {
-                    ads.lock()
-                        .await
-                        .complete_work_stat(upstairs_connection, &m, job_id)
-                        .await?;
-                    // Notify the upstairs before completing work
-                    let mut fw = fw.lock().await;
-                    fw.send(&m).await?;
-                    drop(fw);
-
-                    ads.lock()
-                        .await
-                        .complete_work(upstairs_connection, job_id, m)
-                        .await?;
-                }
+                tokio::spawn(
+                    async move {
+                        let _res = do_work_subtask(
+                            &ads,
+                            upstairs_connection,
+                            &fw,
+                            job_id,
+                            &tx,
+                        )
+                        .await;
+                    }
+                    .instrument(span),
+                );
             }
         }
     }
@@ -1035,8 +1038,43 @@ where
     Ok(())
 }
 
+async fn do_work_subtask<T>(
+    ads: &Arc<RwLock<Downstairs>>,
+    upstairs_connection: UpstairsConnection,
+    fw: &Arc<Mutex<FramedWrite<T, CrucibleEncoder>>>,
+    job_id: u64,
+    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
+) -> Result<()>
+where
+    T: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
+{
+    let ds = ads.read().await;
+
+    let m = ds.do_work(upstairs_connection, job_id).await.unwrap();
+
+    if let Some(m) = m {
+        ds.complete_work_stat(upstairs_connection, &m, job_id)
+            .await
+            .unwrap();
+
+        // Notify the upstairs before completing work
+        let mut fw = fw.lock().await;
+        fw.send(&m).await.unwrap();
+        drop(fw);
+
+        ds.complete_work(upstairs_connection, job_id, m)
+            .await
+            .unwrap();
+    }
+
+    // this job may have been a dependency, so notify it's done
+    job_channel_tx.lock().await.send(0).await.unwrap();
+
+    Ok(())
+}
+
 async fn proc_stream(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &mut Arc<RwLock<Downstairs>>,
     stream: WrappedStream,
 ) -> Result<()> {
     match stream {
@@ -1080,7 +1118,7 @@ pub struct UpstairsConnection {
  * taking IOs from the upstairs.
  */
 async fn proc<RT, WT>(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &mut Arc<RwLock<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
 ) -> Result<()>
@@ -1093,7 +1131,7 @@ where
 {
     // In this function, repair address should exist, and shouldn't change. Grab
     // it here.
-    let repair_addr = ads.lock().await.repair_address.unwrap();
+    let repair_addr = ads.read().await.repair_address.unwrap();
 
     let mut negotiated = 0;
     let mut upstairs_connection: Option<UpstairsConnection> = None;
@@ -1102,7 +1140,7 @@ where
         channel::<UpstairsConnection>(1);
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
-    let log = ads.lock().await.log.new(o!("task" => "proc".to_string()));
+    let log = ads.read().await.log.new(o!("task" => "proc".to_string()));
     /*
      * See the comment in the proc() function on the upstairs side that
      * describes how this negotiation takes place.
@@ -1183,7 +1221,7 @@ where
                 match new_read.transpose()? {
                     None => {
                         // Upstairs disconnected
-                        let mut ds = ads.lock().await;
+                        let mut ds = ads.write().await;
 
                         if let Some(upstairs_connection) = upstairs_connection {
                             info!(
@@ -1231,7 +1269,7 @@ where
                         // of expectation, and terminate the connection - the
                         // Upstairs will not be able to successfully negotiate.
                         {
-                            let ds = ads.lock().await;
+                            let ds = ads.read().await;
                             if ds.read_only != read_only {
                                 let mut fw = fw.lock().await;
 
@@ -1320,7 +1358,7 @@ where
                             }
 
                             {
-                                let mut ds = ads.lock().await;
+                                let mut ds = ads.write().await;
 
                                 ds.promote_to_active(
                                     *upstairs_connection,
@@ -1344,7 +1382,7 @@ where
                         }
                         negotiated = 3;
                         let region_def = {
-                            let ds = ads.lock().await;
+                            let ds = ads.read().await;
                             ds.region.def()
                         };
 
@@ -1360,7 +1398,7 @@ where
                         negotiated = 4;
 
                         {
-                            let mut ds = ads.lock().await;
+                            let ds = ads.read().await;
                             let mut work = ds.work_lock(
                                 upstairs_connection.unwrap(),
                             ).await?;
@@ -1386,7 +1424,7 @@ where
                                 negotiated);
                         }
                         negotiated = 4;
-                        let ds = ads.lock().await;
+                        let ds = ads.read().await;
                         let flush_numbers = ds.region.flush_numbers().await?;
                         let gen_numbers = ds.region.gen_numbers().await?;
                         let dirty_bits = ds.region.dirty().await?;
@@ -1430,7 +1468,7 @@ where
  * downstairs is ready to receive IO.
  */
 async fn resp_loop<RT, WT>(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &mut Arc<RwLock<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
     mut another_upstairs_active_rx: mpsc::Receiver<UpstairsConnection>,
@@ -1445,7 +1483,7 @@ where
 {
     let mut lossy_interval = deadline_secs(5);
     // Create the log for this task to use.
-    let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
+    let log = ads.read().await.log.new(o!("task" => "main".to_string()));
 
     // XXX flow control size to double what Upstairs has for upper limit?
     let (_job_channel_tx, job_channel_rx) = channel(200);
@@ -1469,11 +1507,13 @@ where
     let dw_task = {
         let mut adc = ads.clone();
         let mut fwc = fw.clone();
+        let job_channel_tx = job_channel_tx.clone();
         tokio::spawn(async move {
             do_work_task(
                 &mut adc,
                 upstairs_connection,
                 job_channel_rx,
+                &job_channel_tx,
                 &mut fwc,
             )
             .await
@@ -1497,7 +1537,7 @@ where
             Ok(())
         })
     };
-    let lossy = ads.lock().await.lossy;
+    let lossy = ads.read().await.lossy;
 
     tokio::pin!(dw_task);
     tokio::pin!(pf_task);
@@ -1516,7 +1556,7 @@ where
              * trigger once then never again.
              */
             _ = sleep_until(lossy_interval), if lossy => {
-                //let ds = ads.lock().await;
+                //let ds = ads.read().await;
                 //show_work(&ds).await;
                 job_channel_tx.lock().await.send(0).await?;
                 lossy_interval = deadline_secs(5);
@@ -1584,7 +1624,7 @@ where
                 match new_read {
                     None => {
                         // Upstairs disconnected
-                        let mut ds = ads.lock().await;
+                        let mut ds = ads.write().await;
 
                         warn!(
                             log,
@@ -1634,7 +1674,7 @@ pub struct ActiveUpstairs {
  */
 #[derive(Debug)]
 pub struct Downstairs {
-    pub region: Region,
+    pub region: Arc<Region>,
     lossy: bool,        // Test flag, enables pauses and skipped jobs
     read_errors: bool,  // Test flag
     write_errors: bool, // Test flag
@@ -1651,7 +1691,7 @@ pub struct Downstairs {
 #[allow(clippy::too_many_arguments)]
 impl Downstairs {
     fn new(
-        region: Region,
+        region: Arc<Region>,
         lossy: bool,
         read_errors: bool,
         write_errors: bool,
@@ -1716,7 +1756,7 @@ impl Downstairs {
      * newly active Upstairs.
      */
     async fn work_lock(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<MutexGuard<'_, Work>> {
         let upstairs_uuid = upstairs_connection.upstairs_id;
@@ -1748,7 +1788,7 @@ impl Downstairs {
     }
 
     async fn jobs(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<usize> {
         let work = self.work_lock(upstairs_connection).await?;
@@ -1756,7 +1796,7 @@ impl Downstairs {
     }
 
     async fn new_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<Vec<u64>> {
         let work = self.work_lock(upstairs_connection).await?;
@@ -1765,7 +1805,7 @@ impl Downstairs {
 
     // Add work to the Downstairs
     async fn add_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
         work: IOop,
@@ -1805,7 +1845,7 @@ impl Downstairs {
 
     #[cfg(test)]
     async fn get_job(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
     ) -> Result<DownstairsWork> {
@@ -1815,7 +1855,7 @@ impl Downstairs {
 
     // Downstairs, move a job to in_progress, if we can
     async fn in_progress(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
     ) -> Result<Option<u64>> {
@@ -1846,8 +1886,9 @@ impl Downstairs {
     // On completion, construct the corresponding Crucible Message
     // containing the response to it.  The caller is responsible for sending
     // that response back to the upstairs.
+    #[instrument(skip(self))]
     async fn do_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         job_id: u64,
     ) -> Result<Option<Message>> {
@@ -1867,7 +1908,7 @@ impl Downstairs {
         };
 
         assert_eq!(job.ds_id, job_id);
-        match &job.work {
+        match job.work {
             IOop::Read {
                 dependencies: _dependencies,
                 requests,
@@ -1883,7 +1924,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_read(requests, job_id).await
+                    self.region.region_read(requests.to_vec(), job_id).await
                 };
 
                 Ok(Some(Message::ReadResponse {
@@ -1957,11 +1998,11 @@ impl Downstairs {
                 } else {
                     self.region
                         .region_flush(
-                            *flush_number,
-                            *gen_number,
-                            snapshot_details,
+                            flush_number,
+                            gen_number,
+                            &snapshot_details,
                             job_id,
-                            *extent_limit,
+                            extent_limit,
                         )
                         .await
                 };
@@ -1981,10 +2022,8 @@ impl Downstairs {
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
-                } else if let Some(ext) = self.region.extents.get_mut(*extent) {
-                    ext.close().await
                 } else {
-                    Err(CrucibleError::InvalidExtent)
+                    self.region.close_extent(extent).await
                 };
 
                 Ok(Some(Message::ExtentLiveCloseAck {
@@ -2013,23 +2052,15 @@ impl Downstairs {
                     match self
                         .region
                         .region_flush_extent(
-                            *extent,
-                            *gen_number,
-                            *flush_number,
+                            extent,
+                            gen_number,
+                            flush_number,
                             job_id,
                         )
                         .await
                     {
                         Err(f_res) => Err(f_res),
-                        Ok(_) => {
-                            if let Some(ext) =
-                                self.region.extents.get_mut(*extent)
-                            {
-                                ext.close().await
-                            } else {
-                                Err(CrucibleError::InvalidExtent)
-                            }
-                        }
+                        Ok(_) => self.region.close_extent(extent).await,
                     }
                 };
 
@@ -2066,7 +2097,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.reopen_extent(*extent).await
+                    self.region.reopen_extent(extent).await
                 };
                 Ok(Some(Message::ExtentLiveAckId {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2101,7 +2132,7 @@ impl Downstairs {
      * - putting the id on the completed list.
      */
     async fn complete_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
         m: Message,
@@ -2136,7 +2167,7 @@ impl Downstairs {
      * Oximeter counter for the operation.
      */
     async fn complete_work_stat(
-        &mut self,
+        &self,
         _upstairs_connection: UpstairsConnection,
         m: &Message,
         ds_id: u64,
@@ -2433,7 +2464,7 @@ impl Downstairs {
         }
     }
 
-    fn is_active(&mut self, connection: UpstairsConnection) -> bool {
+    fn is_active(&self, connection: UpstairsConnection) -> bool {
         let uuid = connection.upstairs_id;
         if let Some(active_upstairs) = self.active_upstairs.get(&uuid) {
             active_upstairs.upstairs_connection == connection
@@ -2442,7 +2473,7 @@ impl Downstairs {
         }
     }
 
-    fn active_upstairs(&mut self) -> Vec<UpstairsConnection> {
+    fn active_upstairs(&self) -> Vec<UpstairsConnection> {
         self.active_upstairs
             .values()
             .map(|x| x.upstairs_connection)
@@ -2816,7 +2847,7 @@ pub async fn build_downstairs_for_region(
     flush_errors: bool,
     read_only: bool,
     log_request: Option<Logger>,
-) -> Result<Arc<Mutex<Downstairs>>> {
+) -> Result<Arc<RwLock<Downstairs>>> {
     let log = match log_request {
         Some(log) => log,
         None => {
@@ -2848,8 +2879,8 @@ pub async fn build_downstairs_for_region(
 
     let encrypted = region.encrypted();
 
-    Ok(Arc::new(Mutex::new(Downstairs::new(
-        region,
+    Ok(Arc::new(RwLock::new(Downstairs::new(
+        Arc::new(region),
         lossy,
         read_errors,
         write_errors,
@@ -2866,7 +2897,7 @@ pub async fn build_downstairs_for_region(
 /// successfully, and Err otherwise.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_downstairs(
-    d: Arc<Mutex<Downstairs>>,
+    d: Arc<RwLock<Downstairs>>,
     address: IpAddr,
     oximeter: Option<SocketAddr>,
     port: u16,
@@ -2876,7 +2907,7 @@ pub async fn start_downstairs(
     root_cert_pem: Option<String>,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
     if let Some(oximeter) = oximeter {
-        let dssw = d.lock().await;
+        let dssw = d.read().await;
         let dss = dssw.dss.clone();
         let log = dssw.log.new(o!("task" => "oximeter".to_string()));
 
@@ -2901,7 +2932,7 @@ pub async fn start_downstairs(
     }
 
     // Setup a log for this task
-    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
+    let log = d.read().await.log.new(o!("task" => "main".to_string()));
 
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
@@ -2912,7 +2943,7 @@ pub async fn start_downstairs(
     let listener = TcpListener::bind(&listen_on).await?;
     let local_addr = listener.local_addr()?;
     {
-        let mut ds = d.lock().await;
+        let mut ds = d.write().await;
         ds.address = Some(local_addr);
     }
     info!(log, "Using address: {:?}", local_addr);
@@ -2923,7 +2954,7 @@ pub async fn start_downstairs(
     };
 
     let dss = d.clone();
-    let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
+    let repair_log = d.read().await.log.new(o!("task" => "repair".to_string()));
 
     let repair_listener =
         match repair::repair_main(&dss, repair_address, &repair_log).await {
@@ -2937,7 +2968,7 @@ pub async fn start_downstairs(
         };
 
     {
-        let mut ds = d.lock().await;
+        let mut ds = d.write().await;
         ds.repair_address = Some(repair_listener);
     }
     info!(log, "Using repair address: {:?}", repair_listener);
@@ -2999,7 +3030,7 @@ pub async fn start_downstairs(
                  * Add one to the counter every time we have a connection
                  * from an upstairs
                  */
-                let mut ds = d.lock().await;
+                let ds = d.read().await;
                 ds.dss.add_connection().await;
             }
 
@@ -3008,12 +3039,12 @@ pub async fn start_downstairs(
             tokio::spawn(async move {
                 if let Err(e) = proc_stream(&mut dd, stream).await {
                     error!(
-                        dd.lock().await.log,
+                        dd.read().await.log,
                         "connection({}): {:?}", raddr, e
                     );
                 } else {
                     info!(
-                        dd.lock().await.log,
+                        dd.read().await.log,
                         "connection({}): all done", raddr
                     );
                 }
@@ -3232,7 +3263,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -3282,7 +3313,7 @@ mod test {
         extent_size: u64,
         extent_count: u32,
         dir: &TempDir,
-    ) -> Result<Arc<Mutex<Downstairs>>> {
+    ) -> Result<Arc<RwLock<Downstairs>>> {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
@@ -3340,7 +3371,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -3430,7 +3461,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -3600,7 +3631,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -3722,7 +3753,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -3834,7 +3865,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -3948,7 +3979,7 @@ mod test {
 
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx.clone())
             .await?;
 
@@ -4995,7 +5026,7 @@ mod test {
             for offset in 0..region.def().extent_size().value {
                 let responses = region
                     .region_read(
-                        &[crucible_protocol::ReadRequest {
+                        vec![crucible_protocol::ReadRequest {
                             eid: eid.into(),
                             offset: Block::new_512(offset),
                         }],
@@ -5023,7 +5054,7 @@ mod test {
 
     async fn build_test_downstairs(
         read_only: bool,
-    ) -> Result<Arc<Mutex<Downstairs>>> {
+    ) -> Result<Arc<RwLock<Downstairs>>> {
         let block_size: u64 = 512;
         let extent_size = 4;
 
@@ -5069,7 +5100,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5090,7 +5121,7 @@ mod test {
         let (_tx, mut _rx) = channel(1);
         let tx = Arc::new(_tx);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5123,7 +5154,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5174,7 +5205,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         println!("ds1: {:?}", ds);
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
         println!("\nds2: {:?}\n", ds);
@@ -5228,7 +5259,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5278,7 +5309,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5322,7 +5353,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5365,7 +5396,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5407,7 +5438,7 @@ mod test {
         let (tx2, mut rx2) = channel(1);
         let tx2 = Arc::new(tx2);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         assert_eq!(ds.active_upstairs().len(), 1);
@@ -5509,7 +5540,7 @@ mod test {
         let (tx1, mut rx1) = channel(1);
         let tx1 = Arc::new(tx1);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         // Add one job, id 1000
@@ -5604,7 +5635,7 @@ mod test {
         let (tx1, mut rx1) = channel(1);
         let tx1 = Arc::new(tx1);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         // Add one job, id 1000
@@ -5699,7 +5730,7 @@ mod test {
         let (tx1, mut rx1) = channel(1);
         let tx1 = Arc::new(tx1);
 
-        let mut ds = ads.lock().await;
+        let mut ds = ads.write().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
 
         // Add one job, id 1000

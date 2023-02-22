@@ -58,7 +58,8 @@ pub async fn dump_region(
          * struct, which is another hashmap where the index is the region
          * directory index and the value is the ExtentMeta for that region.
          */
-        for e in &region.extents {
+        let extents = region.extents.read().await;
+        for e in &*extents {
             let en = e.number();
 
             /*
@@ -90,7 +91,13 @@ pub async fn dump_region(
                     continue;
                 }
             }
-            let inner = e.inner().await;
+            let mg = e.inner.read().await;
+            let inner = match &*mg {
+                region::ExtentState::Opened(inner) => inner,
+                region::ExtentState::Closed => {
+                    panic!("dump on closed extent!");
+                }
+            };
 
             /*
              * Create the ExtentMeta struct for this directory's extent
@@ -98,9 +105,9 @@ pub async fn dump_region(
              */
             let extent_info = ExtentMeta {
                 ext_version: 0,
-                gen_number: inner.gen_number().unwrap(),
-                flush_number: inner.flush_number().unwrap(),
-                dirty: inner.dirty().unwrap(),
+                gen_number: inner.gen_number().await.unwrap(),
+                flush_number: inner.flush_number().await.unwrap(),
+                dirty: inner.dirty().await.unwrap(),
             };
 
             /*
@@ -545,7 +552,7 @@ async fn show_extent(
 
             let mut responses = region
                 .region_read(
-                    &[ReadRequest {
+                    vec![ReadRequest {
                         eid: cmp_extent as u64,
                         offset: Block::new_with_ddef(block, &region.def()),
                     }],
@@ -660,7 +667,7 @@ async fn show_extent_block(
 
         let mut responses = region
             .region_read(
-                &[ReadRequest {
+                vec![ReadRequest {
                     eid: cmp_extent as u64,
                     offset: Block::new_with_ddef(
                         block_in_extent,

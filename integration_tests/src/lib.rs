@@ -12,11 +12,11 @@ mod test {
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
     use crucible_pantry_client::Client as CruciblePantryClient;
-    use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
     use slog::{o, Drain, Logger};
     use tempfile::*;
+    use tokio::sync::RwLock;
     use uuid::*;
 
     // Create a simple logger
@@ -29,7 +29,8 @@ mod test {
     struct TestDownstairs {
         address: IpAddr,
         tempdir: TempDir,
-        downstairs: Arc<Mutex<Downstairs>>,
+        downstairs: Arc<RwLock<Downstairs>>,
+        join_handle: tokio::task::JoinHandle<Result<()>>,
     }
 
     impl TestDownstairs {
@@ -67,7 +68,7 @@ mod test {
             )
             .await?;
 
-            let _join_handle = start_downstairs(
+            let join_handle = start_downstairs(
                 downstairs.clone(),
                 address,
                 None, /* oximeter */
@@ -83,6 +84,7 @@ mod test {
                 address,
                 tempdir,
                 downstairs,
+                join_handle,
             })
         }
 
@@ -98,7 +100,9 @@ mod test {
             )
             .await?;
 
-            let _join_handle = start_downstairs(
+            self.join_handle.abort();
+
+            self.join_handle = start_downstairs(
                 self.downstairs.clone(),
                 self.address,
                 None, /* oximeter */
@@ -115,7 +119,30 @@ mod test {
 
         pub async fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
-            self.downstairs.lock().await.address.unwrap()
+            self.downstairs.read().await.address.unwrap()
+        }
+
+        pub async fn close_all_extents(&self) {
+            self.downstairs
+                .read()
+                .await
+                .region
+                .close_all_extents()
+                .await
+                .unwrap()
+        }
+    }
+
+    impl Drop for TestDownstairs {
+        fn drop(&mut self) {
+            self.join_handle.abort();
+
+            /*while !self.join_handle.is_finished() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+
+            let ds = Arc::get_mut(&mut self.downstairs).unwrap();
+            drop(ds);*/
         }
     }
 
@@ -231,6 +258,12 @@ mod test {
             ];
 
             Ok(())
+        }
+
+        pub async fn close_all_extents(&mut self) {
+            self.downstairs1.close_all_extents().await;
+            self.downstairs2.close_all_extents().await;
+            self.downstairs3.close_all_extents().await;
         }
     }
 
@@ -2733,6 +2766,7 @@ mod test {
         client.job_result_ok(&response.job_id).await.unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
 
         // read the data to verify import
 
@@ -2876,6 +2910,7 @@ mod test {
         assert!(client.job_result_ok(&response.job_id).await.is_err());
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
     }
 
     #[tokio::test]
@@ -2999,6 +3034,7 @@ mod test {
         client.job_result_ok(&response.job_id).await.unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
 
         // Attach, validate img.raw got imported
 
@@ -3096,6 +3132,7 @@ mod test {
             .unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
     }
 
     #[tokio::test]
@@ -3171,6 +3208,7 @@ mod test {
         }
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
 
         // Attach, validate bulk write worked
 
@@ -3279,6 +3317,7 @@ mod test {
             .unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
 
         // Attach, validate bulk write worked
 
@@ -3449,6 +3488,7 @@ mod test {
         client.job_result_ok(&response.job_id).await.unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        drop(client);
 
         // Drop the read only parent from the volume construction request
 

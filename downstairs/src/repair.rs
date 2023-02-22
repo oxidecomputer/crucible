@@ -40,7 +40,7 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
 pub async fn repair_main(
-    ds: &Arc<Mutex<Downstairs>>,
+    ds: &Arc<RwLock<Downstairs>>,
     addr: SocketAddr,
     log: &Logger,
 ) -> Result<SocketAddr, String> {
@@ -62,7 +62,7 @@ pub async fn repair_main(
      * Record the region directory where all the extents and metadata
      * files live.
      */
-    let ds = ds.lock().await;
+    let ds = ds.read().await;
     let region_dir = ds.region.dir.clone();
     drop(ds);
 
@@ -339,8 +339,7 @@ mod test {
             Region::create(&dir, new_region_options(), csl()).await?;
         region.extend(3).await?;
 
-        let ext_one = &mut region.extents[1];
-        ext_one.close().await?;
+        region.close_extent(1).await?;
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);
