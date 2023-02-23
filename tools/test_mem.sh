@@ -185,8 +185,8 @@ echo "Memory usage test begins at $(date)"
 echo "Memory usage values in kilobytes unless specified otherwise"
 
 #            ES   EC
-mem_test 131072  32
-mem_test 131072  64
-mem_test 131072 128
+mem_test 131072   16
+mem_test 131072   32
+mem_test 131072   64
 
 echo "Memory usage test finished on $(date)"
