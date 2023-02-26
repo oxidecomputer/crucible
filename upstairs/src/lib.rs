@@ -481,11 +481,6 @@ where
             continue;
         }
 
-        // ZZZ if this is a flush, then we have to determine if there is
-        // an extent_limit value for this downstairs.
-        // Ah, store a downstairs<hm, client_id> value for each. if it's
-        // We can just take whatever value is in that and plop it directly
-        // into the flush.
         active_count += 1;
         match job.unwrap() {
             IOop::Write {
@@ -526,6 +521,9 @@ where
                 snapshot_details,
                 extent_limit: _,
             } => {
+                // This is a flush so we have to determine if there is an
+                // extent_limit value for this downstairs.  Use the client ID
+                // to get the Option<limit> for our unique client.
                 let extent_limit =
                     u.downstairs.lock().await.extent_limit[client_id as usize];
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
