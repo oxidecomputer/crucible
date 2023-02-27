@@ -2122,6 +2122,7 @@ impl Region {
         gen_number: u64,
         snapshot_details: &Option<SnapshotDetails>,
         job_id: u64,
+        extent_limit: Option<usize>,
     ) -> Result<(), CrucibleError> {
         // It should be ok to Flush a read-only region, but not take a snapshot.
         // Most likely this read-only region *is* a snapshot, so that's
@@ -2130,10 +2131,19 @@ impl Region {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        // XXX How to we convert between usize and u32 correctly?
+        // Set the extent we will stop flushing at.
         cdt::os__flush__start!(|| job_id);
-        for eid in 0..self.def.extent_count() {
-            let extent = &self.extents[eid as usize];
+        let extent_count = match extent_limit {
+            Some(el) => {
+                if el > self.def.extent_count().try_into().unwrap() {
+                    crucible_bail!(InvalidExtent);
+                }
+                el
+            }
+            None => self.def.extent_count().try_into().unwrap(),
+        };
+        for eid in 0..extent_count {
+            let extent = &self.extents[eid];
             extent
                 .flush(flush_number, gen_number, job_id, &self.log)
                 .await?;
@@ -4674,6 +4684,173 @@ mod test {
         Ok(())
     }
 
+    // A test function to return a generic'ish write command.
+    // We use the "all 9's data" and checksum.
+    fn create_generic_write(
+        eid: u64,
+        offset: crucible::Block,
+    ) -> Vec<crucible_protocol::Write> {
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
+            }];
+        writes
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_base() {
+        // Check that the extent_limit value in region_flush is honored
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(2).await.unwrap();
+
+        // Write to extent 0 block 0 first
+        let writes = create_generic_write(0, Block::new_512(0));
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Now write to extent 1 block 0
+        let writes = create_generic_write(1, Block::new_512(0));
+
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Verify the dirty bit is now set for both extents.
+        let inner = &region.extents[0].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        // Call flush, but limit the flush to extents < 1
+        region.region_flush(1, 2, &None, 3, Some(1)).await.unwrap();
+
+        // Verify the dirty bit is no longer set for 0, but still set
+        // for extent 1.
+        let inner = &region.extents[0].inner.as_ref().unwrap();
+        assert!(!inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_end() {
+        // Check that the extent_limit value in region_flush is honored
+        // Write to the last block in the extents.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(3).await.unwrap();
+
+        // Write to extent 1 block 9 first
+        let writes = create_generic_write(1, Block::new_512(9));
+        region.region_write(&writes, 1, true).await.unwrap();
+
+        // Now write to extent 2 block 9
+        let writes = create_generic_write(2, Block::new_512(9));
+        region.region_write(&writes, 2, true).await.unwrap();
+
+        // Verify the dirty bit is now set for both extents.
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[2].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        // Call flush, but limit the flush to extents < 2
+        region.region_flush(1, 2, &None, 3, Some(2)).await.unwrap();
+
+        // Verify the dirty bit is no longer set for 1, but still set
+        // for extent 2.
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(!inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[2].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        // Now flush with no restrictions.
+        region.region_flush(1, 2, &None, 3, None).await.unwrap();
+
+        // Extent 2 should no longer be dirty
+        let inner = &region.extents[2].inner.as_ref().unwrap();
+        assert!(!inner.lock().await.dirty().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_walk_it_off() {
+        // Check that the extent_limit value in region_flush is honored
+        // Write to all the extents, then flush them one at a time.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(10).await.unwrap();
+
+        // Write to extent 1 block 9 first
+        let mut job_id = 1;
+        for ext in 0..10 {
+            let writes = create_generic_write(ext, Block::new_512(5));
+            region.region_write(&writes, job_id, true).await.unwrap();
+            job_id += 1;
+        }
+
+        // Verify the dirty bit is now set for all extents.
+        for ext in 0..10 {
+            let inner = &region.extents[ext].inner.as_ref().unwrap();
+            assert!(inner.lock().await.dirty().unwrap());
+        }
+
+        // Walk up the extent_limit, verify at each flush extents are
+        // flushed.
+        for ext in 1..10 {
+            println!("Flush to extent limit {}", ext);
+            region
+                .region_flush(1, 2, &None, 3, Some(ext))
+                .await
+                .unwrap();
+
+            // This ext should no longer be dirty.
+            println!("extent n-1 {} should not be dirty now", ext - 1);
+            let inner = &region.extents[ext - 1].inner.as_ref().unwrap();
+            assert!(!inner.lock().await.dirty().unwrap());
+
+            // Any extent above the current point should still be dirty.
+            for d_ext in ext..10 {
+                println!("verify {} still dirty", d_ext);
+                let inner = &region.extents[d_ext].inner.as_ref().unwrap();
+                assert!(inner.lock().await.dirty().unwrap());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_too_large() {
+        // Check that the extent_limit value in region_flush will return
+        // an error if the extent_limit is too large.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(1).await.unwrap();
+
+        // Call flush with an invalid extent
+        assert!(region.region_flush(1, 2, &None, 3, Some(2)).await.is_err());
+    }
+
     #[tokio::test]
     async fn test_extent_write_flush_close() {
         // Verify that a write then close of an extent will return the
@@ -4849,7 +5026,7 @@ mod test {
         }
 
         // Flush
-        region.region_flush(1, 2, &None, 3).await?;
+        region.region_flush(1, 2, &None, 3, None).await?;
 
         // We are gonna compare against the last write iteration
         let last_writes = writes.last().unwrap();
@@ -4928,7 +5105,7 @@ mod test {
         }
 
         // Flush
-        region.region_flush(1, 2, &None, 3).await?;
+        region.region_flush(1, 2, &None, 3, None).await?;
 
         // compare against the last write iteration
         let last_writes = writes.last().unwrap();

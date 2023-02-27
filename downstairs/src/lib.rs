@@ -312,6 +312,7 @@ pub async fn show_work(ds: &mut Downstairs) {
                         flush_number: _flush_number,
                         gen_number: _gen_number,
                         snapshot_details: _,
+                        extent_limit: _,
                     } => {
                         dsw_type = "Flush".to_string();
                         dep_list = dependencies.to_vec();
@@ -567,6 +568,7 @@ where
             flush_number,
             gen_number,
             snapshot_details,
+            extent_limit,
         } => {
             if !is_message_valid(
                 upstairs_connection,
@@ -585,6 +587,7 @@ where
                 flush_number: *flush_number,
                 gen_number: *gen_number,
                 snapshot_details: snapshot_details.clone(),
+                extent_limit: *extent_limit,
             };
 
             let mut d = ad.lock().await;
@@ -1943,6 +1946,7 @@ impl Downstairs {
                 flush_number,
                 gen_number,
                 snapshot_details,
+                extent_limit,
             } => {
                 let result = if self.flush_errors && random() && random() {
                     warn!(self.log, "returning error on flush!");
@@ -1957,6 +1961,7 @@ impl Downstairs {
                             *gen_number,
                             snapshot_details,
                             job_id,
+                            *extent_limit,
                         )
                         .await
                 };
@@ -2614,6 +2619,7 @@ impl Work {
                                     flush_number: _flush_number,
                                     gen_number: _gen_number,
                                     snapshot_details: _,
+                                    extent_limit: _,
                                 } => "Flush",
                                 IOop::Read {
                                     dependencies: _,
@@ -3043,6 +3049,7 @@ mod test {
                         flush_number: 10,
                         gen_number: 0,
                         snapshot_details: None,
+                        extent_limit: None,
                     }
                 } else {
                     IOop::Read {
@@ -3098,6 +3105,7 @@ mod test {
                     flush_number: _,
                     gen_number: _,
                     snapshot_details: _,
+                    extent_limit: _,
                 }
             )
         };
@@ -3605,6 +3613,7 @@ mod test {
             flush_number: 3,
             gen_number: gen,
             snapshot_details: None,
+            extent_limit: None,
         };
         ds.add_work(upstairs_connection, 1001, rio).await?;
 
@@ -4735,7 +4744,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path).await?;
-        region.region_flush(1, 1, &None, 0).await?;
+        region.region_flush(1, 1, &None, 0, None).await?;
 
         // export region to another file
 
@@ -4804,7 +4813,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path).await?;
-        region.region_flush(1, 1, &None, 0).await?;
+        region.region_flush(1, 1, &None, 0, None).await?;
 
         // export region to another file (note: 100 fewer bytes imported than
         // region size still means the whole region is exported)
@@ -4887,7 +4896,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path).await?;
-        region.region_flush(1, 1, &None, 0).await?;
+        region.region_flush(1, 1, &None, 0, None).await?;
 
         // export region to another file (note: 100 more bytes will have caused
         // 10 more extents to be added, but someone running the export command
@@ -4971,7 +4980,7 @@ mod test {
         // import random_data to the region
 
         downstairs_import(&mut region, &random_file_path).await?;
-        region.region_flush(1, 1, &None, 0).await?;
+        region.region_flush(1, 1, &None, 0, None).await?;
 
         // read block by block
         let mut read_data = Vec::with_capacity(total_bytes as usize);

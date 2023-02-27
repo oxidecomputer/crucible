@@ -764,6 +764,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
 
         ds.enqueue(op, ds_done_tx.clone()).await;
@@ -830,6 +831,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
 
         ds.enqueue(op, ds_done_tx.clone()).await;
@@ -896,6 +898,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
 
         ds.enqueue(op, ds_done_tx.clone()).await;
@@ -1765,6 +1768,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
 
         ds.enqueue(op, ds_done_tx.clone()).await;
@@ -1901,6 +1905,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
         ds.enqueue(op, ds_done_tx.clone()).await;
 
@@ -2060,6 +2065,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
         ds.enqueue(op, ds_done_tx.clone()).await;
 
@@ -2192,6 +2198,7 @@ mod up_test {
             0,
             None,
             ImpactedBlocks::Empty,
+            None,
         );
         ds.enqueue(op, ds_done_tx.clone()).await;
 
@@ -4716,6 +4723,7 @@ mod up_test {
                 0,
                 None,
                 ImpactedBlocks::Empty,
+                None,
             );
             ds.enqueue(op, ds_done_tx.clone()).await;
 
@@ -4894,8 +4902,16 @@ mod up_test {
 
         let id = ds.next_id();
 
-        let op =
-            create_flush(id, vec![], 10, 0, 0, None, ImpactedBlocks::Empty);
+        let op = create_flush(
+            id,
+            vec![],
+            10,
+            0,
+            0,
+            None,
+            ImpactedBlocks::Empty,
+            None,
+        );
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         if make_in_progress {
@@ -5026,6 +5042,7 @@ mod up_test {
                 0,
                 None,
                 ImpactedBlocks::Empty,
+                None,
             );
             ds.enqueue(op, ds_done_tx.clone()).await;
 
