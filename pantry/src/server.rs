@@ -86,6 +86,11 @@ async fn is_job_finished(
     Ok(HttpResponseOk(JobPollResponse { job_is_finished }))
 }
 
+#[derive(Serialize, JsonSchema)]
+pub struct JobResultOkResponse {
+    pub job_result_ok: bool,
+}
+
 /// Block on returning a Pantry background job result, then return 200 OK if the
 /// job executed OK, 500 otherwise.
 #[endpoint {
@@ -95,16 +100,21 @@ async fn is_job_finished(
 async fn job_result_ok(
     rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<JobPath>,
-) -> Result<HttpResponseOk<()>, HttpError> {
+) -> Result<HttpResponseOk<JobResultOkResponse>, HttpError> {
     let path = path.into_inner();
     let pantry = rc.context();
 
-    let job_result = pantry.get_job_result(path.id).await?;
+    match pantry.get_job_result(path.id).await {
+        Ok(result) => {
+            // The inner result is from the tokio task itself.
+            Ok(HttpResponseOk(JobResultOkResponse {
+                job_result_ok: result.is_ok(),
+            }))
+        }
 
-    match job_result {
-        Ok(_) => Ok(HttpResponseOk(())),
-
-        Err(e) => Err(HttpError::for_internal_error(e.to_string())),
+        // Here is where get_job_result will return 404 if the job id is not
+        // found, or a 500 if the join_handle.await didn't work.
+        Err(e) => Err(e),
     }
 }
 
@@ -205,6 +215,40 @@ async fn bulk_write(
 
     Ok(HttpResponseUpdatedNoContent())
 }
+#[derive(Deserialize, JsonSchema)]
+struct BulkReadRequest {
+    pub offset: u64,
+    pub size: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct BulkReadResponse {
+    pub base64_encoded_data: String,
+}
+
+/// Bulk read data from a volume at a specified offset
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/bulk_read",
+}]
+async fn bulk_read(
+    rc: RequestContext<Arc<Pantry>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<BulkReadRequest>,
+) -> Result<HttpResponseOk<BulkReadResponse>, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    let data = pantry
+        .bulk_read(path.id.clone(), body.offset, body.size)
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseOk(BulkReadResponse {
+        base64_encoded_data: engine::general_purpose::STANDARD.encode(data),
+    }))
+}
 
 #[derive(Serialize, JsonSchema)]
 struct ScrubResponse {
@@ -229,6 +273,38 @@ async fn scrub(
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     Ok(HttpResponseOk(ScrubResponse { job_id }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ValidateRequest {
+    pub expected_digest: ExpectedDigest,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct ValidateResponse {
+    pub job_id: String,
+}
+
+/// Validate the digest of a whole volume
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/validate",
+}]
+async fn validate(
+    rc: RequestContext<Arc<Pantry>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<ValidateRequest>,
+) -> Result<HttpResponseOk<ValidateResponse>, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    let job_id = pantry
+        .validate(path.id.clone(), body.expected_digest)
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+    Ok(HttpResponseOk(ValidateResponse { job_id }))
 }
 
 /// Flush and close a volume, removing it from the Pantry
@@ -260,7 +336,9 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     api.register(import_from_url)?;
     api.register(snapshot)?;
     api.register(bulk_write)?;
+    api.register(bulk_read)?;
     api.register(scrub)?;
+    api.register(validate)?;
     api.register(detach)?;
 
     Ok(api)
