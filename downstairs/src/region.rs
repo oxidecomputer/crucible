@@ -1210,7 +1210,7 @@ impl Extent {
             // write_to_skip.contains()`?
             if writes_to_skip.contains(&block) {
                 debug_assert!(only_write_unwritten);
-                batched_pwritev.flush()?;
+                batched_pwritev.perform_writes()?;
                 continue;
             }
 
@@ -1218,7 +1218,7 @@ impl Extent {
         }
 
         // Write any remaining data
-        batched_pwritev.flush()?;
+        batched_pwritev.perform_writes()?;
 
         cdt::extent__write__file__done!(|| {
             (job_id, self.number, writes.len() as u64)
@@ -2406,7 +2406,7 @@ impl<'a> BatchedPwritev<'a> {
     ) -> Result<(), CrucibleError> {
         let block = write.offset.value;
 
-        let should_flush = if let Some(state) = &self.state {
+        let should_perform_writes = if let Some(state) = &self.state {
             // Is this write contiguous with the last?
             if block == state.next_block_in_run {
                 // If so, then add it to the list. Make sure to flush if the
@@ -2420,8 +2420,8 @@ impl<'a> BatchedPwritev<'a> {
             false
         };
 
-        if should_flush {
-            self.flush()?;
+        if should_perform_writes {
+            self.perform_writes()?;
         }
 
         // If flush was called above, then state will be None.
@@ -2453,7 +2453,7 @@ impl<'a> BatchedPwritev<'a> {
     }
 
     // Write bytes out to file target
-    pub fn flush(&mut self) -> Result<(), CrucibleError> {
+    pub fn perform_writes(&mut self) -> Result<(), CrucibleError> {
         if !self.iovecs.is_empty() {
             if let Some(ref mut state) = self.state {
                 nix::sys::uio::pwritev(
