@@ -1910,6 +1910,7 @@ impl Region {
             self.def.extent_count(),
         )
     }
+
     pub fn def(&self) -> RegionDefinition {
         self.def
     }
@@ -5128,5 +5129,434 @@ mod test {
         assert_eq!(responses[0].data[..], [0u8; 512][..]);
 
         Ok(())
+    }
+
+    async fn prepare_random_region(
+    ) -> Result<(tempfile::TempDir, Region, Vec<u8>)> {
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let ddef = region.def();
+        let total_size = ddef.total_size() as usize;
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // Write in random data
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = vec![0; total_size];
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            });
+        }
+
+        region.region_write(&writes, 0, false).await?;
+
+        Ok((dir, region, buffer))
+    }
+
+    #[tokio::test]
+    async fn test_read_single_large_contiguous() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a single large contiguous range
+        let requests: Vec<crucible::ReadRequest> = (1..8)
+            .map(|i| crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(i),
+            })
+            .collect();
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &data[512..(8 * 512)],
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_single_large_contiguous_span_extents() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a single large contiguous range that spans
+        // multiple extents
+        let requests: Vec<crucible::ReadRequest> = (9..28)
+            .map(|i| crucible_protocol::ReadRequest {
+                eid: i / 10,
+                offset: Block::new_512(i % 10),
+            })
+            .collect();
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &data[(9 * 512)..(28 * 512)],
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_multiple_disjoint_large_contiguous() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a multiple disjoint large contiguous ranges
+        let requests: Vec<crucible::ReadRequest> = vec![
+            (1..4)
+                .map(|i| crucible_protocol::ReadRequest {
+                    eid: i / 10,
+                    offset: Block::new_512(i % 10),
+                })
+                .collect::<Vec<crucible::ReadRequest>>(),
+            (15..24)
+                .map(|i| crucible_protocol::ReadRequest {
+                    eid: i / 10,
+                    offset: Block::new_512(i % 10),
+                })
+                .collect::<Vec<crucible::ReadRequest>>(),
+            (27..28)
+                .map(|i| crucible_protocol::ReadRequest {
+                    eid: i / 10,
+                    offset: Block::new_512(i % 10),
+                })
+                .collect::<Vec<crucible::ReadRequest>>(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &[
+                &data[512..(4 * 512)],
+                &data[(15 * 512)..(24 * 512)],
+                &data[(27 * 512)..(28 * 512)],
+            ]
+            .concat(),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_multiple_disjoint_none_contiguous() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a multiple disjoint non-contiguous ranges
+        let requests: Vec<crucible::ReadRequest> = vec![
+            crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            },
+            crucible_protocol::ReadRequest {
+                eid: 1,
+                offset: Block::new_512(4),
+            },
+            crucible_protocol::ReadRequest {
+                eid: 1,
+                offset: Block::new_512(9),
+            },
+            crucible_protocol::ReadRequest {
+                eid: 2,
+                offset: Block::new_512(4),
+            },
+        ];
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &[
+                &data[0..512],
+                &data[(14 * 512)..(15 * 512)],
+                &data[(19 * 512)..(20 * 512)],
+                &data[(24 * 512)..(25 * 512)],
+            ]
+            .concat(),
+        );
+
+        Ok(())
+    }
+
+    fn prepare_writes(
+        offsets: std::ops::Range<usize>,
+        data: &mut [u8],
+    ) -> Vec<crucible_protocol::Write> {
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(offsets.len());
+        let mut rng = rand::thread_rng();
+
+        for i in offsets {
+            let mut buffer: Vec<u8> = vec![0; 512];
+            rng.fill_bytes(&mut buffer);
+
+            // alter data as writes are prepared
+            data[(i * 512)..((i + 1) * 512)].copy_from_slice(&buffer[..]);
+
+            let hash = integrity_hash(&[&buffer]);
+
+            writes.push(crucible_protocol::Write {
+                eid: (i as u64) / 10,
+                offset: Block::new_512((i as u64) % 10),
+                data: Bytes::from(buffer),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            });
+        }
+
+        assert!(!writes.is_empty());
+
+        writes
+    }
+
+    async fn validate_whole_region(region: &Region, data: &[u8]) -> Result<()> {
+        let num_blocks = region.def().extent_size().value
+            * region.def().extent_count() as u64;
+
+        let requests: Vec<crucible_protocol::ReadRequest> = (0..num_blocks)
+            .map(|i| crucible_protocol::ReadRequest {
+                eid: i / 10,
+                offset: Block::new_512(i % 10),
+            })
+            .collect();
+
+        let responses = region.region_read(&requests, 1).await?;
+
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &data,
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_single_large_contiguous() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a single large contiguous range
+        let writes = prepare_writes(1..8, &mut data);
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_single_large_contiguous_span_extents() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a single large contiguous range that spans
+        // multiple extents
+        let writes = prepare_writes(9..28, &mut data);
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_multiple_disjoint_large_contiguous() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a multiple disjoint large contiguous ranges
+        let writes = vec![
+            prepare_writes(1..4, &mut data),
+            prepare_writes(15..24, &mut data),
+            prepare_writes(27..28, &mut data),
+        ]
+        .concat();
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_multiple_disjoint_none_contiguous() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a multiple disjoint non-contiguous ranges
+        let writes = vec![
+            prepare_writes(0..1, &mut data),
+            prepare_writes(14..15, &mut data),
+            prepare_writes(19..20, &mut data),
+            prepare_writes(24..25, &mut data),
+        ]
+        .concat();
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_single_large_contiguous() -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a single large contiguous range
+        let writes = prepare_writes(1..8, &mut data);
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_single_large_contiguous_span_extents(
+    ) -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a single large contiguous range that spans
+        // multiple extents
+        let writes = prepare_writes(9..28, &mut data);
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_multiple_disjoint_large_contiguous(
+    ) -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a multiple disjoint large contiguous ranges
+        let writes = vec![
+            prepare_writes(1..4, &mut data),
+            prepare_writes(15..24, &mut data),
+            prepare_writes(27..28, &mut data),
+        ]
+        .concat();
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_multiple_disjoint_none_contiguous(
+    ) -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a multiple disjoint non-contiguous ranges
+        let writes = vec![
+            prepare_writes(0..1, &mut data),
+            prepare_writes(14..15, &mut data),
+            prepare_writes(19..20, &mut data),
+            prepare_writes(24..25, &mut data),
+        ]
+        .concat();
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
     }
 }
