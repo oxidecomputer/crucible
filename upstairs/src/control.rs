@@ -168,9 +168,10 @@ struct WorkSummary {
     state: Vec<DownstairsJobState>,
 }
 
-// States of a job on a downstairs (from the upstairs)
-// Getting the CrucibleError type to support JsonSchema was too much, and
-// I don't really care here what the actual error is.
+/**
+ * The Possible states of a job on a downstairs (from the point of view
+ * of the upstairs).
+ */
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub enum DownstairsJobState {
     New,
@@ -182,7 +183,8 @@ pub enum DownstairsJobState {
 }
 
 /**
- * Fetch the current downstairs work struct
+ * Fetch the current downstairs work queue and populate a WorkSummary
+ * struct for each job we find.
  */
 #[endpoint {
     method = GET,
@@ -223,7 +225,6 @@ async fn downstairs_work_queue(
                         let block_size = write.offset.block_size_in_bytes();
                         num_blocks += write.data.len() / block_size as usize;
                     }
-
                     (job_type, num_blocks, dependencies.clone())
                 }
                 IOop::WriteUnwritten {
@@ -237,7 +238,6 @@ async fn downstairs_work_queue(
                         let block_size = write.offset.block_size_in_bytes();
                         num_blocks += write.data.len() / block_size as usize;
                     }
-
                     (job_type, num_blocks, dependencies.clone())
                 }
                 IOop::Flush {
@@ -292,12 +292,16 @@ async fn downstairs_work_queue(
             };
 
         let mut state = Vec::with_capacity(3);
-        // Convert the possible job states (and handle the None) into
-        // our DownstairsJobState
+        /*
+         * Convert the possible job states (and handle the None) into
+         * our DownstairsJobState
+         */
         for cid in 0..3 {
-            // I don't ever expect the job state to return None, but
-            // if it does because something else is wrong, I don't want
-            // to panic here while trying to debug it.
+            /*
+             * We don't ever expect the job state to return None, but
+             * if it does because something else is wrong, I don't want
+             * to panic here while trying to debug it.
+             */
             let dss = match job.state.get(&(cid as u8)) {
                 Some(IOState::New) => DownstairsJobState::New,
                 Some(IOState::InProgress) => DownstairsJobState::InProgress,
@@ -368,7 +372,9 @@ async fn fault_downstairs(
     }
     drop(active);
 
-    // Mark the downstairs client as faulted
+    /*
+     * Mark the downstairs client as faulted
+     */
     api_context.up.ds_transition_with_lock(
         &mut ds,
         up_state,
@@ -376,7 +382,9 @@ async fn fault_downstairs(
         DsState::Faulted,
     );
 
-    // Move all jobs to skipped for this downstairs.
+    /*
+     * Move all jobs to skipped for this downstairs.
+     */
     ds.ds_set_faulted(cid);
 
     Ok(HttpResponseUpdatedNoContent())

@@ -92,7 +92,8 @@
     },
     "/work": {
       "get": {
-        "summary": "Fetch the current downstairs work struct",
+        "summary": "Fetch the current downstairs work queue and populate a WorkSummary",
+        "description": "struct for each job we find.",
         "operationId": "downstairs_work_queue",
         "responses": {
           "200": {
@@ -138,6 +139,7 @@
         ]
       },
       "DownstairsJobState": {
+        "description": "The Possible states of a job on a downstairs (from the point of view of the upstairs).",
         "type": "string",
         "enum": [
           "New",
