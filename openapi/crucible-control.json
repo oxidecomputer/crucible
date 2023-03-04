@@ -89,6 +89,30 @@
           }
         }
       }
+    },
+    "/work": {
+      "get": {
+        "summary": "Fetch the current downstairs work struct",
+        "operationId": "downstairs_work_queue",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DownstairsWork"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -105,6 +129,40 @@
       }
     },
     "schemas": {
+      "AckStatus": {
+        "type": "string",
+        "enum": [
+          "NotAcked",
+          "AckReady",
+          "Acked"
+        ]
+      },
+      "DownstairsJobState": {
+        "type": "string",
+        "enum": [
+          "New",
+          "InProgress",
+          "Done",
+          "Skipped",
+          "Error",
+          "Unknown"
+        ]
+      },
+      "DownstairsWork": {
+        "description": "`DownstairsWork` holds the information gathered from the downstairs",
+        "type": "object",
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkSummary"
+            }
+          }
+        },
+        "required": [
+          "jobs"
+        ]
+      },
       "DsState": {
         "type": "string",
         "enum": [
@@ -218,6 +276,54 @@
           "repair_needed",
           "state",
           "up_jobs"
+        ]
+      },
+      "WorkSummary": {
+        "description": "A summary of information from each job the downstairs has in its queue.",
+        "type": "object",
+        "properties": {
+          "ack_status": {
+            "$ref": "#/components/schemas/AckStatus"
+          },
+          "deps": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "id": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "job_type": {
+            "type": "string"
+          },
+          "num_blocks": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "replay": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DownstairsJobState"
+            }
+          }
+        },
+        "required": [
+          "ack_status",
+          "deps",
+          "id",
+          "job_type",
+          "num_blocks",
+          "replay",
+          "state"
         ]
       }
     }
