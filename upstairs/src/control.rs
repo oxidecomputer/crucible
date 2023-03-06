@@ -22,6 +22,7 @@ use super::*;
 pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
+    api.register(downstairs_work_queue).unwrap();
     api.register(fault_downstairs).unwrap();
     api.register(take_snapshot).unwrap();
 
@@ -144,6 +145,194 @@ async fn upstairs_fill_info(
     }))
 }
 
+/**
+ * `DownstairsWork` holds the information gathered from the downstairs
+ */
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct DownstairsWork {
+    jobs: Vec<WorkSummary>,
+}
+
+/**
+ * A summary of information from each job the downstairs has in
+ * its queue.
+ */
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct WorkSummary {
+    id: u64,
+    replay: bool,
+    job_type: String,
+    num_blocks: usize,
+    deps: Vec<u64>,
+    ack_status: AckStatus,
+    state: Vec<DownstairsJobState>,
+}
+
+/**
+ * The Possible states of a job on a downstairs (from the point of view
+ * of the upstairs).
+ */
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub enum DownstairsJobState {
+    New,
+    InProgress,
+    Done,
+    Skipped,
+    Error,
+    Unknown,
+}
+
+async fn build_downstairs_job_list(up: &Arc<Upstairs>) -> Vec<WorkSummary> {
+    let ds = up.downstairs.lock().await;
+    let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
+    kvec.sort_unstable();
+
+    let mut jobs = Vec::new();
+    for id in kvec.iter() {
+        let job = ds.ds_active.get(id).unwrap();
+
+        let (job_type, num_blocks, deps): (String, usize, Vec<u64>) =
+            match &job.work {
+                IOop::Read {
+                    dependencies,
+                    requests,
+                } => {
+                    let job_type = "Read".to_string();
+                    let num_blocks = requests.len();
+                    (job_type, num_blocks, dependencies.clone())
+                }
+                IOop::Write {
+                    dependencies,
+                    writes,
+                } => {
+                    let job_type = "Write".to_string();
+                    let mut num_blocks = 0;
+
+                    for write in writes {
+                        let block_size = write.offset.block_size_in_bytes();
+                        num_blocks += write.data.len() / block_size as usize;
+                    }
+                    (job_type, num_blocks, dependencies.clone())
+                }
+                IOop::WriteUnwritten {
+                    dependencies,
+                    writes,
+                } => {
+                    let job_type = "WriteU".to_string();
+                    let mut num_blocks = 0;
+
+                    for write in writes {
+                        let block_size = write.offset.block_size_in_bytes();
+                        num_blocks += write.data.len() / block_size as usize;
+                    }
+                    (job_type, num_blocks, dependencies.clone())
+                }
+                IOop::Flush {
+                    dependencies,
+                    flush_number: _flush_number,
+                    gen_number: _gen_number,
+                    snapshot_details: _,
+                    extent_limit: _,
+                } => {
+                    let job_type = "Flush".to_string();
+                    (job_type, 0, dependencies.clone())
+                }
+                IOop::ExtentClose {
+                    dependencies,
+                    extent,
+                } => {
+                    let job_type = "EClose".to_string();
+                    (job_type, *extent, dependencies.clone())
+                }
+                IOop::ExtentFlushClose {
+                    dependencies,
+                    extent,
+                    flush_number: _,
+                    gen_number: _,
+                    source_downstairs: _,
+                    repair_downstairs: _,
+                } => {
+                    let job_type = "FClose".to_string();
+                    (job_type, *extent, dependencies.clone())
+                }
+                IOop::ExtentLiveRepair {
+                    dependencies,
+                    extent,
+                    source_downstairs: _,
+                    source_repair_address: _,
+                    repair_downstairs: _,
+                } => {
+                    let job_type = "Repair".to_string();
+                    (job_type, *extent, dependencies.clone())
+                }
+                IOop::ExtentLiveReopen {
+                    dependencies,
+                    extent,
+                } => {
+                    let job_type = "Reopen".to_string();
+                    (job_type, *extent, dependencies.clone())
+                }
+                IOop::ExtentLiveNoOp { dependencies } => {
+                    let job_type = "NoOp".to_string();
+                    (job_type, 0, dependencies.clone())
+                }
+            };
+
+        let mut state = Vec::with_capacity(3);
+        /*
+         * Convert the possible job states (and handle the None) into
+         * our DownstairsJobState
+         */
+        for cid in 0..3 {
+            /*
+             * We don't ever expect the job state to return None, but
+             * if it does because something else is wrong, I don't want
+             * to panic here while trying to debug it.
+             */
+            let dss = match job.state.get(&(cid as u8)) {
+                Some(IOState::New) => DownstairsJobState::New,
+                Some(IOState::InProgress) => DownstairsJobState::InProgress,
+                Some(IOState::Done) => DownstairsJobState::Done,
+                Some(IOState::Skipped) => DownstairsJobState::Skipped,
+                Some(IOState::Error(_)) => DownstairsJobState::Error,
+                None => DownstairsJobState::Unknown,
+            };
+            state.push(dss);
+        }
+
+        let ws = WorkSummary {
+            id: *id,
+            replay: job.replay,
+            job_type,
+            num_blocks,
+            deps,
+            ack_status: job.ack_status,
+            state,
+        };
+        jobs.push(ws);
+    }
+    jobs
+}
+
+/**
+ * Fetch the current downstairs work queue and populate a WorkSummary
+ * struct for each job we find.
+ */
+#[endpoint {
+    method = GET,
+    path = "/work",
+    unpublished = false,
+}]
+async fn downstairs_work_queue(
+    rqctx: RequestContext<Arc<UpstairsInfo>>,
+) -> Result<HttpResponseOk<DownstairsWork>, HttpError> {
+    let api_context = rqctx.context();
+
+    let jobs = build_downstairs_job_list(&api_context.up.clone()).await;
+
+    Ok(HttpResponseOk(DownstairsWork { jobs }))
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Cid {
@@ -177,18 +366,32 @@ async fn fault_downstairs(
      */
     let active = api_context.up.active.lock().await;
     let up_state = active.up_state;
-    let ds = api_context.up.downstairs.lock().await;
-    if ds.ds_state[cid as usize] != DsState::Active {
-        return Err(HttpError::for_bad_request(
-            Some(String::from("InvalidState")),
-            format!("downstairs {} not in Active state", cid),
-        ));
+    let mut ds = api_context.up.downstairs.lock().await;
+    match ds.ds_state[cid as usize] {
+        DsState::Active | DsState::Offline => {}
+        x => {
+            return Err(HttpError::for_bad_request(
+                Some(String::from("InvalidState")),
+                format!("downstairs {} in invalid state {:?}", cid, x),
+            ));
+        }
     }
     drop(active);
 
-    api_context
-        .up
-        .ds_transition_with_lock(ds, up_state, cid, DsState::Faulted);
+    /*
+     * Mark the downstairs client as faulted
+     */
+    api_context.up.ds_transition_with_lock(
+        &mut ds,
+        up_state,
+        cid,
+        DsState::Faulted,
+    );
+
+    /*
+     * Move all jobs to skipped for this downstairs.
+     */
+    ds.ds_set_faulted(cid);
 
     Ok(HttpResponseUpdatedNoContent())
 }

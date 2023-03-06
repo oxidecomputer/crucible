@@ -1488,7 +1488,7 @@ where
         active.up_state
     };
     {
-        let ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs.lock().await;
         let state = ds.ds_state[up_coms.client_id as usize];
         match state {
             DsState::Replay => {
@@ -1499,7 +1499,7 @@ where
                     up.uuid,
                 );
                 up.ds_transition_with_lock(
-                    ds,
+                    &mut ds,
                     up_state,
                     up_coms.client_id,
                     DsState::Active,
@@ -4682,14 +4682,14 @@ impl Upstairs {
         if up_state != UpState::Deactivating {
             return false;
         }
-        let ds = self.downstairs.lock().await;
+        let mut ds = self.downstairs.lock().await;
 
         let mut kvec: Vec<u64> =
             ds.ds_active.keys().cloned().collect::<Vec<u64>>();
         if kvec.is_empty() {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
             self.ds_transition_with_lock(
-                ds,
+                &mut ds,
                 up_state,
                 client_id,
                 DsState::Deactivated,
@@ -4738,7 +4738,7 @@ impl Upstairs {
          */
         info!(self.log, "[{}] check deactivate YES", client_id);
         self.ds_transition_with_lock(
-            ds,
+            &mut ds,
             up_state,
             client_id,
             DsState::Deactivated,
@@ -5441,9 +5441,9 @@ impl Upstairs {
     async fn ds_transition(&self, client_id: u8, new_state: DsState) {
         let active = self.active.lock().await;
         let up_state = active.up_state;
-        let ds = self.downstairs.lock().await;
+        let mut ds = self.downstairs.lock().await;
         drop(active);
-        self.ds_transition_with_lock(ds, up_state, client_id, new_state);
+        self.ds_transition_with_lock(&mut ds, up_state, client_id, new_state);
     }
 
     /*
@@ -5453,7 +5453,7 @@ impl Upstairs {
      */
     fn ds_transition_with_lock(
         &self,
-        mut ds: MutexGuard<'_, Downstairs>,
+        ds: &mut MutexGuard<'_, Downstairs>,
         up_state: UpState,
         client_id: u8,
         new_state: DsState,
@@ -6461,7 +6461,7 @@ impl Upstairs {
                     client_id
                 );
                 self.ds_transition_with_lock(
-                    ds,
+                    &mut ds,
                     up_state,
                     client_id,
                     DsState::Disabled,
@@ -6510,7 +6510,7 @@ impl Upstairs {
                         );
                     }
                     self.ds_transition_with_lock(
-                        ds,
+                        &mut ds,
                         up_state,
                         client_id,
                         DsState::Faulted,
@@ -7112,7 +7112,7 @@ impl IOStateCount {
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum AckStatus {
     NotAcked,
     AckReady,
