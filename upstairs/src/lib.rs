@@ -4899,21 +4899,21 @@ impl Upstairs {
         if snapshot_details.is_some() {
             info!(self.log, "flush with snap requested");
         }
+
         /*
-         * To build the dependency list for this flush, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new flush must
-         * depend on it.
+         * To build the dependency list for this flush, iterate from the end of
+         * the downstairs work active list in reverse order and check each job
+         * in that list to see if this new flush must depend on it.
          *
          * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But this flush must
-         * depend on the last flush - flush and gen numbers
-         * downstairs need to be sequential and the same for each
-         * downstairs.
+         * last flush will depend on jobs before it. But this flush must depend
+         * on the last flush - flush and gen numbers downstairs need to be
+         * sequential and the same for each downstairs.
          *
-         * This flush does not have to depend on reads as they do not impact
-         * downstairs state, but must depend on every write since the last
-         * flush.
+         * The downstairs currently assumes that all jobs previous to the last
+         * flush have completed, so the Upstairs must set that flushes depend on
+         * all jobs. It's currently important that flushes depend on everything,
+         * and everything depends on flushes.
          */
         let num_jobs = downstairs.ds_active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
@@ -4928,15 +4928,12 @@ impl Upstairs {
         {
             let job = &downstairs.ds_active[job_id];
 
+            // Flushes must depend on everything
+            dep.push(**job_id);
+
             // Depend on the last flush, but then bail out
             if job.work.is_flush() {
-                dep.push(**job_id);
                 break;
-            }
-
-            // Depend on all writes seen
-            if job.work.is_write() {
-                dep.push(**job_id);
             }
         }
 
@@ -5072,26 +5069,13 @@ impl Upstairs {
          * Construct a list of dependencies for this write based on the
          * following rules:
          *
-         * - writes have to depend on the last flush completing
+         * - writes have to depend on the last flush completing (because
+         *   currently everything has to depend on flushes)
          * - any overlap of impacted blocks requires a dependency
          *
          * It's important to remember that jobs may arrive at different
-         * Downstairs in different orders (they should still complete in job
-         * dependency order!). For example, say that searching for the
-         * dependency of a write stopped at the last flush. Then say that the
-         * following set of jobs were submitted:
-         *
-         *       block
-         * op# | 0 1 2 | deps
-         * ----|-------------
-         *   0 | R R   |
-         *   1 | F F F |
-         *   2 |   W W | 1
-         *
-         * Without any dependencies, a downstairs could choose to perform op 0
-         * at any time, including after the write! This would result in an
-         * incorrect read. It's important to search for write dependencies in
-         * the list of all active jobs.
+         * Downstairs in different orders but they should still complete in job
+         * dependency order.
          *
          * TODO: any overlap of impacted blocks will create a dependency.
          * take this an example (this shows three writes, all to the
@@ -5301,8 +5285,8 @@ impl Upstairs {
          * Construct a list of dependencies for this read based on the
          * following rules:
          *
-         * - reads do not depend on flushes, only writes (because flushes do
-         *   not modify data!)
+         * - reads depend on flushes (because currently everything has to depend
+         *   on flushes)
          * - any write with an overlap of impacted blocks requires a
          *   dependency
          */
@@ -5320,11 +5304,14 @@ impl Upstairs {
         {
             let job = &downstairs.ds_active[job_id];
 
-            // If this is a write and it impacts the same blocks as something
-            // already active, create a dependency.
-            if job.work.is_write()
+            if job.work.is_flush() {
+                dep.push(**job_id);
+                break;
+            } else if job.work.is_write()
                 && impacted_blocks.conflicts(&job.impacted_blocks)
             {
+                // If this is a write and it impacts the same blocks as
+                // something already active, create a dependency.
                 dep.push(**job_id);
             }
         }
