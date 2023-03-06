@@ -182,21 +182,8 @@ pub enum DownstairsJobState {
     Unknown,
 }
 
-/**
- * Fetch the current downstairs work queue and populate a WorkSummary
- * struct for each job we find.
- */
-#[endpoint {
-    method = GET,
-    path = "/work",
-    unpublished = false,
-}]
-async fn downstairs_work_queue(
-    rqctx: RequestContext<Arc<UpstairsInfo>>,
-) -> Result<HttpResponseOk<DownstairsWork>, HttpError> {
-    let api_context = rqctx.context();
-
-    let ds = api_context.up.downstairs.lock().await;
+async fn build_downstairs_job_list(up: &Arc<Upstairs>) -> Vec<WorkSummary> {
+    let ds = up.downstairs.lock().await;
     let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
     kvec.sort_unstable();
 
@@ -324,6 +311,25 @@ async fn downstairs_work_queue(
         };
         jobs.push(ws);
     }
+    jobs
+}
+
+/**
+ * Fetch the current downstairs work queue and populate a WorkSummary
+ * struct for each job we find.
+ */
+#[endpoint {
+    method = GET,
+    path = "/work",
+    unpublished = false,
+}]
+async fn downstairs_work_queue(
+    rqctx: RequestContext<Arc<UpstairsInfo>>,
+) -> Result<HttpResponseOk<DownstairsWork>, HttpError> {
+    let api_context = rqctx.context();
+
+    let jobs = build_downstairs_job_list(&api_context.up.clone()).await;
+
     Ok(HttpResponseOk(DownstairsWork { jobs }))
 }
 
