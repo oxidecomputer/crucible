@@ -3964,15 +3964,15 @@ impl Downstairs {
             kvec.sort_unstable();
 
             for id in kvec.iter() {
-                // Remove everything before this flush (only valid if flushes
-                // depend on everything, and everything depends on flushes).
+                // Remove everything before this flush (because flushes depend
+                // on everything, and everything depends on flushes).
                 assert!(*id <= ds_id);
 
                 // Assert the job is actually done, then complete it
                 let wc = self.state_count(*id).unwrap();
 
-                // Asserting that wc.active = 0 here is only valid if flushes
-                // depend on everything, and everything depends on flushes.
+                // Asserting that wc.active = 0 here because flushes depend on
+                // everything, and everything depends on flushes.
                 assert_eq!(wc.active, 0);
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(id));
