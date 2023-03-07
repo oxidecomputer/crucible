@@ -3964,27 +3964,15 @@ impl Downstairs {
             kvec.sort_unstable();
 
             for id in kvec.iter() {
-                // Remove everything before this flush
+                // Remove everything before this flush (only valid if flushes
+                // depend on everything, and everything depends on flushes).
                 assert!(*id <= ds_id);
 
                 // Assert the job is actually done, then complete it
                 let wc = self.state_count(*id).unwrap();
-                let job = self.ds_active.get(id).unwrap();
 
-                if wc.active > 0 && matches!(job.work, IOop::Read { .. }) {
-                    // Flushes do not depend on reads, so there's a special case
-                    // where all writes that a flush depends on have completed,
-                    // and we're retiring that flush, but there's still an
-                    // outstanding read result (one that does not overlap with
-                    // any write, or does overlap with a write and depends on
-                    // that write).
-                    //
-                    // Call continue here - some future flush will retire this
-                    // read, and in the case of replay we'll correctly replay it
-                    // and compare the read result and all that good stuff :)
-                    continue;
-                }
-
+                // Asserting that wc.active = 0 here is only valid if flushes
+                // depend on everything, and everything depends on flushes.
                 assert_eq!(wc.active, 0);
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(id));
