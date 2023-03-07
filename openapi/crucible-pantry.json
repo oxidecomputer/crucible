@@ -16,8 +16,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -52,8 +51,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -92,8 +90,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "requestBody": {
@@ -135,8 +132,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -163,8 +159,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "requestBody": {
@@ -201,8 +196,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "requestBody": {
@@ -246,8 +240,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "responses": {
@@ -281,8 +274,7 @@
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "style": "simple"
+            }
           }
         ],
         "requestBody": {
@@ -592,6 +584,16 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "blocks_per_extent": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "extent_count": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
               "gen": {
                 "type": "integer",
                 "format": "uint64",
@@ -609,6 +611,8 @@
             },
             "required": [
               "block_size",
+              "blocks_per_extent",
+              "extent_count",
               "gen",
               "opts",
               "type"

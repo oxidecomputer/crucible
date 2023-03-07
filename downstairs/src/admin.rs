@@ -21,7 +21,9 @@ pub struct RunDownstairsForRegionParams {
     lossy: bool,
     port: u16,
     rport: u16,
-    return_errors: bool,
+    read_errors: bool,
+    write_errors: bool,
+    flush_errors: bool,
     cert_pem: Option<String>,
     key_pem: Option<String>,
     root_cert_pem: Option<String>,
@@ -43,9 +45,9 @@ pub struct DownstairsRunningResponse {
     path = "/regions/{uuid}/downstairs"
 }]
 pub async fn run_downstairs_for_region(
-    rqctx: Arc<RequestContext<Arc<ServerContext>>>,
-    run_params: TypedBody<RunDownstairsForRegionParams>,
+    rqctx: RequestContext<Arc<ServerContext>>,
     path_param: Path<RunDownstairsforRegionPath>,
+    run_params: TypedBody<RunDownstairsForRegionParams>,
 ) -> Result<HttpResponseCreated<DownstairsRunningResponse>, HttpError> {
     let apictx = rqctx.context();
     let run_params = run_params.into_inner();
@@ -63,10 +65,13 @@ pub async fn run_downstairs_for_region(
     let d = build_downstairs_for_region(
         &run_params.data,
         run_params.lossy,
-        run_params.return_errors,
+        run_params.read_errors,
+        run_params.write_errors,
+        run_params.flush_errors,
         run_params.read_only,
         None,
     )
+    .await
     .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     let _join_handle = start_downstairs(

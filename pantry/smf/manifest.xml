@@ -3,7 +3,7 @@
 
 <service_bundle type='manifest' name='oxide-crucible-pantry'>
 
-<service name='system/illumos/crucible-pantry' type='service' version='1'>
+<service name='system/illumos/crucible_pantry' type='service' version='1'>
   <create_default_instance enabled='false' />
 
   <!-- Run once we hit multi-user, so that the network and file systems have
@@ -14,8 +14,7 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/opt/oxide/crucible-pantry/bin/crucible-pantry run
-      -l %{config/listen}'
+    exec='/opt/oxide/crucible_pantry/bin/pantry_method_script.sh'
     timeout_seconds='30'
     />
 
@@ -26,7 +25,10 @@
   </property_group>
 
   <property_group name='config' type='application'>
-    <propval name='listen' type='astring' value='127.0.0.1:17000' />
+    <propval name='datalink' type='astring' value='unknown' />
+    <propval name='gateway' type='astring' value='unknown' />
+    <propval name='listen_addr' type='astring' value='127.0.0.1' />
+    <propval name='listen_port' type='astring' value='17000' />
   </property_group>
 
   <stability value='Unstable' />

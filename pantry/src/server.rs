@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use base64::{engine, Engine};
 use dropshot::endpoint;
 use dropshot::HttpError;
 use dropshot::HttpResponseDeleted;
@@ -42,7 +43,7 @@ struct AttachResult {
     path = "/crucible/pantry/0/volume/{id}",
 }]
 async fn attach(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<VolumePath>,
     body: TypedBody<AttachRequest>,
 ) -> Result<HttpResponseOk<AttachResult>, HttpError> {
@@ -74,7 +75,7 @@ struct JobPollResponse {
     path = "/crucible/pantry/0/job/{id}/is_finished",
 }]
 async fn is_job_finished(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<JobPath>,
 ) -> Result<HttpResponseOk<JobPollResponse>, HttpError> {
     let path = path.into_inner();
@@ -92,7 +93,7 @@ async fn is_job_finished(
     path = "/crucible/pantry/0/job/{id}/ok",
 }]
 async fn job_result_ok(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<JobPath>,
 ) -> Result<HttpResponseOk<()>, HttpError> {
     let path = path.into_inner();
@@ -129,7 +130,7 @@ struct ImportFromUrlResponse {
     path = "/crucible/pantry/0/volume/{id}/import_from_url",
 }]
 async fn import_from_url(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<VolumePath>,
     body: TypedBody<ImportFromUrlRequest>,
 ) -> Result<HttpResponseOk<ImportFromUrlResponse>, HttpError> {
@@ -156,7 +157,7 @@ struct SnapshotRequest {
     path = "/crucible/pantry/0/volume/{id}/snapshot",
 }]
 async fn snapshot(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<VolumePath>,
     body: TypedBody<SnapshotRequest>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
@@ -185,7 +186,7 @@ struct BulkWriteRequest {
     path = "/crucible/pantry/0/volume/{id}/bulk_write",
 }]
 async fn bulk_write(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<VolumePath>,
     body: TypedBody<BulkWriteRequest>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
@@ -193,7 +194,8 @@ async fn bulk_write(
     let body = body.into_inner();
     let pantry = rc.context();
 
-    let data = base64::decode(body.base64_encoded_data)
+    let data = engine::general_purpose::STANDARD
+        .decode(body.base64_encoded_data)
         .map_err(|e| HttpError::for_bad_request(None, e.to_string()))?;
 
     pantry
@@ -215,7 +217,7 @@ struct ScrubResponse {
     path = "/crucible/pantry/0/volume/{id}/scrub",
 }]
 async fn scrub(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<VolumePath>,
 ) -> Result<HttpResponseOk<ScrubResponse>, HttpError> {
     let path = path.into_inner();
@@ -235,7 +237,7 @@ async fn scrub(
     path = "/crucible/pantry/0/volume/{id}",
 }]
 async fn detach(
-    rc: Arc<RequestContext<Arc<Pantry>>>,
+    rc: RequestContext<Arc<Pantry>>,
     path: TypedPath<VolumePath>,
 ) -> Result<HttpResponseDeleted, HttpError> {
     let path = path.into_inner();

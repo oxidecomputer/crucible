@@ -786,60 +786,71 @@ fn worker(
          * - create a running snapshot
          * - delete a running snapshot
          *
-         * Multiple requests could have accumulated before waking up on the
-         * cond var, so operate on batches instead of individual regions or
-         * running snapshots.
+         * We use first_in_states to both get the next available Region
+         * and to wait on the condvar when there are no regions available.
          *
-         * First, create any requested regions. This has to occur before
-         * apply_smf.
-         *
-         * Then, run apply_smf. If this is successful, then tombstoned
-         * regions can be destroyed (has to occur after apply_smf
-         * removes the running instance so the zfs dataset is no
-         * longer in use).
+         * If the region is State::Requested, we create that region then run
+         * the apply_smf().
+         * If the region is State:Tombstoned, we apply_smf() first, then we
+         * finish up destroying the region.
          */
+        let r = df.first_in_states(&[State::Tombstoned, State::Requested]);
 
-        while let Some(r) = &df.first_region_in_states(&[State::Requested]) {
-            // if regions need to be created, do that before apply_smf.
-            let region_dataset =
-                regions_dataset.ensure_child_dataset(&r.id.0).unwrap();
+        match &r.state {
+            State::Requested => {
+                // if regions need to be created, do that before apply_smf.
+                let region_dataset =
+                    regions_dataset.ensure_child_dataset(&r.id.0).unwrap();
 
-            let res = worker_region_create(
-                &log,
-                &downstairs_program,
-                r,
-                &region_dataset.path().unwrap(),
-            )
-            .and_then(|_| df.created(&r.id));
+                let res = worker_region_create(
+                    &log,
+                    &downstairs_program,
+                    &r,
+                    &region_dataset.path().unwrap(),
+                )
+                .and_then(|_| df.created(&r.id));
 
-            if let Err(e) = res {
-                error!(log, "region {:?} create failed: {:?}", r.id.0, e);
-                df.fail(&r.id);
+                if let Err(e) = res {
+                    error!(log, "region {:?} create failed: {:?}", r.id.0, e);
+                    df.fail(&r.id);
+                }
+
+                info!(log, "applying SMF actions post create...");
+                let result = apply_smf(
+                    &log,
+                    &df,
+                    regions_dataset.path().unwrap(),
+                    &downstairs_prefix,
+                    &snapshot_prefix,
+                );
+                if let Err(e) = result {
+                    error!(log, "SMF application failure: {:?}", e);
+                } else {
+                    info!(log, "SMF ok!");
+                }
             }
-        }
+            State::Tombstoned => {
+                info!(log, "applying SMF actions before removal...");
+                let result = apply_smf(
+                    &log,
+                    &df,
+                    regions_dataset.path().unwrap(),
+                    &downstairs_prefix,
+                    &snapshot_prefix,
+                );
 
-        info!(log, "applying SMF actions...");
-        let result = apply_smf(
-            &log,
-            &df,
-            regions_dataset.path().unwrap(),
-            &downstairs_prefix,
-            &snapshot_prefix,
-        );
+                if let Err(e) = result {
+                    error!(log, "SMF application failure: {:?}", e);
+                } else {
+                    info!(log, "SMF ok!");
+                }
 
-        if let Err(e) = result {
-            error!(log, "SMF application failure: {:?}", e);
-        } else {
-            info!(log, "SMF ok!");
-
-            while let Some(r) = &df.first_region_in_states(&[State::Tombstoned])
-            {
                 // After SMF successfully shuts off downstairs, remove zfs
                 // dataset.
                 let region_dataset =
                     regions_dataset.from_child_dataset(&r.id.0).unwrap();
 
-                let res = worker_region_destroy(&log, r, region_dataset)
+                let res = worker_region_destroy(&log, &r, region_dataset)
                     .and_then(|_| df.destroyed(&r.id));
 
                 if let Err(e) = res {
@@ -847,10 +858,11 @@ fn worker(
                     df.fail(&r.id);
                 }
             }
+            _ => {
+                eprintln!("worker got unexpected region state: {:?}", r);
+                std::process::exit(1);
+            }
         }
-
-        // Wait for more work
-        df.wait_on_bell();
     }
 }
 
@@ -898,7 +910,7 @@ fn worker_region_create(
         .arg(region.extent_size.to_string())
         .arg("--extent-count")
         .arg(region.extent_count.to_string())
-        .arg(format!("--encrypted={}", region.encrypted))
+        .arg(if region.encrypted { "--encrypted" } else { "" })
         .output()?;
 
     if cmd.status.success() {
@@ -916,19 +928,19 @@ fn worker_region_create(
     if let Some(cert_pem) = &region.cert_pem {
         let mut path = dir.to_path_buf();
         path.push("cert.pem");
-        std::fs::write(path, &cert_pem)?;
+        std::fs::write(path, cert_pem)?;
     }
 
     if let Some(key_pem) = &region.key_pem {
         let mut path = dir.to_path_buf();
         path.push("key.pem");
-        std::fs::write(path, &key_pem)?;
+        std::fs::write(path, key_pem)?;
     }
 
     if let Some(root_pem) = &region.root_pem {
         let mut path = dir.to_path_buf();
         path.push("root.pem");
-        std::fs::write(path, &root_pem)?;
+        std::fs::write(path, root_pem)?;
     }
 
     /*

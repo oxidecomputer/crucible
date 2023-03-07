@@ -3,21 +3,21 @@ name = "crucible-nbd-server"
 version = "0.1.0"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer>", "James MacMahon <james@oxide.computer>"]
 license = "MPL-2.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
-clap = { version = "3.2", features = ["derive"] }
+clap = { version = "4.1", features = ["derive"] }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
 futures = "0.3"
 futures-core = "0.3"
-ringbuffer = "0.8"
+ringbuffer = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.21.2", features = ["full"] }
+tokio = { version = "1.25.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"]}
-toml = "0.5"
+toml = "0.7"
 nbd = "0.2.3"

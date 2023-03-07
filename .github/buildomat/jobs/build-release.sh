@@ -3,7 +3,7 @@
 #: name = "rbuild"
 #: variety = "basic"
 #: target = "helios"
-#: rust_toolchain = "nightly-2021-11-24"
+#: rust_toolchain = "1.66"
 #: output_rules = [
 #:	"/out/*",
 #:	"/work/rbins/*",
@@ -89,7 +89,6 @@ tar cavf out/crucible-nightly.tar.gz \
     target/release/crucible-hammer \
     target/release/dsc \
     target/release/crudd \
-    tools/downstairs_daemon.sh \
     tools/hammer_loop.sh \
     tools/test_reconnect.sh \
     tools/test_repair.sh \

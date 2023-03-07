@@ -1,9 +1,6 @@
-// Copyright 2021 Oxide Computer Company
-#![cfg_attr(not(usdt_stable_asm), feature(asm))]
-#![cfg_attr(
-    all(target_os = "macos", not(usdt_stable_asm_sym)),
-    feature(asm_sym)
-)]
+// Copyright 2023 Oxide Computer Company
+#![cfg_attr(usdt_need_asm, feature(asm))]
+#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -20,6 +17,7 @@ use uuid::Uuid;
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
     Ro,
@@ -61,12 +59,7 @@ enum Args {
         #[clap(short, long, name = "UUID", action)]
         uuid: Uuid,
 
-        #[clap(
-            long,
-            default_value = "false",
-            default_missing_value = "true",
-            action(clap::ArgAction::Set)
-        )]
+        #[clap(long, action)]
         encrypted: bool,
     },
     /*
@@ -153,8 +146,17 @@ enum Args {
         #[clap(short, long, default_value = "9000", action)]
         port: u16,
 
+        /// Randomly return read errors
         #[clap(long, action)]
-        return_errors: bool,
+        read_errors: bool,
+
+        /// Randomly return write errors
+        #[clap(long, action)]
+        write_errors: bool,
+
+        /// Randomly return flush errors
+        #[clap(long, action)]
+        flush_errors: bool,
 
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
@@ -222,15 +224,16 @@ async fn main() -> Result<()> {
                 uuid,
                 encrypted,
                 log.clone(),
-            )?;
+            )
+            .await?;
 
             if let Some(ref ip) = import_path {
-                downstairs_import(&mut region, ip).unwrap();
+                downstairs_import(&mut region, ip).await.unwrap();
                 /*
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None, 0)?;
+                region.region_flush(1, 0, &None, 0, None).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
@@ -259,7 +262,8 @@ async fn main() -> Result<()> {
                 only_show_differences,
                 no_color,
                 log,
-            )?;
+            )
+            .await?;
             Ok(())
         }
         Args::Export {
@@ -270,14 +274,15 @@ async fn main() -> Result<()> {
         } => {
             // Open Region read only
             region = region::Region::open(
-                &data,
+                data,
                 Default::default(),
                 true,
                 true,
                 &log,
-            )?;
+            )
+            .await?;
 
-            downstairs_export(&mut region, export_path, skip, count).unwrap();
+            downstairs_export(&mut region, export_path, skip, count).await?;
             Ok(())
         }
         Args::Run {
@@ -286,7 +291,9 @@ async fn main() -> Result<()> {
             oximeter,
             lossy,
             port,
-            return_errors,
+            read_errors,
+            write_errors,
+            flush_errors,
             trace_endpoint,
             cert_pem,
             key_pem,
@@ -305,8 +312,8 @@ async fn main() -> Result<()> {
 
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_pipeline()
-                    .with_agent_endpoint(endpoint) // usually port 6831
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
                     .with_service_name("downstairs")
                     .install_simple()
                     .expect("Error initializing Jaeger exporter");
@@ -324,10 +331,13 @@ async fn main() -> Result<()> {
             let d = build_downstairs_for_region(
                 &data,
                 lossy,
-                return_errors,
+                read_errors,
+                write_errors,
+                flush_errors,
                 read_only,
                 Some(log),
-            )?;
+            )
+            .await?;
 
             let downstairs_join_handle = start_downstairs(
                 d,
@@ -361,8 +371,8 @@ async fn main() -> Result<()> {
 
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_pipeline()
-                    .with_agent_endpoint(endpoint) // usually port 6831
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
                     .with_service_name("downstairs")
                     .install_simple()
                     .expect("Error initializing Jaeger exporter");

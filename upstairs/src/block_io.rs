@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 use super::*;
 
@@ -26,7 +26,7 @@ impl FileBlockIO {
                 Ok(Self {
                     uuid: id,
                     block_size,
-                    total_size: total_size as u64,
+                    total_size,
                     file: Mutex::new(f),
                 })
             }
@@ -36,7 +36,7 @@ impl FileBlockIO {
 
 #[async_trait]
 impl BlockIO for FileBlockIO {
-    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         Ok(())
     }
 
@@ -165,7 +165,7 @@ impl ReqwestBlockIO {
         Ok(Self {
             uuid: id,
             block_size,
-            total_size: total_size as u64,
+            total_size,
             client,
             url,
             count: AtomicU32::new(0),
@@ -181,7 +181,7 @@ impl ReqwestBlockIO {
 
 #[async_trait]
 impl BlockIO for ReqwestBlockIO {
-    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         Ok(())
     }
 

@@ -58,10 +58,8 @@ fn main() -> Result<()> {
     while let Some(service) = services.next().transpose()? {
         let n = service.name()?;
 
-        if !args.is_empty() {
-            if !args.iter().any(|a| n.contains(a)) {
-                continue;
-            }
+        if !args.is_empty() && !args.iter().any(|a| n.contains(a)) {
+            continue;
         }
 
         println!("{}", fil(78, '='));

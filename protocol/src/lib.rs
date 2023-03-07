@@ -12,6 +12,7 @@ const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
 use crucible_common::{Block, CrucibleError, RegionDefinition};
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Write {
     pub eid: u64,
@@ -21,6 +22,7 @@ pub struct Write {
     pub block_context: BlockContext,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
     pub eid: u64,
@@ -29,6 +31,7 @@ pub struct ReadRequest {
 
 // Note: if you change this, you may have to add to the dump commands that show
 // block specific data.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponse {
     pub eid: u64,
@@ -51,6 +54,7 @@ impl ReadResponse {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
@@ -76,6 +80,7 @@ pub struct BlockContext {
     pub encryption_context: Option<EncryptionContext>,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: Vec<u8>,
@@ -121,11 +126,13 @@ impl ReadResponse {
 /**
  * These enums are for messages sent between an Upstairs and a Downstairs
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SnapshotDetails {
     pub snapshot_name: String,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Message {
     /**
@@ -189,11 +196,14 @@ pub enum Message {
     Imok,
 
     /*
-     * Repair related
+     * Reconciliation related
+     * These messages are used only during the initial startup process
+     * when the upstairs is making all three downstairs consistent with
+     * each other.
      * We use rep_id here (Repair ID) instead of job_id to be clear that
-     * this is repair work and not actual IO.  The repair work uses a
-     * different work queue  and each repair job must finish on all three
-     * downstairs before the next one can be sent.
+     * this is reconciliation work and not actual IO.  The reconciliation work
+     * uses a different work queue and each reconciliation job must finish on
+     * all three downstairs before the next one can be sent.
      */
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
@@ -235,6 +245,82 @@ pub enum Message {
         repair_id: u64,
         extent_id: usize,
         error: CrucibleError,
+    },
+
+    /*
+     * Live Repair related.
+     * These messages are used to repair a downstairs while the upstairs
+     * is active and receiving IOs.  These messages are sent from the
+     * upstairs to the downstairs.
+     */
+    /// Close an extent
+    ExtentLiveClose {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+    },
+    /// Flush and then close an extent.
+    ExtentLiveFlushClose {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+        flush_number: u64,
+        gen_number: u64,
+    },
+    /// Live Repair of an extent
+    ExtentLiveRepair {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+        source_client_id: u8,
+        source_repair_address: SocketAddr,
+    },
+    /// Reopen this extent, for use when upstairs is active.
+    ExtentLiveReopen {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+        extent_id: usize,
+    },
+    /// There is no real work to do, but we need to complete this job id
+    ExtentLiveNoOp {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        dependencies: Vec<u64>,
+    },
+
+    /*
+     * Live Repair response messages.
+     */
+    /// The extent closed successfully
+    /// Included are the gen and flush numbers that were committed as
+    /// part of this flush request.  Note that if the extent is not
+    /// dirty, then these numbers may be different than the flush/gen
+    /// that was sent with the original flush
+    /// This result is used for both the ExtentLiveClose and the
+    /// ExtentLiveFlushClose messages.
+    ExtentLiveCloseAck {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        result: Result<(u64, u64, bool), CrucibleError>,
+    },
+
+    /// The given "ExtentLive" message ID was completed.  This message
+    /// will be from ExtentLiveRepair, ExtentLiveReopen, or ExtentLiveNoOp
+    ExtentLiveAckId {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
     },
 
     /*
@@ -284,6 +370,11 @@ pub enum Message {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
+        /*
+         * The ending extent where a flush should stop.
+         * This value is unique per downstairs.
+         */
+        extent_limit: Option<usize>,
     },
     FlushAck {
         upstairs_id: Uuid,
@@ -511,7 +602,7 @@ impl Encoder<&Message> for CrucibleEncoder {
         m: &Message,
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        let len = CrucibleEncoder::serialized_size(&m)?;
+        let len = CrucibleEncoder::serialized_size(m)?;
 
         dst.reserve(len);
         dst.put_u32_le(len as u32);

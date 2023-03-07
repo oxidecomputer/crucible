@@ -1,10 +1,10 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
@@ -26,6 +26,7 @@ use crucible::*;
  * The various tests this program supports.
  */
 /// Client: A Crucible Upstairs test program
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 #[clap(name = "workload", term_width = 80)]
 #[clap(about = "Workload the program will execute.", long_about = None)]
@@ -53,7 +54,11 @@ enum Workload {
     Demo,
     Dep,
     Dirty,
-    Fill,
+    Fill {
+        /// Don't do the verify step after filling the region.
+        #[clap(long, action)]
+        skip_verify: bool,
+    },
     Generic,
     Nothing,
     One,
@@ -196,6 +201,7 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_log yet, but perhaps someday..
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegionInfo {
     block_size: u64,
@@ -227,8 +233,8 @@ async fn get_region_info(
      */
     const MAX_IO_BYTES: usize = 1024 * 1024;
     let mut max_block_io = MAX_IO_BYTES / block_size as usize;
-    if total_blocks < max_block_io as usize {
-        max_block_io = total_blocks as usize;
+    if total_blocks < max_block_io {
+        max_block_io = total_blocks;
     }
 
     println!(
@@ -278,6 +284,7 @@ async fn get_region_info(
  *
  * The "seed" is the current counter as a u8 for a given block.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WriteLog {
     count_cur: Vec<u32>,
@@ -322,7 +329,7 @@ impl WriteLog {
     // volume, then update_wc() should be called first to increment the
     // counter before we get a new seed.
     fn get_seed(&self, index: usize) -> u8 {
-        (self.count_cur[index] % 250) as u8
+        (self.count_cur[index] & 0xff) as u8
     }
 
     // This is called before a test where we expect to be recovering and we
@@ -351,38 +358,83 @@ impl WriteLog {
         value: u8,
         update: bool,
     ) -> bool {
-        let max = (self.count_cur[index] % 250) as u8;
-        let min = (self.count_min[index] % 250) as u8;
-
         let res;
-        let mut new_max = self.count_cur[index];
-        // A little bit of work here when max rolls over and is < min.
-        // Because we need to handle the update case, we also need
-        // to determine what the "correct" count_cur should be if we
-        // are going to update our internal counter to match the value
-        // passed to us from the caller.
-        if min > max {
-            if value >= min && value < 250 {
+
+        if self.count_min[index] & 0xff > self.count_cur[index] & 0xff {
+            // Special case when the min and max cross a u8 boundary.
+            let min_adjusted_value = (self.count_min[index] & 0xff) as u8;
+            let cur_adjusted_value = (self.count_cur[index] & 0xff) as u8;
+            println!(
+                "SPEC  v:{}  min_av:{} cur_av:{}  cm:{} cc:{}",
+                value,
+                min_adjusted_value,
+                cur_adjusted_value,
+                self.count_min[index],
+                self.count_cur[index],
+            );
+
+            let mut new_cur = value as u32;
+            if value >= min_adjusted_value {
                 res = true;
-                new_max = self.count_cur[index] + 250 - value as u32;
-            } else if value <= max {
+                // Figure out the delta between value and the minimum,
+                // then add that to the non-adjusted minimum and make
+                // that our new maximum.
+                let delta = (value - min_adjusted_value) as u32;
+                new_cur = self.count_min[index] + delta;
+                println!("new cur is {} from min", new_cur);
+            } else if value <= cur_adjusted_value {
                 res = true;
-                new_max = self.count_cur[index] + (max - value) as u32;
+                // Figure out the delta between value and the max(cur)
+                // and then subtract that from the current cur to set
+                // our new expected value.
+                let delta = (cur_adjusted_value - value) as u32;
+                new_cur = self.count_cur[index] - delta;
+                println!("new cur is {} from cur", new_cur);
             } else {
+                // The value in not in the expected range
                 res = false;
             }
-        } else if value >= min && value <= max {
-            res = true;
-            new_max = self.count_cur[index] - (max - value) as u32;
+
+            // If update requested (and we are in the range) then update
+            // the counter to reflect the new "max".
+            if update && res {
+                if new_cur != self.count_cur[index] {
+                    println!("Adjusting new cur to {}", new_cur);
+                    self.count_cur[index] = new_cur;
+                } else {
+                    println!("No adjustment necessary");
+                }
+            }
         } else {
-            res = false;
-        }
-        if update {
+            // The regular case, just be sure we are between the
+            // lower and upper expected values.
+            let shift = self.count_min[index] / 256;
+
+            let s_value = value as u32 + (256 * shift);
             println!(
-                "Update block {} to {} (min:{} max:{} res:{}",
-                index, new_max, min, max, res
+                "Shift {}, v:{} sv:{} min:{} cur:{}",
+                shift,
+                value,
+                s_value,
+                self.count_min[index],
+                self.count_cur[index],
             );
-            self.count_cur[index] = new_max;
+
+            res = s_value >= self.count_min[index]
+                && s_value <= self.count_cur[index];
+
+            // Only update if requested and the range was valid.
+            if update && res && self.count_cur[index] != s_value {
+                println!(
+                    "Update block {} to {} (min:{} max:{} res:{})",
+                    index,
+                    s_value,
+                    self.count_min[index],
+                    self.count_cur[index],
+                    res,
+                );
+                self.count_cur[index] = s_value;
+            }
         }
         res
     }
@@ -521,7 +573,7 @@ async fn main() -> Result<()> {
     }
 
     let _join_handle =
-        up_main(crucible_opts, opt.gen, guest.clone(), pr).await?;
+        up_main(crucible_opts, opt.gen, None, guest.clone(), pr).await?;
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
@@ -537,13 +589,13 @@ async fn main() -> Result<()> {
     }
 
     if opt.retry_activate {
-        while let Err(e) = guest.activate(opt.gen).await {
+        while let Err(e) = guest.activate_with_gen(opt.gen).await {
             println!("Activate returns: {:#}  Retrying", e);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
         println!("Activate successful");
     } else {
-        guest.activate(opt.gen).await?;
+        guest.activate_with_gen(opt.gen).await?;
     }
 
     println!("Wait for a query_work_queue command to finish before sending IO");
@@ -598,7 +650,7 @@ async fn main() -> Result<()> {
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
-            burst_workload(&guest, 60, 190, &mut region_info, &opt.verify_out)
+            burst_workload(&guest, 460, 190, &mut region_info, &opt.verify_out)
                 .await?;
         }
         Workload::Deactivate => {
@@ -619,15 +671,19 @@ async fn main() -> Result<()> {
         }
         Workload::Demo => {
             println!("Run Demo test");
-            println!("Pause for 10 seconds, then start testing");
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
+            let count = {
+                if opt.count == 0 {
+                    300
+                } else {
+                    opt.count
+                }
+            };
             /*
              * The count provided here should be greater than the flow
              * control limit if we wish to test flow control.  Also, set
              * lossy on a downstairs otherwise it will probably keep up.
              */
-            demo_workload(&guest, 300, &mut region_info).await?;
+            demo_workload(&guest, count, &mut region_info).await?;
         }
         Workload::Dep => {
             println!("Run dep test");
@@ -661,9 +717,9 @@ async fn main() -> Result<()> {
             return Ok(());
         }
 
-        Workload::Fill => {
+        Workload::Fill { skip_verify } => {
             println!("Fill test");
-            fill_workload(&guest, &mut region_info).await?;
+            fill_workload(&guest, &mut region_info, skip_verify).await?;
         }
 
         Workload::Generic => {
@@ -865,6 +921,8 @@ async fn verify_volume(
         ri.total_blocks, range
     );
 
+    let mut result = Ok(());
+
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
@@ -899,19 +957,23 @@ async fn verify_volume(
             range,
         ) {
             ValidateStatus::Bad => {
-                pb.finish_with_message("Error");
-                bail!(
+                println!(
                     "Error in block range {} -> {}",
                     block_index,
                     block_index + next_io_blocks
                 );
+                result = Err(anyhow!("Validation error".to_string()));
             }
             ValidateStatus::InRange => {
                 if range {
                     {}
                 } else {
-                    pb.finish_with_message("Error");
-                    bail!("Error at block {}", block_index);
+                    println!(
+                        "Error in block range {} -> {}",
+                        block_index,
+                        block_index + next_io_blocks
+                    );
+                    result = Err(anyhow!("Validation error".to_string()));
                 }
             }
             ValidateStatus::Good => {}
@@ -921,7 +983,7 @@ async fn verify_volume(
         pb.set_position(block_index as u64);
     }
     pb.finish();
-    Ok(())
+    result
 }
 
 /*
@@ -975,6 +1037,7 @@ fn fill_vec(
  * should be written back out, and future calls to verify_vec will
  * expect the same value (i.e. we cut off any higher write count).
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 enum ValidateStatus {
     Good,
@@ -1038,38 +1101,43 @@ fn validate_vec(
         let seed = wl.get_seed(block_offset);
         for i in 1..bs {
             if data[data_offset + i] != seed {
+                // Our data is not what we expect.
+                // Figure out if it is in range if requested, and print a
+                // message reflecting what the situation is.
                 let byte_offset = bs as u64 * block_offset as u64;
-                println!(
-                    "Mismatch in Block:{} Volume offset:{}  Expected:{} Got:{}",
-                    block_offset,
-                    byte_offset + i as u64,
-                    seed,
-                    data[data_offset + i],
-                );
+                let msg;
                 if range {
                     if wl.validate_seed_range(
                         block_offset,
                         data[data_offset + i],
                         true,
                     ) {
-                        println!(
-                            "Block {} is in valid seed range",
-                            block_offset
-                        );
-                        res = ValidateStatus::InRange;
+                        msg = "In Range   Block:".to_string();
+                        // Only change if it is currently good.
+                        if res == ValidateStatus::Good {
+                            res = ValidateStatus::InRange;
+                        }
                     } else {
-                        println!(
-                            "Block {} Also fails valid seed range",
-                            block_offset
-                        );
+                        msg = "Out of Range Block:".to_string();
                         res = ValidateStatus::Bad;
                     }
                 } else {
+                    msg = "Mismatch     Block:".to_string();
                     res = ValidateStatus::Bad;
                 }
+
+                println!(
+                    "{}:{} bo:{} Volume offset:{}  Expected:{} Got:{}",
+                    msg,
+                    block_offset,
+                    i,
+                    byte_offset + i as u64,
+                    seed,
+                    data[data_offset + i],
+                );
             }
         }
-        data_offset += bs as usize;
+        data_offset += bs;
     }
     res
 }
@@ -1138,7 +1206,11 @@ async fn balloon_workload(
 /*
  * Write then read (and verify) to every possible block.
  */
-async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn fill_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    skip_verify: bool,
+) -> Result<()> {
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
@@ -1177,7 +1249,9 @@ async fn fill_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     guest.flush(None).await?;
     pb.finish();
 
-    verify_volume(guest, ri, false).await?;
+    if !skip_verify {
+        verify_volume(guest, ri, false).await?;
+    }
     Ok(())
 }
 
@@ -1211,13 +1285,13 @@ async fn generic_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10) as usize;
+            let size = rng.gen_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = ri.total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max) as usize;
+            let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset =
@@ -1307,7 +1381,7 @@ async fn dirty_workload(
     let block_max = ri.total_blocks - size + 1;
     let count_width = count.to_string().len();
     for c in 1..=count {
-        let block_index = rng.gen_range(0..block_max) as usize;
+        let block_index = rng.gen_range(0..block_max);
         /*
          * Convert offset and length to their byte values.
          */
@@ -1334,7 +1408,6 @@ async fn dirty_workload(
         let future = guest.write(offset, data);
         futureslist.push(future);
     }
-
     println!("loop over {} futures", futureslist.len());
     crucible::join_all(futureslist).await?;
     Ok(())
@@ -1379,11 +1452,11 @@ pub fn perf_csv(
     // Convert all Durations to u64 nanoseconds.
     let times = iotimes
         .iter()
-        .map(|x| (x.as_secs() as u64 * 100000000) + x.subsec_nanos() as u64)
+        .map(|x| (x.as_secs() * 100000000) + x.subsec_nanos() as u64)
         .collect::<Vec<u64>>();
 
     let time_in_nsec =
-        duration.as_secs() as u64 * 100000000 + duration.subsec_nanos() as u64;
+        duration.as_secs() * 100000000 + duration.subsec_nanos() as u64;
 
     wtr.serialize(Record {
         label: msg.to_string(),
@@ -1531,9 +1604,8 @@ async fn perf_workload(
             )
         })
         .collect();
-    let read_buffers: Vec<Buffer> = (0..io_depth)
-        .map(|_| Buffer::new(io_size as usize))
-        .collect();
+    let read_buffers: Vec<Buffer> =
+        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
 
     let es = ri.extent_size.value;
     let ec = ri.total_blocks as u64 / es;
@@ -1664,7 +1736,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
      */
     let size = 1;
     let block_max = ri.total_blocks - size + 1;
-    let block_index = rng.gen_range(0..block_max) as usize;
+    let block_index = rng.gen_range(0..block_max);
 
     /*
      * Convert offset and length to their byte values.
@@ -1756,7 +1828,7 @@ async fn deactivate_workload(
         );
         let mut retry = 1;
         gen += 1;
-        while let Err(e) = guest.activate(gen).await {
+        while let Err(e) = guest.activate_with_gen(gen).await {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
                 c,
@@ -1802,7 +1874,7 @@ async fn rand_workload(
          * Pick a random size (in blocks) for the IO, up to the size of the
          * entire region.
          */
-        let size = rng.gen_range(1..=ri.max_block_io) as usize;
+        let size = rng.gen_range(1..=ri.max_block_io);
 
         /*
          * Once we have our IO size, decide where the starting offset should
@@ -1810,7 +1882,7 @@ async fn rand_workload(
          * IO size.
          */
         let block_max = ri.total_blocks - size + 1;
-        let block_index = rng.gen_range(0..block_max) as usize;
+        let block_index = rng.gen_range(0..block_max);
 
         /*
          * Convert offset and length to their byte values.
@@ -1907,12 +1979,12 @@ async fn burst_workload(
             println!("Wrote out file {:?} at this time", cp);
         }
         println!(
-            "{:>0width$}/{:>0width$}: 5 second pause, then another test loop",
+            "{:>0width$}/{:>0width$}: 2 second pause, then another test loop",
             c,
             count,
             width = count_width
         );
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
     Ok(())
 }
@@ -1929,9 +2001,6 @@ async fn repair_workload(
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    // Any state coming in should have been verified, so we can
-    // consider the current write log to be the minimum possible values.
-    ri.write_log.commit();
     // TODO: Allow user to request r/w/f percentage (how???)
     // We want at least one write, otherwise there will be nothing to
     // repair.
@@ -1965,13 +2034,13 @@ async fn repair_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10) as usize;
+            let size = rng.gen_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = ri.total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max) as usize;
+            let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset =
@@ -1989,18 +2058,23 @@ async fn repair_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                println!(
+                print!(
                     "{:>0width$}/{:>0width$} Write \
-                    block {:>bw$}  len {:>sw$}  data:{:>3}",
+                    block {:>bw$}  len {:>sw$}  data:",
                     c,
                     count,
                     offset.value,
                     data.len(),
-                    data[1],
                     width = count_width,
                     bw = block_width,
                     sw = size_width,
                 );
+                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                for i in 0..size {
+                    print!("{:>3} ", ri.write_log.get_seed(block_index + i));
+                }
+                println!();
+
                 guest.write(offset, data).await?;
             } else {
                 // Read
@@ -2039,10 +2113,17 @@ async fn demo_workload(
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
+    // Because this workload issues a bunch of IO all at the same time,
+    // we can't be sure the order will be preserved for our IOs.
+    // We take the state of the volume now as our minimum, and verify
+    // that the read at the end of this loop finds some value between
+    // what it is now and what it is at the end of test.
+    ri.write_log.commit();
+
     let mut futureslist = Vec::new();
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
-    for i in 1..=count {
+    for _ in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
@@ -2051,13 +2132,13 @@ async fn demo_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10) as usize;
+            let size = rng.gen_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = ri.total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max) as usize;
+            let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset =
@@ -2085,18 +2166,16 @@ async fn demo_workload(
                 let future = guest.read(offset, data.clone());
                 futureslist.push(future);
             }
-
-            if i == 10 || i == 20 {
-                guest.show_work().await?;
-            }
         }
     }
     let mut wc = WQCounts {
         up_count: 0,
         ds_count: 0,
     };
-
-    println!("loop over {} futures", futureslist.len());
+    println!(
+        "Submit work and wait for {} jobs to finish",
+        futureslist.len()
+    );
     crucible::join_all(futureslist).await?;
 
     /*
@@ -2108,9 +2187,12 @@ async fn demo_workload(
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
     println!("All downstairs jobs completed.");
-    if let Err(e) = verify_volume(guest, ri, false).await {
+    if let Err(e) = verify_volume(guest, ri, true).await {
         bail!("Final volume verify failed: {:?}", e)
     }
+
+    // Commit the current state as the new minimum for any future tests.
+    ri.write_log.commit();
 
     Ok(())
 }
@@ -2364,14 +2446,29 @@ mod test {
 
     #[test]
     fn test_wl_update_rollover() {
-        // Rollover of u8 at 250
+        // Rollover of u8 at 255
         let mut write_log = WriteLog::new(10);
         write_log.set_wc(0, 249);
         assert_eq!(write_log.get_seed(0), 249);
         write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 250);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 251);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 252);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 253);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 254);
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 255);
+
+        write_log.update_wc(0);
         assert_eq!(write_log.get_seed(0), 0);
         // Seed at zero does not mean the counter is zero
         assert!(!write_log.unwritten(0));
+        write_log.update_wc(0);
+        assert_eq!(write_log.get_seed(0), 1);
     }
 
     #[test]
@@ -2395,7 +2492,7 @@ mod test {
     fn test_wl_update_commit_rollover() {
         // Write log returns highest after a commit, but before u8 conversion
         let mut write_log = WriteLog::new(10);
-        write_log.set_wc(0, 249);
+        write_log.set_wc(0, 255);
         write_log.commit();
         write_log.update_wc(0);
         assert_eq!(write_log.get_seed(0), 0);
@@ -2491,6 +2588,7 @@ mod test {
         assert!(write_log.validate_seed_range(1, 3, true));
         assert_eq!(write_log.get_seed(1), 3);
     }
+
     #[test]
     fn test_wl_commit_range_update_min() {
         // Verify that a validate_seed_range also updates the internal
@@ -2524,22 +2622,312 @@ mod test {
     }
 
     #[test]
-    fn test_wl_commit_range_rollover() {
-        // validate seed range works if write log seed rolls over.
+    fn test_wl_commit_range_rollover_range() {
+        // validate seed range works if write log seed rolls over and
+        // the min max are away from the rollover point
         let mut write_log = WriteLog::new(10);
-        write_log.set_wc(0, 248);
+        write_log.set_wc(0, 254);
         write_log.commit();
-        write_log.update_wc(0); // 249
+        write_log.update_wc(0); // 255
         write_log.update_wc(0); // 0
         write_log.update_wc(0); // 1
         assert_eq!(write_log.get_seed(0), 1);
-        assert!(!write_log.validate_seed_range(0, 247, false));
-        assert!(write_log.validate_seed_range(0, 248, false));
-        assert!(write_log.validate_seed_range(0, 249, false));
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
         assert!(write_log.validate_seed_range(0, 0, false));
         assert!(write_log.validate_seed_range(0, 1, false));
         assert!(!write_log.validate_seed_range(0, 2, false));
     }
+
+    #[test]
+    fn test_wl_commit_range_rollover_min_at() {
+        // validate seed range works if write log seed rolls over and
+        // the min is at the rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 255);
+        write_log.commit();
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert!(!write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_rollover_max_at() {
+        // validate seed range works if write log seed rolls over and
+        // the max is at the rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 253);
+        write_log.commit();
+        write_log.update_wc(0); // 254
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        assert_eq!(write_log.get_seed(0), 0);
+        assert!(!write_log.validate_seed_range(0, 252, false));
+        assert!(write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_update_rollover_below() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is below the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, true));
+        // Once we make a new max, the old range is invalid.
+        assert!(!write_log.validate_seed_range(0, 255, false));
+        assert!(!write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_update_rollover_above() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is across the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        // Below the range is not okay.
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        // Pick a "new" range just above the roll over point.
+        assert!(write_log.validate_seed_range(0, 0, true));
+        // Lower range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        // Anything above is no longer valid.
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_no_update_below_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is below the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+
+        // Below the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 253, true));
+        assert_eq!(write_log.count_cur[0], 257);
+
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_range_no_update_above_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is above in the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 254);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        // The actual count continues above 255
+        assert_eq!(write_log.count_cur[0], 257);
+
+        // Above the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 2, true));
+        assert_eq!(write_log.count_cur[0], 257);
+
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+    }
+
+    // More rollover tests, but starting at the second rollover point
+    #[test]
+    fn test_wl_commit_1024_range_rollover_range() {
+        // validate seed range works if write log seed rolls over
+        // at the second rollover point and the min max are away
+        // from the second rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255 or 1023
+        write_log.update_wc(0); // 0 or 1024
+        write_log.update_wc(0); // 1 or 1025
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_rollover_min_at() {
+        // validate seed range works if write log seed rolls over and
+        // the min is at the second rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1023);
+        write_log.commit();
+        write_log.update_wc(0); // 0 or 1024
+        write_log.update_wc(0); // 1 or 1025
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        assert!(!write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_rollover_max_at() {
+        // validate seed range works if write log seed rolls over and
+        // the max is at the rollover point
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1021);
+        write_log.commit();
+        write_log.update_wc(0); // 254
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        assert_eq!(write_log.get_seed(0), 0);
+        assert_eq!(write_log.count_cur[0], 1024);
+        assert!(!write_log.validate_seed_range(0, 252, false));
+        assert!(write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_update_rollover_below() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is below the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        assert!(write_log.validate_seed_range(0, 254, true));
+        // The new cur value goes back to 1022
+        assert_eq!(write_log.count_cur[0], 1022);
+        // Once we make a new max, the old range is invalid.
+        assert!(!write_log.validate_seed_range(0, 255, false));
+        assert!(!write_log.validate_seed_range(0, 0, false));
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_update_rollover_above() {
+        // validate seed range works if write log seed rolls over when
+        // our range value is across the rollover point.
+        // Make sure the new range is updated.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        // Below the range is not okay.
+        assert!(!write_log.validate_seed_range(0, 253, false));
+        // Pick a "new" range just above the roll over point.
+        assert!(write_log.validate_seed_range(0, 0, true));
+        assert_eq!(write_log.count_cur[0], 1024);
+        // Lower range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        // Anything above is no longer valid.
+        assert!(!write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_no_update_below_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is below the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        // Below the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 253, true));
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+        assert!(!write_log.validate_seed_range(0, 2, false));
+    }
+
+    #[test]
+    fn test_wl_commit_1024_range_no_update_above_rollover() {
+        // validate no change to our expected value when in a
+        // rollover situation if the value is above in the expected
+        // range.
+        let mut write_log = WriteLog::new(10);
+        write_log.set_wc(0, 1022);
+        write_log.commit();
+        write_log.update_wc(0); // 255
+        write_log.update_wc(0); // 0
+        write_log.update_wc(0); // 1
+        assert_eq!(write_log.get_seed(0), 1);
+        assert_eq!(write_log.count_cur[0], 1025);
+        // Above the range is not okay, and there is no update.
+        assert!(!write_log.validate_seed_range(0, 2, true));
+        assert_eq!(write_log.count_cur[0], 1025);
+        // All range values are still okay.
+        assert!(write_log.validate_seed_range(0, 254, false));
+        assert!(write_log.validate_seed_range(0, 255, false));
+        assert!(write_log.validate_seed_range(0, 0, false));
+        assert!(write_log.validate_seed_range(0, 1, false));
+    }
+    // End rollover range tests
 
     #[test]
     fn test_wl_set() {

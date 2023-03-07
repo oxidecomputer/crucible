@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use super::*;
 
-pub(crate) fn build_api() -> ApiDescription<DownstairsControl> {
+pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     let mut api = ApiDescription::new();
     api.register(dsc_get_ds_state).unwrap();
     api.register(dsc_get_pid).unwrap();
@@ -69,7 +69,7 @@ pub async fn begin(dsci: Arc<DscInfo>, addr: SocketAddr) -> Result<(), String> {
      * Set up the server.
      */
     let server =
-        HttpServerStarter::new(&config_dropshot, api, api_context, &log)
+        HttpServerStarter::new(&config_dropshot, api, api_context.into(), &log)
             .map_err(|error| format!("failed to create server: {}", error))?
             .start();
 
@@ -116,8 +116,8 @@ pub struct Max {
     max: u64,
 }
 
-fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
-    let rs = dsci.rs.lock().unwrap();
+async fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
+    let rs = dsci.rs.lock().await;
     rs.ds_state.len() <= cid
 }
 
@@ -129,20 +129,20 @@ fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
     path = "/pid/cid/{cid}",
 }]
 async fn dsc_get_pid(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseOk<Option<u32>>, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             Some(String::from("BadInput")),
             format!("Invalid client id: {}", cid),
         ));
     }
-    let ds_pid = api_context.dsci.get_ds_pid(cid).map_err(|e| {
+    let ds_pid = api_context.dsci.get_ds_pid(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
             format!("failed to state for downstairs {}: {:#}", 0, e),
@@ -160,20 +160,20 @@ async fn dsc_get_pid(
     path = "/state/cid/{cid}",
 }]
 async fn dsc_get_ds_state(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseOk<DownstairsState>, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let ds_state = api_context.dsci.get_ds_state(cid).map_err(|e| {
+    let ds_state = api_context.dsci.get_ds_state(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
             format!("failed to state for downstairs {}: {:#}", 0, e),
@@ -191,20 +191,20 @@ async fn dsc_get_ds_state(
     path = "/stop/cid/{cid}",
 }]
 async fn dsc_stop(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::Stop(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -216,11 +216,11 @@ async fn dsc_stop(
     path = "/stop/all",
 }]
 async fn dsc_stop_all(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::StopAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -233,11 +233,11 @@ async fn dsc_stop_all(
     path = "/stop/rand",
 }]
 async fn dsc_stop_rand(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::StopRand);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -250,20 +250,20 @@ async fn dsc_stop_rand(
     path = "/start/cid/{cid}",
 }]
 async fn dsc_start(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::Start(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -276,11 +276,11 @@ async fn dsc_start(
     path = "/start/all",
 }]
 async fn dsc_start_all(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::StartAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -293,20 +293,20 @@ async fn dsc_start_all(
     path = "/disablerestart/cid/{cid}",
 }]
 async fn dsc_disable_restart(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::DisableRestart(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -319,11 +319,11 @@ async fn dsc_disable_restart(
     path = "/disablerestart/all",
 }]
 async fn dsc_disable_restart_all(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::DisableRestartAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -336,20 +336,20 @@ async fn dsc_disable_restart_all(
     path = "/enablerestart/cid/{cid}",
 }]
 async fn dsc_enable_restart(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
 
-    if cid_bad(&api_context.dsci, cid) {
+    if cid_bad(&api_context.dsci, cid).await {
         return Err(HttpError::for_bad_request(
             None,
             format!("Invalid client id: {}", cid),
         ));
     }
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRestart(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -362,11 +362,11 @@ async fn dsc_enable_restart(
     path = "/enablerestart/all",
 }]
 async fn dsc_enable_restart_all(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRestartAll);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -379,11 +379,11 @@ async fn dsc_enable_restart_all(
     path = "/shutdown",
 }]
 async fn dsc_shutdown(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::Shutdown);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -396,11 +396,11 @@ async fn dsc_shutdown(
     path = "/randomstop/enable",
 }]
 async fn dsc_enable_random_stop(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRandomStop);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -413,11 +413,11 @@ async fn dsc_enable_random_stop(
     path = "/randomstop/disable",
 }]
 async fn dsc_disable_random_stop(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::DisableRandomStop);
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -430,14 +430,14 @@ async fn dsc_disable_random_stop(
     path = "/randomstop/min/{min}",
 }]
 async fn dsc_enable_random_min(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Min>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let min = path.min;
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::RandomStopMin(min));
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -450,14 +450,14 @@ async fn dsc_enable_random_min(
     path = "/randomstop/max/{max}",
 }]
 async fn dsc_enable_random_max(
-    rqctx: Arc<RequestContext<DownstairsControl>>,
+    rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Max>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let max = path.max;
     let api_context = rqctx.context();
 
-    let mut dsc_work = api_context.dsci.work.lock().unwrap();
+    let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::RandomStopMax(max));
     Ok(HttpResponseUpdatedNoContent())
 }

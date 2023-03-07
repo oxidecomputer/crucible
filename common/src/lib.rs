@@ -12,13 +12,15 @@ use tempfile::NamedTempFile;
 
 mod region;
 pub use region::{
-    Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
+    Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MAX_SHIFT,
+    MIN_BLOCK_SIZE, MIN_SHIFT,
 };
 
 pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CrucibleError {
     #[error("Error: {0}")]
@@ -122,6 +124,9 @@ pub enum CrucibleError {
 
     #[error("Failed reconciliation")]
     RegionAssembleError,
+
+    #[error("Property not available: {0}")]
+    PropertyNotAvailable(String),
 }
 
 impl From<std::io::Error> for CrucibleError {

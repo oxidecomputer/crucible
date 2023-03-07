@@ -1,23 +1,23 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use crucible_common::*;
-use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use futures::TryStreamExt;
-use repair_client::types::FileType;
-use repair_client::Client;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use tokio::macros::support::Pin;
 use tracing::instrument;
+
+use crucible_common::*;
+use crucible_protocol::{EncryptionContext, SnapshotDetails};
+use repair_client::types::FileType;
+use repair_client::Client;
 
 use super::*;
 
@@ -51,6 +51,9 @@ pub struct DownstairsBlockContext {
 pub struct Inner {
     file: File,
     metadb: Connection,
+
+    /// Set of blocks that have been written since last flush.
+    dirty_blocks: HashSet<usize>,
 }
 
 impl Inner {
@@ -229,10 +232,6 @@ impl Inner {
         Ok(())
     }
 
-    pub fn metadb_transaction(&mut self) -> Result<rusqlite::Transaction> {
-        Ok(self.metadb.transaction()?)
-    }
-
     #[cfg(test)]
     fn set_block_contexts(
         &mut self,
@@ -251,25 +250,29 @@ impl Inner {
         Ok(())
     }
 
-    /*
-     * Get rid of all block context rows except those that match the on-disk
-     * hash that is computed after a flush.
-     */
+    /// Get rid of all block context rows except those that match the on-disk
+    /// hash that is computed after a flush. For best performance, make sure
+    /// `extent_block_indexes_and_hashes` is sorted by block number before
+    /// calling this function.
     fn truncate_encryption_contexts_and_hashes(
         &mut self,
         extent_block_indexes_and_hashes: Vec<(usize, u64)>,
     ) -> Result<()> {
+        let n_blocks = extent_block_indexes_and_hashes.len();
+        cdt::extent__context__truncate__start!(|| n_blocks as u64);
+
         let tx = self.metadb.transaction()?;
-
-        let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
-
-        for (block, on_disk_hash) in extent_block_indexes_and_hashes {
-            let _rows_affected = tx
-                .prepare_cached(stmt)?
-                .execute(params![block, on_disk_hash.to_le_bytes()])?;
+        {
+            let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
+            let mut stmt = tx.prepare_cached(stmt)?;
+            for (block, on_disk_hash) in extent_block_indexes_and_hashes {
+                let _rows_affected =
+                    stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
+            }
         }
-
         tx.commit()?;
+
+        cdt::extent__context__truncate__done!(|| ());
 
         Ok(())
     }
@@ -390,7 +393,7 @@ pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("copy".to_string());
+    out.set_extension("copy");
     out
 }
 
@@ -405,9 +408,10 @@ pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("replace".to_string());
+    out.set_extension("replace");
     out
 }
+
 /**
  * Produce a PathBuf that refers to the completed directory we use for
  * a given extent "number".  This directory is generated (see below) when
@@ -419,7 +423,7 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
 pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     let mut out = extent_dir(dir, number);
     out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("completed".to_string());
+    out.set_extension("completed");
     out
 }
 
@@ -471,11 +475,11 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
 /// Always open sqlite with journaling, and synchronous.
 /// Note: these pragma_updates are not durable
 fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
-    let metadb = Connection::open(&path)?;
+    let metadb = Connection::open(path)?;
 
     assert!(metadb.is_autocommit());
-    metadb.pragma_update(None, "journal_mode", &"WAL")?;
-    metadb.pragma_update(None, "synchronous", &"FULL")?;
+    metadb.pragma_update(None, "journal_mode", "WAL")?;
+    metadb.pragma_update(None, "synchronous", "FULL")?;
 
     // rusqlite provides an LRU Cache (a cache which, when full, evicts the
     // least-recently-used value). This caches prepared statements, allowing
@@ -516,7 +520,7 @@ impl Extent {
      * Open an existing extent file at the location requested.
      * Read in the metadata from the first block of the file.
      */
-    fn open<P: AsRef<Path>>(
+    async fn open<P: AsRef<Path>>(
         dir: P,
         def: &RegionDefinition,
         number: u32,
@@ -604,23 +608,38 @@ impl Extent {
 
         // XXX: schema updates?
 
-        Ok(Extent {
+        let extent = Extent {
             number,
             read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Some(Mutex::new(Inner { file, metadb })),
-        })
+            inner: Some(Mutex::new(Inner {
+                file,
+                metadb,
+                dirty_blocks: HashSet::new(),
+            })),
+        };
+
+        // Clean out any irrelevant block contexts, which may be present if
+        // downstairs crashed between a write() and a flush().
+        extent
+            .fully_rehash_and_clean_all_stale_contexts(false)
+            .await?;
+
+        Ok(extent)
     }
 
     /**
      * Close an extent and the metadata db files for it.
      */
-    pub fn close(&mut self) -> Result<()> {
-        let inner = self.inner.as_ref().unwrap().lock().unwrap();
+    pub async fn close(&mut self) -> Result<(u64, u64, bool), CrucibleError> {
+        let inner = self.inner.as_ref().unwrap().lock().await;
+        let gen = inner.gen_number().unwrap();
+        let flush = inner.flush_number().unwrap();
+        let dirty = inner.dirty().unwrap();
         drop(inner);
         self.inner = None;
-        Ok(())
+        Ok((gen, flush, dirty))
     }
 
     /**
@@ -725,6 +744,7 @@ impl Extent {
             // Any of the context rows written between flushes could be valid
             // until we call flush and remove context rows where the integrity
             // hash does not match what was actually flushed to disk.
+
             metadb.execute(
                 "CREATE TABLE block_context (
                     block INTEGER,
@@ -759,7 +779,11 @@ impl Extent {
             read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
-            inner: Some(Mutex::new(Inner { file, metadb })),
+            inner: Some(Mutex::new(Inner {
+                file,
+                metadb,
+                dirty_blocks: HashSet::new(),
+            })),
         })
     }
 
@@ -813,8 +837,8 @@ impl Extent {
         Ok(file)
     }
 
-    pub fn inner(&self) -> MutexGuard<Inner> {
-        self.inner.as_ref().unwrap().lock().unwrap()
+    pub async fn inner(&self) -> MutexGuard<'_, Inner> {
+        self.inner.as_ref().unwrap().lock().await
     }
 
     pub fn number(&self) -> u32 {
@@ -825,12 +849,16 @@ impl Extent {
     /// an error occurs while processing any of the requests, the state of
     /// `responses` is undefined.
     #[instrument]
-    pub fn read(
+    pub async fn read(
         &self,
+        job_id: u64,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
     ) -> Result<(), CrucibleError> {
-        let mut inner = self.inner();
+        cdt::extent__read__start!(|| {
+            (job_id, self.number, requests.len() as u64)
+        });
+        let mut inner = self.inner().await;
 
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls and sqlite
@@ -868,6 +896,9 @@ impl Extent {
             }
 
             // Finally we get to read the actual data. That's why we're here
+            cdt::extent__read__file__start!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
             inner.file.seek(SeekFrom::Start(
                 first_req.offset.value * self.block_size,
             ))?;
@@ -876,12 +907,21 @@ impl Extent {
             );
             read_buffer.resize(read_buffer.capacity(), 0);
             inner.file.read_exact(&mut read_buffer)?;
+            cdt::extent__read__file__done!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
 
             // Query the block metadata
+            cdt::extent__read__get__contexts__start!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
             let block_contexts = inner.get_block_contexts(
                 first_req.offset.value,
                 n_contiguous_requests as u64,
             )?;
+            cdt::extent__read__get__contexts__done!(|| {
+                (job_id, self.number, n_contiguous_requests as u64)
+            });
 
             // Now it's time to put everything into the responses.
             // We use into_iter here to move values out of enc_ctxts/hashes,
@@ -909,6 +949,10 @@ impl Extent {
 
             req_run_start += n_contiguous_requests;
         }
+
+        cdt::extent__read__done!(|| {
+            (job_id, self.number, requests.len() as u64)
+        });
 
         Ok(())
     }
@@ -948,8 +992,9 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn write(
+    pub async fn write(
         &self,
+        job_id: u64,
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
@@ -957,7 +1002,16 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        let mut inner = self.inner();
+        cdt::extent__write__start!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
+
+        let mut inner = self.inner().await;
+        // I realize this looks like some nonsense but what this is doing is
+        // borrowing the inner up-front from the MutexGuard, which will allow
+        // us to later disjointly borrow fields. Basically, we're helping the
+        // borrow-checker do its job.
+        let inner = &mut *inner;
 
         for write in writes {
             self.check_input(write.offset, &write.data)?;
@@ -1010,6 +1064,9 @@ impl Extent {
         // blocks have hashes
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
+            cdt::extent__write__get__hashes__start!(|| {
+                (job_id, self.number, writes.len() as u64)
+            });
             let mut write_run_start = 0;
             while write_run_start < writes.len() {
                 let first_write = writes[write_run_start];
@@ -1044,9 +1101,15 @@ impl Extent {
 
                 write_run_start += n_contiguous_writes;
             }
+            cdt::extent__write__get__hashes__done!(|| {
+                (job_id, self.number, writes.len() as u64)
+            });
 
             if writes_to_skip.len() == writes.len() {
                 // Nothing to do
+                cdt::extent__write__done!(|| {
+                    (job_id, self.number, writes.len() as u64)
+                });
                 return Ok(());
             }
         }
@@ -1054,39 +1117,90 @@ impl Extent {
         inner.set_dirty()?;
 
         // Write all the metadata to the DB
-        let tx = inner.metadb_transaction()?;
+        // TODO right now we're including the integrity_hash() time in the sqlite time. It's small in
+        // comparison right now, but worth being aware of when looking at dtrace numbers
+        cdt::extent__write__sqlite__insert__start!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
+        let tx = inner.metadb.transaction()?;
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
                 debug_assert!(only_write_unwritten);
                 continue;
             }
 
+            // TODO it would be nice if we could profile what % of time we're
+            // spending on hashes locally vs sqlite
+            let on_disk_hash = integrity_hash(&[&write.data[..]]);
+
             Inner::tx_set_block_context(
                 &tx,
                 &DownstairsBlockContext {
                     block_context: write.block_context.clone(),
                     block: write.offset.value,
-                    on_disk_hash: integrity_hash(&[&write.data[..]]),
+                    on_disk_hash,
                 },
             )?;
+
+            // Worth some thought: this could happen inside
+            // tx_set_block_context, if we passed a reference to dirty_blocks
+            // into that function too. This might be nice, since then a block
+            // context could never be set without marking the block as dirty.
+            // On the other paw, our test suite very much likes the fact that
+            // tx_set_block_context doesn't mark blocks as dirty, since it
+            // lets us easily test specific edge-cases of the database state.
+            // Could make another function that wraps tx_set_block_context
+            // and handles this as well.
+            let _ = inner.dirty_blocks.insert(write.offset.value as usize);
         }
         tx.commit()?;
 
+        cdt::extent__write__sqlite__insert__done!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
+
+        // PERFORMANCE TODO: While sqlite is the bulk of our performance cost
+        // in writes, we're still paying quite the price on small writes
+        // here. It would be nice if we could improve that a bit. An easy win
+        // would be to replace the seek+write with the syscall that does both
+        // in one go. I also wonder whether memory-mapping would be
+        // advantageous here.
+        //
+        // Something else worth considering for small writes is that, based on
+        // my memory of conversations we had with propolis folks about what
+        // OSes expect out of an NVMe driver, I believe our contract with the
+        // upstairs doesn't require us to have the writes inside the file
+        // until after a flush() returns. If that is indeed true, we could
+        // buffer a certain amount of writes, only actually writing that
+        // buffer when either a flush is issued or the buffer exceeds some
+        // set size(based on our memory constraints). This would have
+        // benefits on any workload that frequently writes to the same block
+        // between flushes, would have benefits for small contiguous writes
+        // issued over multiple write commands by letting us batch them into
+        // a larger write, and(speculation) may benefit non-contiguous writes
+        // by cutting down the number of sqlite transactions. But, it
+        // introduces complexity. The time spent implementing that would
+        // probably better be spent switching to aio or something like that.
+        cdt::extent__write__file__start!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
         // Buffer writes for fewer syscalls. The 65536 buffer size here is
         // chosen somewhat arbitrarily.
         let mut write_buffer = [0u8; 65536];
-
         let mut bytes_in_run = 0;
         let mut next_block_in_run = u64::MAX;
         for write in writes {
             let block = write.offset.value;
+            // TODO, can this be `only_write_unwritten &&
+            // write_to_skip.contains()`?
             if writes_to_skip.contains(&block) {
                 debug_assert!(only_write_unwritten);
                 continue;
             }
 
             // If the current write isn't contiguous with previous writes,
-            // write our buffer to the file and seek.
+            // write our buffer to the file and seek. This is also the
+            // avenue by which we seek for the first write.
             if block != next_block_in_run {
                 if bytes_in_run > 0 {
                     inner.file.write_all(&write_buffer[..bytes_in_run])?;
@@ -1114,19 +1228,26 @@ impl Extent {
         if bytes_in_run > 0 {
             inner.file.write_all(&write_buffer[..bytes_in_run])?;
         }
+        cdt::extent__write__file__done!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
+
+        cdt::extent__write__done!(|| {
+            (job_id, self.number, writes.len() as u64)
+        });
 
         Ok(())
     }
 
     #[instrument]
-    pub fn flush_block(
+    pub async fn flush(
         &self,
         new_flush: u64,
         new_gen: u64,
         job_id: u64,
         log: &Logger,
     ) -> Result<(), CrucibleError> {
-        let mut inner = self.inner();
+        let mut inner = self.inner().await;
 
         if !inner.dirty()? {
             /*
@@ -1144,10 +1265,20 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
+        // Used for profiling
+        let n_dirty_blocks = inner.dirty_blocks.len() as u64;
+
+        cdt::extent__flush__start!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
+
         /*
          * We must first fsync to get any outstanding data written to disk.
          * This must be done before we update the flush number.
          */
+        cdt::extent__flush__file__start!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
         if let Err(e) = inner.file.sync_all() {
             /*
              * XXX Retry?  Mark extent as broken?
@@ -1159,35 +1290,204 @@ impl Extent {
                 e
             );
         }
+        cdt::extent__flush__file__done!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
 
         // Clear old block contexts. In order to be crash consistent, only
-        // perform this after the extent fsync is done. Read each block in the
-        // extent and find out the integrity hash. Then, remove all block
-        // context rows where the integrity hash does not match.
+        // perform this after the extent fsync is done. For each block
+        // written since the last flush, remove all block context rows where
+        // the integrity hash does not map the last-written value. This is
+        // safe, because we know the process has not crashed since those
+        // values were written. When the region is first opened, the entire
+        // file is rehashed, since in that case we don't have that luxury.
 
-        let total_bytes: usize =
-            self.extent_size.value as usize * self.block_size as usize;
-        let mut extent_data: Vec<u8> = vec![0; total_bytes];
+        cdt::extent__flush__collect__hashes__start!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
+
+        // We'll fill this up in a moment
+        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> =
+            Vec::with_capacity(inner.dirty_blocks.len());
+
+        // All blocks that may have changed since the last flush
+        let mut dirty_blocks: Vec<usize> = inner.dirty_blocks.drain().collect();
+
+        // Sorting here is extremely important to get good performance out of
+        // truncate_encryption_contexts_and_hashes() later. It also means we
+        // can efficiently re-read only the dirty parts of the file.
+        dirty_blocks.sort_unstable();
+
+        // Rehash any parts of the file that we wrote data to since the last
+        // flush
+        if !dirty_blocks.is_empty() {
+            // Rehashes a contiguous range of blocks
+            const BUFFER_SIZE: usize = 64 * 1024;
+            let mut buffer = [0u8; BUFFER_SIZE];
+            let mut dirty_block_iter = dirty_blocks.iter().copied();
+            let mut run_start = dirty_block_iter.next().unwrap();
+            let mut prev_block = run_start;
+
+            // Group blocks into contiguous runs for optimal IO, and rehash
+            loop {
+                let cur_block = dirty_block_iter.next();
+
+                // We rehash if there is either a run discontinuity, or when
+                // we hit the end of the iterator.
+                if cur_block == Some(prev_block + 1) {
+                    // Run is continuing
+                    prev_block += 1;
+                } else {
+                    // Discontinuity or end of iteration.
+
+                    // First, do the rehash
+                    inner.file.seek(SeekFrom::Start(
+                        run_start as u64 * self.block_size,
+                    ))?;
+
+                    let run_length = prev_block - run_start + 1;
+                    let mut remaining_bytes =
+                        run_length * self.block_size as usize;
+                    let mut block_being_hashed = run_start;
+                    while remaining_bytes > 0 {
+                        // A run may be larger than our IO buffer, in which
+                        // case we only process what fits in the buffer for
+                        // this iteration of the loop.
+                        let slice =
+                            &mut buffer[0..remaining_bytes.min(BUFFER_SIZE)];
+                        inner.file.read_exact(slice)?;
+                        for block_data in
+                            slice.chunks_exact(self.block_size as usize)
+                        {
+                            // Here's where we do the actual rehashing and
+                            // push it into our vec
+                            extent_block_indexes_and_hashes.push((
+                                block_being_hashed,
+                                integrity_hash(&[block_data]),
+                            ));
+                            block_being_hashed += 1;
+                        }
+                        remaining_bytes -= slice.len();
+                    }
+
+                    // Start a new run if there's more data to process, or
+                    // break out of the loop.
+                    match cur_block {
+                        None => break,
+                        Some(cur_block) => {
+                            run_start = cur_block;
+                            prev_block = cur_block;
+                        }
+                    }
+                }
+            }
+        }
+
+        // We could shrink this to 0, but it's nice not to have to expand the
+        // dirty_blocks HashMap on small writes. They have a hard enough time
+        // as it is. We don't want our maps to be keeping a lot of memory
+        // allocated though. With 16 entries max, even a 32TiB region of
+        // 128MiB extents would only be spending ~64MiB of ram on on this,
+        // across the entire region. There's potential for tuning here.
+        inner.dirty_blocks.shrink_to(16);
+
+        cdt::extent__flush__collect__hashes__done!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
+
+        cdt::extent__flush__sqlite__insert__start!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
+        inner.truncate_encryption_contexts_and_hashes(
+            extent_block_indexes_and_hashes,
+        )?;
+        cdt::extent__flush__sqlite__insert__done!(|| {
+            (job_id, self.number, n_dirty_blocks)
+        });
+
+        // Reset the file's seek offset to 0, and set the flush number and gen
+        // number
+        inner.file.seek(SeekFrom::Start(0))?;
+
+        inner.set_flush_number(new_flush, new_gen)?;
+
+        cdt::extent__flush__done!(|| { (job_id, self.number, n_dirty_blocks) });
+
+        Ok(())
+    }
+
+    /// Rehash the entire file. Remove any stored hash/encryption contexts
+    /// that do not correlate to data currently stored on disk. This is
+    /// primarily when opening an extent after recovering from a crash, since
+    /// irrelevant hashes will normally be cleared out during a flush().
+    ///
+    /// By default this function will only do work if the extent is marked
+    /// dirty. Set `force_override_dirty` to `true` to override this behavior.
+    /// This override should generally not be necessary, as the dirty flag
+    /// is set before any contexts are written.
+    #[instrument]
+    async fn fully_rehash_and_clean_all_stale_contexts(
+        &self,
+        force_override_dirty: bool,
+    ) -> Result<(), CrucibleError> {
+        let mut inner = self.inner().await;
+
+        if !force_override_dirty && !inner.dirty()? {
+            return Ok(());
+        }
+
+        // Just in case, let's be very sure that the file on disk is what it should be
+        if let Err(e) = inner.file.sync_all() {
+            crucible_bail!(
+                IoError,
+                "extent {}: fsync 1 failure during full rehash: {:?}",
+                self.number,
+                e
+            );
+        }
 
         inner.file.seek(SeekFrom::Start(0))?;
-        inner.file.read_exact(&mut extent_data)?;
 
-        let extent_block_indexes_and_hashes = extent_data
-            .chunks(self.block_size as usize)
-            .enumerate()
-            .map(|(i, data)| (i, integrity_hash(&[data])))
-            .collect();
+        // Buffer the file so we dont spend all day waiting on syscall
+        let mut inner_file_buffered =
+            BufReader::with_capacity(64 * 1024, &inner.file);
+
+        // This gets filled one block at a time for hashing
+        let mut block = vec![0; self.block_size as usize];
+
+        // The vec of hashes that we'll pass off to truncate...()
+        let mut extent_block_indexes_and_hashes =
+            Vec::with_capacity(self.extent_size.value as usize);
+
+        // Stream the contents of the file and rehash them.
+        for i in 0..self.extent_size.value as usize {
+            inner_file_buffered.read_exact(&mut block)?;
+            extent_block_indexes_and_hashes
+                .push((i, integrity_hash(&[&block])));
+        }
+
+        // NOTE on safety: Unlike BufWriter, BufReader drop() does not have
+        // side-effects. There are no unhandled errors here.
+        drop(inner_file_buffered);
 
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
 
-        // Reset the file's seek offset to 0, and set the flush number and gen
-        // number
-
         inner.file.seek(SeekFrom::Start(0))?;
 
-        inner.set_flush_number(new_flush, new_gen)?;
+        // Intentionally not clearing the dirty flag - we want to know that the
+        // extent is still considered dirty.
+
+        // Let's also clear out the internal map of hashes, in case it has any.
+        // This shouldn't be necessary, for two reasons
+        // 1. aside from tests, this function is only called before any writes
+        //    are issued.
+        // 2. this function should always produce results that match the state
+        //    of that map _anyway_.
+        // But, I never trust a cache, and may as well avoid keeping memory
+        // around at least right?
+        inner.dirty_blocks.clear();
 
         Ok(())
     }
@@ -1209,7 +1509,7 @@ impl Region {
     /**
      * Create a new region based on the given RegionOptions
      */
-    pub fn create<P: AsRef<Path>>(
+    pub async fn create<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
         log: Logger,
@@ -1241,7 +1541,7 @@ impl Region {
             log,
         };
 
-        region.open_extents(true)?;
+        region.open_extents(true).await?;
 
         Ok(region)
     }
@@ -1249,7 +1549,7 @@ impl Region {
     /**
      * Open an existing region file
      */
-    pub fn open<P: AsRef<Path>>(
+    pub async fn open<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
         verbose: bool,
@@ -1283,7 +1583,7 @@ impl Region {
             log: log.clone(),
         };
 
-        region.open_extents(false)?;
+        region.open_extents(false).await?;
 
         Ok(region)
     }
@@ -1303,25 +1603,27 @@ impl Region {
      * If create is true, we expect to create new extent files, and will
      * return error if the file is already present.
      */
-    fn open_extents(&mut self, create: bool) -> Result<()> {
+    async fn open_extents(&mut self, create: bool) -> Result<()> {
         let next_eid = self.extents.len() as u32;
 
-        let these_extents = (next_eid..self.def.extent_count())
-            .into_iter()
-            .map(|eid| {
-                if create {
-                    Extent::create(&self.dir, &self.def, eid)
-                } else {
-                    Extent::open(
-                        &self.dir,
-                        &self.def,
-                        eid,
-                        self.read_only,
-                        &self.log,
-                    )
-                }
-            })
-            .collect::<Result<Vec<Extent>>>()?;
+        let eid_range = next_eid..self.def.extent_count();
+        let mut these_extents = Vec::with_capacity(eid_range.len());
+
+        for eid in eid_range {
+            let extent = if create {
+                Extent::create(&self.dir, &self.def, eid)
+            } else {
+                Extent::open(
+                    &self.dir,
+                    &self.def,
+                    eid,
+                    self.read_only,
+                    &self.log,
+                )
+                .await
+            };
+            these_extents.push(extent?);
+        }
 
         self.extents.extend(these_extents);
 
@@ -1337,7 +1639,7 @@ impl Region {
      * Walk the list of all extents and find any that are not open.
      * Open any extents that are not.
      */
-    pub fn reopen_all_extents(&mut self) -> Result<()> {
+    pub async fn reopen_all_extents(&mut self) -> Result<()> {
         let mut to_open = Vec::new();
         for (i, extent) in self.extents.iter().enumerate() {
             if extent.inner.is_none() {
@@ -1346,7 +1648,7 @@ impl Region {
         }
 
         for eid in to_open {
-            self.reopen_extent(eid as usize)?;
+            self.reopen_extent(eid).await?;
         }
 
         Ok(())
@@ -1355,7 +1657,10 @@ impl Region {
     /**
      * Re open an extent that was previously closed
      */
-    pub fn reopen_extent(&mut self, eid: usize) -> Result<(), CrucibleError> {
+    pub async fn reopen_extent(
+        &mut self,
+        eid: usize,
+    ) -> Result<(), CrucibleError> {
         /*
          * Make sure the extent :
          *
@@ -1363,7 +1668,7 @@ impl Region {
          * - matches our eid
          * - is not read-only
          */
-        assert!(!self.extents[eid].inner.is_some());
+        assert!(self.extents[eid].inner.is_none());
         assert_eq!(self.extents[eid].number, eid as u32);
         assert!(!self.read_only);
 
@@ -1373,7 +1678,8 @@ impl Region {
             eid as u32,
             self.read_only,
             &self.log,
-        )?;
+        )
+        .await?;
         self.extents[eid] = new_extent;
         Ok(())
     }
@@ -1577,7 +1883,7 @@ impl Region {
         // been synced so that change is persistent.
         let current_dir = extent_dir(&self.dir, eid as u32);
 
-        sync_path(&current_dir, &self.log)?;
+        sync_path(current_dir, &self.log)?;
         Ok(())
     }
 
@@ -1585,7 +1891,7 @@ impl Region {
      * if there is a difference between what our actual extent_count is
      * and what is requested, go out and create the new extent files.
      */
-    pub fn extend(&mut self, newsize: u32) -> Result<()> {
+    pub async fn extend(&mut self, newsize: u32) -> Result<()> {
         if self.read_only {
             // XXX return CrucibleError instead of anyhow?
             bail!(CrucibleError::ModifyingReadOnlyRegion.to_string());
@@ -1602,7 +1908,7 @@ impl Region {
         if newsize > self.def.extent_count() {
             self.def.set_extent_count(newsize);
             write_json(config_path(&self.dir), &self.def, true)?;
-            self.open_extents(true)?;
+            self.open_extents(true).await?;
         }
         Ok(())
     }
@@ -1618,36 +1924,35 @@ impl Region {
         self.def
     }
 
-    pub fn flush_numbers(&self) -> Result<Vec<u64>> {
-        let mut ver = self
-            .extents
-            .iter()
-            .map(|e| e.inner().flush_number())
-            .collect::<Result<Vec<_>>>()?;
-
-        if ver.len() > 12 {
-            ver = ver[0..12].to_vec();
+    pub async fn flush_numbers(&self) -> Result<Vec<u64>> {
+        let mut result = Vec::with_capacity(self.extents.len());
+        for e in &self.extents {
+            result.push(e.inner().await.flush_number()?);
         }
-        info!(self.log, "Current flush_numbers [0..12]: {:?}", ver);
 
-        self.extents
-            .iter()
-            .map(|e| e.inner().flush_number())
-            .collect::<Result<Vec<_>>>()
+        if result.len() > 12 {
+            println!("Current flush_numbers [0..12]: {:?}", &result[0..12]);
+        } else {
+            println!("Current flush_numbers [0..12]: {:?}", result);
+        }
+
+        Ok(result)
     }
 
-    pub fn gen_numbers(&self) -> Result<Vec<u64>> {
-        self.extents
-            .iter()
-            .map(|e| e.inner().gen_number())
-            .collect::<Result<Vec<_>>>()
+    pub async fn gen_numbers(&self) -> Result<Vec<u64>> {
+        let mut result = Vec::with_capacity(self.extents.len());
+        for e in &self.extents {
+            result.push(e.inner().await.gen_number()?);
+        }
+        Ok(result)
     }
 
-    pub fn dirty(&self) -> Result<Vec<bool>> {
-        self.extents
-            .iter()
-            .map(|e| e.inner().dirty())
-            .collect::<Result<Vec<_>>>()
+    pub async fn dirty(&self) -> Result<Vec<bool>> {
+        let mut result = Vec::with_capacity(self.extents.len());
+        for e in &self.extents {
+            result.push(e.inner().await.dirty()?);
+        }
+        Ok(result)
     }
 
     pub fn validate_hashes(
@@ -1677,7 +1982,7 @@ impl Region {
     }
 
     #[instrument]
-    pub fn region_write(
+    pub async fn region_write(
         &self,
         writes: &[crucible_protocol::Write],
         job_id: u64,
@@ -1714,7 +2019,9 @@ impl Region {
         for eid in batched_writes.keys() {
             let extent = &self.extents[*eid];
             let writes = batched_writes.get(eid).unwrap();
-            extent.write(&writes[..], only_write_unwritten)?;
+            extent
+                .write(job_id, &writes[..], only_write_unwritten)
+                .await?;
         }
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id);
@@ -1726,7 +2033,7 @@ impl Region {
     }
 
     #[instrument]
-    pub fn region_read(
+    pub async fn region_read(
         &self,
         requests: &[crucible_protocol::ReadRequest],
         job_id: u64,
@@ -1752,7 +2059,9 @@ impl Region {
                     batched_reads.push(request);
                 } else {
                     let extent = &self.extents[_eid as usize];
-                    extent.read(&batched_reads[..], &mut responses)?;
+                    extent
+                        .read(job_id, &batched_reads[..], &mut responses)
+                        .await?;
 
                     eid = Some(request.eid);
                     batched_reads.clear();
@@ -1767,7 +2076,9 @@ impl Region {
 
         if let Some(_eid) = eid {
             let extent = &self.extents[_eid as usize];
-            extent.read(&batched_reads[..], &mut responses)?;
+            extent
+                .read(job_id, &batched_reads[..], &mut responses)
+                .await?;
         }
         cdt::os__read__done!(|| job_id);
 
@@ -1779,11 +2090,11 @@ impl Region {
      * what an extent should use if a flush is required.
      */
     #[instrument]
-    pub fn region_flush_extent(
+    pub async fn region_flush_extent(
         &self,
         eid: usize,
-        flush_number: u64,
         gen_number: u64,
+        flush_number: u64,
         job_id: u64,
     ) -> Result<(), CrucibleError> {
         info!(
@@ -1795,7 +2106,7 @@ impl Region {
         );
 
         let extent = &self.extents[eid];
-        extent.flush_block(flush_number, gen_number, 0, &self.log)?;
+        extent.flush(flush_number, gen_number, 0, &self.log).await?;
 
         Ok(())
     }
@@ -1805,12 +2116,13 @@ impl Region {
      * what an extent should use if a flush is required.
      */
     #[instrument]
-    pub fn region_flush(
+    pub async fn region_flush(
         &self,
         flush_number: u64,
         gen_number: u64,
         snapshot_details: &Option<SnapshotDetails>,
         job_id: u64,
+        extent_limit: Option<usize>,
     ) -> Result<(), CrucibleError> {
         // It should be ok to Flush a read-only region, but not take a snapshot.
         // Most likely this read-only region *is* a snapshot, so that's
@@ -1819,11 +2131,22 @@ impl Region {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        // XXX How to we convert between usize and u32 correctly?
+        // Set the extent we will stop flushing at.
         cdt::os__flush__start!(|| job_id);
-        for eid in 0..self.def.extent_count() {
-            let extent = &self.extents[eid as usize];
-            extent.flush_block(flush_number, gen_number, job_id, &self.log)?;
+        let extent_count = match extent_limit {
+            Some(el) => {
+                if el > self.def.extent_count().try_into().unwrap() {
+                    crucible_bail!(InvalidExtent);
+                }
+                el
+            }
+            None => self.def.extent_count().try_into().unwrap(),
+        };
+        for eid in 0..extent_count {
+            let extent = &self.extents[eid];
+            extent
+                .flush(flush_number, gen_number, job_id, &self.log)
+                .await?;
         }
         cdt::os__flush__done!(|| job_id);
 
@@ -2042,13 +2365,7 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
  */
 pub async fn save_stream_to_file(
     mut file: File,
-    mut stream: Pin<
-        Box<
-            dyn futures::Stream<
-                    Item = std::result::Result<crucible::Bytes, reqwest::Error>,
-                > + std::marker::Send,
-        >,
-    >,
+    mut stream: repair_client::ByteStream,
 ) -> Result<(), CrucibleError> {
     loop {
         match stream.try_next().await {
@@ -2074,14 +2391,17 @@ pub async fn save_stream_to_file(
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::dump::dump_region;
-    use bytes::{BufMut, BytesMut};
-    use rand::{Rng, RngCore};
     use std::fs::rename;
     use std::path::PathBuf;
+
+    use bytes::{BufMut, BytesMut};
+    use rand::{Rng, RngCore};
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    use crate::dump::dump_region;
+
+    use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -2093,6 +2413,7 @@ mod test {
         let inn = Inner {
             file: ff,
             metadb: Connection::open_in_memory().unwrap(),
+            dirty_blocks: HashSet::new(),
         };
 
         /*
@@ -2131,14 +2452,15 @@ mod test {
         region_options
     }
 
-    #[test]
-    fn copy_extent_dir() -> Result<()> {
+    #[tokio::test]
+    async fn copy_extent_dir() -> Result<()> {
         // Create the region, make three extents
         // Create the copy directory, make sure it exists.
         // Remove the copy directory, make sure it goes away.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ext_one = &mut region.extents[1];
         let cp = copy_dir(&dir, 1);
@@ -2150,15 +2472,16 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn copy_extent_dir_twice() -> Result<()> {
+    #[tokio::test]
+    async fn copy_extent_dir_twice() -> Result<()> {
         // Create the region, make three extents
         // Create the copy directory, make sure it exists.
         // Verify a second create will fail.
         let dir = tempdir().unwrap();
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).unwrap();
-        region.extend(3).unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(3).await.unwrap();
 
         let ext_one = &mut region.extents[1];
         ext_one.create_copy_dir(&dir).unwrap();
@@ -2167,22 +2490,29 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn close_extent() -> Result<()> {
+    #[tokio::test]
+    async fn close_extent() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        let (gen, flush, dirty) = ext_one.close().await?;
+
+        // Verify inner is gone, and we returned the expected gen, flush
+        // and dirty values for a new unwritten extent.
+        assert!(ext_one.inner.is_none());
+        assert_eq!(gen, 0);
+        assert_eq!(flush, 0);
+        assert!(!dirty);
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2197,25 +2527,26 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn reopen_extent_cleanup_one() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_extent_cleanup_one() -> Result<()> {
         // Verify the copy directory is removed if an extent is
         // opened with that directory present.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        ext_one.close().await?;
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2227,19 +2558,20 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn reopen_extent_cleanup_two() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_extent_cleanup_two() -> Result<()> {
         // Verify that the completed directory is removed if present
         // when an extent is re-opened.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        ext_one.close().await?;
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2253,7 +2585,7 @@ mod test {
         rename(rd.clone(), cd.clone())?;
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2267,20 +2599,21 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn reopen_extent_cleanup_replay() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_extent_cleanup_replay() -> Result<()> {
         // Verify on extent open that a replacement directory will
         // have it's contents replace an extents existing data and
         // metadata files.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        ext_one.close().await?;
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2313,7 +2646,7 @@ mod test {
         // action is taken when we (re)open the extent.
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         let ext_one = &mut region.extents[1];
         assert!(ext_one.inner.is_some());
@@ -2330,8 +2663,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn reopen_extent_cleanup_replay_short() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_extent_cleanup_replay_short() -> Result<()> {
         // test move_replacement_extent(), create a copy dir, populate it
         // and let the reopen do the work.  This time we make sure our
         // copy dir only has extent data and .db files, and not .db-shm
@@ -2339,13 +2672,14 @@ mod test {
         // extent after the reopen has cleaned them up.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        ext_one.close().await?;
+        assert!(ext_one.inner.is_none());
 
         // Make copy directory for this extent
         let cp = ext_one.create_copy_dir(&dir)?;
@@ -2387,7 +2721,7 @@ mod test {
         // when we (re)open the extent.
 
         // Reopen extent 1
-        region.reopen_extent(1)?;
+        region.reopen_extent(1).await?;
 
         // Make sure there is no longer a db-shm and db-wal
         dest_path.set_extension("db-shm");
@@ -2410,8 +2744,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn reopen_extent_no_replay_readonly() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_extent_no_replay_readonly() -> Result<()> {
         // Verify on a read-only region a replacement directory will
         // be ignored.  This is required by the dump command, as it would
         // be tragic if the command to inspect a region changed that
@@ -2419,8 +2753,9 @@ mod test {
 
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         // Make copy directory for this extent
         let ext_one = &mut region.extents[1];
@@ -2446,7 +2781,8 @@ mod test {
 
         // Open up the region read_only now.
         let mut region =
-            Region::open(&dir, new_region_options(), false, true, &csl())?;
+            Region::open(&dir, new_region_options(), false, true, &csl())
+                .await?;
 
         // Verify extent 1 has opened again.
         let ext_one = &mut region.extents[1];
@@ -2554,25 +2890,26 @@ mod test {
         assert!(!validate_repair_files(1, &good_files));
     }
 
-    #[test]
-    fn reopen_all_extents() -> Result<()> {
+    #[tokio::test]
+    async fn reopen_all_extents() -> Result<()> {
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(5)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(5).await?;
 
         // Close extent 1
         let ext_one = &mut region.extents[1];
-        ext_one.close()?;
-        assert!(!ext_one.inner.is_some());
+        ext_one.close().await?;
+        assert!(ext_one.inner.is_none());
 
         // Close extent 4
         let ext_four = &mut region.extents[4];
-        ext_four.close()?;
-        assert!(!ext_four.inner.is_some());
+        ext_four.close().await?;
+        assert!(ext_four.inner.is_none());
 
         // Reopen all extents
-        region.reopen_all_extents()?;
+        region.reopen_all_extents().await?;
 
         // Verify extent one is valid
         let ext_one = &mut region.extents[1];
@@ -2590,31 +2927,32 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn new_region() -> Result<()> {
+    #[tokio::test]
+    async fn new_region() -> Result<()> {
         let dir = tempdir()?;
-        let _ = Region::create(&dir, new_region_options(), csl());
+        let _ = Region::create(&dir, new_region_options(), csl()).await;
         Ok(())
     }
 
-    #[test]
-    fn new_existing_region() -> Result<()> {
+    #[tokio::test]
+    async fn new_existing_region() -> Result<()> {
         let dir = tempdir()?;
-        let _ = Region::create(&dir, new_region_options(), csl());
+        let _ = Region::create(&dir, new_region_options(), csl()).await;
         let _ = Region::open(&dir, new_region_options(), false, false, &csl());
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[should_panic]
-    fn bad_import_region() {
+    async fn bad_import_region() {
         let _ = Region::open(
-            &"/tmp/12345678-1111-2222-3333-123456789999/notadir",
+            "/tmp/12345678-1111-2222-3333-123456789999/notadir",
             new_region_options(),
             false,
             false,
             &csl(),
         )
+        .await
         .unwrap();
     }
 
@@ -2682,30 +3020,37 @@ mod test {
     fn extent_name_basic() {
         assert_eq!(extent_file_name(4, ExtentType::Data), "004");
     }
+
     #[test]
     fn extent_name_basic_ext() {
         assert_eq!(extent_file_name(4, ExtentType::Db), "004.db");
     }
+
     #[test]
     fn extent_name_basic_ext_shm() {
         assert_eq!(extent_file_name(4, ExtentType::DbShm), "004.db-shm");
     }
+
     #[test]
     fn extent_name_basic_ext_wal() {
         assert_eq!(extent_file_name(4, ExtentType::DbWal), "004.db-wal");
     }
+
     #[test]
     fn extent_name_basic_two() {
         assert_eq!(extent_file_name(10, ExtentType::Data), "00A");
     }
+
     #[test]
     fn extent_name_basic_three() {
         assert_eq!(extent_file_name(59, ExtentType::Data), "03B");
     }
+
     #[test]
     fn extent_name_max() {
         assert_eq!(extent_file_name(u32::MAX, ExtentType::Data), "FFF");
     }
+
     #[test]
     fn extent_name_min() {
         assert_eq!(extent_file_name(u32::MIN, ExtentType::Data), "000");
@@ -2723,6 +3068,7 @@ mod test {
             p("/var/region/FF/FFF")
         );
     }
+
     #[test]
     fn extent_dir_min() {
         assert_eq!(
@@ -2738,6 +3084,7 @@ mod test {
             p("/var/region/00/000/000")
         );
     }
+
     #[test]
     fn copy_path_basic() {
         assert_eq!(
@@ -2775,14 +3122,16 @@ mod test {
         );
     }
 
-    #[test]
-    fn dump_a_region() -> Result<()> {
+    #[tokio::test]
+    async fn dump_a_region() -> Result<()> {
         /*
          * Create a region, give it actual size
          */
         let dir = tempdir()?;
-        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
-        r1.extend(2)?;
+        let mut r1 = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        r1.extend(2).await?;
 
         /*
          * Build the Vec for our region dir
@@ -2792,13 +3141,13 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, None, false, false, csl())?;
+        dump_region(dvec, None, None, false, false, csl()).await?;
 
         Ok(())
     }
 
-    #[test]
-    fn dump_two_region() -> Result<()> {
+    #[tokio::test]
+    async fn dump_two_region() -> Result<()> {
         /*
          * Create our temp dirs
          */
@@ -2807,11 +3156,14 @@ mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
-        let mut r2 =
-            Region::create(&dir2, new_region_options(), csl()).unwrap();
-        r1.extend(2)?;
-        r2.extend(2)?;
+        let mut r1 = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        let mut r2 = Region::create(&dir2, new_region_options(), csl())
+            .await
+            .unwrap();
+        r1.extend(2).await?;
+        r2.extend(2).await?;
 
         /*
          * Build the Vec for our region dirs
@@ -2825,13 +3177,13 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, None, false, false, csl())?;
+        dump_region(dvec, None, None, false, false, csl()).await?;
 
         Ok(())
     }
 
-    #[test]
-    fn dump_extent() -> Result<()> {
+    #[tokio::test]
+    async fn dump_extent() -> Result<()> {
         /*
          * Create our temp dirs
          */
@@ -2841,11 +3193,14 @@ mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
-        r1.extend(3)?;
-        let mut r2 =
-            Region::create(&dir2, new_region_options(), csl()).unwrap();
-        r2.extend(3)?;
+        let mut r1 = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        r1.extend(3).await?;
+        let mut r2 = Region::create(&dir2, new_region_options(), csl())
+            .await
+            .unwrap();
+        r2.extend(3).await?;
 
         /*
          * Build the Vec for our region dirs
@@ -2859,19 +3214,20 @@ mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, Some(2), None, false, false, csl())?;
+        dump_region(dvec, Some(2), None, false, false, csl()).await?;
 
         Ok(())
     }
 
-    #[test]
-    fn block_context() -> Result<()> {
+    #[tokio::test]
+    async fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let ext = &region.extents[0];
-        let mut inner = ext.inner();
+        let mut inner = ext.inner().await;
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -3017,14 +3373,15 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn multiple_context() -> Result<()> {
+    #[tokio::test]
+    async fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let ext = &region.extents[0];
-        let mut inner = ext.inner();
+        let mut inner = ext.inner().await;
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -3212,11 +3569,12 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_big_write() -> Result<()> {
+    #[tokio::test]
+    async fn test_big_write() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -3252,7 +3610,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         // read data into File, compare what was written to buffer
 
@@ -3280,7 +3638,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0)?;
+        let responses = region.region_read(&requests, 0).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -3293,11 +3651,13 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_flush_removes_partial_writes() -> Result<()> {
-        // Validate that incorrect context rows are removed by a flush so that a
-        // repair will get rid of partial writes' block context rows. This is
-        // necessary for write_unwritten to work after a crash.
+    #[tokio::test]
+    async fn test_region_open_removes_partial_writes() -> Result<()> {
+        // Opening a dirty extent should fully rehash the extent to remove any
+        // contexts that don't correlate with data on disk. This is necessary
+        // for write_unwritten to work after a crash, and to move us into a
+        // good state for flushes (flushes only clear out contexts for blocks
+        // written since the last flush)
         //
         // Specifically, this test checks for the case where we had a brand new
         // block and a write to that blocks that failed such that only the
@@ -3306,14 +3666,14 @@ mod test {
         // context row.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // A write of some sort only wrote a block context row
-
         {
             let ext = &region.extents[0];
-            let mut inner = ext.inner();
+            let mut inner = ext.inner().await;
             inner.set_block_contexts(&[&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
@@ -3324,13 +3684,17 @@ mod test {
             }])?;
         }
 
-        region.region_flush(1, 1, &None, 123)?;
+        // This should clear out the invalid context
+        for extent in &mut region.extents {
+            extent.close().await?;
+        }
+        region.reopen_all_extents().await?;
 
         // Verify no block context rows exist
 
         {
             let ext = &region.extents[0];
-            let inner = ext.inner();
+            let inner = ext.inner().await;
             assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
         }
 
@@ -3339,27 +3703,31 @@ mod test {
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
 
-        region.region_write(
-            &[crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(0),
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            }],
-            124,
-            true, // only_write_unwritten
-        )?;
+        region
+            .region_write(
+                &[crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash,
+                    },
+                }],
+                124,
+                true, // only_write_unwritten
+            )
+            .await?;
 
-        let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid: 0,
-                offset: Block::new_512(0),
-            }],
-            125,
-        )?;
+        let responses = region
+            .region_read(
+                &[crucible_protocol::ReadRequest {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                }],
+                125,
+            )
+            .await?;
 
         let response = &responses[0];
 
@@ -3368,11 +3736,191 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_ok_hash_ok() -> Result<()> {
+    #[tokio::test]
+    /// It's very important that only_write_unwritten always works correctly.
+    /// We should never add contexts for blocks that haven't been written by
+    /// an upstairs.
+    async fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
+    ) -> Result<()> {
+        // Make a region. It's empty, and should stay that way
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
+
+        let ext = &region.extents[0];
+
+        // Write a block, but don't flush.
+        {
+            let data = Bytes::from(vec![0x55; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            ext.write(10, &[&write], false).await?;
+        }
+
+        // We haven't flushed, but this should leave our context in place.
+        ext.fully_rehash_and_clean_all_stale_contexts(false).await?;
+
+        // Therefore, we expect that write_unwritten to the first block won't
+        // do anything.
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            ext.write(20, &[&write], true).await?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            };
+            ext.read(21, &[&read], &mut resp).await?;
+
+            // We should not get back our data, because block 0 was written.
+            assert_ne!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        // But, writing to the second block still should!
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(1),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            ext.write(30, &[&write], true).await?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+            };
+            ext.read(31, &[&read], &mut resp).await?;
+
+            // We should get back our data! Block 1 was never written.
+            assert_eq!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(1),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        Ok(())
+    }
+
+    /// If a write successfully put a context into the database, but it never
+    /// actually got the data onto the disk, that block should revert back to
+    /// being "unwritten". After all, the data never was truly written.
+    ///
+    /// This test is very similar to test_region_open_removes_partial_writes,
+    /// but is distinct in that it call fully_rehash directly, without closing
+    /// and re-opening the extent.
+    #[tokio::test]
+    async fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
+    ) -> Result<()> {
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
+
+        let ext = &region.extents[0];
+
+        // Partial write, the data never hits disk, but there's a context
+        // in the DB
+        {
+            let mut inner = ext.inner().await;
+            inner.set_block_contexts(&[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 1024,
+                },
+                block: 0,
+                on_disk_hash: 65536,
+            }])?;
+        }
+
+        // Run a full rehash, which should clear out that partial write.
+        ext.fully_rehash_and_clean_all_stale_contexts(false).await?;
+
+        // Writing to block 0 should succeed with only_write_unwritten
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            ext.write(30, &[&write], true).await?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            };
+            ext.read(31, &[&read], &mut resp).await?;
+
+            // We should get back our data! Block 1 was never written.
+            assert_eq!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ok_hash_ok() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let data = BytesMut::from(&[1u8; 512][..]);
 
@@ -3392,18 +3940,19 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_when_empty() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_when_empty() -> Result<()> {
         // Verify that a read fill does write to a block when there is
         // no data written yet.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // Fill a buffer with "9"'s (random)
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -3426,19 +3975,18 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // Verify the dirty bit is now set.
         // We know our EID, so we can shortcut to getting the actual extent.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
-        let dirty = inner.lock().unwrap().dirty().unwrap();
+        let dirty = inner.lock().await.dirty().unwrap();
         assert!(dirty);
 
         // Now read back that block, make sure it is updated.
-        let responses = region.region_read(
-            &[crucible_protocol::ReadRequest { eid, offset }],
-            0,
-        )?;
+        let responses = region
+            .region_read(&[crucible_protocol::ReadRequest { eid, offset }], 0)
+            .await?;
 
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].hashes().len(), 1);
@@ -3447,13 +3995,14 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_when_written() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_when_written() -> Result<()> {
         // Verify that a read fill does not write to the block when
         // there is data written already.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // Fill a buffer with "9"'s (random)
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -3477,7 +4026,7 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         // Same block, now try to write something else to it.
         let data = BytesMut::from(&[1u8; 512][..]);
@@ -3497,13 +4046,12 @@ mod test {
                 },
             }];
         // Do the write again, but with only_write_unwritten set now.
-        region.region_write(&writes, 1, true)?;
+        region.region_write(&writes, 1, true).await?;
 
         // Now read back that block, make sure it has the first write
-        let responses = region.region_read(
-            &[crucible_protocol::ReadRequest { eid, offset }],
-            2,
-        )?;
+        let responses = region
+            .region_read(&[crucible_protocol::ReadRequest { eid, offset }], 2)
+            .await?;
 
         // We should still have one response.
         assert_eq!(responses.len(), 1);
@@ -3515,14 +4063,15 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_when_written_flush() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_when_written_flush() -> Result<()> {
         // Verify that a read fill does not write to the block when
         // there is data written already.  This time run a flush after the
         // first write.  Verify correct state of dirty bit as well.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         // Fill a buffer with "9"'s
         let data = BytesMut::from(&[9u8; 512][..]);
@@ -3546,19 +4095,19 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // Verify the dirty bit is now set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
-        let dirty = inner.lock().unwrap().dirty().unwrap();
+        let dirty = inner.lock().await.dirty().unwrap();
         assert!(dirty);
 
         // Flush extent with eid, fn, gen, job_id.
-        region.region_flush_extent(eid as usize, 1, 1, 1)?;
+        region.region_flush_extent(eid as usize, 1, 1, 1).await?;
 
         // Verify the dirty bit is no longer set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
-        let dirty = inner.lock().unwrap().dirty().unwrap();
+        let dirty = inner.lock().await.dirty().unwrap();
         assert!(!dirty);
 
         // Create a new write IO with different data.
@@ -3580,18 +4129,17 @@ mod test {
             }];
 
         // Do the write again, but with only_write_unwritten set now.
-        region.region_write(&writes, 1, true)?;
+        region.region_write(&writes, 1, true).await?;
 
         // Verify the dirty bit is not set.
         let inner = &region.extents[eid as usize].inner.as_ref().unwrap();
-        let dirty = inner.lock().unwrap().dirty().unwrap();
+        let dirty = inner.lock().await.dirty().unwrap();
         assert!(!dirty);
 
         // Read back our block, make sure it has the first write data
-        let responses = region.region_read(
-            &[crucible_protocol::ReadRequest { eid, offset }],
-            2,
-        )?;
+        let responses = region
+            .region_read(&[crucible_protocol::ReadRequest { eid, offset }], 2)
+            .await?;
 
         // We should still have one response.
         assert_eq!(responses.len(), 1);
@@ -3603,13 +4151,14 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_big_write() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_big_write() -> Result<()> {
         // Do a multi block write where all blocks start new (unwritten)
         // Verify only empty blocks have data.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -3645,7 +4194,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // read data into File, compare what was written to buffer
         let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
@@ -3671,7 +4220,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0)?;
+        let responses = region.region_read(&requests, 0).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -3684,14 +4233,15 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_big_write_partial_0() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_big_write_partial_0() -> Result<()> {
         // Do a write to block zero, then do a multi block write with
         // only_write_unwritten set. Verify block zero is the first write, and
         // the remaining blocks have the contents from the multi block fill.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -3722,7 +4272,7 @@ mod test {
             }];
 
         // Now write just one block
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
@@ -3752,7 +4302,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
@@ -3785,7 +4335,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0)?;
+        let responses = region.region_read(&requests, 0).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -3798,15 +4348,16 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_big_write_partial_1() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_big_write_partial_1() -> Result<()> {
         // Write to the second block, then do a multi block fill.
         // Verify the second block has the original data we wrote, and all
         // the other blocks have the data from the multi block fill.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(3).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -3836,7 +4387,7 @@ mod test {
             }];
 
         // Now write just to the second block.
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
@@ -3867,7 +4418,7 @@ mod test {
         }
 
         // send write_unwritten command.
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
@@ -3900,7 +4451,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0)?;
+        let responses = region.region_read(&requests, 0).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -3913,8 +4464,8 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_big_write_partial_final() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_big_write_partial_final() -> Result<()> {
         // Do a write to the fourth block, then do a multi block read fill
         // where the last block of the read fill is what we wrote to in
         // our first write.
@@ -3922,8 +4473,9 @@ mod test {
         // three blocks have the data from the multi block read fill.
 
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(5)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(5).await?;
 
         let ddef = region.def();
         // A bunch of things expect a 512, so let's make it explicit.
@@ -3954,7 +4506,7 @@ mod test {
             }];
 
         // Now write just to the second block.
-        region.region_write(&writes, 0, false)?;
+        region.region_write(&writes, 0, false).await?;
 
         // Now use region_write to fill four blocks
         let mut rng = rand::thread_rng();
@@ -3986,7 +4538,7 @@ mod test {
         }
 
         // send only_write_unwritten command.
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our
@@ -4008,7 +4560,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0)?;
+        let responses = region.region_read(&requests, 0).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -4022,13 +4574,14 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_write_unwritten_big_write_partial_sparse() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_unwritten_big_write_partial_sparse() -> Result<()> {
         // Do a multi block write_unwritten where a few different blocks have
         // data. Verify only unwritten blocks get the data.
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(4)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(4).await?;
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -4062,7 +4615,7 @@ mod test {
                 }];
 
             // Now write just one block
-            region.region_write(&writes, 0, false)?;
+            region.region_write(&writes, 0, false).await?;
         }
 
         // Now use region_write to fill entire region
@@ -4093,7 +4646,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, true)?;
+        region.region_write(&writes, 0, true).await?;
 
         // Because we did write_unwritten, the block we already written should
         // still have the data from the first write.  Update our buffer
@@ -4118,7 +4671,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0)?;
+        let responses = region.region_read(&requests, 0).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -4131,11 +4684,468 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_bad_hash_bad() -> Result<()> {
+    // A test function to return a generic'ish write command.
+    // We use the "all 9's data" and checksum.
+    fn create_generic_write(
+        eid: u64,
+        offset: crucible::Block,
+    ) -> Vec<crucible_protocol::Write> {
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
+            }];
+        writes
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_base() {
+        // Check that the extent_limit value in region_flush is honored
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(2).await.unwrap();
+
+        // Write to extent 0 block 0 first
+        let writes = create_generic_write(0, Block::new_512(0));
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Now write to extent 1 block 0
+        let writes = create_generic_write(1, Block::new_512(0));
+
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Verify the dirty bit is now set for both extents.
+        let inner = &region.extents[0].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        // Call flush, but limit the flush to extents < 1
+        region.region_flush(1, 2, &None, 3, Some(1)).await.unwrap();
+
+        // Verify the dirty bit is no longer set for 0, but still set
+        // for extent 1.
+        let inner = &region.extents[0].inner.as_ref().unwrap();
+        assert!(!inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_end() {
+        // Check that the extent_limit value in region_flush is honored
+        // Write to the last block in the extents.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(3).await.unwrap();
+
+        // Write to extent 1 block 9 first
+        let writes = create_generic_write(1, Block::new_512(9));
+        region.region_write(&writes, 1, true).await.unwrap();
+
+        // Now write to extent 2 block 9
+        let writes = create_generic_write(2, Block::new_512(9));
+        region.region_write(&writes, 2, true).await.unwrap();
+
+        // Verify the dirty bit is now set for both extents.
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[2].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        // Call flush, but limit the flush to extents < 2
+        region.region_flush(1, 2, &None, 3, Some(2)).await.unwrap();
+
+        // Verify the dirty bit is no longer set for 1, but still set
+        // for extent 2.
+        let inner = &region.extents[1].inner.as_ref().unwrap();
+        assert!(!inner.lock().await.dirty().unwrap());
+
+        let inner = &region.extents[2].inner.as_ref().unwrap();
+        assert!(inner.lock().await.dirty().unwrap());
+
+        // Now flush with no restrictions.
+        region.region_flush(1, 2, &None, 3, None).await.unwrap();
+
+        // Extent 2 should no longer be dirty
+        let inner = &region.extents[2].inner.as_ref().unwrap();
+        assert!(!inner.lock().await.dirty().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_walk_it_off() {
+        // Check that the extent_limit value in region_flush is honored
+        // Write to all the extents, then flush them one at a time.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(10).await.unwrap();
+
+        // Write to extent 1 block 9 first
+        let mut job_id = 1;
+        for ext in 0..10 {
+            let writes = create_generic_write(ext, Block::new_512(5));
+            region.region_write(&writes, job_id, true).await.unwrap();
+            job_id += 1;
+        }
+
+        // Verify the dirty bit is now set for all extents.
+        for ext in 0..10 {
+            let inner = &region.extents[ext].inner.as_ref().unwrap();
+            assert!(inner.lock().await.dirty().unwrap());
+        }
+
+        // Walk up the extent_limit, verify at each flush extents are
+        // flushed.
+        for ext in 1..10 {
+            println!("Flush to extent limit {}", ext);
+            region
+                .region_flush(1, 2, &None, 3, Some(ext))
+                .await
+                .unwrap();
+
+            // This ext should no longer be dirty.
+            println!("extent n-1 {} should not be dirty now", ext - 1);
+            let inner = &region.extents[ext - 1].inner.as_ref().unwrap();
+            assert!(!inner.lock().await.dirty().unwrap());
+
+            // Any extent above the current point should still be dirty.
+            for d_ext in ext..10 {
+                println!("verify {} still dirty", d_ext);
+                let inner = &region.extents[d_ext].inner.as_ref().unwrap();
+                assert!(inner.lock().await.dirty().unwrap());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_extent_limit_too_large() {
+        // Check that the extent_limit value in region_flush will return
+        // an error if the extent_limit is too large.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(1).await.unwrap();
+
+        // Call flush with an invalid extent
+        assert!(region.region_flush(1, 2, &None, 3, Some(2)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_extent_write_flush_close() {
+        // Verify that a write then close of an extent will return the
+        // expected gen flush and dirty bits for that extent.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(1).await.unwrap();
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
+            }];
+
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Flush extent with eid, fn, gen, job_id.
+        region
+            .region_flush_extent(eid as usize, 3, 2, 1)
+            .await
+            .unwrap();
+
+        // Close extent 0
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Verify inner is gone, and we returned the expected gen, flush
+        // and dirty values for the write that should be flushed now.
+        assert_eq!(gen, 3);
+        assert_eq!(flush, 2);
+        assert!(!dirty);
+    }
+
+    #[tokio::test]
+    async fn test_extent_close_reopen_flush_close() {
+        // Do several extent open close operations, verifying that the
+        // gen/flush/dirty return values are as expected.
+        let dir = tempdir().unwrap();
+        let mut region = Region::create(&dir, new_region_options(), csl())
+            .await
+            .unwrap();
+        region.extend(1).await.unwrap();
+
+        // Fill a buffer with "9"'s
+        let data = BytesMut::from(&[9u8; 512][..]);
+        let eid = 0;
+        let offset = Block::new_512(0);
+
+        // Write the block
+        let writes: Vec<crucible_protocol::Write> =
+            vec![crucible_protocol::Write {
+                eid,
+                offset,
+                data: data.freeze(),
+                block_context: BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: vec![1, 2, 3],
+                            tag: vec![4, 5, 6],
+                        },
+                    ),
+                    hash: 4798852240582462654, // Hash for all 9s
+                },
+            }];
+
+        region.region_write(&writes, 0, true).await.unwrap();
+
+        // Close extent 0 without a flush
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Because we did not flush yet, this extent should still have
+        // the values for an unwritten extent, except for the dirty bit.
+        assert_eq!(gen, 0);
+        assert_eq!(flush, 0);
+        assert!(dirty);
+
+        // Open the extent, then close it again, the values should remain
+        // the same as the previous check (testing here that dirty remains
+        // dirty).
+        region.reopen_extent(eid as usize).await.unwrap();
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Verify everything is the same, and dirty is still set.
+        assert_eq!(gen, 0);
+        assert_eq!(flush, 0);
+        assert!(dirty);
+
+        // Reopen, then flush extent with eid, fn, gen, job_id.
+        region.reopen_extent(eid as usize).await.unwrap();
+        region
+            .region_flush_extent(eid as usize, 4, 9, 1)
+            .await
+            .unwrap();
+        let ext_zero = &mut region.extents[eid as usize];
+        let (gen, flush, dirty) = ext_zero.close().await.unwrap();
+
+        // Verify after flush that g,f are updated, and that dirty
+        // is no longer set.
+        assert_eq!(gen, 4);
+        assert_eq!(flush, 9);
+        assert!(!dirty);
+    }
+
+    #[tokio::test]
+    /// We need to make sure that a flush will properly adjust the DB hashes
+    /// after issuing multiple writes to different disconnected sections of
+    /// an extent
+    async fn test_flush_after_multiple_disjoint_writes() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region_opts = new_region_options();
+        region_opts.set_extent_size(Block::new_512(1024));
+        let mut region =
+            Region::create(&dir, region_opts, csl()).await.unwrap();
+        region.extend(1).await.unwrap();
+
+        // Write some data to 3 different areas
+        let ranges = [(0..120), (243..244), (487..903)];
+
+        // We will write these ranges multiple times so that there's multiple
+        // hashes in the DB, so we need multiple sets of data.
+        let writes: Vec<Vec<Vec<crucible_protocol::Write>>> = (0..3)
+            .map(|_| {
+                ranges
+                    .iter()
+                    .map(|range| {
+                        range
+                            .clone()
+                            .map(|idx| {
+                                // Generate data for this block
+                                let data = thread_rng().gen::<[u8; 512]>();
+                                let hash = integrity_hash(&[&data]);
+                                crucible_protocol::Write {
+                                    eid: 0,
+                                    offset: Block::new_512(idx),
+                                    data: Bytes::copy_from_slice(&data),
+                                    block_context: BlockContext {
+                                        hash,
+                                        encryption_context: None,
+                                    },
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Write all the writes
+        for write_iteration in &writes {
+            for write_chunk in write_iteration {
+                region.region_write(write_chunk, 0, false).await?;
+            }
+        }
+
+        // Flush
+        region.region_flush(1, 2, &None, 3, None).await?;
+
+        // We are gonna compare against the last write iteration
+        let last_writes = writes.last().unwrap();
+
+        let ext = &region.extents[0];
+        let inner = ext.inner().await;
+        for (i, range) in ranges.iter().enumerate() {
+            // Get the contexts for the range
+            let ctxts = inner
+                .get_block_contexts(range.start, range.end - range.start)?;
+
+            // Every block should have at most 1 block
+            assert_eq!(
+                ctxts.iter().map(|block_ctxts| block_ctxts.len()).max(),
+                Some(1)
+            );
+
+            // Now that we've checked that, flatten out for an easier eq
+            let actual_ctxts: Vec<_> = ctxts
+                .iter()
+                .flatten()
+                .map(|downstairs_context| &downstairs_context.block_context)
+                .collect();
+
+            // What we expect is the hashes for the last write we did
+            let expected_ctxts: Vec<_> = last_writes[i]
+                .iter()
+                .map(|write| &write.block_context)
+                .collect();
+
+            // Check that they're right.
+            assert_eq!(expected_ctxts, actual_ctxts);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    /// This test ensures that our flush logic works even for full-extent
+    /// flushes. That's the case where the set of modified blocks will be full.
+    async fn test_big_extent_full_write_and_flush() -> Result<()> {
+        let dir = tempdir()?;
+
+        const EXTENT_SIZE: u64 = 4096;
+        let mut region_opts = new_region_options();
+        region_opts.set_extent_size(Block::new_512(EXTENT_SIZE));
+        let mut region =
+            Region::create(&dir, region_opts, csl()).await.unwrap();
+        region.extend(1).await.unwrap();
+
+        // writing the entire region a few times over before the flush.
+        let writes: Vec<Vec<crucible_protocol::Write>> = (0..3)
+            .map(|_| {
+                (0..EXTENT_SIZE)
+                    .map(|idx| {
+                        // Generate data for this block
+                        let data = thread_rng().gen::<[u8; 512]>();
+                        let hash = integrity_hash(&[&data]);
+                        crucible_protocol::Write {
+                            eid: 0,
+                            offset: Block::new_512(idx),
+                            data: Bytes::copy_from_slice(&data),
+                            block_context: BlockContext {
+                                hash,
+                                encryption_context: None,
+                            },
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Write all the writes
+        for write_iteration in &writes {
+            region.region_write(write_iteration, 0, false).await?;
+        }
+
+        // Flush
+        region.region_flush(1, 2, &None, 3, None).await?;
+
+        // compare against the last write iteration
+        let last_writes = writes.last().unwrap();
+
+        let ext = &region.extents[0];
+        let inner = ext.inner().await;
+        // Get the contexts for the range
+        let ctxts = inner.get_block_contexts(0, EXTENT_SIZE)?;
+
+        // Every block should have at most 1 block
+        assert_eq!(
+            ctxts.iter().map(|block_ctxts| block_ctxts.len()).max(),
+            Some(1)
+        );
+
+        // Now that we've checked that, flatten out for an easier eq
+        let actual_ctxts: Vec<_> = ctxts
+            .iter()
+            .flatten()
+            .map(|downstairs_context| &downstairs_context.block_context)
+            .collect();
+
+        // What we expect is the hashes for the last write we did
+        let expected_ctxts: Vec<_> = last_writes
+            .iter()
+            .map(|write| &write.block_context)
+            .collect();
+
+        // Check that they're right.
+        assert_eq!(expected_ctxts, actual_ctxts);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_bad_hash_bad() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
         let data = BytesMut::from(&[1u8; 512][..]);
 
@@ -4155,7 +5165,7 @@ mod test {
                 },
             }];
 
-        let result = region.region_write(&writes, 0, false);
+        let result = region.region_write(&writes, 0, false).await;
 
         assert!(result.is_err());
 
@@ -4171,19 +5181,22 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_blank_block_read_ok() -> Result<()> {
+    #[tokio::test]
+    async fn test_blank_block_read_ok() -> Result<()> {
         let dir = tempdir()?;
-        let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(1)?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
 
-        let responses = region.region_read(
-            &[crucible_protocol::ReadRequest {
-                eid: 0,
-                offset: Block::new_512(0),
-            }],
-            0,
-        )?;
+        let responses = region
+            .region_read(
+                &[crucible_protocol::ReadRequest {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                }],
+                0,
+            )
+            .await?;
 
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].hashes().len(), 0);

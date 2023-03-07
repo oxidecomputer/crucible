@@ -94,19 +94,17 @@ async fn main() -> Result<()> {
     let guest = Arc::new(Guest::new());
 
     let _join_handle =
-        up_main(crucible_opts, opt.gen, guest.clone(), None).await?;
+        up_main(crucible_opts, opt.gen, None, guest.clone(), None).await?;
     println!("Crucible runtime is spawned");
 
     // NBD server
 
-    guest.activate(opt.gen).await?;
-    let volume = Volume::from_block_io(guest).await?;
-    let mut cpf = crucible::CruciblePseudoFile::from(Arc::new(volume))?;
+    guest.activate().await?;
+    let mut cpf = crucible::CruciblePseudoFile::from(guest)?;
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
 
     // sent to NBD client during handshake through Export struct
-    cpf.activate(opt.gen).await?;
     println!("NBD advertised size as {} bytes", cpf.sz());
 
     for stream in listener.incoming() {

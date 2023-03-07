@@ -29,7 +29,7 @@ impl InMemoryBlockIO {
 
 #[async_trait]
 impl BlockIO for InMemoryBlockIO {
-    async fn activate(&self, _gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         Ok(())
     }
 

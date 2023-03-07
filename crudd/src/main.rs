@@ -486,6 +486,7 @@ async fn cmd_write<T: BlockIO>(
         if early_shutdown.try_recv().is_ok() {
             eprintln!("shutting down early in response to SIGUSR1");
             join_all(futures).await?;
+            crucible.flush(None).await?;
             return Ok(total_bytes_written);
         }
     }
@@ -521,6 +522,9 @@ async fn cmd_write<T: BlockIO>(
             futures,
         )
         .await?;
+    } else {
+        join_all(futures).await?;
+        crucible.flush(None).await?;
     }
 
     Ok(total_bytes_written)
@@ -561,17 +565,17 @@ async fn main() -> Result<()> {
     let guest = Arc::new(Guest::new());
 
     let _join_handle =
-        up_main(crucible_opts, opt.gen, guest.clone(), None).await?;
+        up_main(crucible_opts, opt.gen, None, guest.clone(), None).await?;
     eprintln!("Crucible runtime is spawned");
 
     // IO time
-    guest.activate(opt.gen).await?;
+    guest.activate().await?;
 
     let (early_shutdown_sender, early_shutdown_receiver) = mpsc::channel(1);
 
     // Only start the SIGUSR1 handler if we're in benchmarking mode
     if opt.benchmarking_mode.is_some() {
-        let signals = Signals::new(&[SIGUSR1])?;
+        let signals = Signals::new([SIGUSR1])?;
         tokio::spawn(handle_signals(signals, early_shutdown_sender));
     }
 

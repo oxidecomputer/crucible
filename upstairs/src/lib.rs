@@ -1,9 +1,6 @@
-// Copyright 2022 Oxide Computer Company
-#![cfg_attr(not(usdt_stable_asm), feature(asm))]
-#![cfg_attr(
-    all(target_os = "macos", not(usdt_stable_asm_sym)),
-    feature(asm_sym)
-)]
+// Copyright 2023 Oxide Computer Company
+#![cfg_attr(usdt_need_asm, feature(asm))]
+#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
@@ -40,8 +37,8 @@ use tracing::{instrument, span, Level};
 use usdt::register_probes;
 use uuid::Uuid;
 
-use aes_gcm_siv::aead::{AeadInPlace, NewAead};
-use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce, Tag};
+use aes_gcm_siv::aead::AeadInPlace;
+use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
 pub mod control;
@@ -77,7 +74,7 @@ use async_trait::async_trait;
 /// between flushes are performed in.
 #[async_trait]
 pub trait BlockIO: Sync {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError>;
+    async fn activate(&self) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
@@ -170,15 +167,12 @@ pub trait BlockIO: Sync {
     }
 
     /// Activate if not active.
-    async fn conditional_activate(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
+    async fn conditional_activate(&self) -> Result<(), CrucibleError> {
         if self.query_is_active().await? {
             return Ok(());
         }
 
-        self.activate(gen).await
+        self.activate().await
     }
 }
 
@@ -307,7 +301,8 @@ pub fn deadline_secs(secs: u64) -> Instant {
 async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
-    up_coms: UpComs,
+    client_id: u8,
+    ds_done_tx: &mpsc::Sender<u64>,
 ) -> Result<()> {
     let (upstairs_id, session_id, ds_id, result) = match m {
         Message::Imok => return Ok(()),
@@ -317,7 +312,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__io__done!(|| (job_id, up_coms.client_id as u64));
+            cdt::ds__write__io__done!(|| (job_id, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -331,10 +326,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__unwritten__io__done!(|| (
-                job_id,
-                up_coms.client_id as u64
-            ));
+            cdt::ds__write__unwritten__io__done!(|| (job_id, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -348,7 +340,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__flush__io__done!(|| (job_id, up_coms.client_id as u64));
+            cdt::ds__flush__io__done!(|| (job_id, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -362,7 +354,7 @@ async fn process_message(
             job_id,
             responses,
         } => {
-            cdt::ds__read__io__done!(|| (job_id, up_coms.client_id as u64));
+            cdt::ds__read__io__done!(|| (job_id, client_id as u64));
             (*upstairs_id, *session_id, *job_id, responses.clone())
         }
         /*
@@ -370,10 +362,7 @@ async fn process_message(
          * I don't think there is anything else we can do.
          */
         x => {
-            warn!(
-                u.log,
-                "{} unexpected frame {:?}, IGNORED", up_coms.client_id, x
-            );
+            warn!(u.log, "{} unexpected frame {:?}, IGNORED", client_id, x);
             return Ok(());
         }
     };
@@ -382,7 +371,7 @@ async fn process_message(
         warn!(
             u.log,
             "[{}] u.uuid {:?} != job {} upstairs_id {:?}!",
-            up_coms.client_id,
+            client_id,
             u.uuid,
             ds_id,
             upstairs_id,
@@ -395,7 +384,7 @@ async fn process_message(
         warn!(
             u.log,
             "[{}] u.session_id {:?} != job {} session_id {:?}!",
-            up_coms.client_id,
+            client_id,
             u.session_id,
             ds_id,
             session_id,
@@ -408,10 +397,8 @@ async fn process_message(
     // job being ready to ACK, then send a message on the ds_done
     // channel.  Note that a failed IO still needs to ACK that failure
     // back to the guest.
-    if u.process_ds_operation(ds_id, up_coms.client_id, result)
-        .await?
-    {
-        up_coms.ds_done_tx.send(ds_id).await?;
+    if u.process_ds_operation(ds_id, client_id, result).await? {
+        ds_done_tx.send(ds_id).await?;
     }
 
     Ok(())
@@ -486,8 +473,8 @@ where
         }
 
         /*
-         * If in_progress returns None, it means that this client should
-         * be skipped.
+         * If in_progress returns None, it means that this job on this
+         * client should be skipped.
          */
         let job = u.downstairs.lock().await.in_progress(*new_id, client_id);
         if job.is_none() {
@@ -532,7 +519,13 @@ where
                 flush_number,
                 gen_number,
                 snapshot_details,
+                extent_limit: _,
             } => {
+                // This is a flush so we have to determine if there is an
+                // extent_limit value for this downstairs.  Use the client ID
+                // to get the Option<limit> for our unique client.
+                let extent_limit =
+                    u.downstairs.lock().await.extent_limit[client_id as usize];
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
@@ -542,6 +535,7 @@ where
                     flush_number,
                     gen_number,
                     snapshot_details,
+                    extent_limit,
                 })
                 .await?
             }
@@ -556,6 +550,96 @@ where
                     job_id: *new_id,
                     dependencies: dependencies.clone(),
                     requests,
+                })
+                .await?
+            }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent: _,
+            } => {
+                // This command should never exist on the upstairs side.
+                // We only construct it for downstairs IO, after
+                // receiving ExtentLiveClose from the upstairs.
+                panic!("[{}] Received illegal IOop::ExtentClose", client_id);
+            }
+            IOop::ExtentFlushClose {
+                dependencies,
+                extent,
+                flush_number,
+                gen_number,
+                source_downstairs,
+                repair_downstairs,
+            } => {
+                // TODO: Add dtrace probe point
+                if source_downstairs == client_id {
+                    fw.send(Message::ExtentLiveFlushClose {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: dependencies.clone(),
+                        extent_id: extent,
+                        flush_number,
+                        gen_number,
+                    })
+                    .await?
+                } else if repair_downstairs.contains(&client_id) {
+                    // We are the downstairs being repaired, so just close.
+                    fw.send(Message::ExtentLiveClose {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: dependencies.clone(),
+                        extent_id: extent,
+                    })
+                    .await?
+                } else {
+                    // TODO: Send the IOop::NoOp command here.
+                }
+            }
+            IOop::ExtentLiveRepair {
+                dependencies,
+                extent,
+                source_downstairs,
+                source_repair_address,
+                repair_downstairs,
+            } => {
+                // TODO: Add dtrace probe point
+                if repair_downstairs.contains(&client_id) {
+                    fw.send(Message::ExtentLiveRepair {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: dependencies.clone(),
+                        extent_id: extent,
+                        source_client_id: source_downstairs,
+                        source_repair_address,
+                    })
+                    .await?
+                } else {
+                    // TODO: Send NOOP command for this.
+                }
+            }
+            IOop::ExtentLiveReopen {
+                dependencies,
+                extent,
+            } => {
+                // TODO: Add dtrace probe point
+                fw.send(Message::ExtentLiveReopen {
+                    upstairs_id: u.uuid,
+                    session_id: u.session_id,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
+                    extent_id: extent,
+                })
+                .await?
+            }
+            IOop::ExtentLiveNoOp { dependencies } => {
+                // TODO: Add dtrace probe point
+                fw.send(Message::ExtentLiveNoOp {
+                    upstairs_id: u.uuid,
+                    session_id: u.session_id,
+                    job_id: *new_id,
+                    dependencies: dependencies.clone(),
                 })
                 .await?
             }
@@ -633,27 +717,42 @@ where
             my_state,
         );
 
-        // XXX Move this all to some state check place?
-        if my_state != DsState::New
-            && my_state != DsState::Disconnected
-            && my_state != DsState::Failed
-            && my_state != DsState::Offline
-        {
-            panic!(
-                "[{}] failed proc with state {:?}",
-                up_coms.client_id, my_state
-            );
-        }
+        // Verify we are in a valid state at this point.
+        match my_state {
+            DsState::New | DsState::Disconnected | DsState::Faulted => {} // Ok
 
-        /*
-         * This is only applicable for a downstairs that is returning from
-         * being disconnected. Mark any in progress jobs since the
-         * last good flush back to New, as we have reconnected to
-         * this downstairs and will need to replay any work that we
-         * were holding that we did not flush.
-         */
-        if my_state == DsState::Offline {
-            ds.re_new(up_coms.client_id);
+            DsState::Offline => {
+                /*
+                 * This is only applicable for a downstairs that is
+                 * returning from being disconnected. Mark any in progress
+                 * jobs since the last good flush back to New, as we have
+                 * reconnected to this downstairs and will need to replay
+                 * any work that we were holding that we did not flush.
+                 */
+                ds.re_new(up_coms.client_id);
+            }
+            DsState::OnlineRepair => {
+                /*
+                 * TODO: Write more code here, when a downstairs is being
+                 * repaired and disconnects, we have to basically move it back
+                 * to the beginning of the line and start over, I think.
+                 * Any outstanding jobs need to be discarded, all extents
+                 * that were closed need to re-open, and then the repair
+                 * starts over from the beginning.  Something like that.
+                 * Similar, but not quite the same, as the re_new.
+                 */
+                warn!(
+                    up.log,
+                    "[{}] Reconnect while repair in progress",
+                    up_coms.client_id
+                );
+            }
+            _ => {
+                panic!(
+                    "[{}] failed proc with state {:?}",
+                    up_coms.client_id, my_state
+                );
+            }
         }
     }
 
@@ -696,46 +795,66 @@ where
      * 0:        HereIAm(...)  --->
      *                         <---  YesItsMe(...)
      *
-     * At this point, a downstairs will wait for a "PromoteToActive" message
+     * At this point, a downstairs will wait for a PromoteToActive message
      * to be sent to it.  If this is a new upstairs that has not yet
      * connected to a downstairs, then we will wait for the guest to send
      * us this message and pass it down to the downstairs.  If a downstairs
      * is reconnecting after having already been active, then we look at our
      * upstairs guest_io_ready() and, if the upstairs is ready, we send the
      * downstairs the message ourselves that they should promote to active.
+     * For downstairs currently in Disconnected or New states, we move to
+     * WaitActive, for Faulted or Offline states, we stay in that state..
      *
      * 1: PromoteToActive(uuid)--->
      *                         <---  YouAreNowActive(uuid)
      *
+     * YouAreNowActive includes information about the upstairs and session
+     * ID and we do some sanity checking here to make sure it all still
+     * matches with what we expect.  We next request RegionInfo from the
+     * downstairs.
+     *
      * 2:    RegionInfoPlease  --->
      *                         <---  RegionInfo(r)
      *
-     *    At this point the upstairs looks to see what state the downstairs
-     *    is currently in.  It will be "New", "Disconnected" or "Offline".
+     * At this point the upstairs looks to see what state the downstairs is
+     * currently in.  It will be WaitActive, Faulted, or Offline.
      *
-     *    For "New" or "Disconnected" it means this downstairs never was
-     *    "Active" and we have to go through the full compare of this
-     *    downstairs with other downstairs and make sure they are
-     *    consistent (This code still TBW).  The New/Disconnected steps
-     *    continue here:
+     * Depending on which state, we will either choose 3 or 4 next.
+     *
+     * For the Offline state, the downstairs was connected and verified
+     * and some point after that, the connection was lost.  To handle this
+     * condition we want to know the last flush this downstairs had ACKd
+     * so we can give it whatever work it missed.
+     *
+     * For WaitActive, it means this downstairs never was "Active" and we
+     * have to go through the full compare of this downstairs with other
+     * downstairs and make sure they are consistent.  To do that, we will
+     * request extent versions and skip over step 3
+     * For Faulted, we don't know the condition of the data on the
+     * Downstairs, so we transition this downstairs to OnlineRepair.  We
+     * also request extent versions and will have to repair this
+     * downstairs, skipping over step 3 as well.
+     *
+     * (Offline only):
+     *
+     *          Upstairs             Downstairs
+     * 3:       LastFlush(lf)) --->
+     *                         <---  LastFlushAck(lf)
+     *
+     * After receiving our last flush, we now move this downstairs state to
+     * Replay and skip ahead to step 5.
+     *
+     * (WaitActive and OnlineRepair come here from 2):
      *
      *          Upstairs             Downstairs
      * 4: ExtentVersionsPlease --->
      *                         <---  ExtentVersions(g, v, d)
      *
-     *    Now with the extent info, Upstairs calls process_downstairs() and
-     *    if no problems, sends connected=true to the up_listen() task,
-     *    we set the downstairs to DsState::WaitQuorum and we exit the
-     *    while loop.
+     * Now with the extent info, Upstairs calls process_downstairs() and
+     * if no problems, sends connected=true to the up_listen() task,
+     * we set the downstairs to DsState::WaitQuorum and we exit the
+     * while loop.
      *
-     *    For the "Offline" state, the downstairs was connected and verified
-     *    and after that point the connection was lost.  To handle this
-     *    condition we follow these final steps to get this downstairs
-     *    working again:
-     *
-     *          Upstairs             Downstairs
-     * 3:       LastFlush(lf)) --->
-     *                         <---  LastFlushAck(lf)
      *
      * 5: Now the downstairs is ready to receive replay IOs from the
      *    upstairs. We set the downstairs to DsState::Replay and the while
@@ -759,14 +878,6 @@ where
             r = up_coms.ds_active_rx.changed(),
                 if negotiated == 1 && !self_promotion =>
             {
-                /*
-                 * The activating guest sends us the generation number.
-                 * TODO: Update the promote to active message to send
-                 * the generation number along with the UUID for the
-                 * downstairs to validate. Or, possibly not. The generation
-                 * number the upstairs has is what it should use going
-                 * forward.  What the downstairs has should not be higher.
-                 */
                 match r {
                     Ok(_) => {
                         let gen = up_coms.ds_active_rx.borrow();
@@ -774,8 +885,7 @@ where
                             up_coms.client_id, *gen);
                     }
                     Err(e) => {
-                        // XXX bail? panic?
-                        warn!(up.log, "[{}] received activate error {:?}",
+                        error!(up.log, "[{}] received activate error {:?}",
                             up_coms.client_id, e);
                     }
                 }
@@ -930,7 +1040,7 @@ where
                             match_uuid && match_session && match_gen;
 
                         if !matches_self {
-                            warn!(
+                            error!(
                                 up.log,
                                 "[{}] YouAreNowActive didn't match self! {} {} {}",
                                 up_coms.client_id,
@@ -961,9 +1071,33 @@ where
                                 },
                             );
 
-                            up.ds_transition(up_coms.client_id, DsState::New).await;
-                            up.set_inactive(CrucibleError::UuidMismatch).await;
-                            return Err(CrucibleError::UuidMismatch.into());
+                            up.ds_transition(
+                                up_coms.client_id, DsState::New
+                            ).await;
+                            if !match_gen {
+                                let gen_error = format!(
+                                    "Generation requested:{} found:{}",
+                                    gen, up.get_generation().await
+                                );
+                                up.set_inactive(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        gen_error.clone()
+                                    )
+                                )
+                                .await;
+                                return Err(
+                                    CrucibleError::GenerationNumberTooLow(
+                                        gen_error
+                                    )
+                                    .into()
+                                );
+                            } else {
+                                up.set_inactive(
+                                    CrucibleError::UuidMismatch
+                                )
+                                .await;
+                                return Err(CrucibleError::UuidMismatch.into());
+                            }
                         }
 
                         if negotiated != 1 {
@@ -981,7 +1115,7 @@ where
                         new_session_id,
                         new_gen,
                     }) => {
-                        warn!(
+                        error!(
                             up.log,
                             "[{}] {} ({}) proc saw YouAreNoLongerActive {:?} {:?} {}",
                             up_coms.client_id,
@@ -1057,58 +1191,81 @@ where
                         if negotiated != 2 {
                             bail!("Received RegionInfo out of order!");
                         }
+                        info!(up.log,
+                            "[{}] downstairs client at {} has UUID {}",
+                            up_coms.client_id, target, region_def.uuid(),
+                        );
+
+                        // Add (and/or verify) this region info to our
+                        // collection for each downstairs.
                         up.add_ds_region(up_coms.client_id, region_def).await?;
 
+                        // Match on the current state of this downstairs
                         let my_state = {
                             let state = &up.downstairs.lock().await.ds_state;
                             state[up_coms.client_id as usize]
                         };
-                        if my_state == DsState::Offline {
-                            /*
-                             * If we are coming from state Offline, then it
-                             * means the downstairs has departed then came
-                             * back in short enough time that it does not
-                             * have to go into full recovery/repair mode.
-                             * If we have verified that the UUID and region
-                             * info is the same, we can reconnect and let
-                             * any outstanding work be replayed to catch
-                             * us up.  We do need to tell the downstairs
-                             * the last flush ID it had ACKd to us.
-                             */
-                            let lf = up.last_flush_id(up_coms.client_id).await;
-                            info!(
-                                up.log,
-                                "[{}] send last flush ID to this DS: {}",
-                                up_coms.client_id, lf);
-                            negotiated = 3;
-                            fw.send(Message::LastFlush { last_flush_number: lf }).await?;
+                        match my_state {
+                            DsState::Offline => {
+                                /*
+                                 * If we are coming from state Offline, then it
+                                 * means the downstairs has departed then came
+                                 * back in short enough time that it does not
+                                 * have to go into full recovery/repair mode.
+                                 * If we have verified that the UUID and region
+                                 * info is the same, we can reconnect and let
+                                 * any outstanding work be replayed to catch
+                                 * us up.  We do need to tell the downstairs
+                                 * the last flush ID it had ACKd to us.
+                                 */
+                                let lf = up.last_flush_id(
+                                    up_coms.client_id
+                                ).await;
+                                info!(
+                                    up.log,
+                                    "[{}] send last flush ID to this DS: {}",
+                                    up_coms.client_id, lf);
+                                negotiated = 3;
+                                fw.send(
+                                    Message::LastFlush { last_flush_number: lf }
+                                ).await?;
 
-                        } else if my_state == DsState::WaitActive {
-                            /*
-                             * Ask for the current version of all extents.
-                             */
-                            negotiated = 4;
-                            fw.send(Message::ExtentVersionsPlease).await?;
-
-                        } else {
-                            /*
-                             * TODO: This is the case where a downstairs
-                             * failed and was removed and has re-joined
-                             * (Hopefully fixed now).  To bring this back,
-                             * we need to write code to support combining
-                             * a "new" downstairs with two running downstairs
-                             * while those downstairs are still taking IO.
-                             * Good luck!
-                             */
-                            panic!("[{}] Write more code. join from state {:?} {} {}",
-                                up_coms.client_id,
-                                my_state,
-                                up.uuid,
-                                negotiated,
-                            );
+                            }
+                            DsState::WaitActive => {
+                                /*
+                                 * Ask for the current version of all extents.
+                                 */
+                                negotiated = 4;
+                                fw.send(Message::ExtentVersionsPlease).await?;
+                            }
+                            DsState::Faulted => {
+                                up.ds_transition(
+                                    up_coms.client_id, DsState::OnlineRepair
+                                ).await;
+                                /*
+                                 * Ask for the current version of all extents.
+                                 */
+                                negotiated = 4;
+                                fw.send(Message::ExtentVersionsPlease).await?;
+                            }
+                            DsState::OnlineRepair => {
+                                /*
+                                 * Ask for the current version of all extents.
+                                 */
+                                negotiated = 4;
+                                fw.send(Message::ExtentVersionsPlease).await?;
+                            }
+                            bad_state => {
+                                panic!(
+                                    "[{}] join from invalid state {:?} {} {}",
+                                    up_coms.client_id,
+                                    bad_state,
+                                    up.uuid,
+                                    negotiated,
+                                );
+                            }
                         }
                         up.ds_state_show().await;
-
                     }
                     Some(Message::LastFlushAck { last_flush_number }) => {
                         if negotiated != 3 {
@@ -1128,7 +1285,8 @@ where
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            up.last_flush_id(up_coms.client_id).await, last_flush_number
+                            up.last_flush_id(up_coms.client_id).await,
+                            last_flush_number
                         );
                         up.ds_transition(
                             up_coms.client_id, DsState::Replay
@@ -1137,7 +1295,9 @@ where
                         *connected = true;
                         negotiated = 5;
                     },
-                    Some(Message::ExtentVersions { gen_numbers, flush_numbers, dirty_bits }) => {
+                    Some(Message::ExtentVersions {
+                            gen_numbers, flush_numbers, dirty_bits
+                    }) => {
                         if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
@@ -1146,7 +1306,22 @@ where
                             let state = &up.downstairs.lock().await.ds_state;
                             state[up_coms.client_id as usize]
                         };
-                        assert_eq!(my_state, DsState::WaitActive);
+                        match my_state {
+                            DsState::WaitActive => {
+                                up.ds_transition(
+                                    up_coms.client_id, DsState::WaitQuorum
+                                ).await;
+                            }
+                            DsState::OnlineRepair => {} // Valid to move forward
+                            _ => {
+                                panic!(
+                                    "[{}] Downstairs is in invalid state {}",
+                                    up_coms.client_id,
+                                    my_state,
+                                );
+                            }
+                        }
+
                         /*
                          * Record this downstairs region info for later
                          * comparison with the other downstairs in this
@@ -1158,18 +1333,26 @@ where
                             dirty: dirty_bits,
                         };
 
-                        up.downstairs
+                        let old_rm = up.downstairs
                           .lock()
                           .await
                           .region_metadata
                           .insert(up_coms.client_id, dsr);
 
+                        warn!(
+                            up.log,
+                            "[{}] new RM replaced this: {:?}",
+                            up_coms.client_id,
+                            old_rm,
+                        );
                         negotiated = 5;
-                        up.ds_transition(
-                            up_coms.client_id, DsState::WaitQuorum
-                        ).await;
                         //up.ds_state_show().await;
 
+                        /*
+                         * At this point, we have all we need in the upstairs
+                         * to make a decision on what to do next.  Go ahead
+                         * and move out of the negotiation phase.
+                         */
                         *connected = true;
                     }
                     Some(Message::UuidMismatch { expected_id }) => {
@@ -1183,7 +1366,7 @@ where
                          * downstairs from taking and sending any more
                          * IO.
                          */
-                        warn!(
+                        error!(
                             up.log,
                             "[{}] {} received UuidMismatch, expecting {:?}!",
                             up_coms.client_id, up.uuid, expected_id
@@ -1224,7 +1407,8 @@ where
     /*
      * Tell up_listen task that a downstairs has completed the negotiation
      * and is ready to either rejoin an active upstairs, or participate
-     * in the reconciliation.
+     * in the reconciliation.  The up_listen task will coordinate a
+     * reconciliation if necessary.
      */
     if let Err(e) = up_coms
         .ds_status_tx
@@ -1292,9 +1476,68 @@ where
      * on a reconnect, then we have to enter the reconcile loop and
      * do any repairs that might be necessary.
      */
-    let mut more_work = up.ds_is_replay(up_coms.client_id).await;
-    if !more_work {
-        do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
+    // Match on DS state to decide what to do.
+    // Either:
+    // New: do_reconcile_work
+    // Replay: Set more work, move state to Active
+    // OnlineRepair: XXX write more code, all jobs should stay skipped.
+
+    let mut more_work = false;
+    let up_state = {
+        let active = up.active.lock().await;
+        active.up_state
+    };
+    {
+        let mut ds = up.downstairs.lock().await;
+        let state = ds.ds_state[up_coms.client_id as usize];
+        match state {
+            DsState::Replay => {
+                info!(
+                    up.log,
+                    "[{}] {} Transition from Replay to Active",
+                    up_coms.client_id,
+                    up.uuid,
+                );
+                up.ds_transition_with_lock(
+                    &mut ds,
+                    up_state,
+                    up_coms.client_id,
+                    DsState::Active,
+                );
+                more_work = true;
+            }
+            DsState::WaitQuorum | DsState::Repair => {
+                drop(ds);
+                do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
+            }
+            DsState::OnlineRepair => {
+                drop(ds);
+                // TODO: Repair doing something.
+                // For repair to actually do something, there must be a
+                // responsible task started to coordinate it.  Either do
+                // that here, or signal to an existing task that it must
+                // drive the repair.
+                info!(
+                    up.log,
+                    "[{}] {} Enter Online Repair mode",
+                    up_coms.client_id,
+                    up.uuid
+                );
+            }
+            bad_state => {
+                error!(
+                    up.log,
+                    "[{}] Downstairs in invalid state: {}",
+                    up_coms.client_id,
+                    bad_state,
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                panic!(
+                    "[{}] {} Downstairs in invalid state: {}",
+                    up_coms.client_id, up.uuid, bad_state,
+                );
+            }
+        }
     }
 
     /*
@@ -1317,7 +1560,8 @@ where
     info!(up.log, "[{}] Starts cmd_loop", up_coms.client_id);
     let pm_task = {
         let up_c = up.clone();
-        let up_coms_c = up_coms.clone();
+        let ds_done_tx = up_coms.ds_done_tx.clone();
+        let client_id = up_coms.client_id;
 
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
@@ -1331,18 +1575,35 @@ where
                  * handle it.
                  */
                 if let Err(e) =
-                    process_message(&up_c, &m, up_coms_c.clone()).await
+                    process_message(&up_c, &m, client_id, &ds_done_tx).await
                 {
                     warn!(
                         up_c.log,
-                        "[{}] Error processing message: {}",
-                        up_coms_c.client_id,
-                        e
+                        "[{}] Error processing message: {}", client_id, e
                     );
                 }
 
-                if up_c.ds_deactivate(up_coms_c.client_id).await {
-                    bail!("[{}] exits after deactivation", up_coms_c.client_id);
+                /*
+                 * We may have faulted this downstairs (after processing
+                 * this IO).  If we have, then we exit this task which will
+                 * tear down this connection and require the downstairs to
+                 * reconnect and go into OnlineRepair mode.
+                 */
+                if up_c.downstairs.lock().await.ds_state[client_id as usize]
+                    == DsState::Faulted
+                {
+                    warn!(
+                        up_c.log,
+                        "[{}] exits pm_task, this downstairs faulted",
+                        client_id
+                    );
+                    // Until OnlineRepair is actually supported, we are
+                    // doing more harm than good by remaining up.
+                    panic!("[{}] received Write/WU/Flush error ", client_id);
+                }
+
+                if up_c.ds_deactivate(client_id).await {
+                    bail!("[{}] exits after deactivation", client_id);
                 }
             }
             Ok(())
@@ -1375,7 +1636,11 @@ where
                 match f.transpose()? {
                     None => {
                         // Downstairs disconnected
-                        warn!(up.log, "[{}] None response", up_coms.client_id);
+                        warn!(
+                            up.log,
+                            "[{}] downstairs disconnected",
+                            up_coms.client_id
+                        );
                         return Ok(())
                     },
                     Some(Message::YouAreNoLongerActive {
@@ -1383,7 +1648,7 @@ where
                         new_session_id,
                         new_gen,
                     }) => {
-                        info!(
+                        error!(
                             up.log,
                             "[{}] {} ({}) cmd_loop saw YouAreNoLongerActive {:?} {:?} {}",
                             up_coms.client_id,
@@ -1416,8 +1681,8 @@ where
                             // our UUID. We shouldn't have received this
                             // message. The downstairs is confused.
                             bail!(
-                                "[{}] {} bad YouAreNoLongerActive, same upstairs \
-                                uuid and our gen {} >= new gen {}!",
+                                "[{}] {} bad YouAreNoLongerActive, same \
+                                upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
                                 up.get_generation().await,
@@ -1462,7 +1727,10 @@ where
                          * XXX Can a bad downstairs sending us a bad
                          * UUID be used as a denial of service?
                          */
-                        up.ds_transition(up_coms.client_id, DsState::Disabled).await;
+                        up.ds_transition(
+                                up_coms.client_id,
+                                DsState::Disabled
+                            ).await;
                         up.set_inactive(CrucibleError::UuidMismatch).await;
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
@@ -1474,7 +1742,7 @@ where
                     }
                 }
             }
-            _ = up_coms.ds_work_rx.changed() => {
+            _ = up_coms.ds_work_rx.recv() => {
                 /*
                  * A change here indicates the work hashmap has changed
                  * and we should go look for new work to do. It is possible
@@ -1494,16 +1762,8 @@ where
                 }
             }
             _ = sleep_until(more_work_interval), if more_work => {
-                warn!(up.log, "[{}] flow control sending more work",
-                    up_coms.client_id
-                );
-
-                let more = io_send(up, &mut fw, up_coms.client_id).await?;
-
-                if more {
-                    more_work = true;
-                } else {
-                    more_work = false;
+                more_work = io_send(up, &mut fw, up_coms.client_id).await?;
+                if !more_work {
                     warn!(up.log, "[{}] flow control end ", up_coms.client_id);
                 }
 
@@ -1681,7 +1941,10 @@ where
                         }
                     }
                     Some(Message::UuidMismatch { expected_id }) => {
-                        up.ds_transition(up_coms.client_id, DsState::Disabled).await;
+                        up.ds_transition(
+                            up_coms.client_id,
+                            DsState::Disabled
+                        ).await;
                         bail!(
                             "[{}] received UuidMismatch, expecting {:?}!",
                             up_coms.client_id, expected_id
@@ -1912,7 +2175,7 @@ where
  * Things that allow the various tasks of Upstairs to communicate
  * with each other.
  */
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct UpComs {
     /**
      * The client ID (a downstairs) who will be using these channels.
@@ -1923,7 +2186,7 @@ struct UpComs {
      * (possibly) arrived on the work queue and this client should go
      * see what new work has arrived
      */
-    ds_work_rx: watch::Receiver<u64>,
+    ds_work_rx: mpsc::Receiver<u64>,
     /**
      * This channel is used to transmit that the state of the connection
      * to this downstairs has changed.  The receiver is the up_listen task.
@@ -1973,7 +2236,6 @@ enum WrappedStream {
  * instance.  This task will run forever.
  */
 async fn looper(
-    target: SocketAddr,
     tls_context: Arc<
         tokio::sync::Mutex<Option<crucible_common::x509::TLSContext>>,
     >,
@@ -1990,6 +2252,10 @@ async fn looper(
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        // Get the specific information for the downstairs we will operate on.
+        let ds = up.downstairs.lock().await;
+        let target: SocketAddr = ds.ds_target[up_coms.client_id as usize];
+        drop(ds);
 
         /*
          * Make connection to this downstairs.
@@ -2151,6 +2417,11 @@ struct Downstairs {
     ds_uuid: HashMap<u8, Uuid>,
 
     /*
+     * The IP:Port of each of the downstairs
+     */
+    ds_target: Vec<SocketAddr>,
+
+    /*
      * The IP:Port for repair when contacting the downstairs, hashed by
      * the client index the upstairs gives it.
      */
@@ -2168,7 +2439,7 @@ struct Downstairs {
      */
     ds_last_flush: Vec<u64>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
-    active: HashMap<u64, DownstairsIO>,
+    ds_active: HashMap<u64, DownstairsIO>,
     next_id: u64,
     completed: AllocRingBuffer<u64>,
 
@@ -2207,17 +2478,33 @@ struct Downstairs {
      * The logger for messages sent from downstairs methods.
      */
     log: Logger,
+
+    /**
+     * Counters for the in flight work for the downstairs
+     */
+    io_state_count: IOStateCount,
+
+    /**
+     * Extent limit, if set, should be the extent where a flush
+     * of a region will stop.  It is assumed that the flush will
+     * walk extents from 0 to extent_limit, and any extent above
+     * the limit will not be issued a flush.
+     * This is used during online repair, and will only ever be
+     * set on a downstairs that is undergoing live repair.
+     */
+    extent_limit: Vec<Option<usize>>,
 }
 
 impl Downstairs {
-    fn new(log: Logger) -> Self {
+    fn new(log: Logger, ds_target: Vec<SocketAddr>) -> Self {
         Self {
             ds_uuid: HashMap::new(),
+            ds_target,
             ds_repair: HashMap::new(),
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
-            active: HashMap::new(),
+            ds_active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
             next_id: 1000,
             region_metadata: HashMap::new(),
@@ -2226,6 +2513,8 @@ impl Downstairs {
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
+            io_state_count: IOStateCount::new(),
+            extent_limit: vec![None; 3],
         }
     }
 
@@ -2240,29 +2529,26 @@ impl Downstairs {
 
     /**
      * Mark this request as in progress for this client, and return a copy
-     * of the details of the request. If the downstairs client has
-     * experienced errors in the past, return None and mark this as
-     * Skipped.
+     * of the details of the request.
      *
-     * XXX Better error handling might mean clearing previous downstairs
-     * errors, as for all we know it's a new downstairs.
+     * If the job state is already IOState::Skipped, then this task
+     * has no work to do, so return None.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let job = self.active.get_mut(&ds_id).unwrap();
+        let job = self.ds_active.get_mut(&ds_id).unwrap();
 
-        let newstate = match &self.downstairs_errors.get(&client_id) {
-            Some(_) => IOState::Skipped,
-            None => IOState::InProgress,
-        };
-
-        let oldstate = job.state.insert(client_id, newstate.clone());
-        assert_eq!(oldstate, Some(IOState::New));
-
-        match newstate {
-            IOState::Skipped => None,
-            IOState::InProgress => Some(job.work.clone()),
-            _ => panic!("bad state in in_progress!"),
+        // If current state is Skipped, then we have nothing to do here.
+        if job.state[&client_id] == IOState::Skipped {
+            return None;
         }
+
+        let new_state = IOState::InProgress;
+        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        assert_eq!(old_state, IOState::New);
+        self.io_state_count.decr(&old_state, client_id);
+        self.io_state_count.incr(&new_state, client_id);
+
+        Some(job.work.clone())
     }
 
     /**
@@ -2293,7 +2579,7 @@ impl Downstairs {
             for (i, s) in self.ds_state.iter_mut().enumerate() {
                 if *s == DsState::Repair {
                     *s = DsState::FailedRepair;
-                    warn!(self.log, "Mark {} as FAILED REPAIR", i);
+                    error!(self.log, "Mark {} as FAILED REPAIR", i);
                 }
             }
             info!(self.log, "Clear out existing repair work queue");
@@ -2334,7 +2620,7 @@ impl Downstairs {
             return None;
         }
         if let Some(job) = &mut self.reconcile_current_work {
-            let oldstate = job.state.insert(client_id, IOState::InProgress);
+            let old_state = job.state.insert(client_id, IOState::InProgress);
 
             /*
              * It is possible in reconnect states that multiple messages
@@ -2342,7 +2628,7 @@ impl Downstairs {
              * work for this client to do. Make sure we don't send the the
              * same message twice.
              */
-            if oldstate != Some(IOState::New) {
+            if old_state != Some(IOState::New) {
                 info!(
                     self.log,
                     "[{}] rep_in_progress ignore submitted job {:?}",
@@ -2367,8 +2653,8 @@ impl Downstairs {
      */
     fn rep_done(&mut self, client_id: u8, rep_id: u64) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
-            let oldstate = job.state.insert(client_id, IOState::Done);
-            assert_eq!(oldstate, Some(IOState::InProgress));
+            let old_state = job.state.insert(client_id, IOState::Done).unwrap();
+            assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
             let mut done = 0;
 
@@ -2478,7 +2764,7 @@ impl Downstairs {
      */
     fn ds_deactivate_offline(&mut self, client_id: u8) {
         let mut kvec: Vec<u64> =
-            self.active.keys().cloned().collect::<Vec<u64>>();
+            self.ds_active.keys().cloned().collect::<Vec<u64>>();
         kvec.sort_unstable();
 
         info!(
@@ -2488,13 +2774,16 @@ impl Downstairs {
             kvec.len(),
         );
         for ds_id in kvec.iter() {
-            let job = self.active.get_mut(ds_id).unwrap();
+            let job = self.ds_active.get_mut(ds_id).unwrap();
 
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
                 info!(self.log, "{} change {} to skipped", client_id, ds_id);
-                job.state.insert(client_id, IOState::Skipped);
+                let old_state =
+                    job.state.insert(client_id, IOState::Skipped).unwrap();
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::Skipped, client_id);
             }
         }
     }
@@ -2518,7 +2807,7 @@ impl Downstairs {
     fn re_new(&mut self, client_id: u8) {
         let lf = self.ds_last_flush[client_id as usize];
         let mut kvec: Vec<u64> =
-            self.active.keys().cloned().collect::<Vec<u64>>();
+            self.ds_active.keys().cloned().collect::<Vec<u64>>();
         kvec.sort_unstable();
 
         info!(
@@ -2533,7 +2822,7 @@ impl Downstairs {
             let wc = self.state_count(*ds_id).unwrap();
             let jobs_completed_ok = wc.completed_ok();
 
-            let job = self.active.get_mut(ds_id).unwrap();
+            let job = self.ds_active.get_mut(ds_id).unwrap();
 
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
@@ -2581,9 +2870,75 @@ impl Downstairs {
                     }
                 }
             }
-            job.state.insert(client_id, IOState::New);
+            let old_state = job.state.insert(client_id, IOState::New).unwrap();
             job.replay = true;
+            if old_state != IOState::New {
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::New, client_id);
+            }
         }
+    }
+
+    // This method is called when we have decided to fault a downstairs
+    // client.  By doing this, we are giving up on any InProgress or New
+    // jobs that exist for this downstairs.
+    // It's possible that job we skip here was the final of the three jobs
+    // and if so, we return true to indicate that the caller should
+    // notify the correct upstairs task that all downstairs related work
+    // for a skipped job has completed.
+    fn ds_set_faulted(&mut self, client_id: u8) -> bool {
+        let mut kvec: Vec<u64> =
+            self.ds_active.keys().cloned().collect::<Vec<u64>>();
+        kvec.sort_unstable();
+
+        info!(
+            self.log,
+            "[{}] client skip {} in process jobs because fault",
+            client_id,
+            kvec.len(),
+        );
+        let mut notify_guest = false;
+        for ds_id in kvec.iter() {
+            let job = self.ds_active.get_mut(ds_id).unwrap();
+
+            let state = job.state.get(&client_id).unwrap();
+
+            if *state == IOState::InProgress || *state == IOState::New {
+                info!(
+                    self.log,
+                    "{} change {} to fault skipped", client_id, ds_id
+                );
+                let old_state =
+                    job.state.insert(client_id, IOState::Skipped).unwrap();
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::Skipped, client_id);
+
+                // Check to see if this being skipped means we can ACK
+                // the job back to the guest.
+                if job.ack_status == AckStatus::Acked {
+                    self.retire_check(*ds_id);
+                } else if job.ack_status == AckStatus::NotAcked {
+                    let wc = job.state_count();
+                    if (wc.error + wc.skipped + wc.done) == 3 {
+                        notify_guest = true;
+                        info!(
+                            self.log,
+                            "[{}] notify = true for {}", client_id, ds_id
+                        );
+                        job.ack_status = AckStatus::AckReady;
+                    }
+                } else {
+                    info!(
+                        self.log,
+                        "[{}] job {} middle: {}",
+                        client_id,
+                        ds_id,
+                        job.ack_status
+                    );
+                }
+            }
+        }
+        notify_guest
     }
 
     /**
@@ -2591,7 +2946,7 @@ impl Downstairs {
      * requests for this client.
      */
     fn new_work(&self, client_id: u8) -> Vec<u64> {
-        self.active
+        self.ds_active
             .values()
             .filter_map(|job| {
                 if let Some(IOState::New) = job.state.get(&client_id) {
@@ -2608,7 +2963,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: u8) -> usize {
-        self.active
+        self.ds_active
             .values()
             .filter(|job| {
                 Some(&IOState::InProgress) == job.state.get(&client_id)
@@ -2620,7 +2975,7 @@ impl Downstairs {
      */
     fn ackable_work(&mut self) -> Vec<u64> {
         let mut ackable = Vec::new();
-        for (ds_id, job) in &self.active {
+        for (ds_id, job) in &self.ds_active {
             if job.ack_status == AckStatus::AckReady {
                 ackable.push(*ds_id);
             }
@@ -2631,8 +2986,54 @@ impl Downstairs {
     /**
      * Enqueue a new downstairs request.
      */
-    fn enqueue(&mut self, io: DownstairsIO) {
-        self.active.insert(io.ds_id, io);
+    async fn enqueue(
+        &mut self,
+        mut io: DownstairsIO,
+        ds_done_tx: mpsc::Sender<u64>,
+    ) {
+        let mut skipped = 0;
+        for cid in 0..3 {
+            assert_eq!(io.state[&cid], IOState::New);
+
+            let current = self.ds_state[cid as usize];
+            // If a downstairs is faulted, we can move that job directly
+            // to IOState::Skipped
+            // If a downstairs is in repair, then we need to see if this
+            // IO is on a repaired extent or not.
+            match current {
+                DsState::Faulted => {
+                    io.state.insert(cid, IOState::Skipped);
+                    self.io_state_count.incr(&IOState::Skipped, cid);
+                    skipped += 1;
+                }
+                DsState::OnlineRepair => {
+                    io.state.insert(cid, IOState::Skipped);
+                    self.io_state_count.incr(&IOState::Skipped, cid);
+                    skipped += 1;
+                }
+                _ => {
+                    self.io_state_count.incr(&IOState::New, cid);
+                }
+            }
+        }
+
+        // Puts the IO onto the downstairs work queue.
+        let ds_id = io.ds_id;
+        self.ds_active.insert(ds_id, io);
+
+        // If we skipped all three jobs, then it's possible no downstairs
+        // task is around to tell up_ds_listen() that this job is done, so
+        // do that work here.
+        if skipped == 3 {
+            warn!(self.log, "job {} skipped on all downstairs", &ds_id);
+
+            // Move this job to done ourselves.
+            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            assert_eq!(job.ack_status, AckStatus::NotAcked);
+            job.ack_status = AckStatus::AckReady;
+
+            ds_done_tx.send(ds_id).await.unwrap();
+        }
     }
 
     /**
@@ -2641,7 +3042,7 @@ impl Downstairs {
     fn state_count(&mut self, ds_id: u64) -> Result<WorkCounts> {
         /* XXX Should this support invalid ds_ids? */
         let job = self
-            .active
+            .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         Ok(job.state_count())
@@ -2652,7 +3053,7 @@ impl Downstairs {
          * Move AckReady to Acked.
          */
         let job = self
-            .active
+            .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
@@ -2681,12 +3082,12 @@ impl Downstairs {
         let wc = self.state_count(ds_id).unwrap();
 
         let job = self
-            .active
+            .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
         /*
-         * XXX: this code assumes that 3 downstairs is the max that we'll
+         * This code assumes that 3 downstairs is the max that we'll
          * ever support.
          */
         let bad_job = match &job.work {
@@ -2707,7 +3108,34 @@ impl Downstairs {
                 flush_number: _flush_number,
                 gen_number: _gen_number,
                 snapshot_details: _,
+                extent_limit: _,
             } => wc.error >= 2,
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                panic!("Received illegal IOop::ExtentClose: {}", extent);
+            }
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => wc.error >= 1,
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => wc.error >= 1,
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent: _,
+            } => wc.error >= 1,
+            IOop::ExtentLiveNoOp { dependencies: _ } => wc.error >= 1,
         };
 
         if bad_job {
@@ -2732,7 +3160,7 @@ impl Downstairs {
         stats: &UpStatOuter,
     ) {
         let job = self
-            .active
+            .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
@@ -2765,9 +3193,51 @@ impl Downstairs {
                 flush_number: _,
                 gen_number: _,
                 snapshot_details: _,
+                extent_limit: _,
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
                 stats.add_flush().await;
+            }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                panic!(
+                    "job: {} gw: {}  Received illegal IOop::ExtentClose {}",
+                    ds_id, gw_id, extent,
+                );
+            }
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
+            }
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
+            }
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent: _,
+            } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
+            }
+            IOop::ExtentLiveNoOp { dependencies: _ } => {
+                // TODO: Add dtrace probe point
+                // TODO: Add metric
             }
         }
     }
@@ -2999,7 +3469,7 @@ impl Downstairs {
         let mut jobs_completed_ok = wc.completed_ok();
 
         let job = self
-            .active
+            .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
@@ -3030,7 +3500,7 @@ impl Downstairs {
                     }
                 } else {
                     // The downstairs sent us this error
-                    warn!(
+                    error!(
                         self.log,
                         "[{}] DS Reports error {:?} on job {}, {:?} EC",
                         client_id,
@@ -3062,7 +3532,7 @@ impl Downstairs {
                     }
                 } else {
                     // The downstairs sent us this error
-                    warn!(
+                    error!(
                         self.log,
                         "[{}] DS Reports error {:?} on job {}, {:?}",
                         client_id,
@@ -3075,8 +3545,8 @@ impl Downstairs {
                 }
             };
 
-        let newstate = if let Err(ref e) = read_data {
-            warn!(
+        let new_state = if let Err(ref e) = read_data {
+            error!(
                 self.log,
                 "[{}] Reports error {:?} on job {}, {:?}",
                 client_id,
@@ -3090,20 +3560,22 @@ impl Downstairs {
             IOState::Done
         };
 
-        let oldstate = job.state.insert(client_id, newstate.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        self.io_state_count.decr(&old_state, client_id);
+        self.io_state_count.incr(&new_state, client_id);
 
         /*
          * Verify the job was InProgress
          */
-        if oldstate != IOState::InProgress {
+        if old_state != IOState::InProgress {
             bail!(
                 "[{}] job completed while not InProgress: {:?}",
                 client_id,
-                oldstate
+                old_state
             );
         }
 
-        if let IOState::Error(e) = newstate {
+        if let IOState::Error(e) = new_state {
             // Some errors can be returned without considering the Downstairs
             // bad. For example, it's still an error if a snapshot exists
             // already but we should not increment downstairs_errors and
@@ -3131,15 +3603,50 @@ impl Downstairs {
                             flush_number: _,
                             gen_number: _,
                             snapshot_details: _,
+                            extent_limit: _,
                         } => {
                             let errors: u64 =
                                 match self.downstairs_errors.get(&client_id) {
                                     Some(v) => *v,
                                     None => 0,
                                 };
-
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
+                        }
+                        IOop::ExtentClose {
+                            dependencies: _,
+                            extent: _,
+                        }
+                        | IOop::ExtentFlushClose {
+                            dependencies: _,
+                            extent: _,
+                            flush_number: _,
+                            gen_number: _,
+                            source_downstairs: _,
+                            repair_downstairs: _,
+                        }
+                        | IOop::ExtentLiveRepair {
+                            dependencies: _,
+                            extent: _,
+                            source_downstairs: _,
+                            source_repair_address: _,
+                            repair_downstairs: _,
+                        }
+                        | IOop::ExtentLiveReopen {
+                            dependencies: _,
+                            extent: _,
+                        }
+                        | IOop::ExtentLiveNoOp { dependencies: _ } => {
+                            // TODO: Figure out a plan on how to handle
+                            // errors during repair.  We must invalidate
+                            // any jobs dependent on the repair success as
+                            // well as throw out the whole repair and start
+                            // over as we can no longer trust results from
+                            // the downstairs under repair.
+                            panic!(
+                                "Error in repair {:?}, Write more code!",
+                                job
+                            );
                         }
                         IOop::Read {
                             dependencies: _,
@@ -3179,7 +3686,7 @@ impl Downstairs {
                 }
             }
         } else if job.ack_status == AckStatus::Acked {
-            assert_eq!(newstate, IOState::Done);
+            assert_eq!(new_state, IOState::Done);
             /*
              * If this job is already acked, then we don't have much
              * more to do here.  If it's a flush, then we want to be
@@ -3191,6 +3698,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                     snapshot_details: _,
+                    extent_limit: _,
                 } => {
                     self.ds_last_flush[client_id as usize] = ds_id;
                 }
@@ -3232,7 +3740,7 @@ impl Downstairs {
                 _ => { /* Write and WriteUnwritten IOs have no action here */ }
             }
         } else {
-            assert_eq!(newstate, IOState::Done);
+            assert_eq!(new_state, IOState::Done);
             assert_ne!(job.ack_status, AckStatus::Acked);
 
             let read_data: Vec<ReadResponse> = read_data.unwrap();
@@ -3309,6 +3817,7 @@ impl Downstairs {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                     snapshot_details: _,
+                    extent_limit: _,
                 } => {
                     assert!(read_data.is_empty());
                     /*
@@ -3333,6 +3842,63 @@ impl Downstairs {
                         }
                     }
                     self.ds_last_flush[client_id as usize] = ds_id;
+                }
+                IOop::ExtentClose {
+                    dependencies: _,
+                    extent,
+                } => {
+                    panic!(
+                        "job: {:?} Received illegal IOop::ExtentClose {}",
+                        job, extent,
+                    );
+                }
+                IOop::ExtentFlushClose {
+                    dependencies: _,
+                    extent: _,
+                    flush_number: _,
+                    gen_number: _,
+                    source_downstairs: _,
+                    repair_downstairs: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
+                }
+                IOop::ExtentLiveRepair {
+                    dependencies: _,
+                    extent: _,
+                    source_downstairs: _,
+                    source_repair_address: _,
+                    repair_downstairs: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
+                }
+                IOop::ExtentLiveReopen {
+                    dependencies: _,
+                    extent: _,
+                } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
+                }
+                IOop::ExtentLiveNoOp { dependencies: _ } => {
+                    assert!(read_data.is_empty());
+                    if jobs_completed_ok == 3 {
+                        notify_guest = true;
+                        job.ack_status = AckStatus::AckReady;
+                        // TODO: Add dtrace done probe point
+                    }
                 }
             }
         }
@@ -3361,7 +3927,7 @@ impl Downstairs {
     }
 
     /**
-     * This request is now complete on all peers, but is is ready to retire?
+     * This request is now complete on all peers, but is it ready to retire?
      * Only when a flush is complete on all three downstairs do we check to
      * see if we can remove jobs. Double check that all write jobs have
      * finished and panic if not.
@@ -3389,7 +3955,7 @@ impl Downstairs {
             // and including this flush.
 
             let mut kvec: Vec<u64> = self
-                .active
+                .ds_active
                 .keys()
                 .cloned()
                 .filter(|&x| x <= ds_id)
@@ -3403,7 +3969,7 @@ impl Downstairs {
 
                 // Assert the job is actually done, then complete it
                 let wc = self.state_count(*id).unwrap();
-                let job = self.active.get(id).unwrap();
+                let job = self.ds_active.get(id).unwrap();
 
                 if wc.active > 0 && matches!(job.work, IOop::Read { .. }) {
                     // Flushes do not depend on reads, so there's a special case
@@ -3423,9 +3989,13 @@ impl Downstairs {
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(id));
 
-                let oj = self.active.remove(id).unwrap();
+                let oj = self.ds_active.remove(id).unwrap();
                 assert_eq!(oj.ack_status, AckStatus::Acked);
                 self.completed.push(*id);
+                for cid in 0..3 {
+                    let old_state = oj.state.get(&cid).unwrap();
+                    self.io_state_count.decr(old_state, cid);
+                }
             }
         }
     }
@@ -3435,7 +4005,7 @@ impl Downstairs {
      */
     fn is_flush(&self, ds_id: u64) -> Result<bool> {
         let job = self
-            .active
+            .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
@@ -3445,6 +4015,7 @@ impl Downstairs {
                 flush_number: _flush_number,
                 gen_number: _gen_number,
                 snapshot_details: _,
+                extent_limit: _,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -3455,7 +4026,7 @@ impl Downstairs {
      */
     fn is_read(&self, ds_id: u64) -> Result<bool> {
         let job = self
-            .active
+            .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
@@ -3474,7 +4045,7 @@ impl Downstairs {
         client_id: u8,
     ) -> Result<(), CrucibleError> {
         let job = self
-            .active
+            .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
@@ -3508,7 +4079,7 @@ impl Debug for EncryptionContext {
 impl EncryptionContext {
     pub fn new(key: Vec<u8>, block_size: usize) -> EncryptionContext {
         assert!(key.len() == 32);
-        let key = Key::from_slice(&key[..]);
+        let key = Key::<Aes256GcmSiv>::from_slice(&key[..]);
         let cipher = Aes256GcmSiv::new(key);
 
         EncryptionContext { cipher, block_size }
@@ -3544,7 +4115,7 @@ impl EncryptionContext {
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
-        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], &data[..]]);
+        let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
         Ok((nonce, tag, computed_hash))
     }
@@ -3566,6 +4137,7 @@ impl EncryptionContext {
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, JsonSchema, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum UpState {
@@ -3631,6 +4203,37 @@ impl UpstairsState {
             req.send_ok().await;
         }
         Ok(())
+    }
+}
+
+/// Describes the region definition an upstairs has received or expects to
+/// receive from its downstairs.
+#[derive(Clone, Copy, Debug)]
+enum RegionDefinitionStatus {
+    /// The upstairs has not received any region information from any
+    /// downstairs yet. It will accept the first legal region definition it
+    /// receives from any downstairs and ensure that all other downstairs
+    /// supply the same definition.
+    WaitingForDownstairs,
+
+    /// The upstairs expects to receive specific region information from each
+    /// downstairs and will reject attempts to connect to a downstairs that
+    /// supplies the wrong information.
+    ExpectingFromDownstairs(RegionDefinition),
+
+    /// The upstairs has received region information from at least one
+    /// downstairs, which subsequent downstairs must match.
+    Received(RegionDefinition),
+}
+
+impl RegionDefinitionStatus {
+    fn get_def(&self) -> Option<RegionDefinition> {
+        use RegionDefinitionStatus::*;
+        match self {
+            WaitingForDownstairs => None,
+            ExpectingFromDownstairs(rd) => Some(*rd),
+            Received(rd) => Some(*rd),
+        }
     }
 }
 
@@ -3700,7 +4303,7 @@ pub struct Upstairs {
      * This allows us to verify each downstairs is the same, as well as
      * enables us to translate an LBA to an extent and block offset.
      */
-    ddef: Mutex<RegionDefinition>,
+    ddef: Mutex<RegionDefinitionStatus>,
 
     /*
      * Optional encryption context - Some if a key was supplied in
@@ -3741,7 +4344,7 @@ pub struct Upstairs {
 }
 
 impl Upstairs {
-    pub fn default() -> Arc<Self> {
+    pub fn test_default() -> Arc<Self> {
         let opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![],
@@ -3769,19 +4372,13 @@ impl Upstairs {
         }
         let log = Logger::root(drain.fuse(), o!());
 
-        Self::new(
-            &opts,
-            0,
-            RegionDefinition::default(),
-            Arc::new(Guest::default()),
-            log,
-        )
+        Self::new(&opts, 0, None, Arc::new(Guest::default()), log)
     }
 
     pub fn new(
         opt: &CrucibleOpts,
         gen: u64,
-        def: RegionDefinition,
+        expected_region_def: Option<RegionDefinition>,
         guest: Arc<Guest>,
         log: Logger,
     ) -> Arc<Upstairs> {
@@ -3791,20 +4388,20 @@ impl Upstairs {
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
-        // create an encryption context if a key is supplied.
+        // Create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
             Arc::new(EncryptionContext::new(
                 key,
-                /*
-                 * XXX: It would be good to do BlockOp::QueryBlockSize here,
-                 * but this creates a deadlock. Upstairs::new runs before
-                 * up_ds_listen in up_main, and up_ds_listen needs to run
-                 * to answer BlockOp::QueryBlockSize.
-                 *
-                 * At this point ddef is the default, the downstairs haven't
-                 * reported in.
-                 */
-                512,
+                // XXX: Figure out what to do if no expected region definition
+                // was supplied. It would be good to do BlockOp::QueryBlockSize
+                // here, but this creates a deadlock. Upstairs::new runs before
+                // up_ds_listen in up_main, and up_ds_listen needs to run to
+                // answer BlockOp::QueryBlockSize. (Note that the downstairs
+                // have not reported in yet, so if no expected definition was
+                // supplied no downstairs information is available.)
+                expected_region_def
+                    .map(|rd| rd.block_size() as usize)
+                    .unwrap_or(512),
             ))
         });
 
@@ -3812,6 +4409,11 @@ impl Upstairs {
         info!(log, "Crucible stats registered with UUID: {}", uuid);
         let stats = UpStatOuter {
             up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
+        };
+
+        let rd_status = match expected_region_def {
+            None => RegionDefinitionStatus::WaitingForDownstairs,
+            Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
 
         let session_id = Uuid::new_v4();
@@ -3822,9 +4424,12 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(log.clone())),
+            downstairs: Mutex::new(Downstairs::new(
+                log.clone(),
+                opt.target.to_owned(),
+            )),
             flush_info: Mutex::new(FlushInfo::new()),
-            ddef: Mutex::new(def),
+            ddef: Mutex::new(rd_status),
             encryption_context,
             need_flush: Mutex::new(false),
             stats,
@@ -3848,12 +4453,14 @@ impl Upstairs {
         let up_count = self.up_work_active().await;
         let ds_count = self.ds_work_active().await;
         let ds_state = self.ds_state_copy().await;
+        let ds_io_count = self.downstairs.lock().await.io_state_count;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 ds_count,
                 ds_state,
+                ds_io_count,
             };
             (msg, arg)
         });
@@ -3941,7 +4548,11 @@ impl Upstairs {
      * will only give up if a downstairs goes offline or we finish the
      * work in the queue.
      */
-    async fn set_deactivate(&self, req: Option<BlockReq>) -> Result<(), ()> {
+    async fn set_deactivate(
+        &self,
+        req: Option<BlockReq>,
+        ds_done_tx: mpsc::Sender<u64>,
+    ) -> Result<(), ()> {
         /*
          * We are changing (maybe) the upstairs state, to make
          * sure we don't conflict with any existing flush, we get the
@@ -3995,7 +4606,7 @@ impl Upstairs {
             panic!("Can't deactivate with downstairs offline (yet)");
         }
 
-        if ds.active.keys().len() == 0 {
+        if ds.ds_active.keys().len() == 0 {
             info!(self.log, "No work, no need to flush, return OK");
             if let Some(req) = req {
                 req.send_ok().await;
@@ -4007,7 +4618,8 @@ impl Upstairs {
          * Now, create the "final" flush and submit it to all the
          * downstairs queues.
          */
-        self.submit_flush_internal(gw, ds, req, None).await
+        self.submit_flush_internal(gw, ds, req, None, ds_done_tx)
+            .await
     }
 
     #[cfg(test)]
@@ -4070,14 +4682,14 @@ impl Upstairs {
         if up_state != UpState::Deactivating {
             return false;
         }
-        let ds = self.downstairs.lock().await;
+        let mut ds = self.downstairs.lock().await;
 
         let mut kvec: Vec<u64> =
-            ds.active.keys().cloned().collect::<Vec<u64>>();
+            ds.ds_active.keys().cloned().collect::<Vec<u64>>();
         if kvec.is_empty() {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
             self.ds_transition_with_lock(
-                ds,
+                &mut ds,
                 up_state,
                 client_id,
                 DsState::Deactivated,
@@ -4105,7 +4717,7 @@ impl Upstairs {
              * we are not ready to deactivate.
              */
             for id in kvec.iter() {
-                let job = ds.active.get(id).unwrap();
+                let job = ds.ds_active.get(id).unwrap();
                 let state = job.state.get(&client_id).unwrap();
                 if state == &IOState::New || state == &IOState::InProgress {
                     info!(
@@ -4126,7 +4738,7 @@ impl Upstairs {
          */
         info!(self.log, "[{}] check deactivate YES", client_id);
         self.ds_transition_with_lock(
-            ds,
+            &mut ds,
             up_state,
             client_id,
             DsState::Deactivated,
@@ -4244,6 +4856,7 @@ impl Upstairs {
         &self,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
+        ds_done_tx: mpsc::Sender<u64>,
     ) -> Result<(), ()> {
         /*
          * Lock first the guest_work struct where this new job will go,
@@ -4253,8 +4866,14 @@ impl Upstairs {
         let gw = self.guest.guest_work.lock().await;
         let downstairs = self.downstairs.lock().await;
 
-        self.submit_flush_internal(gw, downstairs, req, snapshot_details)
-            .await
+        self.submit_flush_internal(
+            gw,
+            downstairs,
+            req,
+            snapshot_details,
+            ds_done_tx,
+        )
+        .await
     }
 
     async fn submit_flush_internal(
@@ -4263,6 +4882,7 @@ impl Upstairs {
         mut downstairs: MutexGuard<'_, Downstairs>,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
+        ds_done_tx: mpsc::Sender<u64>,
     ) -> Result<(), ()> {
         self.set_flush_clear().await;
 
@@ -4295,18 +4915,18 @@ impl Upstairs {
          * downstairs state, but must depend on every write since the last
          * flush.
          */
-        let num_jobs = downstairs.active.keys().len();
+        let num_jobs = downstairs.ds_active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         for job_id in downstairs
-            .active
+            .ds_active
             .keys()
             .sorted()
             .collect::<Vec<&u64>>()
             .iter()
             .rev()
         {
-            let job = &downstairs.active[job_id];
+            let job = &downstairs.ds_active[job_id];
 
             // Depend on the last flush, but then bail out
             if job.work.is_flush() {
@@ -4329,7 +4949,6 @@ impl Upstairs {
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
          */
-        let ddef = self.ddef.lock().await;
         let fl = create_flush(
             next_id,
             dep,
@@ -4337,7 +4956,8 @@ impl Upstairs {
             gw_id,
             self.get_generation().await,
             snapshot_details,
-            ImpactedBlocks::new(*ddef),
+            ImpactedBlocks::Empty,
+            None,
         );
 
         let mut sub = HashMap::new();
@@ -4346,8 +4966,8 @@ impl Upstairs {
         let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), req);
         gw.active.insert(gw_id, new_gtos);
 
-        downstairs.enqueue(fl);
         cdt::up__to__ds__flush__start!(|| (gw_id));
+        downstairs.enqueue(fl, ds_done_tx).await;
 
         Ok(())
     }
@@ -4369,6 +4989,7 @@ impl Upstairs {
         data: Bytes,
         req: Option<BlockReq>,
         is_write_unwritten: bool,
+        ds_done_tx: mpsc::Sender<u64>,
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
@@ -4391,16 +5012,31 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        /*
+         * Verify IO is in range for our region.  If not give up now and
+         * report error.
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e).await;
+                }
+                return Err(());
+            }
+        }
+
         self.set_flush_need().await;
 
         /*
          * Given the offset and buffer size, figure out what extent and
          * byte offset that translates into. Keep in mind that an offset
-         * and length may span two extents, and eventually XXX, two regions.
+         * and length may span two extents.
          */
-        let ddef = self.ddef.lock().await;
         let impacted_blocks = extent_from_offset(
-            *ddef,
+            &ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
         );
@@ -4436,9 +5072,26 @@ impl Upstairs {
          * Construct a list of dependencies for this write based on the
          * following rules:
          *
-         * - ignore everything that happened before the last flush
          * - writes have to depend on the last flush completing
          * - any overlap of impacted blocks requires a dependency
+         *
+         * It's important to remember that jobs may arrive at different
+         * Downstairs in different orders (they should still complete in job
+         * dependency order!). For example, say that searching for the
+         * dependency of a write stopped at the last flush. Then say that the
+         * following set of jobs were submitted:
+         *
+         *       block
+         * op# | 0 1 2 | deps
+         * ----|-------------
+         *   0 | R R   |
+         *   1 | F F F |
+         *   2 |   W W | 1
+         *
+         * Without any dependencies, a downstairs could choose to perform op 0
+         * at any time, including after the write! This would result in an
+         * incorrect read. It's important to search for write dependencies in
+         * the list of all active jobs.
          *
          * TODO: any overlap of impacted blocks will create a dependency.
          * take this an example (this shows three writes, all to the
@@ -4452,29 +5105,28 @@ impl Upstairs {
          *   1 | W     | 0
          *   2 | W     | 0,1
          *
-         * op 2 depends on both op 1 and op 0. if dependencies are transitive
+         * op 2 depends on both op 1 and op 0. If dependencies are transitive
          * with an existing job, it would be nice if those were removed from
          * this job's dependencies.
          */
-        let num_jobs = downstairs.active.keys().len();
+        let num_jobs = downstairs.ds_active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
         for job_id in downstairs
-            .active
+            .ds_active
             .keys()
             .sorted()
             .collect::<Vec<&u64>>()
             .iter()
             .rev()
         {
-            let job = &downstairs.active[job_id];
+            let job = &downstairs.ds_active[job_id];
 
-            // Depend on the last flush, then break - flushes are a barrier for
+            // Depend on the last flush - flushes are a barrier for
             // all writes.
             if job.work.is_flush() {
                 dep.push(**job_id);
-                break;
             }
 
             // If this job impacts the same blocks as something already active,
@@ -4485,9 +5137,9 @@ impl Upstairs {
         }
 
         let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(impacted_blocks.tuples().len());
+            Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        for (eid, bo) in impacted_blocks.tuples() {
+        for (eid, offset) in impacted_blocks.blocks(&ddef) {
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
@@ -4530,7 +5182,7 @@ impl Upstairs {
 
             writes.push(crucible_protocol::Write {
                 eid,
-                offset: bo,
+                offset,
                 data: sub_data,
                 block_context: BlockContext {
                     hash,
@@ -4560,12 +5212,12 @@ impl Upstairs {
             gw.active.insert(gw_id, new_gtos);
         }
 
-        downstairs.enqueue(wr);
         if is_write_unwritten {
             cdt::up__to__ds__write__unwritten__start!(|| (gw_id));
         } else {
             cdt::up__to__ds__write__start!(|| (gw_id));
         }
+        downstairs.enqueue(wr, ds_done_tx).await;
 
         Ok(())
     }
@@ -4582,6 +5234,7 @@ impl Upstairs {
         offset: Block,
         data: Buffer,
         req: Option<BlockReq>,
+        ds_done_tx: mpsc::Sender<u64>,
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
@@ -4597,6 +5250,21 @@ impl Upstairs {
          */
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
+        let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        /*
+         * Verify IO is in range for our region
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e).await;
+                }
+                return Err(());
+            }
+        }
+
         self.set_flush_need().await;
 
         /*
@@ -4604,9 +5272,8 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span many extents, and eventually, TODO, regions.
          */
-        let ddef = self.ddef.lock().await;
         let impacted_blocks = extent_from_offset(
-            *ddef,
+            &ddef,
             offset,
             Block::from_bytes(data.len(), &ddef),
         );
@@ -4639,19 +5306,19 @@ impl Upstairs {
          * - any write with an overlap of impacted blocks requires a
          *   dependency
          */
-        let num_jobs = downstairs.active.keys().len();
+        let num_jobs = downstairs.ds_active.keys().len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
         for job_id in downstairs
-            .active
+            .ds_active
             .keys()
             .sorted()
             .collect::<Vec<&u64>>()
             .iter()
             .rev()
         {
-            let job = &downstairs.active[job_id];
+            let job = &downstairs.ds_active[job_id];
 
             // If this is a write and it impacts the same blocks as something
             // already active, create a dependency.
@@ -4667,10 +5334,10 @@ impl Upstairs {
          * from extent_from_offset.
          */
         let mut requests: Vec<ReadRequest> =
-            Vec::with_capacity(impacted_blocks.len());
+            Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        for (eid, bo) in impacted_blocks.tuples() {
-            requests.push(ReadRequest { eid, offset: bo });
+        for (eid, offset) in impacted_blocks.blocks(&ddef) {
+            requests.push(ReadRequest { eid, offset });
         }
 
         sub.insert(next_id, 0); // XXX does this value matter?
@@ -4696,8 +5363,8 @@ impl Upstairs {
             gw.active.insert(gw_id, new_gtos);
         }
 
-        downstairs.enqueue(wr);
         cdt::up__to__ds__read__start!(|| (gw_id));
+        downstairs.enqueue(wr, ds_done_tx).await;
 
         Ok(())
     }
@@ -4717,10 +5384,12 @@ impl Upstairs {
             DsState::Active => DsState::Offline,
             DsState::Replay => DsState::Offline,
             DsState::Offline => DsState::Offline,
-            DsState::Migrating => DsState::Failed,
+            DsState::Migrating => DsState::Faulted,
+            DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
             DsState::Repair => DsState::New,
             DsState::FailedRepair => DsState::New,
+            DsState::OnlineRepair => DsState::OnlineRepair,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -4751,7 +5420,7 @@ impl Upstairs {
      * IOs.  We return false if this downstairs should enter the
      * repair path and reconcile with the other downstairs.
      */
-    async fn ds_is_replay(&self, client_id: u8) -> bool {
+    async fn _ds_is_replay(&self, client_id: u8) -> bool {
         let mut ds = self.downstairs.lock().await;
         if ds.ds_state[client_id as usize] == DsState::Replay {
             info!(
@@ -4772,9 +5441,9 @@ impl Upstairs {
     async fn ds_transition(&self, client_id: u8, new_state: DsState) {
         let active = self.active.lock().await;
         let up_state = active.up_state;
-        let ds = self.downstairs.lock().await;
+        let mut ds = self.downstairs.lock().await;
         drop(active);
-        self.ds_transition_with_lock(ds, up_state, client_id, new_state);
+        self.ds_transition_with_lock(&mut ds, up_state, client_id, new_state);
     }
 
     /*
@@ -4784,7 +5453,7 @@ impl Upstairs {
      */
     fn ds_transition_with_lock(
         &self,
-        mut ds: MutexGuard<'_, Downstairs>,
+        ds: &mut MutexGuard<'_, Downstairs>,
         up_state: UpState,
         client_id: u8,
         new_state: DsState,
@@ -4811,12 +5480,12 @@ impl Upstairs {
                 if old_state == DsState::Offline {
                     if up_state == UpState::Active {
                         panic!(
-                            "[{}] {} Bad state change when active {:?} -> {:?}",
+                            "[{}] {} Bad up active state change {:?} -> {:?}",
                             client_id, self.uuid, old_state, new_state,
                         );
                     }
                 } else if old_state != DsState::New
-                    && old_state != DsState::Failed
+                    && old_state != DsState::Faulted
                     && old_state != DsState::Disconnected
                 {
                     panic!(
@@ -4831,6 +5500,20 @@ impl Upstairs {
             DsState::FailedRepair => {
                 assert_eq!(old_state, DsState::Repair);
             }
+            DsState::Faulted => {
+                match old_state {
+                    DsState::Active
+                    | DsState::Repair
+                    | DsState::OnlineRepair
+                    | DsState::Replay => {} /* Okay */
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
+                }
+            }
             DsState::Repair => {
                 assert_ne!(up_state, UpState::Active);
                 assert_eq!(old_state, DsState::WaitQuorum);
@@ -4840,13 +5523,15 @@ impl Upstairs {
                 assert_eq!(up_state, UpState::Active);
             }
             DsState::Active => {
-                if old_state != DsState::WaitQuorum
-                    && old_state != DsState::Repair
-                {
-                    panic!(
-                        "[{}] {} Invalid transition: {:?} -> {:?}",
-                        client_id, self.uuid, old_state, new_state
-                    );
+                match old_state {
+                    DsState::WaitQuorum | DsState::Replay | DsState::Repair => {
+                    } // Okay
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
                 }
                 /*
                  * Make sure repair happened when the upstairs is inactive.
@@ -4856,22 +5541,63 @@ impl Upstairs {
                 }
             }
             DsState::Deactivated => {
-                /*
-                 *
-                 * We only go deactivated if we were actually active, or
-                 * somewhere past active (offline?)
-                 * if deactivate is requested before active, the downstairs
-                 * state should just go back to NEW and re-require an
-                 * activation.
-                 */
-                assert_ne!(old_state, DsState::New);
-                assert_ne!(old_state, DsState::BadVersion);
-                assert_ne!(old_state, DsState::BadRegion);
-                assert_ne!(old_state, DsState::WaitQuorum);
-                assert_ne!(old_state, DsState::WaitActive);
-                assert_ne!(old_state, DsState::Repair);
+                // We only go deactivated if we were actually active, or
+                // somewhere past active.
+                // if deactivate is requested before active, the downstairs
+                // state should just go back to NEW and re-require an
+                // activation.
+                match old_state {
+                    DsState::Active
+                    | DsState::Replay
+                    | DsState::OnlineRepair
+                    | DsState::Repair => {} // Okay
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
+                }
             }
-            _ => (),
+            DsState::OnlineRepair => {
+                assert_eq!(old_state, DsState::Faulted);
+            }
+            DsState::New => {
+                // Before new, we must have been in
+                // on of these states.
+                match old_state {
+                    DsState::Active
+                    | DsState::Deactivated
+                    | DsState::Faulted => {} // Okay
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
+                }
+            }
+            DsState::Offline => {
+                match old_state {
+                    DsState::Active | DsState::Replay => {} // Okay
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
+                }
+            }
+            DsState::Disabled => {
+                // A move to Disabled can happen at any time we are talking
+                // to a downstairs.
+            }
+            _ => {
+                panic!(
+                    "Make a check for transition {} to {}",
+                    old_state, new_state
+                );
+            }
         }
 
         if old_state != new_state {
@@ -4939,7 +5665,7 @@ impl Upstairs {
      * Get the next repair message from the repair message queue.
      * Make sure the current message has completed.
      *
-     * We return true if we have more work to do (after setting
+     * We return true if we have more work to do after setting
      * reconcile_current_work to that work.
      *
      * We return false if there is no more work to do.
@@ -4986,7 +5712,10 @@ impl Upstairs {
      * Verify the guest given gen number is highest.
      * Decide if we need repair, and if so create the repair list
      */
-    async fn collate_downstairs(&self, ds: &mut Downstairs) -> Result<bool> {
+    async fn collate_downstairs(
+        &self,
+        ds: &mut Downstairs,
+    ) -> Result<bool, CrucibleError> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -5044,7 +5773,7 @@ impl Upstairs {
         let requested_gen = self.get_generation().await;
         if requested_gen == 0 {
             error!(self.log, "generation number should be at least 1");
-            bail!("Generation number should be at least 1");
+            crucible_bail!(GenerationNumberTooLow, "Generation 0 illegal");
         } else if requested_gen < max_gen {
             /*
              * We refuse to connect. The provided generation number is not
@@ -5052,19 +5781,20 @@ impl Upstairs {
              */
             error!(
                 self.log,
-                "found/using gen number {}, larger than requested: {}",
+                "found generation number {}, larger than requested: {}",
                 max_gen,
                 requested_gen,
             );
-            bail!(
-                "found/using gen number {}, larger than requested: {}",
+            crucible_bail!(
+                GenerationNumberTooLow,
+                "found generation number {}, larger than requested: {}",
                 max_gen,
                 requested_gen,
             );
         } else {
             info!(
                 self.log,
-                "Generation requested: {} > found:{}", requested_gen, max_gen,
+                "Generation requested: {} >= found:{}", requested_gen, max_gen,
             );
         }
 
@@ -5277,10 +6007,7 @@ impl Upstairs {
          * Determine the highest flush number and make sure our generation
          * is high enough.
          */
-        let need_repair;
-        let repair_commands;
-        let failed_collate;
-        {
+        let collate_status = {
             let active = self.active.lock().await;
             if active.up_state != UpState::Initializing {
                 return Ok(());
@@ -5313,164 +6040,161 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            match self.collate_downstairs(&mut ds).await {
-                Ok(res) => {
-                    need_repair = res;
-                    failed_collate = false;
-                }
-                Err(e) => {
-                    need_repair = false;
-                    failed_collate = true;
-                    error!(self.log, "Failed collate with {}", e);
-                }
-            }
-            repair_commands = ds.reconcile_task_list.len();
-        }
+            self.collate_downstairs(&mut ds).await
+        };
 
-        if failed_collate {
-            // We failed to collate the three downstairs, so we need
-            // to reset that activation request, and kick all the downstairs
-            // to FailedRepair
-            //
-            self.set_inactive(CrucibleError::RegionAssembleError).await;
-            let _active = self.active.lock().await;
-            let mut ds = self.downstairs.lock().await;
+        match collate_status {
+            Err(e) => {
+                error!(self.log, "Failed downstairs collate with: {}", e);
+                // We failed to collate the three downstairs, so we need
+                // to reset that activation request, and kick all the
+                // downstairs to FailedRepair
+                self.set_inactive(e).await;
+                let _active = self.active.lock().await;
+                let mut ds = self.downstairs.lock().await;
 
-            // While collating, downstairs should all be DsState::Repair.
-            // As we have released then locked the downstairs, we have to
-            // verify that the downstairs are all in the state we expect them
-            // to be.  Any change means that downstairs went away, but any
-            // downstairs still repairing should be moved to failed repair.
-            assert_eq!(ds.active.len(), 0);
-            assert_eq!(ds.reconcile_task_list.len(), 0);
+                // While collating, downstairs should all be DsState::Repair.
+                // As we have released then locked the downstairs, we have to
+                // verify that the downstairs are all in the state we expect
+                // them to be.  Any change means that downstairs went away,
+                // but any downstairs still repairing should be moved to
+                // failed repair.
+                assert_eq!(ds.ds_active.len(), 0);
+                assert_eq!(ds.reconcile_task_list.len(), 0);
 
-            for (i, s) in ds.ds_state.iter_mut().enumerate() {
-                if *s == DsState::WaitQuorum {
-                    *s = DsState::FailedRepair;
-                    warn!(
-                        self.log,
-                        "Mark {} as FAILED Collate in final check", i
-                    );
-                } else {
-                    warn!(
-                        self.log,
-                        "downstairs in state {} after failed collate", *s
-                    );
-                }
-            }
-        } else if need_repair {
-            self.do_reconciliation(
-                dst,
-                lastcast,
-                ds_reconcile_done_rx,
-                repair_commands,
-            )
-            .await?;
-
-            let mut active = self.active.lock().await;
-            let mut ds = self.downstairs.lock().await;
-            /*
-             * Now that we have completed reconciliation, we move all
-             * the downstairs to the next state.  If we fail here, it means
-             * something interrupted our repair and we have to start over.
-             *
-             * As we repaired, downstairs should all be DsState::Repair.
-             *
-             * As we have released the downstairs lock while repairing, we
-             * have to verify that the downstairs are all in the state we
-             * expect them to be.  Any change means we abort and require
-             * all downstairs to reconnect, even if repair work is finished
-             * as a disconnected DS does not yet know it is all done with
-             * work and could have its state reset to New.
-             */
-
-            assert_eq!(ds.active.len(), 0);
-            assert_eq!(ds.reconcile_task_list.len(), 0);
-
-            let ready = ds
-                .ds_state
-                .iter()
-                .filter(|s| **s == DsState::Repair)
-                .count();
-
-            if ready != 3 {
-                /*
-                 * Some downstairs was not in the proper state any longer,
-                 * so we need to abort this reconciliation and start
-                 * everyone over.  Move all the downstairs that thought
-                 * they were still repairing to FailedRepair which will
-                 * trigger a reconnect.
-                 */
                 for (i, s) in ds.ds_state.iter_mut().enumerate() {
-                    if *s == DsState::Repair {
+                    if *s == DsState::WaitQuorum {
                         *s = DsState::FailedRepair;
                         warn!(
                             self.log,
-                            "Mark {} as FAILED REPAIR in final check", i
+                            "Mark {} as FAILED Collate in final check", i
+                        );
+                    } else {
+                        warn!(
+                            self.log,
+                            "downstairs in state {} after failed collate", *s
                         );
                     }
                 }
-                /*
-                 * We don't exit here, as we want the downstairs to all
-                 * be notified there is a need to reset and go back through
-                 * repair because someone did not complete it.
-                 */
-            } else {
-                info!(self.log, "All required repair work is now completed");
-                info!(
-                    self.log,
-                    "Set Downstairs and Upstairs active after repairs"
-                );
-                if active.up_state != UpState::Initializing {
-                    bail!("Upstairs in unexpected state while reconciling");
-                }
-
-                for s in ds.ds_state.iter_mut() {
-                    *s = DsState::Active;
-                }
-                active.set_active().await?;
-                info!(
-                    self.log,
-                    "{} is now active with session: {}",
-                    self.uuid,
-                    self.session_id
-                );
-                self.stats.add_activation().await;
             }
-        } else {
-            /*
-             * No repair was needed, but make sure all DS are in the state
-             * we expect them to be.
-             */
-            let mut active = self.active.lock().await;
-            let mut ds = self.downstairs.lock().await;
+            Ok(true) => {
+                let repair_commands =
+                    self.downstairs.lock().await.reconcile_task_list.len();
+                self.do_reconciliation(
+                    dst,
+                    lastcast,
+                    ds_reconcile_done_rx,
+                    repair_commands,
+                )
+                .await?;
 
-            let ready = ds
-                .ds_state
-                .iter()
-                .filter(|s| **s == DsState::WaitQuorum)
-                .count();
+                let mut active = self.active.lock().await;
+                let mut ds = self.downstairs.lock().await;
+                /*
+                 * Now that we have completed reconciliation, we move all
+                 * the downstairs to the next state.  If we fail here, it means
+                 * something interrupted our repair and we have to start over.
+                 *
+                 * As we repaired, downstairs should all be DsState::Repair.
+                 *
+                 * As we have released the downstairs lock while repairing, we
+                 * have to verify that the downstairs are all in the state we
+                 * expect them to be.  Any change means we abort and require
+                 * all downstairs to reconnect, even if repair work is finished
+                 * as a disconnected DS does not yet know it is all done with
+                 * work and could have its state reset to New.
+                 */
 
-            if ready != 3 {
-                bail!("Unexpected Downstairs state after collation.");
-            } else {
-                info!(self.log, "No repair work was required");
-                info!(self.log, "Set Downstairs and Upstairs active");
-                if active.up_state != UpState::Initializing {
-                    bail!("Upstairs in unexpected state while reconciling");
+                assert_eq!(ds.ds_active.len(), 0);
+                assert_eq!(ds.reconcile_task_list.len(), 0);
+
+                let ready = ds
+                    .ds_state
+                    .iter()
+                    .filter(|s| **s == DsState::Repair)
+                    .count();
+
+                if ready != 3 {
+                    /*
+                     * Some downstairs was not in the proper state any longer,
+                     * so we need to abort this reconciliation and start
+                     * everyone over.  Move all the downstairs that thought
+                     * they were still repairing to FailedRepair which will
+                     * trigger a reconnect.
+                     */
+                    for (i, s) in ds.ds_state.iter_mut().enumerate() {
+                        if *s == DsState::Repair {
+                            *s = DsState::FailedRepair;
+                            warn!(
+                                self.log,
+                                "Mark {} as FAILED REPAIR in final check", i
+                            );
+                        }
+                    }
+                    /*
+                     * We don't exit here, as we want the downstairs to all
+                     * be notified there is a need to reset and go back through
+                     * repair because someone did not complete it.
+                     */
+                } else {
+                    info!(self.log, "All required repair work is completed");
+                    info!(
+                        self.log,
+                        "Set Downstairs and Upstairs active after repairs"
+                    );
+                    if active.up_state != UpState::Initializing {
+                        bail!("Upstairs in unexpected state while reconciling");
+                    }
+
+                    for s in ds.ds_state.iter_mut() {
+                        *s = DsState::Active;
+                    }
+                    active.set_active().await?;
+                    info!(
+                        self.log,
+                        "{} is now active with session: {}",
+                        self.uuid,
+                        self.session_id
+                    );
+                    self.stats.add_activation().await;
                 }
-                for s in ds.ds_state.iter_mut() {
-                    *s = DsState::Active;
+            }
+            Ok(false) => {
+                info!(self.log, "No downstairs repair required");
+                /*
+                 * No repair was needed, but make sure all DS are in the state
+                 * we expect them to be.
+                 */
+                let mut active = self.active.lock().await;
+                let mut ds = self.downstairs.lock().await;
+
+                let ready = ds
+                    .ds_state
+                    .iter()
+                    .filter(|s| **s == DsState::WaitQuorum)
+                    .count();
+
+                if ready != 3 {
+                    bail!("Unexpected Downstairs state after collation.");
+                } else {
+                    info!(self.log, "No repair work was required");
+                    info!(self.log, "Set Downstairs and Upstairs active");
+                    if active.up_state != UpState::Initializing {
+                        bail!("Upstairs in unexpected state while reconciling");
+                    }
+                    for s in ds.ds_state.iter_mut() {
+                        *s = DsState::Active;
+                    }
+                    active.set_active().await?;
+                    info!(
+                        self.log,
+                        "{} is now active with session: {}",
+                        self.uuid,
+                        self.session_id
+                    );
+                    self.stats.add_activation().await;
+                    info!(self.log, "{} Set Active after no repair", self.uuid);
                 }
-                active.set_active().await?;
-                info!(
-                    self.log,
-                    "{} is now active with session: {}",
-                    self.uuid,
-                    self.session_id
-                );
-                self.stats.add_activation().await;
-                info!(self.log, "{} Set Active after no repair", self.uuid);
             }
         }
 
@@ -5480,12 +6204,12 @@ impl Upstairs {
          * (even if none was required) and they should proceed to being
          * active and accepting commands on the ds_work_ message channel.
          */
-        assert!(!self
+        assert!(self
             .downstairs
             .lock()
             .await
             .reconcile_current_work
-            .is_some());
+            .is_none());
 
         info!(
             self.log,
@@ -5510,7 +6234,7 @@ impl Upstairs {
      * DTrace uses this.
      */
     async fn ds_work_active(&self) -> u32 {
-        self.downstairs.lock().await.active.len() as u32
+        self.downstairs.lock().await.ds_active.len() as u32
     }
 
     /**
@@ -5585,10 +6309,17 @@ impl Upstairs {
         }
 
         /*
-         * XXX Eventually we will be provided UUIDs when the upstairs
-         * starts, so we can compare those with what we get here.
+         * TODO(#551) Verify that `client_ddef` makes sense (valid, nonzero
+         * block size, etc.)
+         */
+
+        /*
+         * If this downstairs was previously registered, make sure this
+         * connection reports the one the old connection did.
          *
-         * For now, we take whatever connects to us first.
+         * XXX The expected per-client UUIDs should eventually be provided
+         * when the upstairs stairs. When that happens, they can be
+         * verified here.
          */
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
@@ -5609,42 +6340,35 @@ impl Upstairs {
             ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
 
-        /*
-         * XXX Until we are passed expected region info at start, we
-         * can only compare the three downstairs to each other and move
-         * forward if all three are the same.
-         *
-         * For now I'm using zero as an indication that we don't yet know
-         * the valid values and non-zero meaning we have at least one
-         * downstairs to compare with.
-         *
-         * 0 should never be a valid block size, so this hack will let us
-         * move forward until we get the expected region info at startup.
-         */
         let mut ddef = self.ddef.lock().await;
-        if ddef.block_size() == 0 {
-            ddef.set_block_size(client_ddef.block_size());
-            ddef.set_extent_size(client_ddef.extent_size());
-            ddef.set_extent_count(client_ddef.extent_count());
-            info!(
-                self.log,
-                "Setting expected region info to: {:?}", client_ddef
-            );
+
+        /*
+         * If there is an expected region definition of any kind (either from
+         * a previous connection or an expectation that was supplied
+         * when this upstairs was created), make sure the new
+         * definition matches it.
+         *
+         * If this upstairs' creator didn't specify any expected values, the
+         * first downstairs to connect sets the expected values for the other
+         * two.
+         */
+        if let Some(prev_def) = ddef.get_def() {
+            if prev_def.block_size() != client_ddef.block_size()
+                || prev_def.extent_size().value
+                    != client_ddef.extent_size().value
+                || prev_def.extent_size().block_size_in_bytes()
+                    != client_ddef.extent_size().block_size_in_bytes()
+                || prev_def.extent_count() != client_ddef.extent_count()
+            {
+                // TODO(#558) Figure out if we can handle this error. Possibly not.
+                panic!(
+                    "New downstairs region info mismatch {:?} vs. {:?}",
+                    *ddef, client_ddef
+                );
+            }
         }
 
-        if ddef.block_size() != client_ddef.block_size()
-            || ddef.extent_size().value != client_ddef.extent_size().value
-            || ddef.extent_size().block_size_in_bytes()
-                != client_ddef.extent_size().block_size_in_bytes()
-            || ddef.extent_count() != client_ddef.extent_count()
-        {
-            // XXX Figure out if we can handle this error. Possibly not.
-            panic!(
-                "New downstairs region info mismatch {:?} vs. {:?}",
-                ddef, client_ddef
-            );
-        }
-
+        *ddef = RegionDefinitionStatus::Received(client_ddef);
         Ok(())
     }
 
@@ -5704,7 +6428,7 @@ impl Upstairs {
         }
 
         // Mark this ds_id for the client_id as completed.
-        let notify_guest = match ds.process_ds_completion(
+        let mut notify_guest = match ds.process_ds_completion(
             ds_id,
             client_id,
             read_data,
@@ -5712,7 +6436,7 @@ impl Upstairs {
             up_state,
         ) {
             Err(e) => {
-                let job = ds.active.get_mut(&ds_id).unwrap();
+                let job = ds.ds_active.get_mut(&ds_id).unwrap();
                 error!(
                     self.log,
                     "[{}] ds_completion error: {:?} j:{} {:?} {:?} ",
@@ -5727,6 +6451,7 @@ impl Upstairs {
             Ok(ng) => ng,
         };
 
+        // Decide what to do when we have an error from this IO.
         // Mark this downstairs as bad if this was a write or flush
         if let Err(err) = ds.client_error(ds_id, client_id) {
             if err == CrucibleError::UpstairsInactive {
@@ -5736,31 +6461,28 @@ impl Upstairs {
                     client_id
                 );
                 self.ds_transition_with_lock(
-                    ds,
+                    &mut ds,
                     up_state,
                     client_id,
                     DsState::Disabled,
                 );
             } else if err == CrucibleError::DecryptionError {
+                // We should always be able to decrypt the data.  If we
+                // can't, then we have the wrong key, or the data (or key)
+                // is corrupted.
                 error!(
                     self.log,
-                    "Authenticated decryption failed from client id {}!",
-                    client_id
+                    "[{}] Authenticated decryption failed on job: {:?}",
+                    client_id,
+                    ds_id
                 );
-
-                // XXX reconciliation needs to occur, but do we trust that
-                // Downstairs anymore? One could imagine setting that untrusted
-                // here:
-                //
-                // ds_transition_with_lock( ...  DsState::Untrusted);
+                panic!(
+                    "[{}] Authenticated decryption failed on job: {:?}",
+                    client_id, ds_id
+                );
             } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
                 // skip
-            }
-            /*
-             * After work.complete, it's possible that the job is gone
-             * due to a retire check
-             */
-            else if let Some(job) = ds.active.get_mut(&ds_id) {
+            } else if let Some(job) = ds.ds_active.get_mut(&ds_id) {
                 if matches!(
                     job.work,
                     IOop::Write {
@@ -5771,16 +6493,27 @@ impl Upstairs {
                         flush_number: _,
                         gen_number: _,
                         snapshot_details: _,
+                        extent_limit: _,
                     } | IOop::WriteUnwritten {
                         dependencies: _,
                         writes: _,
                     }
                 ) {
+                    // This error means the downstairs will go to Faulted.
+                    // Walk the active job list and mark any that were
+                    // new or in progress to skipped.
+                    if ds.ds_set_faulted(client_id) {
+                        notify_guest = true;
+                        info!(
+                            self.log,
+                            "[{}] set notify for fault ", client_id,
+                        );
+                    }
                     self.ds_transition_with_lock(
-                        ds,
+                        &mut ds,
                         up_state,
                         client_id,
-                        DsState::Failed,
+                        DsState::Faulted,
                     );
                 }
             }
@@ -5831,6 +6564,7 @@ impl FlushInfo {
  * XXX This very much still under development. Most of these are place
  * holders and the final set of states will change.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum DsState {
@@ -5865,7 +6599,7 @@ enum DsState {
      */
     Verifying,
     /*
-     * Downstairs are repairing from each other.
+     * Initial startup, downstairs are repairing from each other.
      */
     Repair,
     /*
@@ -5881,7 +6615,12 @@ enum DsState {
      * rate, or it is not able to keep up, or it is having some
      * error such that we can no longer use it.
      */
-    Failed,
+    Faulted,
+    /*
+     * This downstairs was failed, but has disconnected and now we
+     * are attempting to repair it.
+     */
+    OnlineRepair,
     /*
      * This downstairs is being migrated to a new location
      */
@@ -5941,8 +6680,11 @@ impl fmt::Display for DsState {
             DsState::Active => {
                 write!(f, "Active")
             }
-            DsState::Failed => {
-                write!(f, "Failed")
+            DsState::Faulted => {
+                write!(f, "Faulted")
+            }
+            DsState::OnlineRepair => {
+                write!(f, "OnlineRepair")
             }
             DsState::Migrating => {
                 write!(f, "Migrating")
@@ -5968,7 +6710,8 @@ impl fmt::Display for DsState {
  */
 #[derive(Debug)]
 struct DownstairsIO {
-    ds_id: u64,    // This MUST match our hashmap index
+    ds_id: u64, // This MUST match our hashmap index
+
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
 
@@ -6025,6 +6768,7 @@ impl DownstairsIO {
      * Return the size of the IO in bytes
      * Depending on the IO (write or read) we have to look in a different
      * location to get the size.
+     * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
         match &self.work {
@@ -6041,6 +6785,7 @@ impl DownstairsIO {
                 flush_number: _flush_number,
                 gen_number: _,
                 snapshot_details: _,
+                extent_limit: _,
             } => 0,
             IOop::Read {
                 dependencies: _,
@@ -6053,6 +6798,30 @@ impl DownstairsIO {
                     0
                 }
             }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent: _,
+            } => 0,
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => 0,
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => 0,
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent: _,
+            } => 0,
+            IOop::ExtentLiveNoOp { dependencies: _ } => 0,
         }
     }
 }
@@ -6076,6 +6845,7 @@ impl ReconcileIO {
 /*
  * Crucible to storage IO operations.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOop {
     Write {
@@ -6095,6 +6865,36 @@ pub enum IOop {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
+        extent_limit: Option<usize>,
+    },
+    /*
+     * These operations are for repairing a bad downstairs
+     */
+    ExtentClose {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+    },
+    ExtentFlushClose {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+        flush_number: u64,
+        gen_number: u64,
+        source_downstairs: u8,
+        repair_downstairs: Vec<u8>,
+    },
+    ExtentLiveRepair {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+        source_downstairs: u8,
+        source_repair_address: SocketAddr,
+        repair_downstairs: Vec<u8>,
+    },
+    ExtentLiveReopen {
+        dependencies: Vec<u64>, // Jobs that must finish before this
+        extent: usize,
+    },
+    ExtentLiveNoOp {
+        dependencies: Vec<u64>, // Jobs that must finish before this
     },
 }
 
@@ -6107,9 +6907,10 @@ impl IOop {
             } => dependencies,
             IOop::Flush {
                 dependencies,
-                flush_number: _flush_number,
+                flush_number: _,
                 gen_number: _,
                 snapshot_details: _,
+                extent_limit: _,
             } => dependencies,
             IOop::Read {
                 dependencies,
@@ -6119,6 +6920,30 @@ impl IOop {
                 dependencies,
                 writes: _,
             } => dependencies,
+            IOop::ExtentClose {
+                dependencies,
+                extent: _,
+            } => dependencies,
+            IOop::ExtentFlushClose {
+                dependencies,
+                extent: _,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => dependencies,
+            IOop::ExtentLiveRepair {
+                dependencies,
+                extent: _,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => dependencies,
+            IOop::ExtentLiveReopen {
+                dependencies,
+                extent: _,
+            } => dependencies,
+            IOop::ExtentLiveNoOp { dependencies } => dependencies,
         }
     }
 
@@ -6140,6 +6965,7 @@ impl IOop {
  * There is a state that is unique to each downstairs task we have and
  * they operate independent of each other.
  */
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOState {
     // A new IO request.
@@ -6178,7 +7004,7 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, Serialize)]
 struct IOStateCount {
     new: [u32; 3],
     in_progress: [u32; 3],
@@ -6261,9 +7087,32 @@ impl IOStateCount {
             }
         }
     }
+
+    pub fn decr(&mut self, state: &IOState, cid: u8) {
+        assert!(cid < 3);
+        let cid = cid as usize;
+        match state {
+            IOState::New => {
+                self.new[cid] -= 1;
+            }
+            IOState::InProgress => {
+                self.in_progress[cid] -= 1;
+            }
+            IOState::Done => {
+                self.done[cid] -= 1;
+            }
+            IOState::Skipped => {
+                self.skipped[cid] -= 1;
+            }
+            IOState::Error(_) => {
+                self.error[cid] -= 1;
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum AckStatus {
     NotAcked,
     AckReady,
@@ -6413,7 +7262,8 @@ pub enum BlockOp {
     Flush {
         snapshot_details: Option<SnapshotDetails>,
     },
-    GoActive {
+    GoActive,
+    GoActiveWithGen {
         gen: u64,
     },
     Deactivate,
@@ -7068,15 +7918,26 @@ impl Guest {
         self.send(BlockOp::Commit).await.wait().await.unwrap();
         Ok(())
     }
+    // Maybe this can just be a guest specific thing, not a BlockIO
+    pub async fn activate_with_gen(
+        &self,
+        gen: u64,
+    ) -> Result<(), CrucibleError> {
+        let waiter = self.send(BlockOp::GoActiveWithGen { gen }).await;
+        println!("The guest has requested activation with gen:{}", gen);
+        waiter.wait().await?;
+        println!("The guest has finished waiting for activation with:{}", gen);
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl BlockIO for Guest {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActive { gen }).await;
-        println!("The guest has requested activation with gen:{}", gen);
+    async fn activate(&self) -> Result<(), CrucibleError> {
+        let waiter = self.send(BlockOp::GoActive).await;
+        println!("The guest has requested activation");
         waiter.wait().await?;
-        println!("The guest has finished waiting for activation with:{}", gen);
+        println!("The guest has finished waiting for activation");
         Ok(())
     }
 
@@ -7238,8 +8099,8 @@ struct Repair {
  * Send a message there is repair work to do.
  */
 pub struct Target {
-    target: SocketAddr,
-    ds_work_tx: watch::Sender<u64>,
+    ds_work_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<u64>,
     ds_active_tx: watch::Sender<u64>,
     ds_reconcile_work_tx: watch::Sender<u64>,
 }
@@ -7255,13 +8116,13 @@ struct Condition {
  * Send work to all the targets.
  * If a send fails, report an error.
  */
-fn send_work(t: &[Target], val: u64) {
-    for d_client in t.iter() {
-        let res = d_client.ds_work_tx.send(val);
+async fn send_work(t: &[Target], val: u64) {
+    for (client_id, d_client) in t.iter().enumerate() {
+        let res = d_client.ds_work_tx.send(val).await;
         if let Err(e) = res {
             println!(
-                "ERROR {:#?} Failed to notify {:?} of work {}",
-                e, d_client.target, val,
+                "ERROR {:#?} Failed to notify client {} of work {}",
+                e, client_id, val,
             );
         }
     }
@@ -7272,12 +8133,12 @@ fn send_work(t: &[Target], val: u64) {
  * If a send fails, report an error.
  */
 fn send_reconcile_work(t: &[Target], val: u64) {
-    for d_client in t.iter() {
+    for (client_id, d_client) in t.iter().enumerate() {
         let res = d_client.ds_reconcile_work_tx.send(val);
         if let Err(e) = res {
             println!(
-                "ERROR {:#?} Failed to notify {:?} of reconcile work {}",
-                e, d_client.target, val,
+                "ERROR {:#?} Failed to notify client {} of reconcile work {}",
+                e, client_id, val,
             );
         }
     }
@@ -7288,13 +8149,13 @@ fn send_reconcile_work(t: &[Target], val: u64) {
  * If a send fails, print an error.
  */
 fn send_active(t: &[Target], gen: u64) {
-    for d_client in t.iter() {
-        // println!("#### send to client {:?}", d_client.target);
+    for (client_id, d_client) in t.iter().enumerate() {
+        // println!("#### send to client {:?}", client_id);
         let res = d_client.ds_active_tx.send(gen);
         if let Err(e) = res {
             println!(
-                "#### error {:#?} Failed 'active' notification to {:?}",
-                e, d_client.target
+                "ERROR {:#?} Failed 'active' notification to client {}",
+                e, client_id
             );
         }
     }
@@ -7332,7 +8193,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
         for ds_id_done in ack_list.iter() {
             let mut ds = up.downstairs.lock().await;
 
-            let done = ds.active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -7387,12 +8248,13 @@ async fn process_new_io(
      * If any of the submit_* functions fail to send to the downstairs, they
      * return an error.  These are reported to the Guest.
      */
+    let ds_done_tx = dst[0].ds_done_tx.clone();
     match req.op() {
         /*
          * These three options can be handled by this task directly,
          * and don't require the upstairs to be fully online.
          */
-        BlockOp::GoActive { gen } => {
+        BlockOp::GoActive => {
             /*
              * If we are deactivating, then reject this re-connect and
              * let the deactivate finish.
@@ -7400,16 +8262,20 @@ async fn process_new_io(
             if let Err(_e) = up.set_active_request(req).await {
                 return;
             }
-            /*
-             * We may redo how the generation number works as more parts
-             * that use it are built.  In the failed migration case an
-             * upstairs will have to recover and either self update the
-             * generation number, or get the new one from propolis.
-             */
-
             // Put the req waiter into the upstairs so we have a hook on
             // who to notify when the answer comes back.
             // We must do this before we tell all the tasks for downstairs.
+            let gen: u64 = *up.generation.lock().await;
+            send_active(dst, gen);
+        }
+        BlockOp::GoActiveWithGen { gen } => {
+            /*
+             * If we are deactivating, then reject this re-connect and
+             * let the deactivate finish.
+             */
+            if let Err(_e) = up.set_active_request(req).await {
+                return;
+            }
             up.set_generation(gen).await;
             send_active(dst, gen);
         }
@@ -7434,40 +8300,44 @@ async fn process_new_io(
              * deactivation and need to signal all our downstairs that
              * they (may) have a flush to do.
              */
-            if up.set_deactivate(Some(req)).await.is_err() {
+            if up.set_deactivate(Some(req), ds_done_tx).await.is_err() {
                 return;
             }
 
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::Read { offset, data } => {
-            if up.submit_read(offset, data, Some(req)).await.is_err() {
+            if up
+                .submit_read(offset, data, Some(req), ds_done_tx)
+                .await
+                .is_err()
+            {
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
             if up
-                .submit_write(offset, data, Some(req), false)
+                .submit_write(offset, data, Some(req), false, ds_done_tx)
                 .await
                 .is_err()
             {
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::WriteUnwritten { offset, data } => {
             if up
-                .submit_write(offset, data, Some(req), true)
+                .submit_write(offset, data, Some(req), true, ds_done_tx)
                 .await
                 .is_err()
             {
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         BlockOp::Flush { snapshot_details } => {
@@ -7483,57 +8353,82 @@ async fn process_new_io(
                 return;
             }
 
-            if up.submit_flush(Some(req), snapshot_details).await.is_err() {
+            if up
+                .submit_flush(Some(req), snapshot_details, ds_done_tx)
+                .await
+                .is_err()
+            {
                 return;
             }
 
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request block size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.block_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.block_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Block size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "block size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryTotalSize { data } => {
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request total size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.total_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.total_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Total size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "total size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
             // Yes, test only
-            if !up.guest_io_ready().await {
-                warn!(
-                    up.log,
-                    "Can't request extent size, upstairs is not active"
-                );
-                req.send_err(CrucibleError::UpstairsInactive).await;
-                return;
-            }
-            *data.lock().await = up.ddef.lock().await.extent_size();
+            let size = match up.ddef.lock().await.get_def() {
+                Some(rd) => rd.extent_size(),
+                None => {
+                    warn!(
+                        up.log,
+                        "Extent size not available (active: {})",
+                        up.guest_io_ready().await
+                    );
+                    req.send_err(CrucibleError::PropertyNotAvailable(
+                        "extent size".to_string(),
+                    ))
+                    .await;
+                    return;
+                }
+            };
+            *data.lock().await = size;
             req.send_ok().await;
         }
         BlockOp::QueryWorkQueue { data } => {
             // TODO should this first check if the Upstairs is active?
             *data.lock().await = WQCounts {
                 up_count: up.guest.guest_work.lock().await.active.len(),
-                ds_count: up.downstairs.lock().await.active.len(),
+                ds_count: up.downstairs.lock().await.ds_active.len(),
             };
             req.send_ok().await;
         }
@@ -7547,7 +8442,7 @@ async fn process_new_io(
                 req.send_err(CrucibleError::UpstairsInactive).await;
                 return;
             }
-            send_work(dst, *lastcast);
+            send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
     }
@@ -7561,6 +8456,7 @@ pub struct Arg {
     up_count: u32,
     ds_count: u32,
     ds_state: Vec<DsState>,
+    ds_io_count: IOStateCount,
 }
 
 /**
@@ -7656,7 +8552,7 @@ async fn up_listen(
                 if let Some(c) = c {
                     info!(
                         up.log,
-                        "[{}] {:?} new connection:{:?}",
+                        "[{}] {} task reports connection:{:?}",
                         c.client_id, c.target, c.connected,
                     );
                     up.ds_state_show().await;
@@ -7679,8 +8575,8 @@ async fn up_listen(
                     } else {
                         info!(
                             up.log,
-                            "[{}] goes offline {}",
-                            c.client_id, c.target
+                            "[{}] {} task reports offline",
+                            c.client_id, c.target,
                         );
                     }
                 } else {
@@ -7691,7 +8587,7 @@ async fn up_listen(
                      * bug somewhere, at least we are leaving this
                      * breadcrumb behind.
                      */
-                    info!(up.log, "up_listen reports status_rx -> None ");
+                    warn!(up.log, "up_listen reports status_rx -> None ");
                 }
             }
             req = up.guest.recv() => {
@@ -7717,11 +8613,15 @@ async fn up_listen(
                  * than necessary.
                  */
                 if up.flush_needed().await {
-                    if let Err(e) = up.submit_flush(None, None).await {
+                    if let Err(e) = up.submit_flush(
+                        None,
+                        None,
+                        dst[0].ds_done_tx.clone()
+                    ).await {
                         error!(up.log, "flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
-                        send_work(&dst, 1);
+                        send_work(&dst, 1).await;
                     }
                 }
                 /*
@@ -7751,6 +8651,7 @@ async fn up_listen(
 pub async fn up_main(
     opt: CrucibleOpts,
     gen: u64,
+    region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -7772,7 +8673,7 @@ pub async fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, RegionDefinition::default(), guest, log);
+    let up = Upstairs::new(&opt, gen, region_def, guest, log);
 
     /*
      * Use this channel to receive updates on target status from each task
@@ -7826,55 +8727,48 @@ pub async fn up_main(
     };
     let tls_context = Arc::new(tokio::sync::Mutex::new(tls_context));
 
-    let mut client_id = 0;
     /*
-     * Create one downstairs task (dst) for each target in the opt
-     * structure that was passed to us.
+     * Create one downstairs task structure (dst) for the three downstairs
+     * tasks.
      */
-    let dst = opt
-        .target
-        .iter()
-        .map(|dst| {
-            /*
-             * Create the channel that we will use to request that the loop
-             * check for work to do in the central structure.
-             */
-            let (ds_work_tx, ds_work_rx) = watch::channel(1);
-            /*
-             * Create the channel used to submit reconcile work to each
-             * downstairs (when work is required).
-             */
-            let (ds_reconcile_work_tx, ds_reconcile_work_rx) =
-                watch::channel(1);
+    let mut dst = Vec::new();
+    for client_id in 0..3 {
+        /*
+         * Create the channel that we will use to request that the loop
+         * check for work to do in the central structure.
+         */
+        let (ds_work_tx, ds_work_rx) = mpsc::channel(500);
+        /*
+         * Create the channel used to submit reconcile work to each
+         * downstairs (when work is required).
+         */
+        let (ds_reconcile_work_tx, ds_reconcile_work_rx) = watch::channel(1);
 
-            // Notify when it's time to go active.
-            let (ds_active_tx, ds_active_rx) = watch::channel(0);
+        // Notify when it's time to go active.
+        let (ds_active_tx, ds_active_rx) = watch::channel(0);
 
-            let up = Arc::clone(&up);
-            let t0 = *dst;
-            let up_coms = UpComs {
-                client_id,
-                ds_work_rx,
-                ds_status_tx: ds_status_tx.clone(),
-                ds_done_tx: ds_done_tx.clone(),
-                ds_active_rx,
-                ds_reconcile_work_rx,
-                ds_reconcile_done_tx: ds_reconcile_done_tx.clone(),
-            };
-            let tls_context = tls_context.clone();
-            tokio::spawn(async move {
-                looper(t0, tls_context, &up, up_coms).await;
-            });
-            client_id += 1;
+        let up = Arc::clone(&up);
+        let up_coms = UpComs {
+            client_id,
+            ds_work_rx,
+            ds_status_tx: ds_status_tx.clone(),
+            ds_done_tx: ds_done_tx.clone(),
+            ds_active_rx,
+            ds_reconcile_work_rx,
+            ds_reconcile_done_tx: ds_reconcile_done_tx.clone(),
+        };
+        let tls_context = tls_context.clone();
+        tokio::spawn(async move {
+            looper(tls_context, &up, up_coms).await;
+        });
 
-            Target {
-                target: *dst,
-                ds_work_tx,
-                ds_active_tx,
-                ds_reconcile_work_tx,
-            }
-        })
-        .collect::<Vec<_>>();
+        dst.push(Target {
+            ds_work_tx,
+            ds_done_tx: ds_done_tx.clone(),
+            ds_active_tx,
+            ds_reconcile_work_tx,
+        });
+    }
 
     // Drop here, otherwise receivers will be kept waiting if looper quits
     drop(ds_done_tx);
@@ -7993,6 +8887,7 @@ fn create_read_eob(
 /*
  * Create a flush DownstairsIO structure.
  */
+#[allow(clippy::too_many_arguments)]
 fn create_flush(
     ds_id: u64,
     dependencies: Vec<u64>,
@@ -8001,12 +8896,14 @@ fn create_flush(
     gen_number: u64,
     snapshot_details: Option<SnapshotDetails>,
     impacted_blocks: ImpactedBlocks,
+    extent_limit: Option<usize>,
 ) -> DownstairsIO {
     let flush = IOop::Flush {
         dependencies,
         flush_number,
         gen_number,
         snapshot_details,
+        extent_limit,
     };
 
     let mut state = HashMap::new();
@@ -8031,12 +8928,11 @@ fn create_flush(
  * the clients.
  */
 async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
-    let mut iosc: IOStateCount = IOStateCount::new();
     let gior = up.guest_io_ready().await;
     let up_count = up.guest.guest_work.lock().await.active.len();
 
-    let ds = up.downstairs.lock().await;
-    let mut kvec: Vec<u64> = ds.active.keys().cloned().collect::<Vec<u64>>();
+    let mut ds = up.downstairs.lock().await;
+    let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
     println!(
         "----------------------------------------------------------------"
     );
@@ -8068,7 +8964,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
         kvec.sort_unstable();
         for id in kvec.iter() {
-            let job = ds.active.get(id).unwrap();
+            let job = ds.ds_active.get(id).unwrap();
             let ack = job.ack_status;
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
@@ -8113,8 +9009,48 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                     flush_number: _flush_number,
                     gen_number: _gen_number,
                     snapshot_details: _,
+                    extent_limit: _,
                 } => {
                     let job_type = "Flush".to_string();
+                    (job_type, 0)
+                }
+                IOop::ExtentClose {
+                    dependencies: _,
+                    extent,
+                } => {
+                    let job_type = "EClose".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentFlushClose {
+                    dependencies: _,
+                    extent,
+                    flush_number: _,
+                    gen_number: _,
+                    source_downstairs: _,
+                    repair_downstairs: _,
+                } => {
+                    let job_type = "FClose".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentLiveRepair {
+                    dependencies: _,
+                    extent,
+                    source_downstairs: _,
+                    source_repair_address: _,
+                    repair_downstairs: _,
+                } => {
+                    let job_type = "Repair".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentLiveReopen {
+                    dependencies: _,
+                    extent,
+                } => {
+                    let job_type = "Reopen".to_string();
+                    (job_type, *extent)
+                }
+                IOop::ExtentLiveNoOp { dependencies: _ } => {
+                    let job_type = "NoOp".to_string();
                     (job_type, 0)
                 }
             };
@@ -8131,7 +9067,6 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                         // XXX I have no idea why this is two spaces instead of
                         // one...
                         print!("  {0:>5}", state);
-                        iosc.incr(state, cid);
                     }
                     _x => {
                         print!("  {0:>5}", "????");
@@ -8142,7 +9077,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
             println!();
         }
-        iosc.show_all();
+        ds.io_state_count.show_all();
         print!("Last Flush: ");
         for lf in ds.ds_last_flush.iter() {
             print!("{} ", lf);

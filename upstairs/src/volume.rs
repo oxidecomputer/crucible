@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 
 use super::*;
 use async_recursion::async_recursion;
@@ -7,6 +7,36 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crucible_client_types::VolumeConstructionRequest;
+
+pub struct RegionExtentInfo {
+    pub block_size: u64,
+    pub blocks_per_extent: u64,
+    pub extent_count: u32,
+}
+
+/// Creates a `RegionDefinition` from a set of parameters in a region
+/// construction request.
+//
+// TODO(#559): This should return a Vec<RegionDefinition> with one definition
+// for each downstairs, each bearing the expected downstairs UUID for that
+// downstairs, but this requires those UUIDs to be present in `opts`, which
+// currently doesn't store them.
+fn build_region_definition(
+    extent_info: &RegionExtentInfo,
+    opts: &CrucibleOpts,
+) -> Result<RegionDefinition> {
+    let mut region_options = RegionOptions::default();
+    region_options.set_block_size(extent_info.block_size);
+    region_options.set_extent_size(Block {
+        value: extent_info.blocks_per_extent,
+        shift: extent_info.block_size.trailing_zeros(),
+    });
+    region_options.set_encrypted(opts.key.is_some());
+
+    let mut region_def = RegionDefinition::from_options(&region_options)?;
+    region_def.set_extent_count(extent_info.extent_count);
+    Ok(region_def)
+}
 
 #[derive(Debug, Clone)]
 pub struct Volume {
@@ -128,17 +158,24 @@ impl Volume {
     pub async fn add_subvolume_create_guest(
         &mut self,
         opts: CrucibleOpts,
+        extent_info: RegionExtentInfo,
         gen: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
+        let region_def = build_region_definition(&extent_info, &opts)?;
         let guest = Arc::new(Guest::new());
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
-        let _join_handle =
-            up_main(opts, gen, guest_clone, producer_registry).await?;
 
-        guest.activate(gen).await?;
+        let _join_handle = up_main(
+            opts,
+            gen,
+            Some(region_def),
+            guest_clone,
+            producer_registry,
+        )
+        .await?;
 
         self.add_subvolume(guest).await
     }
@@ -471,9 +508,9 @@ impl Volume {
 
 #[async_trait]
 impl BlockIO for Volume {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
+    async fn activate(&self) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.conditional_activate(gen).await?;
+            sub_volume.conditional_activate().await?;
 
             let sub_volume_computed_size = self.block_size
                 * (sub_volume.lba_range.end - sub_volume.lba_range.start);
@@ -484,7 +521,7 @@ impl BlockIO for Volume {
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.conditional_activate(gen).await?;
+            read_only_parent.conditional_activate().await?;
         }
 
         Ok(())
@@ -525,9 +562,8 @@ impl BlockIO for Volume {
 
             for sub_volume in &self.sub_volumes {
                 // Range is [start, end), meaning 0..10 is 10
-                total_blocks += (sub_volume.lba_range.end
-                    - sub_volume.lba_range.start)
-                    as u64;
+                total_blocks +=
+                    sub_volume.lba_range.end - sub_volume.lba_range.start;
             }
 
             Ok(total_blocks * self.block_size)
@@ -854,8 +890,8 @@ impl SubVolume {
 
 #[async_trait]
 impl BlockIO for SubVolume {
-    async fn activate(&self, gen: u64) -> Result<(), CrucibleError> {
-        self.block_io.activate(gen).await
+    async fn activate(&self) -> Result<(), CrucibleError> {
+        self.block_io.activate().await
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {
@@ -963,12 +999,23 @@ impl Volume {
 
             VolumeConstructionRequest::Region {
                 block_size,
+                blocks_per_extent,
+                extent_count,
                 opts,
                 gen,
             } => {
                 let mut vol = Volume::new(block_size);
-                vol.add_subvolume_create_guest(opts, gen, producer_registry)
-                    .await?;
+                vol.add_subvolume_create_guest(
+                    opts,
+                    RegionExtentInfo {
+                        block_size,
+                        blocks_per_extent,
+                        extent_count,
+                    },
+                    gen,
+                    producer_registry,
+                )
+                .await?;
                 Ok(vol)
             }
 
@@ -1350,7 +1397,7 @@ mod test {
         mut volume: Volume,
         read_only_parent_init_value: u8,
     ) -> Result<()> {
-        volume.activate(0).await?;
+        volume.activate().await?;
         assert_eq!(volume.get_block_size().await?, 512);
         assert_eq!(block_size, 512);
         assert_eq!(volume.total_size().await?, 4096);
@@ -1785,7 +1832,7 @@ mod test {
         let parent =
             Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
-        parent.activate(0).await?;
+        parent.activate().await?;
 
         // Write 0x80 into parent
         parent
@@ -1801,7 +1848,7 @@ mod test {
             read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
-                    end: parent.total_size().await? / BLOCK_SIZE as u64,
+                    end: parent.total_size().await? / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
             })),
@@ -1810,7 +1857,7 @@ mod test {
             count: Arc::new(AtomicU32::new(0)),
         };
 
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         assert_eq!(volume.total_size().await?, 2048);
 
@@ -1840,7 +1887,7 @@ mod test {
             read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
-                    end: parent.total_size().await.unwrap() / BLOCK_SIZE as u64,
+                    end: parent.total_size().await.unwrap() / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
             })),
@@ -1849,7 +1896,7 @@ mod test {
             count: Arc::new(AtomicU32::new(0)),
         };
 
-        volume.activate(0).await.unwrap();
+        volume.activate().await.unwrap();
 
         // Write 0x80 into volume - this will error
         let res = volume
@@ -1874,7 +1921,7 @@ mod test {
             read_only_parent: Some(Arc::new(SubVolume {
                 lba_range: Range {
                     start: 0,
-                    end: parent.total_size().await.unwrap() / BLOCK_SIZE as u64,
+                    end: parent.total_size().await.unwrap() / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
             })),
@@ -1883,7 +1930,7 @@ mod test {
             count: Arc::new(AtomicU32::new(0)),
         };
 
-        volume.activate(0).await.unwrap();
+        volume.activate().await.unwrap();
 
         // Write 0x80 into volume - this will error
         let res = volume
@@ -2126,7 +2173,7 @@ mod test {
 
         volume.add_read_only_parent(parent).await?;
 
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         assert_eq!(volume.total_size().await?, block_size as u64 * 10);
 
@@ -2406,7 +2453,7 @@ mod test {
         ));
 
         volume.add_read_only_parent(parent.clone()).await?;
-        volume.activate(0).await?;
+        volume.activate().await?;
 
         // The total blocks in our volume
         let volume_blocks = volume.total_size().await? / block_size as u64;

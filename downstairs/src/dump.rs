@@ -18,7 +18,7 @@ struct ExtInfo {
  *
  * If you don't want color, then set nc to true.
  */
-pub fn dump_region(
+pub async fn dump_region(
     region_dir: Vec<PathBuf>,
     mut cmp_extent: Option<u32>,
     block: Option<u64>,
@@ -45,7 +45,8 @@ pub fn dump_region(
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(&dir, Default::default(), false, true, &log)?;
+        let region =
+            Region::open(dir, Default::default(), false, true, &log).await?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -89,7 +90,7 @@ pub fn dump_region(
                     continue;
                 }
             }
-            let inner = e.inner();
+            let inner = e.inner().await;
 
             /*
              * Create the ExtentMeta struct for this directory's extent
@@ -145,7 +146,8 @@ pub fn dump_region(
                 only_show_differences,
                 nc,
                 log,
-            );
+            )
+            .await;
         }
 
         show_extent(
@@ -156,7 +158,8 @@ pub fn dump_region(
             only_show_differences,
             nc,
             log,
-        )?;
+        )
+        .await?;
 
         return Ok(());
     };
@@ -440,7 +443,7 @@ fn return_status_letters<'a, T, U: std::cmp::PartialEq>(
  * Show the metadata and a block by block diff of a single extent
  * We need at least two directories to compare, and no more than three.
  */
-fn show_extent(
+async fn show_extent(
     region_dir: Vec<PathBuf>,
     ei_hm: &HashMap<u32, ExtentMeta>,
     cmp_extent: u32,
@@ -481,12 +484,11 @@ fn show_extent(
     print!("DIRTY    ");
     for dir_index in 0..dir_count {
         if let Some(em) = ei_hm.get(&(dir_index as u32)) {
-            let dirty;
-            if em.dirty {
-                dirty = "D".to_string();
+            let dirty = if em.dirty {
+                "D".to_string()
             } else {
-                dirty = " ".to_string();
-            }
+                " ".to_string()
+            };
             print!("{:>8} ", dirty);
         } else {
             print!("- ");
@@ -494,9 +496,14 @@ fn show_extent(
     }
     println!();
     println!();
+    // Width for BLOCKS column
+    let max_block =
+        blocks_per_extent * cmp_extent as u64 + blocks_per_extent - 1;
+    // Get the max possible width for a single block
+    let block_width = std::cmp::max(3, max_block.to_string().len());
 
     // Print the header
-    print!("{0:5} ", "BLOCK");
+    print!("{:>0width$} ", "BLOCK", width = block_width);
     for (index, _) in region_dir.iter().enumerate() {
         print!(" {0:^2}", format!("D{}", index));
     }
@@ -533,15 +540,18 @@ fn show_extent(
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
             let region =
-                Region::open(&dir, Default::default(), false, true, &log)?;
+                Region::open(dir, Default::default(), false, true, &log)
+                    .await?;
 
-            let mut responses = region.region_read(
-                &[ReadRequest {
-                    eid: cmp_extent as u64,
-                    offset: Block::new_with_ddef(block, &region.def()),
-                }],
-                0,
-            )?;
+            let mut responses = region
+                .region_read(
+                    &[ReadRequest {
+                        eid: cmp_extent as u64,
+                        offset: Block::new_with_ddef(block, &region.def()),
+                    }],
+                    0,
+                )
+                .await?;
             let response = responses.pop().unwrap();
 
             dvec.insert(index, response);
@@ -581,7 +591,7 @@ fn show_extent(
         // Now that we have collected all the results, print them
         let real_block = (blocks_per_extent * cmp_extent as u64) + block;
         if !only_show_differences || different {
-            print!("{:5} ", real_block);
+            print!("{:0width$} ", real_block, width = block_width);
 
             for column in data_columns.iter().take(dir_count) {
                 print!("  {}", column);
@@ -615,7 +625,7 @@ fn is_all_same<T: PartialEq>(slice: &[T]) -> bool {
 /*
  * Show detailed comparison of different region's blocks
  */
-fn show_extent_block(
+async fn show_extent_block(
     region_dir: Vec<PathBuf>,
     cmp_extent: u32,
     block: u64,
@@ -645,15 +655,21 @@ fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(&dir, Default::default(), false, true, &log)?;
+        let region =
+            Region::open(dir, Default::default(), false, true, &log).await?;
 
-        let mut responses = region.region_read(
-            &[ReadRequest {
-                eid: cmp_extent as u64,
-                offset: Block::new_with_ddef(block_in_extent, &region.def()),
-            }],
-            0,
-        )?;
+        let mut responses = region
+            .region_read(
+                &[ReadRequest {
+                    eid: cmp_extent as u64,
+                    offset: Block::new_with_ddef(
+                        block_in_extent,
+                        &region.def(),
+                    ),
+                }],
+                0,
+            )
+            .await?;
         let response = responses.pop().unwrap();
 
         dvec.insert(index, response);

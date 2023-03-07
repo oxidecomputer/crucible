@@ -22,14 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - uses: dtolnay/rust-toolchain@nightly
+    - uses: dtolnay/rust-toolchain@1.66
     - name: Test build documentation
       run: cargo doc
   build-and-test:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - uses: dtolnay/rust-toolchain@nightly
+    - uses: dtolnay/rust-toolchain@1.66
     - name: Build
       run: cargo build --verbose
     - name: Test Libraries

@@ -1,10 +1,10 @@
 [package]
 name = "crucible-smf"
 version = "0.0.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-libc = "0.2.134"
+libc = "0.2.139"
 thiserror = "1"
 num-traits = "0.2"
 num-derive = "0.3"
