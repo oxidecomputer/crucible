@@ -2370,15 +2370,16 @@ pub async fn save_stream_to_file(
     Ok(())
 }
 
-struct BatchedPwritevState {
+struct BatchedPwritevState<'a> {
     byte_offset: u64,
+    iovecs: Vec<IoSlice<'a>>,
     next_block_in_run: u64,
 }
 
 struct BatchedPwritev<'a> {
     fd: std::os::fd::RawFd,
-    iovecs: Vec<IoSlice<'a>>,
-    state: Option<BatchedPwritevState>,
+    capacity: usize,
+    state: Option<BatchedPwritevState<'a>>,
     block_size: u64,
     iov_max: usize,
 }
@@ -2392,7 +2393,7 @@ impl<'a> BatchedPwritev<'a> {
     ) -> Self {
         Self {
             fd,
-            iovecs: Vec::with_capacity(capacity),
+            capacity,
             state: None,
             block_size,
             iov_max,
@@ -2400,7 +2401,7 @@ impl<'a> BatchedPwritev<'a> {
     }
 
     /// Add a write to the batch. If the write would cause the list of iovecs to
-    /// be larger than IOV_MAX, then flush() is called.
+    /// be larger than IOV_MAX, then `perform_writes` is called.
     pub fn add_write(
         &mut self,
         write: &'a crucible_protocol::Write,
@@ -2412,7 +2413,7 @@ impl<'a> BatchedPwritev<'a> {
             if block == state.next_block_in_run {
                 // If so, then add it to the list. Make sure to flush if the
                 // total size would become larger than IOV_MAX.
-                (self.iovecs.len() + 1) >= self.iov_max
+                (state.iovecs.len() + 1) >= self.iov_max
             } else {
                 // If not, then flush, and start the state all over.
                 true
@@ -2425,29 +2426,28 @@ impl<'a> BatchedPwritev<'a> {
             self.perform_writes()?;
         }
 
-        // If flush was called above, then state will be None.
-        if let Some(ref mut state) = self.state {
-            if block == state.next_block_in_run {
-                self.iovecs.push(IoSlice::new(&write.data));
-
-                state.next_block_in_run += 1;
-            } else {
-                // we previously flushed, so start fresh
-                self.state = Some(BatchedPwritevState {
-                    byte_offset: write.offset.value * self.block_size,
-                    next_block_in_run: block + 1,
-                });
-
-                self.iovecs.push(IoSlice::new(&write.data));
-            }
+        // If perform_writes was called above, then state will be None. If
+        // perform_writes was not called, then:
+        //
+        // - block == state.next_block_in_run, and
+        // - (state.iovecs.len() + 1) <= self.iov_max
+        //
+        // hence the assertion below.
+        if let Some(state) = &mut self.state {
+            assert_eq!(block, state.next_block_in_run);
+            state.iovecs.push(IoSlice::new(&write.data));
+            state.next_block_in_run += 1;
         } else {
             // start fresh
             self.state = Some(BatchedPwritevState {
                 byte_offset: write.offset.value * self.block_size,
+                iovecs: {
+                    let mut iovecs = Vec::with_capacity(self.capacity);
+                    iovecs.push(IoSlice::new(&write.data));
+                    iovecs
+                },
                 next_block_in_run: block + 1,
             });
-
-            self.iovecs.push(IoSlice::new(&write.data));
         }
 
         Ok(())
@@ -2455,24 +2455,17 @@ impl<'a> BatchedPwritev<'a> {
 
     // Write bytes out to file target
     pub fn perform_writes(&mut self) -> Result<(), CrucibleError> {
-        if !self.iovecs.is_empty() {
-            if let Some(ref mut state) = self.state {
-                nix::sys::uio::pwritev(
-                    self.fd,
-                    &self.iovecs[..],
-                    state.byte_offset as i64,
-                )
-                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        if let Some(state) = &mut self.state {
+            assert!(!state.iovecs.is_empty());
 
-                self.iovecs.clear();
-                self.state = None;
-            } else {
-                crucible_bail!(
-                    GenericError,
-                    "call to BatchedPwritev::Flush with byte_offset = None!"
-                );
-                // XXX panic?
-            }
+            nix::sys::uio::pwritev(
+                self.fd,
+                &state.iovecs[..],
+                state.byte_offset as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
+            self.state = None;
         }
 
         Ok(())
