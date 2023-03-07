@@ -6545,7 +6545,7 @@ mod up_test {
     }
 
     #[tokio::test]
-    async fn test_deps_read_does_not_depend_on_flush() {
+    async fn test_deps_read_depends_on_flush() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -6553,7 +6553,7 @@ mod up_test {
         // ----|-------|-----
         //   0 | W     |
         //   1 | FFFFF | 0
-        //   2 | R     | 0
+        //   2 | R     | 1
 
         let upstairs = make_upstairs();
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
@@ -6596,7 +6596,7 @@ mod up_test {
 
         assert!(jobs[0].work.deps().is_empty()); // write @ 0
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // read @ 0
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // read @ 0
     }
 
     #[tokio::test]
@@ -7446,167 +7446,6 @@ mod up_test {
     }
 
     #[tokio::test]
-    async fn test_deps_retire_check() {
-        // Test that retire_check still works for flushes that depend on writes
-        // but not reads, where the read hasn't completed yet
-
-        let upstairs = make_upstairs();
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        upstairs.set_active().await.unwrap();
-
-        upstairs
-            .submit_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                None,
-                false,
-                ds_done_tx.clone(),
-            )
-            .await
-            .unwrap();
-
-        upstairs
-            .submit_read(
-                Block::new_512(1),
-                Buffer::new(512),
-                None,
-                ds_done_tx.clone(),
-            )
-            .await
-            .unwrap();
-
-        upstairs
-            .submit_write(
-                Block::new_512(2),
-                Bytes::from(vec![0xff; 512]),
-                None,
-                false,
-                ds_done_tx.clone(),
-            )
-            .await
-            .unwrap();
-
-        upstairs
-            .submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
-
-        // complete and ack the previous flush and both writes
-
-        let mut ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
-        assert_eq!(jobs.len(), 4);
-
-        let write_1 = jobs[0].ds_id;
-        let read = jobs[1].ds_id;
-        let write_2 = jobs[2].ds_id;
-        let flush = jobs[3].ds_id;
-
-        for ds_id in &[write_1, write_2] {
-            for client_id in 0..3 {
-                ds.in_progress(*ds_id, client_id);
-                ds.process_ds_completion(
-                    *ds_id,
-                    client_id,
-                    Ok(vec![]),
-                    &None,
-                    UpState::Active,
-                )
-                .unwrap();
-            }
-
-            ds.ack(*ds_id);
-            ds.retire_check(*ds_id);
-        }
-
-        // complete and ack flush
-        for client_id in 0..3 {
-            ds.in_progress(flush, client_id);
-            ds.process_ds_completion(
-                flush,
-                client_id,
-                Ok(vec![]),
-                &None,
-                UpState::Active,
-            )
-            .unwrap();
-        }
-
-        ds.ack(flush);
-
-        // call retire_check on flush (where the read hasn't been acked yet)
-
-        ds.retire_check(flush);
-
-        // only the read should be left (retire_check removes the flush and the
-        // deps of the flush)
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
-        assert_eq!(jobs.len(), 1);
-
-        assert_eq!(jobs[0].ds_id, read);
-        assert!(matches!(jobs[0].work, IOop::Read { .. }));
-
-        // complete and ack the read, then do another flush. This should retire
-        // everything.
-        for client_id in 0..3 {
-            ds.in_progress(read, client_id);
-
-            let request = ReadRequest {
-                eid: 0,
-                offset: Block::new_512(1),
-            };
-
-            ds.process_ds_completion(
-                read,
-                client_id,
-                Ok(vec![ReadResponse::from_request_with_data(&request, &[])]),
-                &None,
-                UpState::Active,
-            )
-            .unwrap();
-        }
-
-        ds.ack(read);
-        ds.retire_check(read);
-
-        drop(ds);
-        upstairs
-            .submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
-
-        let mut ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
-        assert_eq!(jobs.len(), 2);
-
-        let flush = jobs[1].ds_id;
-
-        for client_id in 0..3 {
-            ds.in_progress(flush, client_id);
-            ds.process_ds_completion(
-                flush,
-                client_id,
-                Ok(vec![]),
-                &None,
-                UpState::Active,
-            )
-            .unwrap();
-        }
-
-        ds.ack(flush);
-        ds.retire_check(flush);
-
-        assert_eq!(ds.ds_active.keys().count(), 0);
-    }
-
-    #[tokio::test]
     async fn test_read_flush_write_hash_mismatch() {
         // Test that the following job dependency graph is made:
         //
@@ -7614,7 +7453,7 @@ mod up_test {
         // op# | 95 96 97 98 99 | deps
         // ----|----------------|-----
         //   0 |  R  R          |
-        //   1 | FFFFFFFFFFFFFFF|
+        //   1 | FFFFFFFFFFFFFFF| 0
         //   2 |     W  W       | 0,1
 
         let upstairs = make_upstairs();
@@ -7659,8 +7498,8 @@ mod up_test {
         // assert read has no deps
         assert!(jobs[0].work.deps().is_empty()); // op 0
 
-        // assert flush has no deps
-        assert!(jobs[1].work.deps().is_empty()); // op 1
+        // assert flush depends on the read
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
 
         // assert write depends on both the read and flush
         assert_eq!(

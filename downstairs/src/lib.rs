@@ -2582,6 +2582,13 @@ impl Work {
                     Vec::with_capacity(dep_list.len());
 
                 for dep in dep_list.iter() {
+                    // The Downstairs currently assumes that all jobs previous
+                    // to the last flush have completed, hence this early out.
+                    //
+                    // Currently `work.completed` is cleared out when
+                    // `Downstairs::complete_work` (or `complete` in mod test)
+                    // is called with a FlushAck so this early out cannot be
+                    // removed unless that is changed too.
                     if dep <= &self.last_flush {
                         continue;
                     }
