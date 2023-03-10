@@ -11,6 +11,7 @@ mod test {
     use crucible::{Bytes, *};
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
+    use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
@@ -2646,25 +2647,28 @@ mod test {
 
     // The following tests are for the Pantry
 
-    #[tokio::test]
-    async fn test_pantry_import_from_url_ovmf() {
+    /// Given a &TestDownstairsSet, spawn a Pantry, attach a
+    /// CruciblePantryClient, and return both plus the Volume ID.
+    async fn get_pantry_and_client_for_tds(
+        tds: &TestDownstairsSet,
+    ) -> (Arc<Pantry>, Uuid, CruciblePantryClient) {
         const BLOCK_SIZE: usize = 512;
 
-        // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::big(false).await.unwrap();
-        let opts = tds.opts();
+        // Start a new pantry
 
-        // Start the pantry
         let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
         let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
-            pantry,
+            &pantry,
         )
         .await
         .unwrap();
 
+        // Create a Volume out of it, and attach a CruciblePantryClient
+
         let volume_id = Uuid::new_v4();
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -2701,6 +2705,21 @@ mod test {
             )
             .await
             .unwrap();
+
+        (pantry, volume_id, client)
+    }
+
+    #[tokio::test]
+    async fn test_pantry_import_from_url_ovmf() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, and get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
         let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
@@ -2796,55 +2815,10 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
-        let opts = tds.opts();
 
-        // Start the pantry
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, and get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
 
@@ -2942,52 +2916,9 @@ mod test {
             drop(volume);
         }
 
-        // Start the pantry, then use it to import img.raw
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
-                read_only_parent: None,
-            };
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, and get the client for it, then use it to import img.raw
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let response = client
             .import_from_url(
@@ -3040,56 +2971,10 @@ mod test {
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
-        let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to snapshot
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to snapshot
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         client
             .snapshot(
@@ -3113,54 +2998,9 @@ mod test {
         let tds = TestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         for i in 0..10 {
             client
@@ -3220,54 +3060,9 @@ mod test {
         let tds = TestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let base64_encoded_data = engine::general_purpose::STANDARD.encode(
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
@@ -3401,7 +3196,7 @@ mod test {
         let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
-            pantry,
+            &pantry,
         )
         .await
         .unwrap();
@@ -3494,56 +3289,11 @@ mod test {
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
-        let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write then bulk_read in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write then
+        // bulk_read in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         // first, bulk_write some data in
 
@@ -3623,56 +3373,11 @@ mod test {
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::big(false).await.unwrap();
-        let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write in
+        // data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         // bulk write in a bunch of data
 
@@ -3723,56 +3428,11 @@ mod test {
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
-        let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write in
+        // data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         // parallel bulk write in a bunch of random data in a random order
 

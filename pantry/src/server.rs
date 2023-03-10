@@ -347,7 +347,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
 pub async fn run_server(
     log: &Logger,
     bind_address: SocketAddr,
-    df: Arc<Pantry>,
+    df: &Arc<Pantry>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<Result<(), String>>)> {
     let api = make_api().map_err(|e| anyhow!(e))?;
 
@@ -361,7 +361,7 @@ pub async fn run_server(
             ..Default::default()
         },
         api,
-        df,
+        df.clone(),
         &log.new(o!("component" => "dropshot")),
     )
     .map_err(|e| anyhow!("creating server: {:?}", e))?
