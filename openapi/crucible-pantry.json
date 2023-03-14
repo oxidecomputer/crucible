@@ -60,11 +60,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Null",
-                  "type": "string",
-                  "enum": [
-                    null
-                  ]
+                  "$ref": "#/components/schemas/JobResultOkResponse"
                 }
               }
             }
@@ -138,6 +134,50 @@
         "responses": {
           "204": {
             "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/bulk_read": {
+      "post": {
+        "summary": "Bulk read data from a volume at a specified offset",
+        "operationId": "bulk_read",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkReadResponse"
+                }
+              }
+            }
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -299,6 +339,50 @@
           }
         }
       }
+    },
+    "/crucible/pantry/0/volume/{id}/validate": {
+      "post": {
+        "summary": "Validate the digest of a whole volume",
+        "operationId": "validate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -335,6 +419,36 @@
         },
         "required": [
           "id"
+        ]
+      },
+      "BulkReadRequest": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "size": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "offset",
+          "size"
+        ]
+      },
+      "BulkReadResponse": {
+        "type": "object",
+        "properties": {
+          "base64_encoded_data": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base64_encoded_data"
         ]
       },
       "BulkWriteRequest": {
@@ -483,6 +597,17 @@
           "job_is_finished"
         ]
       },
+      "JobResultOkResponse": {
+        "type": "object",
+        "properties": {
+          "job_result_ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "job_result_ok"
+        ]
+      },
       "ScrubResponse": {
         "type": "object",
         "properties": {
@@ -503,6 +628,28 @@
         },
         "required": [
           "snapshot_id"
+        ]
+      },
+      "ValidateRequest": {
+        "type": "object",
+        "properties": {
+          "expected_digest": {
+            "$ref": "#/components/schemas/ExpectedDigest"
+          }
+        },
+        "required": [
+          "expected_digest"
+        ]
+      },
+      "ValidateResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
         ]
       },
       "VolumeConstructionRequest": {
