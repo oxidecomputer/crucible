@@ -138,22 +138,16 @@
           "Acked"
         ]
       },
-      "DownstairsJobState": {
-        "description": "The Possible states of a job on a downstairs (from the point of view of the upstairs).",
-        "type": "string",
-        "enum": [
-          "New",
-          "InProgress",
-          "Done",
-          "Skipped",
-          "Error",
-          "Unknown"
-        ]
-      },
       "DownstairsWork": {
         "description": "`DownstairsWork` holds the information gathered from the downstairs",
         "type": "object",
         "properties": {
+          "completed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkSummary"
+            }
+          },
           "jobs": {
             "type": "array",
             "items": {
@@ -162,6 +156,7 @@
           }
         },
         "required": [
+          "completed",
           "jobs"
         ]
       },
@@ -252,6 +247,31 @@
               "$ref": "#/components/schemas/DsState"
             }
           },
+          "extent_limit": {
+            "type": "array",
+            "items": {
+              "nullable": true,
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "extents_confirmed": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "extents_repaired": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
           "repair_done": {
             "type": "integer",
             "format": "uint",
@@ -274,6 +294,9 @@
         "required": [
           "ds_jobs",
           "ds_state",
+          "extent_limit",
+          "extents_confirmed",
+          "extents_repaired",
           "repair_done",
           "repair_needed",
           "state",
@@ -281,7 +304,7 @@
         ]
       },
       "WorkSummary": {
-        "description": "A summary of information from each job the downstairs has in its queue.",
+        "description": "A summary of information from a DownstairsIO struct.",
         "type": "object",
         "properties": {
           "ack_status": {
@@ -314,7 +337,7 @@
           "state": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DownstairsJobState"
+              "type": "string"
             }
           }
         },
