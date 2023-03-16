@@ -693,7 +693,9 @@ impl Extent {
                 Ok((gen, flush, dirty))
             }
 
-            ExtentState::Closed => panic!("close on already closed extent!"),
+            ExtentState::Closed => {
+                crucible_bail!(GenericError, "close on already closed extent!")
+            }
         }
     }
 
@@ -914,7 +916,9 @@ impl Extent {
         let mg = self.inner.read().await;
         let inner = match &*mg {
             ExtentState::Opened(inner) => inner,
-            ExtentState::Closed => panic!("read on closed extent!"),
+            ExtentState::Closed => {
+                crucible_bail!(GenericError, "read on closed extent!")
+            }
         };
 
         // This code batches up operations for contiguous regions of
@@ -1071,7 +1075,9 @@ impl Extent {
         let mg = self.inner.read().await;
         let inner = match &*mg {
             ExtentState::Opened(inner) => inner,
-            ExtentState::Closed => panic!("write on closed extent!"),
+            ExtentState::Closed => {
+                crucible_bail!(GenericError, "write on closed extent!")
+            }
         };
 
         for write in writes {
@@ -1305,7 +1311,9 @@ impl Extent {
         let mut mg = self.inner.write().await;
         let inner: &mut Inner = match &mut *mg {
             ExtentState::Opened(inner) => inner,
-            ExtentState::Closed => panic!("flush on closed extent!"),
+            ExtentState::Closed => {
+                crucible_bail!(GenericError, "flush on closed extent!")
+            }
         };
 
         if !inner.dirty().await? {
@@ -1494,12 +1502,13 @@ impl Extent {
         // A write lock is required because of the seek and read used on
         // inner.file
         let mut mg = self.inner.write().await;
-        let inner = match &mut *mg {
-            ExtentState::Opened(inner) => inner,
-            ExtentState::Closed => panic!(
+        let inner =
+            match &mut *mg {
+                ExtentState::Opened(inner) => inner,
+                ExtentState::Closed => crucible_bail!(GenericError,
                 "fully_rehash_and_clean_all_stale_contexts on closed extent!"
             ),
-        };
+            };
 
         if !force_override_dirty && !inner.dirty().await? {
             return Ok(());
@@ -2065,7 +2074,7 @@ impl Region {
                 }
 
                 ExtentState::Closed => {
-                    panic!("flush_numbers on closed extent!");
+                    bail!("flush_numbers on closed extent!");
                 }
             }
         }
@@ -2090,7 +2099,7 @@ impl Region {
                 }
 
                 ExtentState::Closed => {
-                    panic!("gen_numbers on closed extent!");
+                    bail!("gen_numbers on closed extent!");
                 }
             }
         }
@@ -2108,7 +2117,7 @@ impl Region {
                 }
 
                 ExtentState::Closed => {
-                    panic!("dirty on closed extent!");
+                    bail!("dirty on closed extent!");
                 }
             }
         }
