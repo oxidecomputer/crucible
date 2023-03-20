@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 tokio = "1.25"
-omicron-zone-package = "0.5.1"
+omicron-zone-package = "0.8.3"
