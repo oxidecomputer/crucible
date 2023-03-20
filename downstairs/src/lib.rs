@@ -1163,14 +1163,21 @@ where
                             new_upstairs_connection, upstairs_connection);
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::YouAreNoLongerActive {
+                        if let Err(e) = fw.send(Message::YouAreNoLongerActive {
                             new_upstairs_id:
                                 new_upstairs_connection.upstairs_id,
                             new_session_id:
                                 new_upstairs_connection.session_id,
                             new_gen: new_upstairs_connection.gen,
-                        }).await?;
-
+                        }).await {
+                            warn!(
+                                log,
+                                "Notify upstairs:{} session:{} not active failed:{}",
+                                upstairs_connection.upstairs_id,
+                                upstairs_connection.session_id,
+                                e,
+                            );
+                        }
                         return Ok(());
                     }
                 }
@@ -1208,7 +1215,9 @@ where
                     }
                     Some(Message::Ruok) => {
                         let mut fw = fw.lock().await;
-                        fw.send(Message::Imok).await?;
+                        if let Err(e) = fw.send(Message::Imok).await {
+                            bail!("Failed to answer ping: {}", e);
+                        }
                     }
                     Some(Message::HereIAm {
                         version,
@@ -1235,9 +1244,11 @@ where
                             if ds.read_only != read_only {
                                 let mut fw = fw.lock().await;
 
-                                fw.send(Message::ReadOnlyMismatch {
+                                if let Err(e) = fw.send(Message::ReadOnlyMismatch {
                                     expected: ds.read_only,
-                                }).await?;
+                                }).await {
+                                    warn!(log, "Failed to send ReadOnlyMismatch: {}", e);
+                                }
 
                                 bail!("closing connection due to read-only \
                                     mismatch");
@@ -1246,9 +1257,11 @@ where
                             if ds.encrypted != encrypted {
                                 let mut fw = fw.lock().await;
 
-                                fw.send(Message::EncryptedMismatch {
+                                if let Err(e) = fw.send(Message::EncryptedMismatch {
                                     expected: ds.encrypted,
-                                }).await?;
+                                }).await {
+                                    warn!(log, "Failed to send EncryptedMismatch: {}", e);
+                                }
 
                                 bail!("closing connection due to encryption \
                                     mismatch");
@@ -1266,9 +1279,11 @@ where
                             upstairs_connection.unwrap());
 
                         let mut fw = fw.lock().await;
-                        fw.send(
+                        if let Err(e) = fw.send(
                             Message::YesItsMe { version: 1, repair_addr }
-                        ).await?;
+                        ).await {
+                            bail!("Failed sending YesItsMe: {}", e);
+                        }
                     }
                     Some(Message::PromoteToActive {
                         upstairs_id,
@@ -1289,12 +1304,14 @@ where
 
                         if !matches_self {
                             let mut fw = fw.lock().await;
-                            fw.send(
+                            if let Err(e) = fw.send(
                                 Message::UuidMismatch {
                                     expected_id:
                                         upstairs_connection.upstairs_id,
                                 }
-                            ).await?;
+                            ).await {
+                                warn!(log, "Failed sending UuidMismatch: {}", e);
+                            }
                             bail!(
                                 "Upstairs connection expected \
                                 upstairs_id:{} session_id:{}  received \
@@ -1330,11 +1347,13 @@ where
                             negotiated = 2;
 
                             let mut fw = fw.lock().await;
-                            fw.send(Message::YouAreNowActive {
+                            if let Err(e) = fw.send(Message::YouAreNowActive {
                                 upstairs_id,
                                 session_id,
                                 gen,
-                            }).await?;
+                            }).await {
+                                bail!("Failed sending YouAreNewActive: {}", e);
+                            }
                         }
                     }
                     Some(Message::RegionInfoPlease) => {
@@ -1349,7 +1368,9 @@ where
                         };
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::RegionInfo { region_def }).await?;
+                        if let Err(e) = fw.send(Message::RegionInfo { region_def }).await {
+                            bail!("Failed sending RegionInfo: {}", e);
+                        }
                     }
                     Some(Message::LastFlush { last_flush_number }) => {
                         if negotiated != 3 {
@@ -1371,9 +1392,11 @@ where
                         }
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::LastFlushAck {
+                        if let Err(e) = fw.send(Message::LastFlushAck {
                             last_flush_number
-                        }).await?;
+                        }).await {
+                            bail!("Failed sending LastFlushAck: {}", e);
+                        }
 
                         /*
                          * Once this command is sent, we are ready to exit
@@ -1393,12 +1416,14 @@ where
                         drop(ds);
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::ExtentVersions {
+                        if let Err(e) = fw.send(Message::ExtentVersions {
                             gen_numbers,
                             flush_numbers,
                             dirty_bits,
                         })
-                        .await?;
+                        .await {
+                            bail!("Failed sending ExtentVersions: {}", e);
+                        }
 
                         /*
                          * Once this command is sent, we are ready to exit
@@ -1568,13 +1593,15 @@ where
                             new_upstairs_connection, upstairs_connection);
 
                         let mut fw = fw.lock().await;
-                        fw.send(Message::YouAreNoLongerActive {
+                        if let Err(e) = fw.send(Message::YouAreNoLongerActive {
                             new_upstairs_id:
                                 new_upstairs_connection.upstairs_id,
                             new_session_id:
                                 new_upstairs_connection.session_id,
                             new_gen: new_upstairs_connection.gen,
-                        }).await?;
+                        }).await {
+                            warn!(log, "Failed sending YouAreNoLongerActive: {}", e);
+                        }
 
                         return Ok(());
                     }
@@ -1604,15 +1631,17 @@ where
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
                             let mut fw = fw.lock().await;
-                            fw.send(Message::Imok).await?;
-                        } else {
-                            message_channel_tx.send(msg).await?;
+                            if let Err(e) = fw.send(Message::Imok).await {
+                                bail!("Failed sending Imok: {}", e);
+                            }
+                        } else if let Err(e) = message_channel_tx.send(msg).await {
+                            bail!("Failed sending message to proc_frame: {}", e);
                         }
                     }
                     Some(Err(e)) => {
                         // XXX "unexpected end of file" can occur if upstairs
                         // terminates, we don't yet have a HangUp message
-                        return Err(e);
+                        bail!("Error reading from Upstairs: {}", e);
                     }
                 }
             }
@@ -3009,12 +3038,12 @@ pub async fn start_downstairs(
                 if let Err(e) = proc_stream(&mut dd, stream).await {
                     error!(
                         dd.lock().await.log,
-                        "connection({}): {:?}", raddr, e
+                        "connection ({}) Exits with error: {:?}", raddr, e
                     );
                 } else {
                     info!(
                         dd.lock().await.log,
-                        "connection({}): all done", raddr
+                        "connection ({}): all done", raddr
                     );
                 }
             });
