@@ -2442,6 +2442,7 @@ struct Downstairs {
     ds_active: HashMap<u64, DownstairsIO>,
     next_id: u64,
     completed: AllocRingBuffer<u64>,
+    completed_jobs: AllocRingBuffer<WorkSummary>,
 
     /**
      * On Startup, we collect info from each downstairs region. We use that
@@ -2485,6 +2486,16 @@ struct Downstairs {
     io_state_count: IOStateCount,
 
     /**
+     * Count of extents repaired online.
+     */
+    extents_repaired: Vec<usize>,
+
+    /**
+     * Count of extents checked but not needing online repair.
+     */
+    extents_confirmed: Vec<usize>,
+
+    /**
      * Extent limit, if set, should be the extent where a flush
      * of a region will stop.  It is assumed that the flush will
      * walk extents from 0 to extent_limit, and any extent above
@@ -2506,6 +2517,7 @@ impl Downstairs {
             downstairs_errors: HashMap::new(),
             ds_active: HashMap::new(),
             completed: AllocRingBuffer::with_capacity(2048),
+            completed_jobs: AllocRingBuffer::with_capacity(8),
             next_id: 1000,
             region_metadata: HashMap::new(),
             reconcile_current_work: None,
@@ -2514,6 +2526,8 @@ impl Downstairs {
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             io_state_count: IOStateCount::new(),
+            extents_repaired: vec![0; 3],
+            extents_confirmed: vec![0; 3],
             extent_limit: vec![None; 3],
         }
     }
@@ -3980,6 +3994,8 @@ impl Downstairs {
                 let oj = self.ds_active.remove(id).unwrap();
                 assert_eq!(oj.ack_status, AckStatus::Acked);
                 self.completed.push(*id);
+                let summary = oj.io_summarize();
+                self.completed_jobs.push(summary);
                 for cid in 0..3 {
                     let old_state = oj.state.get(&cid).unwrap();
                     self.io_state_count.decr(old_state, cid);
@@ -6799,6 +6815,54 @@ impl DownstairsIO {
             IOop::ExtentLiveNoOp { dependencies: _ } => 0,
         }
     }
+
+    /*
+     * Return a summary of this job in the form of the WorkSummary struct.
+     */
+    pub fn io_summarize(&self) -> WorkSummary {
+        let (job_type, num_blocks, deps) = self.work.ioop_summary();
+
+        let mut state = Vec::with_capacity(3);
+        /*
+         * Convert the possible job states (and handle the None)
+         */
+        for cid in 0..3 {
+            /*
+             * We don't ever expect the job state to return None, but
+             * if it does because something else is wrong, I don't want
+             * to panic here while trying to debug it.
+             */
+            let dss = match self.state.get(&(cid as u8)) {
+                Some(x) => format!("{}", x).to_string(),
+                None => " ???".to_string(),
+            };
+            state.push(dss);
+        }
+
+        WorkSummary {
+            id: self.ds_id,
+            replay: self.replay,
+            job_type,
+            num_blocks,
+            deps,
+            ack_status: self.ack_status,
+            state,
+        }
+    }
+}
+
+/**
+ * A summary of information from a DownstairsIO struct.
+ */
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct WorkSummary {
+    id: u64,
+    replay: bool,
+    job_type: String,
+    num_blocks: usize,
+    deps: Vec<u64>,
+    ack_status: AckStatus,
+    state: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -6932,6 +6996,101 @@ impl IOop {
 
     pub fn is_flush(&self) -> bool {
         matches!(self, IOop::Flush { .. })
+    }
+
+    /**
+     * Take a IOop work operation and just return:
+     * A string of the job type.
+     * The size of the IO, or extent number if a repair operation.
+     * A Vec of the dependencies.
+     */
+    pub fn ioop_summary(&self) -> (String, usize, Vec<u64>) {
+        let (job_type, num_blocks, deps) = match self {
+            IOop::Read {
+                dependencies,
+                requests,
+            } => {
+                let job_type = "Read".to_string();
+                let num_blocks = requests.len();
+                (job_type, num_blocks, dependencies.clone())
+            }
+            IOop::Write {
+                dependencies,
+                writes,
+            } => {
+                let job_type = "Write".to_string();
+                let mut num_blocks = 0;
+
+                for write in writes {
+                    let block_size = write.offset.block_size_in_bytes();
+                    num_blocks += write.data.len() / block_size as usize;
+                }
+                (job_type, num_blocks, dependencies.clone())
+            }
+            IOop::WriteUnwritten {
+                dependencies,
+                writes,
+            } => {
+                let job_type = "WriteU".to_string();
+                let mut num_blocks = 0;
+
+                for write in writes {
+                    let block_size = write.offset.block_size_in_bytes();
+                    num_blocks += write.data.len() / block_size as usize;
+                }
+                (job_type, num_blocks, dependencies.clone())
+            }
+            IOop::Flush {
+                dependencies,
+                flush_number: _flush_number,
+                gen_number: _gen_number,
+                snapshot_details: _,
+                extent_limit: _,
+            } => {
+                let job_type = "Flush".to_string();
+                (job_type, 0, dependencies.clone())
+            }
+            IOop::ExtentClose {
+                dependencies,
+                extent,
+            } => {
+                let job_type = "EClose".to_string();
+                (job_type, *extent, dependencies.clone())
+            }
+            IOop::ExtentFlushClose {
+                dependencies,
+                extent,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => {
+                let job_type = "FClose".to_string();
+                (job_type, *extent, dependencies.clone())
+            }
+            IOop::ExtentLiveRepair {
+                dependencies,
+                extent,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => {
+                let job_type = "Repair".to_string();
+                (job_type, *extent, dependencies.clone())
+            }
+            IOop::ExtentLiveReopen {
+                dependencies,
+                extent,
+            } => {
+                let job_type = "Reopen".to_string();
+                (job_type, *extent, dependencies.clone())
+            }
+            IOop::ExtentLiveNoOp { dependencies } => {
+                let job_type = "NoOp".to_string();
+                (job_type, 0, dependencies.clone())
+            }
+        };
+        (job_type, num_blocks, deps)
     }
 }
 
