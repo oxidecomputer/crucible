@@ -14,7 +14,7 @@ crossterm = { version = "0.26.0" }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 crucible-protocol = { path = "../protocol" }
-csv = "1.1.6"
+csv = "1.2.1"
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 dsc-client = { path = "../dsc-client" }
 futures = "0.3"
