@@ -11,7 +11,7 @@ chrono = { version = "0.4", features = [ "serde" ] }
 clap = { version = "4.1", features = ["derive"] }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
 futures = "0.3"
-http = "0.2.8"
+http = "0.2.9"
 hyper = "0.14"
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
 serde = { version = "1", features = [ "derive" ] }
