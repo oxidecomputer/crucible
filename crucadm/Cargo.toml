@@ -8,4 +8,4 @@ edition = "2021"
 clap = { version = "4.1", features = ["derive", "env"] }
 crucible = { path = "../upstairs" }
 crucible-control-client = { path = "../control-client" }
-tokio = { version = "1.25.0", features = ["full"] }
+tokio = { version = "1.27.0", features = ["full"] }
