@@ -731,7 +731,7 @@ where
                  */
                 ds.re_new(up_coms.client_id);
             }
-            DsState::OnlineRepair => {
+            DsState::OnlineRepairReady => {
                 /*
                  * TODO: Write more code here, when a downstairs is being
                  * repaired and disconnects, we have to basically move it back
@@ -831,7 +831,7 @@ where
      * downstairs and make sure they are consistent.  To do that, we will
      * request extent versions and skip over step 3
      * For Faulted, we don't know the condition of the data on the
-     * Downstairs, so we transition this downstairs to OnlineRepair.  We
+     * Downstairs, so we transition this downstairs to OnlineRepairReady.  We
      * also request extent versions and will have to repair this
      * downstairs, skipping over step 3 as well.
      *
@@ -844,7 +844,7 @@ where
      * After receiving our last flush, we now move this downstairs state to
      * Replay and skip ahead to step 5.
      *
-     * (WaitActive and OnlineRepair come here from 2):
+     * (WaitActive and OnlineRepairReady come here from 2):
      *
      *          Upstairs             Downstairs
      * 4: ExtentVersionsPlease --->
@@ -1239,16 +1239,6 @@ where
                                 fw.send(Message::ExtentVersionsPlease).await?;
                             }
                             DsState::Faulted => {
-                                up.ds_transition(
-                                    up_coms.client_id, DsState::OnlineRepair
-                                ).await;
-                                /*
-                                 * Ask for the current version of all extents.
-                                 */
-                                negotiated = 4;
-                                fw.send(Message::ExtentVersionsPlease).await?;
-                            }
-                            DsState::OnlineRepair => {
                                 /*
                                  * Ask for the current version of all extents.
                                  */
@@ -1312,7 +1302,12 @@ where
                                     up_coms.client_id, DsState::WaitQuorum
                                 ).await;
                             }
-                            DsState::OnlineRepair => {} // Valid to move forward
+                            DsState::Faulted => {
+                                up.ds_transition(
+                                    up_coms.client_id,
+                                    DsState::OnlineRepairReady,
+                                ).await;
+                            }
                             _ => {
                                 panic!(
                                     "[{}] Downstairs is in invalid state {}",
@@ -1480,7 +1475,7 @@ where
     // Either:
     // New: do_reconcile_work
     // Replay: Set more work, move state to Active
-    // OnlineRepair: XXX write more code, all jobs should stay skipped.
+    // OnlineRepairReady: All jobs should stay skipped.
 
     let mut more_work = false;
     let up_state = {
@@ -1510,7 +1505,7 @@ where
                 drop(ds);
                 do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
             }
-            DsState::OnlineRepair => {
+            DsState::OnlineRepairReady => {
                 drop(ds);
                 // TODO: Repair doing something.
                 // For repair to actually do something, there must be a
@@ -1519,7 +1514,7 @@ where
                 // drive the repair.
                 info!(
                     up.log,
-                    "[{}] {} Enter Online Repair mode",
+                    "[{}] {} Enter Ready for Online Repair mode",
                     up_coms.client_id,
                     up.uuid
                 );
@@ -3010,12 +3005,12 @@ impl Downstairs {
             assert_eq!(io.state[&cid], IOState::New);
 
             let current = self.ds_state[cid as usize];
-            // If a downstairs is faulted, we can move that job directly
-            // to IOState::Skipped
+            // If a downstairs is faulted or ready for repair, we can move
+            // that job directly to IOState::Skipped
             // If a downstairs is in repair, then we need to see if this
             // IO is on a repaired extent or not.
             match current {
-                DsState::Faulted => {
+                DsState::Faulted | DsState::OnlineRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;
@@ -5380,7 +5375,8 @@ impl Upstairs {
             DsState::Deactivated => DsState::New,
             DsState::Repair => DsState::New,
             DsState::FailedRepair => DsState::New,
-            DsState::OnlineRepair => DsState::OnlineRepair,
+            DsState::OnlineRepair => DsState::Faulted,
+            DsState::OnlineRepairReady => DsState::Faulted,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -5496,6 +5492,7 @@ impl Upstairs {
                     DsState::Active
                     | DsState::Repair
                     | DsState::OnlineRepair
+                    | DsState::OnlineRepairReady
                     | DsState::Replay => {} /* Okay */
                     _ => {
                         panic!(
@@ -5541,6 +5538,7 @@ impl Upstairs {
                     DsState::Active
                     | DsState::Replay
                     | DsState::OnlineRepair
+                    | DsState::OnlineRepairReady
                     | DsState::Repair => {} // Okay
                     _ => {
                         panic!(
@@ -5551,7 +5549,7 @@ impl Upstairs {
                 }
             }
             DsState::OnlineRepair => {
-                assert_eq!(old_state, DsState::Faulted);
+                assert_eq!(old_state, DsState::OnlineRepairReady);
             }
             DsState::New => {
                 // Before new, we must have been in
@@ -6609,7 +6607,11 @@ enum DsState {
     Faulted,
     /*
      * This downstairs was failed, but has disconnected and now we
-     * are attempting to repair it.
+     * are ready to repair it.
+     */
+    OnlineRepairReady,
+    /*
+     * This downstairs is undergoing OnlineRepair
      */
     OnlineRepair,
     /*
@@ -6673,6 +6675,9 @@ impl fmt::Display for DsState {
             }
             DsState::Faulted => {
                 write!(f, "Faulted")
+            }
+            DsState::OnlineRepairReady => {
+                write!(f, "OnlineRepairReady")
             }
             DsState::OnlineRepair => {
                 write!(f, "OnlineRepair")
