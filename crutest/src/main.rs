@@ -1271,12 +1271,14 @@ async fn generic_workload(
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
     let count_width = count.to_string().len();
+    let block_width = ri.total_blocks.to_string().len();
+    let size_width = (10 * ri.block_size).to_string().len();
     for c in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
             println!(
-                "{:>0width$}/{:>0width$} FLUSH",
+                "{:>0width$}/{:>0width$} Flush",
                 c,
                 count,
                 width = count_width,
@@ -1308,14 +1310,22 @@ async fn generic_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                println!(
-                    "{:>0width$}/{:>0width$} WRITE {}:{}",
+                print!(
+                    "{:>0width$}/{:>0width$} Write \
+                    block {:>bw$}  len {:>sw$}  data:",
                     c,
                     count,
                     offset.value,
                     data.len(),
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
+                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                for i in 0..size {
+                    print!("{:>3} ", ri.write_log.get_seed(block_index + i));
+                }
+                println!();
                 guest.write(offset, data).await?;
             } else {
                 // Read (+ verify)
@@ -1323,12 +1333,15 @@ async fn generic_workload(
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{:>0width$}/{:>0width$} READ  {}:{}",
+                    "{:>0width$}/{:>0width$} Read  \
+                    block {:>bw$}  len {:>sw$}",
                     c,
                     count,
                     offset.value,
                     data.len(),
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
                 guest.read(offset, data.clone()).await?;
 
