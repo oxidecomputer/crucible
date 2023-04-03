@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -27,7 +27,7 @@ use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{error, info, o, warn, Drain, Logger};
+use slog::{debug, error, info, o, warn, Drain, Logger};
 use slog_dtrace::{with_drain, ProbeRegistration};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch, Mutex, MutexGuard, Notify, RwLock};
@@ -66,6 +66,9 @@ pub use stats::*;
 
 mod impacted_blocks;
 pub use impacted_blocks::*;
+
+mod online_repair;
+pub use online_repair::{check_for_repair, ExtentInfo, RepairCheck};
 
 use async_trait::async_trait;
 
@@ -259,10 +262,15 @@ mod cdt {
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}
     fn volume__flush__start(_: u32, _: Uuid) {}
+    fn extent__or__start(_: u32) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__flush__start(_: u64) {}
+    fn gw__close__start(_: u64, _: u32) {}
+    fn gw__repair__start(_: u64, _: u32) {}
+    fn gw__noop__start(_: u64) {}
+    fn gw__reopen__start(_: u64, _: u32) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
@@ -271,10 +279,18 @@ mod cdt {
     fn ds__write__io__start(_: u64, _: u64) {}
     fn ds__write__unwritten__io__start(_: u64, _: u64) {}
     fn ds__flush__io__start(_: u64, _: u64) {}
+    fn ds__close__start(_: u64, _: u64, _: usize) {}
+    fn ds__repair__start(_: u64, _: u64, _: usize) {}
+    fn ds__noop__start(_: u64, _: u64) {}
+    fn ds__reopen__start(_: u64, _: u64, _: usize) {}
     fn ds__read__io__done(_: u64, _: u64) {}
     fn ds__write__io__done(_: u64, _: u64) {}
     fn ds__write__unwritten__io__done(_: u64, _: u64) {}
     fn ds__flush__io__done(_: u64, _: u64) {}
+    fn ds__close__done(_: u64, _: u64) {}
+    fn ds__repair__done(_: u64, _: u64) {}
+    fn ds__noop__done(_: u64, _: u64) {}
+    fn ds__reopen__done(_: u64, _: u64) {}
     fn up__to__ds__read__done(_: u64) {}
     fn up__to__ds__write__done(_: u64) {}
     fn up__to__ds__write__unwritten__done(_: u64) {}
@@ -283,6 +299,11 @@ mod cdt {
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn gw__close__done(_: u64, _: usize) {}
+    fn gw__repair__done(_: u64, _: usize) {}
+    fn gw__noop__done(_: u64) {}
+    fn gw__reopen__done(_: u64, _: usize) {}
+    fn extent__or__done(_: u32) {}
     fn reqwest__read__start(_: u32, _: Uuid) {}
     fn reqwest__read__done(_: u32, _: Uuid) {}
     fn volume__read__done(_: u32, _: Uuid) {}
@@ -297,6 +318,12 @@ pub fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
+/*
+ * We are taking a message from the downstairs and translating it into
+ * something we can process.  There is some stuff going on here and we
+ * should write it down so it's easy to understand.  That's why I'm writing
+ * this comment.
+ */
 #[instrument]
 async fn process_message(
     u: &Arc<Upstairs>,
@@ -304,7 +331,7 @@ async fn process_message(
     client_id: u8,
     ds_done_tx: &mpsc::Sender<u64>,
 ) -> Result<()> {
-    let (upstairs_id, session_id, ds_id, result) = match m {
+    let (upstairs_id, session_id, ds_id, result, extent_info) = match m {
         Message::Imok => return Ok(()),
         Message::WriteAck {
             upstairs_id,
@@ -318,6 +345,7 @@ async fn process_message(
                 *session_id,
                 *job_id,
                 result.clone().map(|_| Vec::new()),
+                None,
             )
         }
         Message::WriteUnwrittenAck {
@@ -332,6 +360,7 @@ async fn process_message(
                 *session_id,
                 *job_id,
                 result.clone().map(|_| Vec::new()),
+                None,
             )
         }
         Message::FlushAck {
@@ -346,6 +375,7 @@ async fn process_message(
                 *session_id,
                 *job_id,
                 result.clone().map(|_| Vec::new()),
+                None,
             )
         }
         Message::ReadResponse {
@@ -355,7 +385,73 @@ async fn process_message(
             responses,
         } => {
             cdt::ds__read__io__done!(|| (job_id, client_id as u64));
-            (*upstairs_id, *session_id, *job_id, responses.clone())
+            (*upstairs_id, *session_id, *job_id, responses.clone(), None)
+        }
+        Message::ExtentLiveCloseAck {
+            upstairs_id,
+            session_id,
+            job_id,
+            result,
+        } => {
+            // Take the result from the live close and store it away.
+            let extent_info: Option<ExtentInfo> = match result {
+                Ok((g, f, d)) => {
+                    debug!(
+                        u.log,
+                        "[{}] ELC got g:{} f:{} d:{}", client_id, g, f, d
+                    );
+                    Some(ExtentInfo {
+                        generation: *g,
+                        flush_number: *f,
+                        dirty: *d,
+                    })
+                }
+                Err(e) => {
+                    panic!(
+                        "[{}] ELC-Ack {} returned error {:?}",
+                        client_id, job_id, e
+                    );
+                }
+            };
+            cdt::ds__close__done!(|| (job_id, client_id as u64));
+            (
+                *upstairs_id,
+                *session_id,
+                *job_id,
+                result.clone().map(|_| Vec::new()),
+                extent_info,
+            )
+        }
+        Message::ExtentLiveAckId {
+            upstairs_id,
+            session_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__noop__done!(|| (job_id, client_id as u64));
+            cdt::ds__reopen__done!(|| (job_id, client_id as u64));
+            (
+                *upstairs_id,
+                *session_id,
+                *job_id,
+                result.clone().map(|_| Vec::new()),
+                None,
+            )
+        }
+        Message::ExtentLiveRepairAckId {
+            upstairs_id,
+            session_id,
+            job_id,
+            result,
+        } => {
+            cdt::ds__repair__done!(|| (job_id, client_id as u64));
+            (
+                *upstairs_id,
+                *session_id,
+                *job_id,
+                result.clone().map(|_| Vec::new()),
+                None,
+            )
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -397,7 +493,10 @@ async fn process_message(
     // job being ready to ACK, then send a message on the ds_done
     // channel.  Note that a failed IO still needs to ACK that failure
     // back to the guest.
-    if u.process_ds_operation(ds_id, client_id, result).await? {
+    if u.process_ds_operation(ds_id, client_id, result, extent_info)
+        .await?
+    {
+        debug!(u.log, "[{}] Process message NOTIFY {}", client_id, ds_id);
         ds_done_tx.send(ds_id).await?;
     }
 
@@ -487,12 +586,19 @@ where
                 dependencies,
                 writes,
             } => {
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
                 cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: *new_id,
-                    dependencies: dependencies.clone(),
+                    dependencies: deps.clone(),
                     writes: writes.clone(),
                 })
                 .await?
@@ -501,6 +607,13 @@ where
                 dependencies,
                 writes,
             } => {
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
                 cdt::ds__write__unwritten__io__start!(|| (
                     *new_id,
                     client_id as u64
@@ -509,7 +622,7 @@ where
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: *new_id,
-                    dependencies: dependencies.clone(),
+                    dependencies: deps.clone(),
                     writes: writes.clone(),
                 })
                 .await?
@@ -521,9 +634,14 @@ where
                 snapshot_details,
                 extent_limit: _,
             } => {
-                // This is a flush so we have to determine if there is an
-                // extent_limit value for this downstairs.  Use the client ID
-                // to get the Option<limit> for our unique client.
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
+                // Include the extent_limit value specific for this client.
                 let extent_limit =
                     u.downstairs.lock().await.extent_limit[client_id as usize];
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
@@ -531,7 +649,7 @@ where
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: *new_id,
-                    dependencies: dependencies.clone(),
+                    dependencies: deps.clone(),
                     flush_number,
                     gen_number,
                     snapshot_details,
@@ -543,12 +661,19 @@ where
                 dependencies,
                 requests,
             } => {
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
                 cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: *new_id,
-                    dependencies: dependencies.clone(),
+                    dependencies: deps.clone(),
                     requests,
                 })
                 .await?
@@ -567,33 +692,38 @@ where
                 extent,
                 flush_number,
                 gen_number,
-                source_downstairs,
+                source_downstairs: _,
                 repair_downstairs,
             } => {
-                // TODO: Add dtrace probe point
-                if source_downstairs == client_id {
-                    fw.send(Message::ExtentLiveFlushClose {
-                        upstairs_id: u.uuid,
-                        session_id: u.session_id,
-                        job_id: *new_id,
-                        dependencies: dependencies.clone(),
-                        extent_id: extent,
-                        flush_number,
-                        gen_number,
-                    })
-                    .await?
-                } else if repair_downstairs.contains(&client_id) {
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
+                cdt::ds__close__start!(|| (*new_id, client_id as u64, extent));
+                if repair_downstairs.contains(&client_id) {
                     // We are the downstairs being repaired, so just close.
                     fw.send(Message::ExtentLiveClose {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: *new_id,
-                        dependencies: dependencies.clone(),
+                        dependencies: deps.clone(),
                         extent_id: extent,
                     })
                     .await?
                 } else {
-                    // TODO: Send the IOop::NoOp command here.
+                    fw.send(Message::ExtentLiveFlushClose {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: deps.clone(),
+                        extent_id: extent,
+                        flush_number,
+                        gen_number,
+                    })
+                    .await?
                 }
             }
             IOop::ExtentLiveRepair {
@@ -603,43 +733,70 @@ where
                 source_repair_address,
                 repair_downstairs,
             } => {
-                // TODO: Add dtrace probe point
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
+                cdt::ds__repair__start!(|| (*new_id, client_id as u64, extent));
                 if repair_downstairs.contains(&client_id) {
                     fw.send(Message::ExtentLiveRepair {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: *new_id,
-                        dependencies: dependencies.clone(),
+                        dependencies: deps.clone(),
                         extent_id: extent,
                         source_client_id: source_downstairs,
                         source_repair_address,
                     })
                     .await?
                 } else {
-                    // TODO: Send NOOP command for this.
+                    fw.send(Message::ExtentLiveNoOp {
+                        upstairs_id: u.uuid,
+                        session_id: u.session_id,
+                        job_id: *new_id,
+                        dependencies: deps.clone(),
+                    })
+                    .await?
                 }
             }
             IOop::ExtentLiveReopen {
                 dependencies,
                 extent,
             } => {
-                // TODO: Add dtrace probe point
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
+                cdt::ds__reopen__start!(|| (*new_id, client_id as u64, extent));
                 fw.send(Message::ExtentLiveReopen {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: *new_id,
-                    dependencies: dependencies.clone(),
+                    dependencies: deps.clone(),
                     extent_id: extent,
                 })
                 .await?
             }
             IOop::ExtentLiveNoOp { dependencies } => {
-                // TODO: Add dtrace probe point
+                let deps = u
+                    .online_repair_dep_check(
+                        client_id,
+                        dependencies.clone(),
+                        *new_id,
+                    )
+                    .await;
+                cdt::ds__noop__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::ExtentLiveNoOp {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: *new_id,
-                    dependencies: dependencies.clone(),
+                    dependencies: deps.clone(),
                 })
                 .await?
             }
@@ -730,6 +887,7 @@ where
                  * any work that we were holding that we did not flush.
                  */
                 ds.re_new(up_coms.client_id);
+                // ZZZ verify no OnlineRepair stuff is set for this DS.
             }
             DsState::OnlineRepairReady => {
                 /*
@@ -741,6 +899,10 @@ where
                  * starts over from the beginning.  Something like that.
                  * Similar, but not quite the same, as the re_new.
                  */
+                // ZZZ Can (should?) this ever happen? We should go to faulted,
+                // then, eventually, move to OnlineRepairReady and just
+                // keep skipping IOs till the OR task comes around and
+                // tells us to start being repaired.
                 warn!(
                     up.log,
                     "[{}] Reconnect while repair in progress",
@@ -1471,7 +1633,7 @@ where
      * on a reconnect, then we have to enter the reconcile loop and
      * do any repairs that might be necessary.
      */
-    // Match on DS state to decide what to do.
+    // Match on DS state to decide what to do. ZZZ
     // Either:
     // New: do_reconcile_work
     // Replay: Set more work, move state to Active
@@ -1501,18 +1663,17 @@ where
                 );
                 more_work = true;
             }
+            // ZZZ Verify this is either state.  Where is repair set?
+            // I don't think repair should ever be here, right?  cmd_loop
+            // does not handle this work, as it's on a different queue is
+            // it not?
             DsState::WaitQuorum | DsState::Repair => {
                 drop(ds);
                 do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
             }
             DsState::OnlineRepairReady => {
                 drop(ds);
-                // TODO: Repair doing something.
-                // For repair to actually do something, there must be a
-                // responsible task started to coordinate it.  Either do
-                // that here, or signal to an existing task that it must
-                // drive the repair.
-                info!(
+                warn!(
                     up.log,
                     "[{}] {} Enter Ready for Online Repair mode",
                     up_coms.client_id,
@@ -1587,14 +1748,12 @@ where
                 if up_c.downstairs.lock().await.ds_state[client_id as usize]
                     == DsState::Faulted
                 {
-                    warn!(
-                        up_c.log,
+                    bail!(
                         "[{}] exits pm_task, this downstairs faulted",
                         client_id
                     );
                     // Until OnlineRepair is actually supported, we are
                     // doing more harm than good by remaining up.
-                    panic!("[{}] received Write/WU/Flush error ", client_id);
                 }
 
                 if up_c.ds_deactivate(client_id).await {
@@ -2435,6 +2594,7 @@ struct Downstairs {
     ds_last_flush: Vec<u64>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     ds_active: HashMap<u64, DownstairsIO>,
+    ds_skipped_jobs: [HashSet<u64>; 3],
     next_id: u64,
     completed: AllocRingBuffer<u64>,
     completed_jobs: AllocRingBuffer<WorkSummary>,
@@ -2464,8 +2624,8 @@ struct Downstairs {
     reconcile_task_list: VecDeque<ReconcileIO>,
 
     /**
-     * Count of extents repaired and needing repair since the start of
-     * this upstairs.
+     * Count of extents repaired and needing repair during the
+     * reconciliation process that happens at activation.
      */
     reconcile_repaired: usize,
     reconcile_repair_needed: usize,
@@ -2481,6 +2641,14 @@ struct Downstairs {
     io_state_count: IOStateCount,
 
     /**
+     * Online Repair info
+     * This will contain the extent info for each downstairs as reported
+     * by those downstairs and is used to decide if an extent requires
+     * repair or not.
+     */
+    repair_info: HashMap<u8, ExtentInfo>,
+
+    /**
      * Count of extents repaired online.
      */
     extents_repaired: Vec<usize>,
@@ -2491,14 +2659,46 @@ struct Downstairs {
     extents_confirmed: Vec<usize>,
 
     /**
-     * Extent limit, if set, should be the extent where a flush
-     * of a region will stop.  It is assumed that the flush will
-     * walk extents from 0 to extent_limit, and any extent above
-     * the limit will not be issued a flush.
-     * This is used during online repair, and will only ever be
+     * Count of time a downstairs OnlineRepair completed.
+     */
+    online_repair_completed: Vec<usize>,
+
+    /**
+     * Count of time a downstairs OnlineRepair was aborted.
+     */
+    online_repair_aborted: Vec<usize>,
+
+    /**
+     * Extent limit, if set, indicates the extent where OnlineRepair
+     * has already submitted, or possibly even already finished the
+     * OnlineRepair of this extent. If you are changing this value,
+     * it must happen at the same time the repair IOs are enqueued on
+     * the work list for the extent under repair.
+     *
+     * This limit, if used in a flush indicates that extents <= this
+     * value should be issued a flush, and extents > this value should
+     * not be flushed.
+     *
+     * When deciding to skip an IO on a downstairs in OnlineRepair, any
+     * IO at or below this extent should go ahead and be submitted, and
+     * not skipped.  Any IO above this extent should still be skipped.
+     *
+     * This is only used during online repair, and will only ever be
      * set on a downstairs that is undergoing live repair.
      */
     extent_limit: Vec<Option<usize>>,
+
+    /**
+     * Online Repair Job IDs
+     * When we start a repair, the first thing we do is pre reserve
+     * all the downstairs IDs we will need for each extent.
+     */
+    repair_job_ids: HashMap<u32, ExtentRepairIDs>,
+    /**
+     * When repairing, the minimum job ID the downstairs under repair
+     * needs to consider for dependencies.
+     */
+    repair_min_id: Option<u64>,
 }
 
 impl Downstairs {
@@ -2511,6 +2711,7 @@ impl Downstairs {
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
             ds_active: HashMap::new(),
+            ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
             completed: AllocRingBuffer::with_capacity(2048),
             completed_jobs: AllocRingBuffer::with_capacity(8),
             next_id: 1000,
@@ -2521,10 +2722,25 @@ impl Downstairs {
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             io_state_count: IOStateCount::new(),
+            repair_info: HashMap::new(),
             extents_repaired: vec![0; 3],
             extents_confirmed: vec![0; 3],
+            online_repair_completed: vec![0; 3],
+            online_repair_aborted: vec![0; 3],
             extent_limit: vec![None; 3],
+            repair_job_ids: HashMap::new(),
+            repair_min_id: None,
         }
+    }
+
+    /**
+     * Online repair is over, Clean up any repair related settings.
+     */
+    fn end_online_repair(&mut self) {
+        self.repair_info = HashMap::new();
+        self.extent_limit = vec![None; 3];
+        self.repair_job_ids = HashMap::new();
+        self.repair_min_id = None;
     }
 
     /**
@@ -2534,6 +2750,12 @@ impl Downstairs {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+    /**
+     * See what the next ID will be, without getting it.
+     */
+    fn peek_next_id(&mut self) -> u64 {
+        self.next_id
     }
 
     /**
@@ -2558,6 +2780,58 @@ impl Downstairs {
         self.io_state_count.incr(&new_state, client_id);
 
         Some(job.work.clone())
+    }
+
+    /*
+     * Determine if the conditions exist where we need to remove dependencies
+     * for an IOop during online repair.  We only need to do this if the
+     * downstairs in question is in OnlineRepair, and there are skipped
+     * jobs for this downstairs.
+     */
+    fn dependencies_need_cleanup(&mut self, client_id: u8) -> bool {
+        self.ds_state[client_id as usize] == DsState::OnlineRepair
+            && !self.ds_skipped_jobs[client_id as usize].is_empty()
+    }
+
+    // Go through the list of dependencies and remove any jobs that this
+    // downstairs has already skipped.
+    fn remove_dep_if_skipped(
+        &mut self,
+        client_id: u8,
+        mut deps: Vec<u64>,
+        ds_id: u64,
+    ) -> Vec<u64> {
+        debug!(
+            self.log,
+            "[{}] {} Remove check skipped:{:?} from deps:{:?}",
+            client_id,
+            ds_id,
+            self.ds_skipped_jobs[client_id as usize],
+            deps
+        );
+        assert_eq!(self.ds_state[client_id as usize], DsState::OnlineRepair);
+        assert!(self.repair_min_id.is_some());
+
+        deps.retain(|x| !self.ds_skipped_jobs[client_id as usize].contains(x));
+
+        // If we are repairing, then there must be a repair_min_id set so we
+        // know where to stop with dependency inclusion.
+        if let Some(repair_min_id) = self.repair_min_id {
+            debug!(
+                self.log,
+                "[{}] {} Remove check < min repaired:{} from deps:{:?}",
+                client_id,
+                ds_id,
+                repair_min_id,
+                deps
+            );
+            deps.retain(|x| x >= &repair_min_id);
+        }
+        info!(
+            self.log,
+            "[{}] {} final dependency list {:?}", client_id, ds_id, deps
+        );
+        deps
     }
 
     /**
@@ -2793,6 +3067,7 @@ impl Downstairs {
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
+                self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
             }
         }
     }
@@ -2813,6 +3088,9 @@ impl Downstairs {
      * switch the overall job back to NotAcked, and then let the replay
      * happen.
      */
+    // ZZZ don't re_new repair jobs, those should all move to failed/skipped
+    // as repair jobs need to happen in lock-step, and, yeah, don't do that.
+    // maybe its okay if the repair has failed.
     fn re_new(&mut self, client_id: u8) {
         let lf = self.ds_last_flush[client_id as usize];
         let mut kvec: Vec<u64> =
@@ -2921,6 +3199,7 @@ impl Downstairs {
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
+                self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
 
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
@@ -3008,17 +3287,31 @@ impl Downstairs {
             // If a downstairs is faulted or ready for repair, we can move
             // that job directly to IOState::Skipped
             // If a downstairs is in repair, then we need to see if this
-            // IO is on a repaired extent or not.
+            // IO is on a repaired extent or not.  If an IO spans extents
+            // where some are repaired and some are not, then this IO had
+            // better have the dependencies already set to reflect the
+            // requirement that a repair IO will need to finish first.
             match current {
                 DsState::Faulted | DsState::OnlineRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;
+                    self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
                 }
                 DsState::OnlineRepair => {
-                    io.state.insert(cid, IOState::Skipped);
-                    self.io_state_count.incr(&IOState::Skipped, cid);
-                    skipped += 1;
+                    let my_limit = self.extent_limit[cid as usize];
+                    assert!(self.repair_min_id.is_some());
+                    if io.work.send_io_live_repair(my_limit) {
+                        // Leave this IO as New, the downstairs will receive it.
+                        self.io_state_count.incr(&IOState::New, cid);
+                    } else {
+                        // Move this IO to skipped, we are not ready for
+                        // the downstairs to receive it.
+                        io.state.insert(cid, IOState::Skipped);
+                        self.io_state_count.incr(&IOState::Skipped, cid);
+                        skipped += 1;
+                        self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
+                    }
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
@@ -3040,9 +3333,41 @@ impl Downstairs {
             let job = self.ds_active.get_mut(&ds_id).unwrap();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
+            info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
 
             ds_done_tx.send(ds_id).await.unwrap();
         }
+    }
+
+    /**
+     * Enqueue a new downstairs online repair request.
+     */
+    async fn enqueue_repair(&mut self, mut io: DownstairsIO) {
+        // Puts the repair IO onto the downstairs work queue.
+        for cid in 0..3 {
+            assert_eq!(io.state[&cid], IOState::New);
+
+            let current = self.ds_state[cid as usize];
+            // If a downstairs is faulted, we can move that job directly
+            // to IOState::Skipped.
+            match current {
+                DsState::Faulted | DsState::OnlineRepairReady => {
+                    io.state.insert(cid, IOState::Skipped);
+                    self.io_state_count.incr(&IOState::Skipped, cid);
+                    self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
+                }
+                _ => {
+                    self.io_state_count.incr(&IOState::New, cid);
+                }
+            }
+        }
+
+        let ds_id = io.ds_id;
+        debug!(self.log, "Enqueue repair job {}", ds_id);
+        for cid in 0..3 {
+            self.io_state_count.incr(&IOState::New, cid);
+        }
+        self.ds_active.insert(ds_id, io);
     }
 
     /**
@@ -3211,6 +3536,11 @@ impl Downstairs {
                 dependencies: _,
                 extent,
             } => {
+                // The upstairs should never have an ExtentClose on the
+                // work queue.  We will always use ExtentFlushClose as the
+                // IOop, then convert to the proper Message to send to
+                // each downstairs depending on the source/repair downstairs
+                // values in that IOop.
                 panic!(
                     "job: {} gw: {}  Received illegal IOop::ExtentClose {}",
                     ds_id, gw_id, extent,
@@ -3218,35 +3548,35 @@ impl Downstairs {
             }
             IOop::ExtentFlushClose {
                 dependencies: _,
-                extent: _,
+                extent,
                 flush_number: _,
                 gen_number: _,
                 source_downstairs: _,
                 repair_downstairs: _,
             } => {
-                // TODO: Add dtrace probe point
-                // TODO: Add metric
+                cdt::gw__close__done!(|| (gw_id, extent));
+                stats.add_flush_close().await;
             }
             IOop::ExtentLiveRepair {
                 dependencies: _,
-                extent: _,
+                extent,
                 source_downstairs: _,
                 source_repair_address: _,
                 repair_downstairs: _,
             } => {
-                // TODO: Add dtrace probe point
-                // TODO: Add metric
+                cdt::gw__repair__done!(|| (gw_id, extent));
+                stats.add_extent_repair().await;
+            }
+            IOop::ExtentLiveNoOp { dependencies: _ } => {
+                cdt::gw__noop__done!(|| (gw_id));
+                stats.add_extent_noop().await;
             }
             IOop::ExtentLiveReopen {
                 dependencies: _,
-                extent: _,
+                extent,
             } => {
-                // TODO: Add dtrace probe point
-                // TODO: Add metric
-            }
-            IOop::ExtentLiveNoOp { dependencies: _ } => {
-                // TODO: Add dtrace probe point
-                // TODO: Add metric
+                cdt::gw__reopen__done!(|| (gw_id, extent));
+                stats.add_extent_reopen().await;
             }
         }
     }
@@ -3283,7 +3613,10 @@ impl Downstairs {
                 for context in response.block_contexts.iter().rev() {
                     error!(log, "No match          hash:0x{:x}", context.hash);
                 }
-                error!(log, "Data from hash: {:?}", response.data);
+                error!(log, "Data from hash:");
+                for i in 0..6 {
+                    error!(log, "[{}]:{}", i, response.data[i]);
+                }
 
                 return Err(CrucibleError::HashMismatch);
             }
@@ -3444,6 +3777,11 @@ impl Downstairs {
         }
     }
 
+    // ZZZ
+    // What is the error path when a repair starts failing:?
+    // We have to be able to handle skipping jobs if things go away
+    // while repairing, but while being sure that a skipped job comes back
+    // as a failure to the repair task, so it knows to unwind everything.
     /**
      * Mark this downstairs request as complete for this client. Returns
      * true if this completion is enough that we should message the
@@ -3460,6 +3798,7 @@ impl Downstairs {
         responses: Result<Vec<ReadResponse>, CrucibleError>,
         encryption_context: &Option<Arc<EncryptionContext>>,
         up_state: UpState,
+        extent_info: Option<ExtentInfo>,
     ) -> Result<bool> {
         /*
          * Assume we don't have enough completed jobs, and only change
@@ -3652,10 +3991,13 @@ impl Downstairs {
                             // well as throw out the whole repair and start
                             // over as we can no longer trust results from
                             // the downstairs under repair.
-                            panic!(
-                                "Error in repair {:?}, Write more code!",
-                                job
-                            );
+                            let errors: u64 =
+                                match self.downstairs_errors.get(&client_id) {
+                                    Some(v) => *v,
+                                    None => 0,
+                                };
+                            self.downstairs_errors
+                                .insert(client_id, errors + 1);
                         }
                         IOop::Read {
                             dependencies: _,
@@ -3746,7 +4088,14 @@ impl Downstairs {
                         }
                     }
                 }
-                _ => { /* Write and WriteUnwritten IOs have no action here */ }
+                _ => {
+                    /*
+                     * Write and WriteUnwritten IOs have no action here
+                     * If this job was LiveRepair, we should never get here,
+                     * as those jobs should never be acked before all three
+                     * are done.
+                     */
+                }
             }
         } else {
             assert_eq!(new_state, IOState::Done);
@@ -3764,6 +4113,7 @@ impl Downstairs {
                     requests: _,
                 } => {
                     assert!(!read_data.is_empty());
+                    assert!(extent_info.is_none());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
                         assert!(job.read_response_hashes.is_empty());
@@ -3772,6 +4122,10 @@ impl Downstairs {
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
+                        debug!(
+                            self.log,
+                            "[{}] Read AckReady {}", client_id, job.ds_id
+                        );
                         cdt::up__to__ds__read__done!(|| job.guest_id);
                     } else {
                         /*
@@ -3779,6 +4133,12 @@ impl Downstairs {
                          * compare our read hash to
                          * that and verify they are the same.
                          */
+                        debug!(
+                            self.log,
+                            "[{}] Read already AckReady {}",
+                            client_id,
+                            job.ds_id
+                        );
                         if job.read_response_hashes != read_response_hashes {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
@@ -3802,6 +4162,7 @@ impl Downstairs {
                     writes: _,
                 } => {
                     assert!(read_data.is_empty());
+                    assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -3813,6 +4174,7 @@ impl Downstairs {
                     writes: _,
                 } => {
                     assert!(read_data.is_empty());
+                    assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
@@ -3829,6 +4191,7 @@ impl Downstairs {
                     extent_limit: _,
                 } => {
                     assert!(read_data.is_empty());
+                    assert!(extent_info.is_none());
                     /*
                      * If we are deactivating, then we want an ACK from
                      * all three downstairs, not the usual two.
@@ -3842,7 +4205,7 @@ impl Downstairs {
                         job.ack_status = AckStatus::AckReady;
                         cdt::up__to__ds__flush__done!(|| job.guest_id);
                         if deactivate {
-                            info!(
+                            debug!(
                                 self.log,
                                 "[{}] deactivate flush {} done",
                                 client_id,
@@ -3870,10 +4233,27 @@ impl Downstairs {
                     repair_downstairs: _,
                 } => {
                     assert!(read_data.is_empty());
+                    assert!(extent_info.is_some());
+
+                    let ci = self
+                        .repair_info
+                        .insert(client_id, extent_info.unwrap());
+                    if ci.is_some() {
+                        panic!(
+                            "[{}] Unexpected repair found on insertion: {:?}",
+                            client_id, ci
+                        );
+                    }
+
                     if jobs_completed_ok == 3 {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
-                        // TODO: Add dtrace done probe point
+                        debug!(
+                            self.log,
+                            "[{}] ExtentFlushClose {} AckReady",
+                            client_id,
+                            ds_id
+                        );
                     }
                 }
                 IOop::ExtentLiveRepair {
@@ -3886,8 +4266,13 @@ impl Downstairs {
                     assert!(read_data.is_empty());
                     if jobs_completed_ok == 3 {
                         notify_guest = true;
+                        debug!(
+                            self.log,
+                            "[{}] ExtentLiveRepair AckReady {}",
+                            client_id,
+                            ds_id
+                        );
                         job.ack_status = AckStatus::AckReady;
-                        // TODO: Add dtrace done probe point
                     }
                 }
                 IOop::ExtentLiveReopen {
@@ -3897,16 +4282,24 @@ impl Downstairs {
                     assert!(read_data.is_empty());
                     if jobs_completed_ok == 3 {
                         notify_guest = true;
+                        debug!(
+                            self.log,
+                            "[{}] ExtentLiveReopen AckReady {}",
+                            client_id,
+                            ds_id
+                        );
                         job.ack_status = AckStatus::AckReady;
-                        // TODO: Add dtrace done probe point
                     }
                 }
                 IOop::ExtentLiveNoOp { dependencies: _ } => {
                     assert!(read_data.is_empty());
                     if jobs_completed_ok == 3 {
                         notify_guest = true;
+                        debug!(
+                            self.log,
+                            "[{}] ExtentLiveNoOp AckReady {}", client_id, ds_id
+                        );
                         job.ack_status = AckStatus::AckReady;
-                        // TODO: Add dtrace done probe point
                     }
                 }
             }
@@ -3929,6 +4322,7 @@ impl Downstairs {
             if (wc.error + wc.skipped + wc.done) == 3 {
                 notify_guest = true;
                 job.ack_status = AckStatus::AckReady;
+                debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
             }
         }
 
@@ -3972,6 +4366,7 @@ impl Downstairs {
 
             kvec.sort_unstable();
 
+            let mut retired = Vec::new();
             for id in kvec.iter() {
                 // Remove everything before this flush (because flushes depend
                 // on everything, and everything depends on flushes).
@@ -3980,14 +4375,36 @@ impl Downstairs {
                 // Assert the job is actually done, then complete it
                 let wc = self.state_count(*id).unwrap();
 
-                // Asserting that wc.active = 0 here because flushes depend on
-                // everything, and everything depends on flushes.
-                assert_eq!(wc.active, 0);
+                // While we don't expect any jobs to still be in progress,
+                // there is nothing to prevent a flush ACK from getting
+                // ahead of the ACK from something that flush depends on.
+                // The downstairs should handle the dependency.
+                if wc.active != 0 {
+                    info!(
+                        self.log,
+                        "  ZZZ Leave job {} on the work queue for now", id
+                    );
+                    continue;
+                }
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
-                assert!(!self.completed.contains(id));
 
+                assert!(!self.completed.contains(id));
+                // Figure out how to get the job and look to see if
+                // it is ACKED without pulling it off.
+
+                let oj = self.ds_active.get(id).unwrap();
+                if oj.ack_status != AckStatus::Acked {
+                    info!(self.log,
+                        "  ZZZ  [rc] leave job {} on the queue when removing {}",
+                        oj.ds_id,
+                        ds_id,
+                    );
+                    continue;
+                }
                 let oj = self.ds_active.remove(id).unwrap();
                 assert_eq!(oj.ack_status, AckStatus::Acked);
+                assert_eq!(oj.ds_id, *id);
+                retired.push(oj.ds_id);
                 self.completed.push(*id);
                 let summary = oj.io_summarize();
                 self.completed_jobs.push(summary);
@@ -3995,6 +4412,14 @@ impl Downstairs {
                     let old_state = oj.state.get(&cid).unwrap();
                     self.io_state_count.decr(old_state, cid);
                 }
+            }
+
+            // ZZZ
+            debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
+            // Only keep track of skipped jobs at or above the flush.
+            // // ZZZ Maybe this is wrong too?  Only purge skipped inside?
+            for cid in 0..3 {
+                self.ds_skipped_jobs[cid].retain(|&x| x >= ds_id);
             }
         }
     }
@@ -4059,6 +4484,76 @@ impl Downstairs {
             Ok(())
         }
     }
+
+    // Reserve some job IDs for future repair work.
+    // Return the job IDs we reserved.  If the extent already has
+    // job IDs reserved, then use those instead.
+    fn reserve_repair_ids(&mut self, eid: u32) -> ExtentRepairIDs {
+        if let Some(eri) = self.repair_job_ids.get_mut(&eid) {
+            debug!(self.log, "reserve returns existing job ids for {}", eid);
+            let repair_ids = ExtentRepairIDs {
+                close_id: eri.close_id,
+                repair_id: eri.repair_id,
+                noop_id: eri.noop_id,
+                reopen_id: eri.reopen_id,
+            };
+
+            return repair_ids;
+        }
+
+        debug!(
+            self.log,
+            "Reserve Created new job ids for {}, save them", eid
+        );
+        let close_id = self.next_id();
+        let repair_id = self.next_id();
+        let noop_id = self.next_id();
+        let reopen_id = self.next_id();
+        let repair_ids = ExtentRepairIDs {
+            close_id,
+            repair_id,
+            noop_id,
+            reopen_id,
+        };
+        self.repair_job_ids.insert(eid, repair_ids);
+
+        repair_ids
+    }
+
+    // Get the repair IDs for this extent.
+    // If they were already reserved, then us those values, otherwise,
+    // go get the next set of job IDs.
+    fn get_repair_ids(&mut self, eid: u32) -> ExtentRepairIDs {
+        if let Some(eri) = self.repair_job_ids.remove(&eid) {
+            debug!(self.log, "Return existing job ids for {} GG", eid);
+            eri
+        } else {
+            debug!(self.log, "Create new job ids for {}", eid);
+            let close_id = self.next_id();
+            let repair_id = self.next_id();
+            let noop_id = self.next_id();
+            let reopen_id = self.next_id();
+            ExtentRepairIDs {
+                close_id,
+                repair_id,
+                noop_id,
+                reopen_id,
+            }
+        }
+    }
+    // Check to see if any repair IDs have been assigned for this
+    // extent.
+    fn query_repair_ids(&mut self, eid: u32) -> bool {
+        self.repair_job_ids.contains_key(&eid)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ExtentRepairIDs {
+    close_id: u64,
+    repair_id: u64,
+    noop_id: u64,
+    reopen_id: u64,
 }
 
 /// Implement AES-GCM-SIV encryption
@@ -4340,10 +4835,13 @@ pub struct Upstairs {
      * Logger used by the upstairs
      */
     log: Logger,
+    /*
+     * Online repair tracking structure
+     */
 }
 
 impl Upstairs {
-    pub fn test_default() -> Arc<Self> {
+    pub fn test_default(ddef: Option<RegionDefinition>) -> Arc<Self> {
         let opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![],
@@ -4371,7 +4869,7 @@ impl Upstairs {
         }
         let log = Logger::root(drain.fuse(), o!());
 
-        Self::new(&opts, 0, None, Arc::new(Guest::default()), log)
+        Self::new(&opts, 0, ddef, Arc::new(Guest::default()), log)
     }
 
     pub fn new(
@@ -4452,7 +4950,12 @@ impl Upstairs {
         let up_count = self.up_work_active().await;
         let ds_count = self.ds_work_active().await;
         let ds_state = self.ds_state_copy().await;
-        let ds_io_count = self.downstairs.lock().await.io_state_count;
+        let ds = self.downstairs.lock().await;
+        let ds_io_count = ds.io_state_count;
+        let ds_repair = ds.extents_repaired.clone();
+        let ds_confirm = ds.extents_confirmed.clone();
+        let ds_online_repair_completed = ds.online_repair_completed.clone();
+        let ds_online_repair_aborted = ds.online_repair_aborted.clone();
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -4460,6 +4963,10 @@ impl Upstairs {
                 ds_count,
                 ds_state,
                 ds_io_count,
+                ds_repair,
+                ds_confirm,
+                ds_online_repair_completed,
+                ds_online_repair_aborted,
             };
             (msg, arg)
         });
@@ -4606,7 +5113,7 @@ impl Upstairs {
         }
 
         if ds.ds_active.keys().len() == 0 {
-            info!(self.log, "No work, no need to flush, return OK");
+            debug!(self.log, "No work, no need to flush, return OK");
             if let Some(req) = req {
                 req.send_ok().await;
             }
@@ -4662,6 +5169,32 @@ impl Upstairs {
                 info!(self.log, "All DS in the proper state! -> INIT");
                 active.up_state = UpState::Initializing;
             }
+        }
+    }
+
+    /*
+     * Look to see if this specific downstairs is in OnlineRepair, and if so,
+     * apply special consideration for dependencies, as they could be unique
+     * for this downstairs.
+     *
+     * First off, any job that was "skipped" should not be a dependency for
+     * this specific downstairs.  In addition, any job that happened before
+     * the skipped jobs that was marked as "Done" should also be removed, as
+     * there will be no replay here and we are basically rebuilding this
+     * downstairs from other downstairs.
+     */
+    async fn online_repair_dep_check(
+        &self,
+        client_id: u8,
+        deps: Vec<u64>,
+        ds_id: u64,
+    ) -> Vec<u64> {
+        let mut ds = self.downstairs.lock().await;
+
+        if ds.dependencies_need_cleanup(client_id) {
+            ds.remove_dep_if_skipped(client_id, deps.clone(), ds_id)
+        } else {
+            deps
         }
     }
 
@@ -4935,6 +5468,7 @@ impl Upstairs {
                 break;
             }
         }
+        debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
 
         /*
          * TODO: Walk the list of guest work structs and build the same list
@@ -5056,7 +5590,6 @@ impl Upstairs {
          * on behalf of this guest job.
          */
         let mut sub = HashMap::new();
-        let next_id = downstairs.next_id();
         let mut cur_offset: usize = 0;
 
         /*
@@ -5122,7 +5655,64 @@ impl Upstairs {
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
+        let mut future_repair = false;
+        let mut deps_to_add: HashSet<u32> = HashSet::new();
+        let mut extent_under_repair = None;
+        for cid in 0..3 {
+            if let Some(eur) = downstairs.extent_limit[cid] {
+                if extent_under_repair.is_none() {
+                    extent_under_repair = Some(eur as u64);
+                } else {
+                    // We only support one extent being repaired at a time
+                    assert_eq!(Some(eur as u64), extent_under_repair);
+                }
+            }
+        }
+
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
+            if let Some(eur) = extent_under_repair {
+                // We are in the middle of an online repair. See if we
+                // are trying to do IO that needs special dependencies.
+                if eid == eur {
+                    warn!(
+                        self.log,
+                        "Write to Extent {}:{}:{} under repair",
+                        eid,
+                        offset.value,
+                        offset.shift
+                    );
+                    // We are operating on extent_under_repair.  This means
+                    // job IDs for that repair operation have been submitted
+                    // into the work queue, and we should already have found
+                    // them and added them to our dependency list.
+                    //
+                    // ZZZ Can we assert that?
+                    //
+                    // If this IO extends beyond the end of this extent, then
+                    // we are in the special case of an IO that spans a
+                    // repaired extent and a not yet repaired extent.  Our
+                    // only path forward here is to let the repair finish
+                    // for all extents covered by this IO before we allow
+                    // this IO to move forward.
+                    //
+                    // If we start our IO above the extent limit, then we
+                    // don't need dependencies as this IO should go out
+                    // before any future repair.
+                    future_repair = true;
+                } else if future_repair && eid > eur {
+                    deps_to_add.insert(eid as u32);
+                    // We crossed the repair extent, depend on future repairs
+                    // for this extent as well.
+                    warn!(
+                        self.log,
+                        "Write {}:{}:{} past extent under repair {}",
+                        eid,
+                        offset.value,
+                        offset.shift,
+                        eur
+                    );
+                }
+            }
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
@@ -5174,6 +5764,32 @@ impl Upstairs {
             });
 
             cur_offset += byte_len;
+        }
+
+        for new_dep in deps_to_add.iter() {
+            let ids = downstairs.reserve_repair_ids(*new_dep);
+            dep.push(ids.close_id);
+            dep.push(ids.repair_id);
+            dep.push(ids.noop_id);
+            dep.push(ids.reopen_id);
+        }
+
+        // After reserving any OnlineRepair IDs, go get one for this job.
+        // This is required to avoid circular dependencies.
+        let next_id = downstairs.next_id();
+
+        // debug message printing, not load bearing.
+        for new_dep in deps_to_add.iter() {
+            warn!(
+                self.log,
+                "IO Write {} on eur {} Added deps {}",
+                next_id,
+                extent_under_repair.unwrap(),
+                new_dep
+            );
+        }
+        if deps_to_add.is_empty() {
+            debug!(self.log, "IO Write {} has deps {:?}", next_id, dep);
         }
 
         let wr = create_write_eob(
@@ -5269,13 +5885,6 @@ impl Upstairs {
         cdt::gw__read__start!(|| (gw_id));
 
         /*
-         * Create the tracking info for downstairs request numbers (ds_id) we
-         * will create on behalf of this guest job.
-         */
-        let mut sub = HashMap::new();
-        let next_id = downstairs.next_id();
-
-        /*
          * To build the dependency list for this read, iterate from the end
          * of the downstairs work active list in reverse order and
          * check each job in that list to see if this new read must
@@ -5306,12 +5915,26 @@ impl Upstairs {
             if job.work.is_flush() {
                 dep.push(**job_id);
                 break;
-            } else if job.work.is_write()
+            } else if (job.work.is_write() | job.work.is_repair())
                 && impacted_blocks.conflicts(&job.impacted_blocks)
             {
-                // If this is a write and it impacts the same blocks as
-                // something already active, create a dependency.
+                // If this is a write or repair and it impacts the same blocks
+                // as something already active, create a dependency.
                 dep.push(**job_id);
+            }
+        }
+
+        let mut future_repair = false;
+        let mut deps_to_add: HashSet<u32> = HashSet::new();
+        let mut extent_under_repair = None;
+        for cid in 0..3 {
+            if let Some(eur) = downstairs.extent_limit[cid] {
+                if extent_under_repair.is_none() {
+                    extent_under_repair = Some(eur as u64);
+                } else {
+                    // We only support one extent being repaired at a time
+                    assert_eq!(Some(eur as u64), extent_under_repair);
+                }
             }
         }
 
@@ -5323,7 +5946,43 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
+            if let Some(eur) = extent_under_repair {
+                if eid == eur {
+                    future_repair = true;
+                } else if future_repair && eid > eur {
+                    deps_to_add.insert(eid as u32);
+                }
+            }
             requests.push(ReadRequest { eid, offset });
+        }
+
+        for new_dep in deps_to_add.iter() {
+            warn!(self.log, "Create read repair deps for extent {}", new_dep);
+            let ids = downstairs.reserve_repair_ids(*new_dep);
+            dep.push(ids.close_id);
+            dep.push(ids.repair_id);
+            dep.push(ids.noop_id);
+            dep.push(ids.reopen_id);
+        }
+
+        /*
+         * Create the tracking info for downstairs request numbers (ds_id) we
+         * will create on behalf of this guest job.
+         */
+        let mut sub = HashMap::new();
+        let next_id = downstairs.next_id();
+
+        for new_dep in deps_to_add.iter() {
+            warn!(
+                self.log,
+                "IO Read  {} extent {} added deps {}",
+                next_id,
+                extent_under_repair.unwrap(),
+                new_dep
+            );
+        }
+        if deps_to_add.is_empty() {
+            debug!(self.log, "IO Read  {} has deps {:?}", next_id, dep);
         }
 
         sub.insert(next_id, 0); // XXX does this value matter?
@@ -5395,6 +6054,9 @@ impl Upstairs {
             current,
             new_state,
         );
+
+        // Should we move jobs now?  When do we move work that has
+        // been submitted over to "skipped"
         ds.ds_state[client_id as usize] = new_state;
     }
 
@@ -5493,6 +6155,7 @@ impl Upstairs {
                     | DsState::Repair
                     | DsState::OnlineRepair
                     | DsState::OnlineRepairReady
+                    | DsState::Offline
                     | DsState::Replay => {} /* Okay */
                     _ => {
                         panic!(
@@ -5512,8 +6175,10 @@ impl Upstairs {
             }
             DsState::Active => {
                 match old_state {
-                    DsState::WaitQuorum | DsState::Replay | DsState::Repair => {
-                    } // Okay
+                    DsState::WaitQuorum
+                    | DsState::Replay
+                    | DsState::Repair
+                    | DsState::OnlineRepair => {} // Okay
                     _ => {
                         panic!(
                             "[{}] {} Invalid transition: {:?} -> {:?}",
@@ -5550,6 +6215,9 @@ impl Upstairs {
             }
             DsState::OnlineRepair => {
                 assert_eq!(old_state, DsState::OnlineRepairReady);
+            }
+            DsState::OnlineRepairReady => {
+                assert_eq!(old_state, DsState::Faulted);
             }
             DsState::New => {
                 // Before new, we must have been in
@@ -5633,7 +6301,7 @@ impl Upstairs {
         rep_id: u64,
         ds_reconcile_done_tx: &mpsc::Sender<Repair>,
     ) -> Result<()> {
-        info!(
+        debug!(
             self.log,
             "[{}] It's time to notify for {}", client_id, rep_id
         );
@@ -6166,7 +6834,7 @@ impl Upstairs {
                 if ready != 3 {
                     bail!("Unexpected Downstairs state after collation.");
                 } else {
-                    info!(self.log, "No repair work was required");
+                    info!(self.log, "No initial repair work was required");
                     info!(self.log, "Set Downstairs and Upstairs active");
                     if active.up_state != UpState::Initializing {
                         bail!("Upstairs in unexpected state while reconciling");
@@ -6374,6 +7042,7 @@ impl Upstairs {
         ds_id: u64,
         client_id: u8,
         read_data: Result<Vec<ReadResponse>, CrucibleError>,
+        extent_info: Option<ExtentInfo>,
     ) -> Result<bool> {
         /*
          * We can't get the upstairs state lock when holding the downstairs
@@ -6405,15 +7074,20 @@ impl Upstairs {
          * we already received, because it may never come back.
          */
         let ds_state = ds.ds_state[client_id as usize];
-        if ds_state != DsState::Active && ds_state != DsState::Repair {
-            warn!(
-                self.log,
-                "[{}] {} WARNING finish job {} when downstairs state:{:?}",
-                client_id,
-                self.uuid,
-                ds_id,
-                ds_state
-            );
+        match ds_state {
+            DsState::Active
+            | DsState::Repair  // ZZZ <-- Is this right? We never repair here!
+            | DsState::OnlineRepair => {}
+            _ => {
+                warn!(
+                    self.log,
+                    "[{}] {} WARNING finish job {} when downstairs state:{:?}",
+                    client_id,
+                    self.uuid,
+                    ds_id,
+                    ds_state
+                );
+            }
         }
 
         // Mark this ds_id for the client_id as completed.
@@ -6423,18 +7097,45 @@ impl Upstairs {
             read_data,
             &self.encryption_context,
             up_state,
+            extent_info,
         ) {
             Err(e) => {
-                let job = ds.ds_active.get_mut(&ds_id).unwrap();
-                error!(
-                    self.log,
-                    "[{}] ds_completion error: {:?} j:{} {:?} {:?} ",
-                    client_id,
-                    e,
-                    ds_id,
-                    &self.encryption_context,
-                    job,
-                );
+                match ds.ds_active.get_mut(&ds_id) {
+                    Some(job) => {
+                        error!(
+                            self.log,
+                            "[{}] ds_completion error: {:?} j:{} {:?} {:?} ",
+                            client_id,
+                            e,
+                            ds_id,
+                            &self.encryption_context,
+                            job,
+                        );
+                    }
+                    None => {
+                        // If the DS is failed, it's possible we completed
+                        // this job at that time.
+                        error!(
+                            self.log,
+                            "[{}] ds_completion error: {:?} Missing:{} ",
+                            client_id,
+                            e,
+                            ds_id,
+                        );
+                        /*
+                         * ZZZ This is only true for a limited time after
+                         * the downstairs has failed.  An old in-flight IO
+                         * could, in theory, ack back to us at some time
+                         * in the future after we cleared the completed
+                         * list.
+                         */
+                        assert_eq!(
+                            ds.ds_state[client_id as usize],
+                            DsState::Faulted
+                        );
+                        assert!(ds.completed.contains(&ds_id));
+                    }
+                }
                 return Err(e);
             }
             Ok(ng) => ng,
@@ -6474,19 +7175,13 @@ impl Upstairs {
             } else if let Some(job) = ds.ds_active.get_mut(&ds_id) {
                 if matches!(
                     job.work,
-                    IOop::Write {
-                        dependencies: _,
-                        writes: _,
-                    } | IOop::Flush {
-                        dependencies: _,
-                        flush_number: _,
-                        gen_number: _,
-                        snapshot_details: _,
-                        extent_limit: _,
-                    } | IOop::WriteUnwritten {
-                        dependencies: _,
-                        writes: _,
-                    }
+                    IOop::Write { .. }
+                        | IOop::Flush { .. }
+                        | IOop::WriteUnwritten { .. }
+                        | IOop::ExtentFlushClose { .. }
+                        | IOop::ExtentLiveRepair { .. }
+                        | IOop::ExtentLiveNoOp { .. }
+                        | IOop::ExtentLiveReopen { .. }
                 ) {
                     // This error means the downstairs will go to Faulted.
                     // Walk the active job list and mark any that were
@@ -6704,7 +7399,7 @@ impl fmt::Display for DsState {
 /*
  * A unit of work for downstairs that is put into the hashmap.
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DownstairsIO {
     ds_id: u64, // This MUST match our hashmap index
 
@@ -7003,6 +7698,20 @@ impl IOop {
         matches!(self, IOop::Flush { .. })
     }
 
+    /*
+     * Report if the IOop is one used during OnlineRepair
+     */
+    pub fn is_repair(&self) -> bool {
+        matches!(
+            self,
+            IOop::ExtentClose { .. }
+                | IOop::ExtentFlushClose { .. }
+                | IOop::ExtentLiveRepair { .. }
+                | IOop::ExtentLiveNoOp { .. }
+                | IOop::ExtentLiveReopen { .. }
+        )
+    }
+
     /**
      * Take a IOop work operation and just return:
      * A string of the job type.
@@ -7097,6 +7806,103 @@ impl IOop {
         };
         (job_type, num_blocks, deps)
     }
+
+    // ZZZ this is ready to test, but we still need to do the
+    // dependency side work.
+    //
+    // Write a test for just this method
+    // We have a downstairs in OnlineRepair.
+    // Compare the extent IDs for this IO and where we have repaired
+    // so far, and determine if this IO should be sent to the downstairs
+    // or not (skipped).
+    // Return true if we should send it.
+    pub fn send_io_live_repair(&self, extent_limit: Option<usize>) -> bool {
+        if let Some(extent_limit) = extent_limit {
+            // The extent_limit has been set, so we have repair work in
+            // progress.  If our IO touches an extent less than or equal
+            // to the extent_limit, then we go ahead and send it.
+            //
+            // The special case of IOs that span extents repaired and not
+            // repaired is handled with dependencies, and IOs should arrive
+            // here with those dependencies already set.
+            match &self {
+                IOop::Write {
+                    dependencies: _,
+                    writes,
+                } => {
+                    for write in writes {
+                        if write.eid <= extent_limit as u64 {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                IOop::WriteUnwritten {
+                    dependencies: _,
+                    writes,
+                } => {
+                    for write in writes {
+                        if write.eid <= extent_limit as u64 {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                IOop::Flush {
+                    dependencies: _,
+                    flush_number: _,
+                    gen_number: _,
+                    snapshot_details: _,
+                    extent_limit: _,
+                } => {
+                    // If we have set extent limit, then we go ahead and
+                    // send the flush with the extent_limit in it, and allow
+                    // the downstairs to act based on that.
+                    true
+                }
+                IOop::Read {
+                    dependencies: _,
+                    requests,
+                } => {
+                    for req in requests {
+                        if req.eid <= extent_limit as u64 {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                // ZZZ Should the rest of these just panic?
+                IOop::ExtentClose {
+                    dependencies: _,
+                    extent: _,
+                } => true,
+                IOop::ExtentFlushClose {
+                    dependencies: _,
+                    extent: _,
+                    flush_number: _,
+                    gen_number: _,
+                    source_downstairs: _,
+                    repair_downstairs: _,
+                } => true,
+                IOop::ExtentLiveRepair {
+                    dependencies: _,
+                    extent: _,
+                    source_downstairs: _,
+                    source_repair_address: _,
+                    repair_downstairs: _,
+                } => true,
+                IOop::ExtentLiveReopen {
+                    dependencies: _,
+                    extent: _,
+                } => true,
+                IOop::ExtentLiveNoOp { dependencies: _ } => true,
+            }
+        } else {
+            // If we have not set an extent_limit yet all IO should
+            // be skipped for this downstairs.
+            false
+        }
+    }
 }
 
 /*
@@ -7105,7 +7911,7 @@ impl IOop {
  * they operate independent of each other.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum IOState {
     // A new IO request.
     New,
@@ -7406,6 +8212,8 @@ pub enum BlockOp {
         gen: u64,
     },
     Deactivate,
+    // Repair command
+    RepairOp,
     // Query ops
     QueryBlockSize {
         data: Arc<Mutex<u64>>,
@@ -7693,6 +8501,7 @@ impl GuestWork {
         ds_id: u64,
         data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
+        log: &Logger,
     ) {
         /*
          * A gw_id that already finished and results were sent back to
@@ -7730,7 +8539,7 @@ impl GuestWork {
 
                 gtos_job.completed.push(ds_id);
             } else {
-                println!("gw_id:{} ({}) already removed???", gw_id, ds_id);
+                error!(log, "gw_id:{} ({}) already removed???", gw_id, ds_id);
                 assert!(gtos_job.completed.contains(&ds_id));
                 panic!(
                     "{} Attempting to complete ds_id {} we already completed",
@@ -8312,6 +9121,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
      * work.
      */
     while ds_done_rx.recv().await.is_some() {
+        debug!(up.log, "up_listen was notified");
         /*
          * XXX Do we need to hold the lock while we process all the
          * completed jobs?  We should be continuing to send message over
@@ -8328,9 +9138,11 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
          */
         ack_list.sort_unstable();
 
+        let jobs_checked = ack_list.len();
         let mut gw = up.guest.guest_work.lock().await;
         for ds_id_done in ack_list.iter() {
             let mut ds = up.downstairs.lock().await;
+            debug!(up.log, "up_listen process {}", ds_id_done);
 
             let done = ds.ds_active.get_mut(ds_id_done).unwrap();
             /*
@@ -8353,14 +9165,19 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let data = done.data.take();
 
             ds.ack(ds_id);
+            debug!(ds.log, "[A] ack job {}:{}", ds_id, gw_id);
 
-            gw.gw_ds_complete(gw_id, ds_id, data, ds.result(ds_id))
+            gw.gw_ds_complete(gw_id, ds_id, data, ds.result(ds_id), &up.log)
                 .await;
 
             ds.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats).await;
 
             ds.retire_check(ds_id);
         }
+        debug!(
+            up.log,
+            "up_listen checked {} jobs, back to waiting", jobs_checked
+        );
     }
     warn!(up.log, "up_ds_listen loop done");
 }
@@ -8503,6 +9320,10 @@ async fn process_new_io(
             send_work(dst, *lastcast).await;
             *lastcast += 1;
         }
+        BlockOp::RepairOp => {
+            // ZZZ Maybe panic?  Who is sending us this garbage?
+            warn!(up.log, "Ignoring external BlockOp::RepairOp");
+        }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             let size = match up.ddef.lock().await.get_def() {
@@ -8596,6 +9417,10 @@ pub struct Arg {
     ds_count: u32,
     ds_state: Vec<DsState>,
     ds_io_count: IOStateCount,
+    ds_repair: Vec<usize>,
+    ds_confirm: Vec<usize>,
+    ds_online_repair_completed: Vec<usize>,
+    ds_online_repair_aborted: Vec<usize>,
 }
 
 /**
@@ -8680,6 +9505,8 @@ async fn up_listen(
     up.stat_update("start").await;
     let mut flush_check = deadline_secs(flush_timeout.into());
     let mut show_work_interval = deadline_secs(5);
+    let mut repair_check_interval = deadline_secs(60);
+    let mut repair_check = false;
     loop {
         /*
          * Wait for all three downstairs to connect (for each region set).
@@ -8710,6 +9537,11 @@ async fn up_listen(
                                 "Reconciliation attempt reported error {}",
                                 e
                             );
+                        } else {
+                            // Set check for repair here.
+                            info!(up.log, "Set check for repair");
+                            repair_check = true;
+                            repair_check_interval = deadline_secs(1);
                         }
                     } else {
                         info!(
@@ -8731,6 +9563,25 @@ async fn up_listen(
             }
             req = up.guest.recv() => {
                 process_new_io(up, &dst, req, &mut lastcast).await;
+            }
+            _ = sleep_until(repair_check_interval), if repair_check => {
+                match check_for_repair(up, &dst).await {
+                    RepairCheck::RepairStarted => {
+                        repair_check = false;
+                        info!(up.log, "Online Repair started");
+                    },
+                    RepairCheck::NoRepairNeeded => {
+                        repair_check = false;
+                    },
+                    RepairCheck::RepairInProgress => {
+                        repair_check = true;
+                        repair_check_interval = deadline_secs(60);
+                        info!(up.log, "Online Repair in progress, try again");
+                    },
+                    RepairCheck::InvalidState => {
+                        repair_check = false;
+                    }
+                }
             }
             _ = sleep_until(leak_deadline) => {
                 if let Some(iop_limit) = up.guest.get_iop_limit() {

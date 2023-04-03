@@ -48,6 +48,30 @@ pub struct Flush {
     #[datum]
     pub count: Cumulative<i64>,
 }
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct FlushClose {
+    /// Count of extent flush close operations this upstairs has completed
+    #[datum]
+    pub count: Cumulative<i64>,
+}
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct ExtentRepair {
+    /// Count of extent repair operations this upstairs has completed
+    #[datum]
+    pub count: Cumulative<i64>,
+}
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct ExtentNoOp {
+    /// Count of extent NoOp operations this upstairs has completed
+    #[datum]
+    pub count: Cumulative<i64>,
+}
+#[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct ExtentReopen {
+    /// Count of extent reopen operations this upstairs has completed
+    #[datum]
+    pub count: Cumulative<i64>,
+}
 
 // All the counter stats in one struct.
 #[derive(Clone, Debug)]
@@ -59,6 +83,10 @@ pub struct UpCountStat {
     read_count: Read,
     read_bytes: ReadBytes,
     flush_count: Flush,
+    flush_close_count: FlushClose,
+    extent_repair_count: ExtentRepair,
+    extent_noop_count: ExtentNoOp,
+    extent_reopen_count: ExtentReopen,
 }
 
 impl UpCountStat {
@@ -71,6 +99,10 @@ impl UpCountStat {
             read_count: Default::default(),
             read_bytes: Default::default(),
             flush_count: Default::default(),
+            flush_close_count: Default::default(),
+            extent_repair_count: Default::default(),
+            extent_noop_count: Default::default(),
+            extent_reopen_count: Default::default(),
         }
     }
 }
@@ -110,6 +142,26 @@ impl UpStatOuter {
         let datum = ups.flush_count.datum_mut();
         *datum += 1;
     }
+    pub async fn add_flush_close(&self) {
+        let mut ups = self.up_stat_wrap.lock().await;
+        let datum = ups.flush_close_count.datum_mut();
+        *datum += 1;
+    }
+    pub async fn add_extent_repair(&self) {
+        let mut ups = self.up_stat_wrap.lock().await;
+        let datum = ups.extent_repair_count.datum_mut();
+        *datum += 1;
+    }
+    pub async fn add_extent_noop(&self) {
+        let mut ups = self.up_stat_wrap.lock().await;
+        let datum = ups.extent_noop_count.datum_mut();
+        *datum += 1;
+    }
+    pub async fn add_extent_reopen(&self) {
+        let mut ups = self.up_stat_wrap.lock().await;
+        let datum = ups.extent_reopen_count.datum_mut();
+        *datum += 1;
+    }
 }
 
 // This trait is what is called to update the data to send to Oximeter.
@@ -134,6 +186,10 @@ impl Producer for UpStatOuter {
         data.push(Sample::new(&name, &ups.write_bytes));
         data.push(Sample::new(&name, &ups.read_count));
         data.push(Sample::new(&name, &ups.read_bytes));
+        data.push(Sample::new(&name, &ups.flush_close_count));
+        data.push(Sample::new(&name, &ups.extent_repair_count));
+        data.push(Sample::new(&name, &ups.extent_noop_count));
+        data.push(Sample::new(&name, &ups.extent_reopen_count));
 
         // Yield the available samples.
         Ok(Box::new(data.into_iter()))

@@ -2,8 +2,6 @@
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
-use dropshot::ConfigLogging;
-use dropshot::ConfigLoggingLevel;
 use dropshot::HttpError;
 use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
@@ -44,16 +42,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
         tls: None,
     };
 
-    /*
-     * For simplicity, we'll configure an "info"-level logger that writes to
-     * stderr assuming that it's a terminal.
-     */
-    let config_logging = ConfigLogging::StderrTerminal {
-        level: ConfigLoggingLevel::Info,
-    };
-    let log = config_logging
-        .to_logger("example-basic")
-        .map_err(|error| format!("failed to create logger: {}", error))?;
+    let log = up.log.new(o!("task" => "control".to_string()));
 
     /*
      * Build a description of the API.
@@ -115,6 +104,8 @@ struct UpstairsStats {
     extents_repaired: Vec<usize>,
     extents_confirmed: Vec<usize>,
     extent_limit: Vec<Option<usize>>,
+    online_repair_completed: Vec<usize>,
+    online_repair_aborted: Vec<usize>,
 }
 
 /**
@@ -140,6 +131,8 @@ async fn upstairs_fill_info(
     let extents_repaired = ds.extents_repaired.clone();
     let extents_confirmed = ds.extents_confirmed.clone();
     let extent_limit = ds.extent_limit.clone();
+    let online_repair_completed = ds.online_repair_completed.clone();
+    let online_repair_aborted = ds.online_repair_aborted.clone();
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
@@ -151,6 +144,8 @@ async fn upstairs_fill_info(
         extents_repaired,
         extents_confirmed,
         extent_limit,
+        online_repair_completed,
+        online_repair_aborted,
     }))
 }
 
@@ -233,7 +228,10 @@ async fn fault_downstairs(
     let up_state = active.up_state;
     let mut ds = api_context.up.downstairs.lock().await;
     match ds.ds_state[cid as usize] {
-        DsState::Active | DsState::Offline => {}
+        DsState::Active
+        | DsState::Offline
+        | DsState::OnlineRepair
+        | DsState::OnlineRepairReady => {}
         x => {
             return Err(HttpError::for_bad_request(
                 Some(String::from("InvalidState")),

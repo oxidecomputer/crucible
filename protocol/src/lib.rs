@@ -314,6 +314,16 @@ pub enum Message {
         result: Result<(u64, u64, bool), CrucibleError>,
     },
 
+    /// The given "ExtentLiveRepair" message ID was completed.  This message
+    /// will only be from ExtentLiveRepair, as this operations failure
+    /// will require special action in the upstairs.
+    ExtentLiveRepairAckId {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
+    },
+
     /// The given "ExtentLive" message ID was completed.  This message
     /// will be from ExtentLiveRepair, ExtentLiveReopen, or ExtentLiveNoOp
     ExtentLiveAckId {
