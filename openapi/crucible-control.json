@@ -273,6 +273,22 @@
               "minimum": 0
             }
           },
+          "online_repair_aborted": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "online_repair_completed": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
           "repair_done": {
             "type": "integer",
             "format": "uint",
@@ -298,6 +314,8 @@
           "extent_limit",
           "extents_confirmed",
           "extents_repaired",
+          "online_repair_aborted",
+          "online_repair_completed",
           "repair_done",
           "repair_needed",
           "state",
