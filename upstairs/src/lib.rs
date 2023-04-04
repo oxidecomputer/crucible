@@ -493,13 +493,29 @@ async fn process_message(
     // job being ready to ACK, then send a message on the ds_done
     // channel.  Note that a failed IO still needs to ACK that failure
     // back to the guest.
-    if u.process_ds_operation(ds_id, client_id, result, extent_info)
-        .await?
+    match u
+        .process_ds_operation(ds_id, client_id, result, extent_info)
+        .await
     {
-        debug!(u.log, "[{}] Process message NOTIFY {}", client_id, ds_id);
-        ds_done_tx.send(ds_id).await?;
+        Ok(notify_guest) => {
+            if notify_guest {
+                match ds_done_tx.send(ds_id).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(
+                            u.log,
+                            "[{}] pm_task: {:?}, sending message to ds_done_tx",
+                            client_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            error!(u.log, "process_ds_operation error: {:?}", e);
+        }
     }
-
     Ok(())
 }
 
@@ -887,27 +903,7 @@ where
                  * any work that we were holding that we did not flush.
                  */
                 ds.re_new(up_coms.client_id);
-                // ZZZ verify no OnlineRepair stuff is set for this DS.
-            }
-            DsState::OnlineRepairReady => {
-                /*
-                 * TODO: Write more code here, when a downstairs is being
-                 * repaired and disconnects, we have to basically move it back
-                 * to the beginning of the line and start over, I think.
-                 * Any outstanding jobs need to be discarded, all extents
-                 * that were closed need to re-open, and then the repair
-                 * starts over from the beginning.  Something like that.
-                 * Similar, but not quite the same, as the re_new.
-                 */
-                // ZZZ Can (should?) this ever happen? We should go to faulted,
-                // then, eventually, move to OnlineRepairReady and just
-                // keep skipping IOs till the OR task comes around and
-                // tells us to start being repaired.
-                warn!(
-                    up.log,
-                    "[{}] Reconnect while repair in progress",
-                    up_coms.client_id
-                );
+                assert!(ds.extent_limit[up_coms.client_id as usize].is_none());
             }
             _ => {
                 panic!(
@@ -1628,16 +1624,14 @@ where
         + 'static,
 {
     /*
-     * We set more_work if we arrive here on a re-connection, this will
-     * allow us to replay any outstanding work.  If we don't arrive here
-     * on a reconnect, then we have to enter the reconcile loop and
-     * do any repairs that might be necessary.
+     * The current state of this downstairs client will decide what path
+     * we take next.
+     * If the state is Replay, then we set more work and move to active.
+     * If the state is WQ or repair, then we do the work required to make
+     * the three downstairs match each other.
+     * If we are ORR, then we wait for the online repair task to discover
+     * this and start repairing this downstairs.
      */
-    // Match on DS state to decide what to do. ZZZ
-    // Either:
-    // New: do_reconcile_work
-    // Replay: Set more work, move state to Active
-    // OnlineRepairReady: All jobs should stay skipped.
 
     let mut more_work = false;
     let up_state = {
@@ -1663,10 +1657,6 @@ where
                 );
                 more_work = true;
             }
-            // ZZZ Verify this is either state.  Where is repair set?
-            // I don't think repair should ever be here, right?  cmd_loop
-            // does not handle this work, as it's on a different queue is
-            // it not?
             DsState::WaitQuorum | DsState::Repair => {
                 drop(ds);
                 do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
@@ -1711,7 +1701,7 @@ where
      * a result of a message we sent).  This channel is how this task
      * communicates that there is a message to handle.
      */
-    let (tx, mut rx) = mpsc::channel::<Message>(100);
+    let (pm_task_tx, mut pm_task_rx) = mpsc::channel::<Message>(100);
 
     info!(up.log, "[{}] Starts cmd_loop", up_coms.client_id);
     let pm_task = {
@@ -1720,7 +1710,7 @@ where
         let client_id = up_coms.client_id;
 
         tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
+            while let Some(m) = pm_task_rx.recv().await {
                 /*
                  * TODO: Add a check here to make sure we are
                  * connected and in the proper state before we
@@ -1752,14 +1742,13 @@ where
                         "[{}] exits pm_task, this downstairs faulted",
                         client_id
                     );
-                    // Until OnlineRepair is actually supported, we are
-                    // doing more harm than good by remaining up.
                 }
 
                 if up_c.ds_deactivate(client_id).await {
                     bail!("[{}] exits after deactivation", client_id);
                 }
             }
+            warn!(up_c.log, "[{}] pm_task rx.recv() is None", client_id);
             Ok(())
         })
     };
@@ -1778,9 +1767,9 @@ where
              * new work, we help to avoid overwhelming the downstairs.
              */
             biased;
-            _ = &mut pm_task => {
-                bail!("[{}] client work task ended, so we end too",
-                    up_coms.client_id);
+            e = &mut pm_task => {
+                bail!("[{}] client work task ended, {:?}, so we end too",
+                    up_coms.client_id, e);
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
@@ -1892,7 +1881,7 @@ where
                         );
                     }
                     Some(m) => {
-                        tx.send(m).await?;
+                        pm_task_tx.send(m).await?;
                     }
                 }
             }
@@ -2694,6 +2683,7 @@ struct Downstairs {
      * all the downstairs IDs we will need for each extent.
      */
     repair_job_ids: HashMap<u32, ExtentRepairIDs>,
+
     /**
      * When repairing, the minimum job ID the downstairs under repair
      * needs to consider for dependencies.
@@ -2793,9 +2783,11 @@ impl Downstairs {
             && !self.ds_skipped_jobs[client_id as usize].is_empty()
     }
 
-    // Go through the list of dependencies and remove any jobs that this
-    // downstairs has already skipped.
-    fn remove_dep_if_skipped(
+    // Given a client ID that is undergoing OnlineRepair, go through the list
+    // of dependencies and remove any jobs that this downstairs has already
+    // skipped, as the downstairs on the other side will not have received
+    // these IOs..
+    fn remove_dep_if_online_repair(
         &mut self,
         client_id: u8,
         mut deps: Vec<u64>,
@@ -3088,9 +3080,6 @@ impl Downstairs {
      * switch the overall job back to NotAcked, and then let the replay
      * happen.
      */
-    // ZZZ don't re_new repair jobs, those should all move to failed/skipped
-    // as repair jobs need to happen in lock-step, and, yeah, don't do that.
-    // maybe its okay if the repair has failed.
     fn re_new(&mut self, client_id: u8) {
         let lf = self.ds_last_flush[client_id as usize];
         let mut kvec: Vec<u64> =
@@ -3226,6 +3215,8 @@ impl Downstairs {
                 }
             }
         }
+        // As this downstairs is now faulted, we clear the extent_limit.
+        self.extent_limit[client_id as usize] = None;
         notify_guest
     }
 
@@ -3777,11 +3768,6 @@ impl Downstairs {
         }
     }
 
-    // ZZZ
-    // What is the error path when a repair starts failing:?
-    // We have to be able to handle skipping jobs if things go away
-    // while repairing, but while being sure that a skipped job comes back
-    // as a failure to the repair task, so it knows to unwind everything.
     /**
      * Mark this downstairs request as complete for this client. Returns
      * true if this completion is enough that we should message the
@@ -3820,6 +3806,17 @@ impl Downstairs {
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+
+        if job.state[&client_id] == IOState::Skipped {
+            // This job was already marked as skipped, and at that time
+            // all required action was taken on it.  We can drop any more
+            // processing of it here and return.
+            warn!(
+                self.log,
+                "[{}] Dropping already skipped job {}", client_id, ds_id
+            );
+            return Ok(true);
+        }
 
         // Validate integrity hashes and optionally authenticated decryption.
         //
@@ -3916,8 +3913,9 @@ impl Downstairs {
          * Verify the job was InProgress
          */
         if old_state != IOState::InProgress {
+            // This job is in an unexpected state.
             bail!(
-                "[{}] job completed while not InProgress: {:?}",
+                "[{}] Job completed while not InProgress: {:?}",
                 client_id,
                 old_state
             );
@@ -4380,22 +4378,21 @@ impl Downstairs {
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs should handle the dependency.
                 if wc.active != 0 {
-                    info!(
+                    warn!(
                         self.log,
-                        "  ZZZ Leave job {} on the work queue for now", id
+                        "Leave job {} on the work queue for now", id
                     );
                     continue;
                 }
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
 
                 assert!(!self.completed.contains(id));
-                // Figure out how to get the job and look to see if
-                // it is ACKED without pulling it off.
 
                 let oj = self.ds_active.get(id).unwrap();
                 if oj.ack_status != AckStatus::Acked {
-                    info!(self.log,
-                        "  ZZZ  [rc] leave job {} on the queue when removing {}",
+                    warn!(
+                        self.log,
+                        "[rc] leave job {} on the queue when removing {}",
                         oj.ds_id,
                         ds_id,
                     );
@@ -4414,10 +4411,8 @@ impl Downstairs {
                 }
             }
 
-            // ZZZ
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
-            // // ZZZ Maybe this is wrong too?  Only purge skipped inside?
             for cid in 0..3 {
                 self.ds_skipped_jobs[cid].retain(|&x| x >= ds_id);
             }
@@ -5192,7 +5187,7 @@ impl Upstairs {
         let mut ds = self.downstairs.lock().await;
 
         if ds.dependencies_need_cleanup(client_id) {
-            ds.remove_dep_if_skipped(client_id, deps.clone(), ds_id)
+            ds.remove_dep_if_online_repair(client_id, deps.clone(), ds_id)
         } else {
             deps
         }
@@ -5685,8 +5680,6 @@ impl Upstairs {
                     // job IDs for that repair operation have been submitted
                     // into the work queue, and we should already have found
                     // them and added them to our dependency list.
-                    //
-                    // ZZZ Can we assert that?
                     //
                     // If this IO extends beyond the end of this extent, then
                     // we are in the special case of an IO that spans a
@@ -7113,8 +7106,6 @@ impl Upstairs {
                         );
                     }
                     None => {
-                        // If the DS is failed, it's possible we completed
-                        // this job at that time.
                         error!(
                             self.log,
                             "[{}] ds_completion error: {:?} Missing:{} ",
@@ -7123,17 +7114,17 @@ impl Upstairs {
                             ds_id,
                         );
                         /*
-                         * ZZZ This is only true for a limited time after
+                         * This assertion is only true for a limited time after
                          * the downstairs has failed.  An old in-flight IO
                          * could, in theory, ack back to us at some time
                          * in the future after we cleared the completed
                          * list.
                          */
-                        assert_eq!(
-                            ds.ds_state[client_id as usize],
-                            DsState::Faulted
-                        );
                         assert!(ds.completed.contains(&ds_id));
+                        // ZZZ I also think this path is possible if we
+                        // are in failure mode for OnlineRepair, as we could
+                        // get an ack back from a job after we failed the DS
+                        // (from the upstairs side) and flushed the job away.
                     }
                 }
                 return Err(e);
@@ -7807,10 +7798,6 @@ impl IOop {
         (job_type, num_blocks, deps)
     }
 
-    // ZZZ this is ready to test, but we still need to do the
-    // dependency side work.
-    //
-    // Write a test for just this method
     // We have a downstairs in OnlineRepair.
     // Compare the extent IDs for this IO and where we have repaired
     // so far, and determine if this IO should be sent to the downstairs
@@ -7848,13 +7835,7 @@ impl IOop {
                     }
                     false
                 }
-                IOop::Flush {
-                    dependencies: _,
-                    flush_number: _,
-                    gen_number: _,
-                    snapshot_details: _,
-                    extent_limit: _,
-                } => {
+                IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
                     // send the flush with the extent_limit in it, and allow
                     // the downstairs to act based on that.
@@ -7871,31 +7852,9 @@ impl IOop {
                     }
                     false
                 }
-                // ZZZ Should the rest of these just panic?
-                IOop::ExtentClose {
-                    dependencies: _,
-                    extent: _,
-                } => true,
-                IOop::ExtentFlushClose {
-                    dependencies: _,
-                    extent: _,
-                    flush_number: _,
-                    gen_number: _,
-                    source_downstairs: _,
-                    repair_downstairs: _,
-                } => true,
-                IOop::ExtentLiveRepair {
-                    dependencies: _,
-                    extent: _,
-                    source_downstairs: _,
-                    source_repair_address: _,
-                    repair_downstairs: _,
-                } => true,
-                IOop::ExtentLiveReopen {
-                    dependencies: _,
-                    extent: _,
-                } => true,
-                IOop::ExtentLiveNoOp { dependencies: _ } => true,
+                _ => {
+                    panic!("Unsupported IO check {:?}", self);
+                }
             }
         } else {
             // If we have not set an extent_limit yet all IO should

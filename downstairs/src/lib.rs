@@ -1053,7 +1053,6 @@ where
     Ok(())
 }
 
-// ZZZ WTH?  Make this oneline work
 fn check_message_for_abort(m: &Message) -> bool {
     match m {
         Message::ExtentLiveRepairAckId {

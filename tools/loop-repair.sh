@@ -4,6 +4,21 @@
 # Each loop will select a new downstairs and stop/fault/start
 # that downstairs which should kick off a repair.
 
+
+#
+# Make a test that:
+# starts IO
+# Faults a downstairs.
+# waits for repair to start.
+# Faults a downstairs again.
+
+# Also,
+# Faults a downstairs
+# waits for repair to start.
+# Faults a 2nd downstairs.
+# waits for repair to finish on 1
+# waits for 2nd repair to start on 2
+
 set -eu
 total=0
 

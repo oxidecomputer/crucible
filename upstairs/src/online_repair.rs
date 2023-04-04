@@ -27,8 +27,11 @@ pub enum RepairCheck {
 /**
  * Support functions for online repair.
  */
-// ZZZ Rename this,
-// Maybe return something to indicate a repair task has been started?
+
+/**
+ * Determine if we need to perform an OnlineRepair.
+ * Return status in RepairCheck to indicate what the status is.
+ */
 pub async fn check_for_repair(
     up: &Arc<Upstairs>,
     dst: &[Target],
@@ -61,11 +64,22 @@ pub async fn check_for_repair(
         info!(up.log, "No Online Repair required at this time");
         RepairCheck::NoRepairNeeded
     } else if repair > 0 {
-        // This also means repair_ready > 0 too
+        // This also means repair_ready > 0
         warn!(up.log, "Upstairs already in repair, no new repairs allowed");
         RepairCheck::RepairInProgress
     } else {
-        warn!(up.log, "Downstairs are in need of repair");
+        // If something else kicked this downstairs out, and it has made
+        // it all the way around and is trying to get back to repairing
+        // before the repair task has even noticed, then we should let
+        // the repair task take note and allow it to cleanup.
+        if ds.repair_min_id.is_some() {
+            warn!(
+                up.log,
+                "Upstairs repair task running, no new repairs allowed"
+            );
+            return RepairCheck::RepairInProgress;
+        }
+
         // Move the upstairs that were RR to officially ready.
         // We do this now while we have the lock to avoid having to do all
         // these checks again in online_repair_main
@@ -79,10 +93,10 @@ pub async fn check_for_repair(
                 );
             }
         }
-        assert!(ds.repair_min_id.is_none());
+        // This being set indicates an OnlineRepair is in progress.
         ds.repair_min_id = Some(ds.peek_next_id());
-
         drop(ds);
+
         let upc = Arc::clone(up);
         let mut ds_work_vec = Vec::with_capacity(3);
         for d in dst.iter().take(3) {
@@ -91,21 +105,34 @@ pub async fn check_for_repair(
         let ds_done_tx = dst[0].ds_done_tx.clone();
         tokio::spawn(async move {
             let res = online_repair_main(&upc, ds_work_vec, ds_done_tx).await;
-            warn!(upc.log, "Repair returns {:?}", res);
-            // Any error from online_repair_main should finish with any
-            // downstairs that was ORR going back to Faulted. But.. maybe
-            // we should confirm that here.
+            warn!(upc.log, "Online Repair returns {:?}", res);
         });
         RepairCheck::RepairStarted
     }
 }
 
+// Send a notification to all downstairs clients there is new work.
+async fn notify_ds_new_work(
+    ds_work_vec: &[mpsc::Sender<u64>],
+    log: &Logger,
+    msg: String,
+) {
+    for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
+        let res = ds_work_tx.send(1).await;
+        if let Err(e) = res {
+            error!(
+                log,
+                "ERROR {:#?} Failed to notify client {} of {}", e, cid, msg
+            );
+        }
+    }
+}
+
 /**
  * The main task that coordinates repair.
- * This task does the work of turning a downstairs that is in OnlineRepair
- * state into either Active, or Faulted (if the repair fails).
- * When this task ends, the OnlineRepair downstairs will be in one of those
- * two states.
+ * This task does the work of taking a downstairs that is in OnlineRepair
+ * state and ending with those downstairs being Active, or Faulted (if the
+ * repair fails).
  */
 async fn online_repair_main(
     up: &Arc<Upstairs>,
@@ -122,14 +149,15 @@ async fn online_repair_main(
     // in a vaild state to begin.
     let active = up.active.lock().await;
     let up_state = active.up_state;
+    let mut ds = up.downstairs.lock().await;
     if up_state != UpState::Active {
-        // ZZZ This should return all DS to failed, and clear out the
-        // repair_min_id
+        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
+        ds.end_online_repair();
         bail!("Upstairs in invalid state for repair");
     }
-    let mut ds = up.downstairs.lock().await;
     drop(active);
 
+    // Make sure things are as we expect them to be.
     assert!(ds.repair_job_ids.is_empty());
     // Verify no extent_limits are Some
     assert_eq!(ds.extent_limit.iter().flatten().count(), 0);
@@ -163,20 +191,22 @@ async fn online_repair_main(
     // of the upstairs and start another repair attempt.
     if source_downstairs.is_none() {
         error!(log, "Failed to find source downstairs for repair");
-        up.abort_repair_ds(&mut ds, up_state);
-
-        bail!("Failed to find a vaild source downstairs for repair");
+        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
+        ds.end_online_repair();
+        bail!("Failed to find a valid source downstairs for repair");
     }
 
     if repair_downstairs.is_empty() {
         error!(log, "Failed to find a downstairs needing repair");
-        ds.repair_min_id = None;
+        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
+        ds.end_online_repair();
         bail!("Failed to find a downstairs needing repair");
     }
 
     // This should have been set already when we first moved the downstairs
     // to OnlineRepair, but really, that was only because of the assertion
-    // in enqueue,
+    // in enqueue.  Now that the actual repair begins and we will start
+    // checking it, set to the minimum ID we will compare with.
     ds.repair_min_id = Some(ds.peek_next_id());
     drop(ds);
 
@@ -189,13 +219,19 @@ async fn online_repair_main(
         }
     };
 
-    let mut repair_fail = false;
+    let mut failed_repair = false;
     info!(log, "Start Online Repair of extents 0 to {}", extent_count);
+
+    // Loop over all extents in the region.
+    // If we encounter an error during repair, we may have to continue to
+    // process the next few extents as it's possible for IOs to have reserved
+    // future job IDs for repair work and be depending on those IDs.  The
+    // failed_repair case below should handle these if they exist.
     for eid in 0..extent_count {
         info!(log, "Start extent {} repair", eid);
         cdt::extent__or__start!(|| (eid));
 
-        if repair_fail {
+        if failed_repair {
             info!(log, "extent {} repair has failed", eid);
             // This repair has failed, we only need to keep going if
             // we made future job reservations.
@@ -206,7 +242,8 @@ async fn online_repair_main(
                 assert_eq!(ds.extent_limit[cid], None);
                 assert!(ds.ds_state[cid] != DsState::OnlineRepair);
             }
-            assert_eq!(ds.repair_min_id, None);
+            // This will not be set until the repair task exits.
+            assert!(ds.repair_min_id.is_some());
             if ds.query_repair_ids(eid) {
                 // There are some reservations we need to clear out.
                 let _ = up.abort_repair_extent(&mut gw, &mut ds, eid);
@@ -222,12 +259,13 @@ async fn online_repair_main(
                 eid,
                 source_downstairs,
                 repair_downstairs.clone(),
+                &ds_done_tx,
             )
             .await
             .is_err()
         {
             warn!(log, "Error After extent {} repair", eid);
-            repair_fail = true;
+            failed_repair = true;
         }
         cdt::extent__or__done!(|| (eid));
     }
@@ -235,7 +273,6 @@ async fn online_repair_main(
     // Send a final flush, wait for it to finish so we know the downstairs
     // has cleared all the repair jobs and our "last flush" is set.
 
-    // ZZZ Maybe don't send a final flush???
     let (send, recv) = mpsc::channel(1);
     let op = BlockOp::Flush {
         snapshot_details: None,
@@ -243,33 +280,26 @@ async fn online_repair_main(
     let flush_br = BlockReq::new(op, send);
     let flush_brw = BlockReqWaiter::new(recv);
 
-    let res = up.submit_flush(Some(flush_br), None, ds_done_tx).await;
-    match res {
+    match up.submit_flush(Some(flush_br), None, ds_done_tx).await {
         Ok(()) => {
-            info!(up.log, "Final flush submitted");
+            info!(up.log, "OnlineRepair final flush submitted");
         }
         Err(e) => {
-            error!(up.log, "Final flush faild.. WTH {:?}", e);
-            // ZZZ is this fatal?
+            error!(up.log, "OnlineRepair final flush submit failed: {:?}", e);
         }
     }
 
-    // Send a notification to all downstairs clients there is new work.
-    for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
-        let res = ds_work_tx.send(1).await;
-        if let Err(e) = res {
-            // ZZZ handle this
-            error!(
-                up.log,
-                "ERROR {:#?} Failed to notify client {} of OR flush", e, cid
-            );
+    notify_ds_new_work(&ds_work_vec, &up.log, "final flush".to_string()).await;
+
+    // Wait on flush_brw
+    match flush_brw.wait().await {
+        Ok(()) => {
+            info!(up.log, "OnlineRepair final flush completed");
+        }
+        Err(e) => {
+            error!(up.log, "OnlineRepair final flush failed: {:?}", e);
         }
     }
-    // Wait on flush_brw
-    let res = flush_brw.wait().await;
-    info!(up.log, "RE: Final Got {:?} back from flush_brw", res);
-    // Handle this too...
-    assert!(res.is_ok());
 
     // A last check for state here.  If we are failing the repair, then
     // we should not transition to Active.
@@ -281,7 +311,7 @@ async fn online_repair_main(
     let mut ds = up.downstairs.lock().await;
     drop(active);
 
-    if repair_fail {
+    if failed_repair {
         for cid in 0..3 {
             assert!(ds.extent_limit[cid].is_none());
             assert!(ds.ds_state[cid] != DsState::OnlineRepair);
@@ -289,11 +319,8 @@ async fn online_repair_main(
         for cid in repair_downstairs.iter() {
             ds.online_repair_aborted[*cid as usize] += 1;
         }
-        assert!(ds.repair_min_id.is_none());
     } else {
         for cid in repair_downstairs.iter() {
-            ds.extent_limit[*cid as usize] = None;
-            ds.repair_min_id = None;
             up.ds_transition_with_lock(
                 &mut ds,
                 up_state,
@@ -516,12 +543,6 @@ fn repair_or_noop(
 // have to prevent any IO from hitting the same extent, which means
 // any IO going to our ImpactedBlocks (the whole extent) must finish
 // first (or come after) our job.
-// Also included is the starting job ID we expect this repair to have.
-// We need this starting ID to prevent us from adding a dependency on
-// an IO that requires these repairs to finish before it can move
-// forward.  We do this by not making dependencies on any IO that
-// has a higher job ID than us, as if any exist in that situation they
-// should be created for is.   ZZZ that comment is shite, fix it...
 fn deps_for_online_repair(
     ds: &Downstairs,
     impacted_blocks: ImpactedBlocks,
@@ -712,9 +733,10 @@ async fn create_and_enqueue_noop_io(
     noop_brw
 }
 
-// ZZZ make a test for this
-// Check if any downstairs have changed state since starting repair.
-fn abort_if_state_change(
+// When an extent repair begins, we select a source downstairs and a
+// list of downstairs to repair.  If any of those change state from what
+// we expect, we return true here.
+fn repair_ds_state_change(
     ds: &mut MutexGuard<'_, Downstairs>,
     source: u8,
     repair: &[u8],
@@ -728,16 +750,21 @@ fn abort_if_state_change(
 }
 
 impl Upstairs {
-    // Abort a repair in progress and clear out any repair state
-    fn abort_repair_ds(
+    // Abort a repair in progress on all downstairs and clear out any
+    // repair state.  If our setting faulted on an IO will complete that
+    // IO, then we must indicate that to the ds_done_tx channel.
+    async fn abort_repair_ds(
         &self,
         ds: &mut MutexGuard<'_, Downstairs>,
         up_state: UpState,
+        ds_done_tx: &mpsc::Sender<u64>,
     ) {
+        let mut notify_guest = false;
         for cid in 0..3 {
             if ds.ds_state[cid] == DsState::OnlineRepair {
-                ds.extent_limit[cid] = None;
-                ds.ds_set_faulted(cid as u8);
+                if ds.ds_set_faulted(cid as u8) {
+                    notify_guest = true;
+                }
                 self.ds_transition_with_lock(
                     ds,
                     up_state,
@@ -746,20 +773,31 @@ impl Upstairs {
                 );
             }
         }
-        ds.repair_min_id = None;
+
+        // If we get an error, it's possible the other end has already
+        // given up on us, so just forge ahead.
+        if notify_guest {
+            match ds_done_tx.send(0).await {
+                Ok(()) => {}
+                Err(e) => {
+                    error!(
+                        self.log,
+                        "abort_repair error sending to ds_done_tx: {:?}", e
+                    );
+                }
+            }
+        }
     }
 
-    // If the downstairs is already faulted at this point, then a previous
-    // extent repair failed, or an IO to an extent of the downstairs we
-    // already fixed returned an error.
+    // We have decided to abort repairing this extent.  Verify if there
+    // are any reserved jobs we need to account for, and if so, submit
+    // NoOp jobs for them.
     async fn abort_repair_extent(
         &self,
         gw: &mut MutexGuard<'_, GuestWork>,
         ds: &mut MutexGuard<'_, Downstairs>,
         eid: u32,
     ) -> Result<()> {
-        println!("Move all to failed");
-
         warn!(self.log, "Extent {} Aborting repair", eid);
 
         // If there were job IDs reserved for future repairs, we must
@@ -829,8 +867,48 @@ impl Upstairs {
         Ok(())
     }
 
-    // Given an extent, with client_ids for both the source and the
-    // "may need repair" downstairs, construct and send the work
+    // Helper function to:
+    // Wait on a block req waiter and process the reuslt from it..
+    // If we get an error, and abort_repair is not already true, then
+    // take action to abort the repair process.
+    // If we changed abort_repair to true, return that, otherwise return
+    // whatever was sent to us.
+    async fn wait_and_process_repair_ack(
+        &self,
+        brw: block_req::BlockReqWaiter,
+        ds_id: u64,
+        eid: u32,
+        mut abort_repair: bool,
+        ds_done_tx: &mpsc::Sender<u64>,
+    ) -> bool {
+        // Independent of the current abort_repair state, we wait for
+        // the ACK from a job we have submitted to the work queue.
+        match brw.wait().await {
+            Ok(()) => {
+                debug!(self.log, "Extent {} id:{} Done", eid, ds_id);
+            }
+            Err(e) => {
+                error!(
+                    self.log,
+                    "Extent {} close id:{} Failed: {}", eid, ds_id, e
+                );
+                // If we don't already have an error, then go ahead
+                // and take the error action path now.
+                if !abort_repair {
+                    let active = self.active.lock().await;
+                    let up_state = active.up_state;
+                    let mut ds = self.downstairs.lock().await;
+                    drop(active);
+                    self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+                    abort_repair = true;
+                }
+            }
+        }
+        abort_repair
+    }
+
+    // Given an extent, with client_ids for both the downstairs source and
+    // the downstairs that need repairing, construct and send the work
     // required to repair the extent.
     //
     // We don't actually know if an extent needs repair until we close it
@@ -852,8 +930,8 @@ impl Upstairs {
     // When we Create and enqueue the Close and the Reopen jobs, we
     // leave a job ID gap for the Repair or NoOp job and the NoOp job that
     // will follow it. By enqueueing the reopen job (with a dependency on
-    // the not yet created repair job), we
-    // can create a "block" of four IOs that
+    // the not yet created repair and NoOp jobs), we can create a "block"
+    // of four IOs that
     // 1. Will execute in order.
     // 2. Will prevent new IOs from getting between any of them..
     // 3. Allow us to "insert" a job in the middle, after getting the
@@ -874,66 +952,55 @@ impl Upstairs {
         eid: u32,
         source: u8,
         repair: Vec<u8>,
+        ds_done_tx: &mpsc::Sender<u64>,
     ) -> Result<()> {
         debug!(self.log, "RE:{} Repair extent begins", eid);
-        if !self.guest_io_ready().await {
-            info!(self.log, "Repairing while inactive");
-            // ZZZ This should not happen, or maybe if we deactivated
-            // while repairing?
-        }
 
         // To consider:
-        // ZZZ If our source downstairs skipped the IO, we will still consider
-        // that a success I believe...  Make sure that we don't end up skipping
-        // work on a downstairs we care about (like the close/reopen/repair
-        // set of things.  If we are repairing from a downstairs that has failed,
-        //  we have to throw up our hands and abort the whole thing.
+        // ZZZ If our source downstairs skipped the IO, we will still
+        // consider that a success I believe?? Make sure that we don't end
+        // up skipping work on a downstairs we care about (like the
+        // close/reopen/repair set of things.  If we are repairing from
+        // a downstairs that has failed, we have to throw up our hands
+        // and abort the whole repair.
         let active = self.active.lock().await;
         let up_state = active.up_state;
         let mut gw = self.guest.guest_work.lock().await;
         let mut ds = self.downstairs.lock().await;
         drop(active);
 
-        // Make a last chance for easy abort if anything has changed since
+        // Make a last check for easy abort if anything has changed since
         // we started this repair.  If we find things are different, it's
         // easier to abort now.  Once we move forward with this repair, the
         // cleanup is more complicated.
-        let mut abort_repair = abort_if_state_change(&mut ds, source, &repair);
+        let abort_repair = repair_ds_state_change(&mut ds, source, &repair);
         if abort_repair || up_state != UpState::Active {
             error!(
                 self.log,
-                "RE: downstairs state change, aborting repair now"
+                "RE: unexpected downstairs state change, aborting repair now"
             );
-            self.abort_repair_ds(&mut ds, up_state);
+
             // Since we have done nothing yet, we can call abort here and
             // not have to issue jobs if none have been reserved.
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
             let res = self.abort_repair_extent(&mut gw, &mut ds, eid).await;
 
             drop(ds);
             drop(gw);
+
             // The abort_repair_extent might have put job(s) on the queue.
             // Send a notify to the downstairs tasks just in case.
-            for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
-                let res = ds_work_tx.send(1).await;
-                if let Err(e) = res {
-                    error!(
-                        self.log,
-                        "ERROR {:#?} Failed to notify client {} of OR job",
-                        e,
-                        cid
-                    );
-                }
-            }
+            notify_ds_new_work(
+                ds_work_vec,
+                &self.log,
+                "Abort cleanup".to_string(),
+            )
+            .await;
+
             return res;
         }
         assert!(ds.repair_min_id.is_some());
         assert!(ds.repair_info.is_empty());
-
-        // Repair has officially started for this extent.
-        // Once we start sending repair jobs, we must finish. If we encounter
-        // an error in the middle, then we still need to submit NoOp
-        // jobs, and let the reopen job have its dependencies met for the
-        // sake of the downstairs that are not being repaired.
 
         // Update our extent limit to this extent.
         for ds_repair in repair.iter() {
@@ -965,13 +1032,14 @@ impl Upstairs {
         let noop_id = extent_repair_ids.noop_id;
         let reopen_id = extent_repair_ids.reopen_id;
 
-        // Get the list of dependencies all repair operations will start from.
-        // Note that this list of dependencies will potentially include
-        // skipped jobs for some downstairs.  The list of dependencies may
-        // be further altered when we are about to send IO to an individual
-        // downstairs that is under repair. At that time, we go through the
-        // list of dependencies and remove jobs that we skipped or done for
-        // that specific downstairs before we send the IO over the wire.
+        // Get the list of dependencies all repair operations will start
+        // from.  Note that this list of dependencies will potentially
+        // include skipped jobs for some downstairs.  The list of
+        // dependencies can be further altered when we are about to send
+        // IO to an individual downstairs that is under repair. At that
+        // time, we go through the list of dependencies and remove jobs
+        // that we skipped or finished for that specific downstairs before
+        // we send the repair IO over the wire.
         let mut deps = deps_for_online_repair(&ds, impacted_blocks, close_id);
 
         info!(
@@ -997,16 +1065,6 @@ impl Upstairs {
 
         deps.push(noop_id);
         let reopen_deps = deps.clone();
-        debug!(
-            self.log,
-            "RE:{} Repair with ids {},{},{},{} final deps:{:?}",
-            eid,
-            close_id,
-            repair_id,
-            noop_id,
-            reopen_id,
-            deps,
-        );
 
         let reopen_brw = create_and_enqueue_reopen_io(
             &mut ds,
@@ -1040,54 +1098,42 @@ impl Upstairs {
 
         // Now that we have enqueued both the close and the reopen, we
         // can release all the locks and wait for the result from our close.
-
-        // Make sure we don't have any repair info yet
         drop(gw);
         drop(ds);
 
-        debug!(
+        info!(
             self.log,
             "RE:{} close id:{} queued, notify DS", eid, close_id
         );
-        // Send a notification to all downstairs clients there is new work.
-        for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
-            let res = ds_work_tx.send(1).await;
-            if let Err(e) = res {
-                panic!(
-                    "ERROR {:#?} Failed to notify client {} of OR work",
-                    e, cid
-                );
-            }
-        }
 
-        debug!(
+        // Send a notification to all downstairs clients there is new work.
+        notify_ds_new_work(
+            ds_work_vec,
+            &self.log,
+            "Initial repair work".to_string(),
+        )
+        .await;
+
+        info!(
             self.log,
             "RE:{} Wait for result from close command {}:{}",
             eid,
             close_id,
             gw_close_id
         );
-        // Wait on our close to report back from all three downstairs.
-        match close_brw.wait().await {
-            Ok(()) => {
-                debug!(self.log, "Extent {} close id:{} Done", eid, close_id);
-            }
-            Err(e) => {
-                error!(
-                    self.log,
-                    "Extent {} close id:{} Failed: {}", eid, close_id, e
-                );
-                let active = self.active.lock().await;
-                let up_state = active.up_state;
-                let mut ds = self.downstairs.lock().await;
-                drop(active);
-                self.abort_repair_ds(&mut ds, up_state);
-                abort_repair = true;
-            }
-        }
 
-        // Get the locks, and then submit either the repair, if it
-        // is needed, or a noop job.  Every time we get the lock, we have
+        let mut abort_repair = self
+            .wait_and_process_repair_ack(
+                close_brw,
+                close_id,
+                eid,
+                abort_repair,
+                ds_done_tx,
+            )
+            .await;
+
+        // Get the locks, and then submit either the repair if it is
+        // needed, or a NoOp job.  Every time we get the lock, we have
         // to re-verify that things are in a good place to continue.
         let active = self.active.lock().await;
         let up_state = active.up_state;
@@ -1096,18 +1142,18 @@ impl Upstairs {
         drop(active);
 
         if !abort_repair {
-            abort_repair = abort_if_state_change(&mut ds, source, &repair);
+            abort_repair = repair_ds_state_change(&mut ds, source, &repair);
             if abort_repair || up_state != UpState::Active {
                 warn!(
                     self.log,
                     "RE: downstairs state change, aborting repair now"
                 );
-                self.abort_repair_ds(&mut ds, up_state);
+                self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
             }
         }
-        // If an downstairs went away, it's possible the IO was skipped on it.
-        // We can't handle this currently, so if we don't have all downstairs
-        // then just abort this online repair.
+
+        // If we are aborting the repair, then send a NoOp now.
+        // Otherwise, send the repair IO.
         let repair_brw = if abort_repair {
             create_and_enqueue_noop_io(
                 &mut ds,
@@ -1136,53 +1182,28 @@ impl Upstairs {
         drop(ds);
 
         // The next op is on the queue, now tell the downstairs
-        for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
-            let res = ds_work_tx.send(1).await;
-            if let Err(e) = res {
-                panic!(
-                    "ERROR {:#?} Failed to notify client {} of OR work",
-                    e, cid
-                );
-            }
-        }
+        notify_ds_new_work(ds_work_vec, &self.log, "repair job".to_string())
+            .await;
 
         // Wait on the results of our repair (or noop) request.
-        debug!(
+        info!(
             self.log,
             "RE:{} Wait for result from repair command {}:{}",
             eid,
             repair_id,
             gw_repair_id
         );
-        let res = repair_brw.wait().await;
-        debug!(
-            self.log,
-            "RE:{} Got {:?} back from repair_brw {}", eid, res, repair_id
-        );
 
-        // If we are already aborting this error, then more errors don't
-        // change what we do.  If we have not reported an error yet, then
-        // we need to tack action on it.
-        if res.is_err() {
-            error!(
-                self.log,
-                "Extent:{} job:{} Got {:?} back from repair_brw",
-                eid,
+        let mut abort_repair = self
+            .wait_and_process_repair_ack(
+                repair_brw,
                 repair_id,
-                res
-            );
-            let active = self.active.lock().await;
-            let up_state = active.up_state;
-            let mut ds = self.downstairs.lock().await;
-            self.abort_repair_ds(&mut ds, up_state);
-            abort_repair = true;
-        }
+                eid,
+                abort_repair,
+                ds_done_tx,
+            )
+            .await;
 
-        // put the next job on the queue.  This job acts like a barrier and
-        // will not let IOs continue on an extent until we know for certain
-        // that extent has been repaired. If we have already decided to
-        // abort this error or not, it makes no difference, we still need
-        // to send this NoOp to satisfy dependencies.
         let active = self.active.lock().await;
         let up_state = active.up_state;
         let mut gw = self.guest.guest_work.lock().await;
@@ -1190,13 +1211,13 @@ impl Upstairs {
 
         drop(active);
         if !abort_repair {
-            abort_repair = abort_if_state_change(&mut ds, source, &repair);
+            abort_repair = repair_ds_state_change(&mut ds, source, &repair);
             if abort_repair {
                 warn!(
                     self.log,
                     "RE: downstairs state change, aborting repair now"
                 );
-                self.abort_repair_ds(&mut ds, up_state);
+                self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
             }
         }
 
@@ -1214,19 +1235,15 @@ impl Upstairs {
         drop(gw);
         drop(ds);
 
-        // The noop is on the queue, now tell the downstairs
-        for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
-            let res = ds_work_tx.send(1).await;
-            if let Err(e) = res {
-                panic!(
-                    "ERROR {:#?} Failed to notify client {} of NoOp job",
-                    e, cid
-                );
-            }
-        }
+        notify_ds_new_work(
+            ds_work_vec,
+            &self.log,
+            "NoOp repair work".to_string(),
+        )
+        .await;
 
         // Wait on the results of our NoOp command.
-        debug!(
+        info!(
             self.log,
             "RE:{} Wait for result from NoOp command {}:{}",
             eid,
@@ -1234,62 +1251,35 @@ impl Upstairs {
             gw_noop_id
         );
 
-        // ZZZ Maybe make this a sub function? Wait on a channel and
-        // if error, then abort.
-        let res = noop_brw.wait().await;
-        debug!(
-            self.log,
-            "RE:{} Got {:?} back from noop_brw {}:{}",
-            eid,
-            res,
-            noop_id,
-            gw_noop_id
-        );
-        if res.is_err() {
-            abort_repair = true;
-            error!(
-                self.log,
-                "Extent:{} job:{} Got {:?} back from NoOp", eid, noop_id, res
-            );
-            let active = self.active.lock().await;
-            let up_state = active.up_state;
-            let mut ds = self.downstairs.lock().await;
-            drop(active);
-            self.abort_repair_ds(&mut ds, up_state);
-        }
+        let abort_repair = self
+            .wait_and_process_repair_ack(
+                noop_brw,
+                noop_id,
+                eid,
+                abort_repair,
+                ds_done_tx,
+            )
+            .await;
 
-        // let abort_repair = result from wait command?
-        // Pass in current abort_repair value.
-        // If error back, report it.
-        // If error + abort_fail not yet set, then take error path
-        // and abort_repair_ds and return true
-        // otherwise, return false
         // The reopen command will have already been queued so we can just
         // move to waiting for it to be completed..
-        debug!(
+        info!(
             self.log,
             "RE:{} Wait for result from reopen command {}:{}",
             eid,
             reopen_id,
             gw_reopen_id
         );
-        let res = reopen_brw.wait().await;
-        debug!(
-            self.log,
-            "RE:{} Got {:?} back from reopen_brw {}", eid, res, reopen_id
-        );
-        if res.is_err() {
-            abort_repair = true;
-            error!(
-                self.log,
-                "Extent:{} job:{} Got {:?} back from ReOpen", eid, noop_id, res
-            );
-            let active = self.active.lock().await;
-            let up_state = active.up_state;
-            let mut ds = self.downstairs.lock().await;
-            drop(active);
-            self.abort_repair_ds(&mut ds, up_state);
-        }
+
+        let mut abort_repair = self
+            .wait_and_process_repair_ack(
+                reopen_brw,
+                reopen_id,
+                eid,
+                abort_repair,
+                ds_done_tx,
+            )
+            .await;
 
         // One final check to be sure nothing we need has gone astray
         // for these last few commands, but only if we are not already
@@ -1299,16 +1289,18 @@ impl Upstairs {
             let up_state = active.up_state;
             let mut ds = self.downstairs.lock().await;
             drop(active);
-            abort_repair = abort_if_state_change(&mut ds, source, &repair);
+            abort_repair = repair_ds_state_change(&mut ds, source, &repair);
             if abort_repair {
                 error!(
                     self.log,
                     "RE: downstairs state change, aborting repair now"
                 );
-                self.abort_repair_ds(&mut ds, up_state);
+                self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
             }
         }
 
+        // This repair is done.  All we have left to do is return the
+        // result to our caller.
         if abort_repair {
             warn!(self.log, "RE:{} Bailing with error", eid);
             let ds = self.downstairs.lock().await;
@@ -1355,7 +1347,6 @@ pub mod repair_test {
         up.ds_transition(fail_id, DsState::Faulted).await;
         up.ds_transition(fail_id, DsState::OnlineRepairReady).await;
         up.ds_transition(fail_id, DsState::OnlineRepair).await;
-        // ZZZ This comes out?  We set it elsewhere now??
         up.downstairs.lock().await.repair_min_id = Some(1000);
 
         up
@@ -1477,11 +1468,18 @@ pub mod repair_test {
             ds_work_vec.push(this_target.ds_work_tx.clone());
         }
         let upc = Arc::clone(&up);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let repair_handle = tokio::spawn(async move {
-            upc.repair_extent(&ds_work_vec, 0, source_ds, [or_ds].to_vec())
-                .await
-                .unwrap();
+            upc.repair_extent(
+                &ds_work_vec,
+                0,
+                source_ds,
+                [or_ds].to_vec(),
+                &ds_done_tx,
+            )
+            .await
+            .unwrap();
         });
 
         // The first thing that should happen after we start repair_exetnt
@@ -1526,6 +1524,13 @@ pub mod repair_test {
             check_for_repair(&up, &dst).await,
             RepairCheck::NoRepairNeeded
         );
+
+        // No downstairs should change state.
+        let ds = up.downstairs.lock().await;
+        for cid in 0..3 {
+            assert_eq!(ds.ds_state[cid], DsState::Active);
+        }
+        assert!(ds.repair_min_id.is_none())
     }
 
     #[tokio::test]
@@ -1550,10 +1555,96 @@ pub mod repair_test {
             check_for_repair(&up, &dst).await,
             RepairCheck::RepairStarted
         );
+        let ds = up.downstairs.lock().await;
+        assert_eq!(ds.ds_state[1], DsState::OnlineRepair);
+        assert!(ds.repair_min_id.is_some())
     }
 
-    // ZZZ Add a test that will return retry if online repair is already going.
+    #[tokio::test]
+    async fn test_check_for_repair_do_two_repair() {
+        // No repair needed here.
+        let (dst, _ds_work_rx) = create_test_dst_rx();
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
 
+        let up = Upstairs::test_default(Some(ddef));
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+        up.ds_transition(1, DsState::OnlineRepairReady).await;
+        up.ds_transition(2, DsState::Faulted).await;
+        up.ds_transition(2, DsState::OnlineRepairReady).await;
+        assert_eq!(
+            check_for_repair(&up, &dst).await,
+            RepairCheck::RepairStarted
+        );
+        let ds = up.downstairs.lock().await;
+        assert_eq!(ds.ds_state[0], DsState::Active);
+        assert_eq!(ds.ds_state[1], DsState::OnlineRepair);
+        assert_eq!(ds.ds_state[2], DsState::OnlineRepair);
+        assert!(ds.repair_min_id.is_some())
+    }
+
+    #[tokio::test]
+    async fn test_check_for_repair_already_repair() {
+        // No repair needed here.
+        let (dst, _ds_work_rx) = create_test_dst_rx();
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let up = Upstairs::test_default(Some(ddef));
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+        up.ds_transition(1, DsState::OnlineRepairReady).await;
+        up.ds_transition(1, DsState::OnlineRepair).await;
+        // Make ds 0 ready for repair.
+        up.ds_transition(0, DsState::Faulted).await;
+        up.ds_transition(0, DsState::OnlineRepairReady).await;
+        assert_eq!(
+            check_for_repair(&up, &dst).await,
+            RepairCheck::RepairInProgress
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_for_repair_task_running() {
+        let (dst, _ds_work_rx) = create_test_dst_rx();
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let up = Upstairs::test_default(Some(ddef));
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+        up.ds_transition(1, DsState::OnlineRepairReady).await;
+        let mut ds = up.downstairs.lock().await;
+        ds.repair_min_id = Some(3);
+        drop(ds);
+
+        assert_eq!(
+            check_for_repair(&up, &dst).await,
+            RepairCheck::RepairInProgress
+        );
+    }
     // Test the permutations of calling repair_extent with each downstairs
     // as the one needing OnlineRepair
     #[tokio::test]
@@ -5304,7 +5395,8 @@ pub mod repair_test {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
 
-        up.abort_repair_ds(&mut ds, UpState::Active);
+        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
+            .await;
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32)
             .await
             .unwrap();
@@ -5348,7 +5440,8 @@ pub mod repair_test {
         // Reserve some repair IDs
         let reserved_ids = ds.reserve_repair_ids(eid as u32);
 
-        up.abort_repair_ds(&mut ds, UpState::Active);
+        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
+            .await;
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32)
             .await
             .unwrap();
@@ -5400,7 +5493,8 @@ pub mod repair_test {
         // Reserve some repair IDs
         let _reserved_ids = ds.reserve_repair_ids(eid as u32);
 
-        up.abort_repair_ds(&mut ds, UpState::Active);
+        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
+            .await;
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32)
             .await
             .unwrap();
@@ -5506,7 +5600,7 @@ pub mod repair_test {
 
         assert_eq!(&current_deps, &[1002, 1001, 1000]);
         // No dependencies are valid for online repair
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
         let job = ds.ds_active.get_mut(&1004).unwrap();
@@ -5514,14 +5608,14 @@ pub mod repair_test {
 
         // Job 1001 is not a dep for 1004
         assert_eq!(&current_deps, &[1003, 1002, 1000]);
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
         let job = ds.ds_active.get_mut(&1005).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1004, 1003, 1002, 1001, 1000]);
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
     }
 
@@ -5596,14 +5690,14 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1005, 1004, 1003, 1002, 1001, 1000]);
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
         let job = ds.ds_active.get_mut(&1007).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1006, 1005, 1003, 1002, 1000]);
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
         assert_eq!(new_deps, &[1006]);
 
         let job = ds.ds_active.get_mut(&1008).unwrap();
@@ -5613,7 +5707,7 @@ pub mod repair_test {
             &current_deps,
             &[1007, 1006, 1005, 1004, 1003, 1002, 1001, 1000]
         );
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
         assert_eq!(new_deps, &[1007, 1006]);
     }
 
@@ -5739,7 +5833,7 @@ pub mod repair_test {
         // have any dependencies, as, technically, this IO is the first IO to
         // happen after we started repair, and we should not look for any
         // dependencies before starting repair.
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 1007);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1007);
         assert_eq!(new_deps, empty);
 
         // This second write after starting a repair should require jobs 0,4
@@ -5753,7 +5847,7 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
         assert_eq!(&current_deps, &[1004, 1000]);
 
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 1008);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1008);
         // OnlineRepair downstairs won't see past the repair.
         assert_eq!(new_deps, &[1004]);
 
@@ -5772,7 +5866,7 @@ pub mod repair_test {
             &[1008, 1007, 1004, 1002, 1001, 1000, 1009, 1010, 1011, 1012]
         );
 
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 1013);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1013);
         // OnlineRepair downstairs won't see past the repair, and it won't
         // include the skipped IO at 1007, but will have the future repair
         // operations that don't yet exist.
@@ -5913,7 +6007,7 @@ pub mod repair_test {
         // The downstairs in OnlineRepair should not see the first write, but
         // should see all the repair IDs, including ones that don't actually
         // exist yet.
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 1004);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1004);
         assert_eq!(new_deps, &[1001, 1002, 1003]);
 
         // This second write after starting a repair should require jobs 0,1,4
@@ -5927,7 +6021,7 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
         assert_eq!(&current_deps, &[1004, 1001, 1000]);
 
-        let new_deps = ds.remove_dep_if_skipped(1, current_deps, 1005);
+        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1005);
         // OnlineRepair downstairs won't see past the repair.
         assert_eq!(new_deps, &[1004, 1001]);
     }

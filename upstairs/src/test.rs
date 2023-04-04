@@ -5397,6 +5397,107 @@ pub mod up_test {
     }
 
     #[tokio::test]
+    async fn send_io_live_repair_read() {
+        // Check the send_io_live_repair for a read below extent limit,
+        // at extent limit, and above extent limit.
+
+        // Below limit
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+        };
+        let op = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![request],
+        };
+        assert!(op.send_io_live_repair(Some(2)));
+
+        // At limit
+        let request = ReadRequest {
+            eid: 2,
+            offset: Block::new_512(7),
+        };
+        let op = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![request],
+        };
+        assert!(op.send_io_live_repair(Some(2)));
+
+        let request = ReadRequest {
+            eid: 3,
+            offset: Block::new_512(7),
+        };
+        let op = IOop::Read {
+            dependencies: Vec::new(),
+            requests: vec![request],
+        };
+        // We are past the extent limit, so this should return false
+        assert!(!op.send_io_live_repair(Some(2)));
+    }
+
+    // Construct an IOop::Write or IOop::WriteUnwritten at the given extent
+    fn write_at_extent(eid: u64, wu: bool) -> IOop {
+        let request = crucible_protocol::Write {
+            eid,
+            offset: Block::new_512(7),
+            data: Bytes::from(vec![1]),
+            block_context: BlockContext {
+                encryption_context: None,
+                hash: 0,
+            },
+        };
+
+        let writes = vec![request];
+
+        if wu {
+            IOop::WriteUnwritten {
+                dependencies: Vec::new(),
+                writes,
+            }
+        } else {
+            IOop::Write {
+                dependencies: Vec::new(),
+                writes,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn send_io_live_repair_write() {
+        // Check the send_io_live_repair for a write below extent limit,
+        // at extent limit, and above extent limit.
+
+        // Below limit
+        let wr = write_at_extent(0, false);
+        assert!(wr.send_io_live_repair(Some(2)));
+
+        // At the limit
+        let wr = write_at_extent(2, false);
+        assert!(wr.send_io_live_repair(Some(2)));
+
+        // Above the limit
+        let wr = write_at_extent(3, false);
+        assert!(!wr.send_io_live_repair(Some(2)));
+    }
+
+    #[tokio::test]
+    async fn send_io_live_repair_unwritten_write() {
+        // Check the send_io_live_repair for a write unwritten below extent
+        // limit, at extent limit, and above extent limit.
+        // Below limit
+        let wr = write_at_extent(0, true);
+        assert!(wr.send_io_live_repair(Some(2)));
+
+        // At the limit
+        let wr = write_at_extent(2, true);
+        assert!(wr.send_io_live_repair(Some(2)));
+
+        // Above the limit
+        let wr = write_at_extent(3, true);
+        assert!(!wr.send_io_live_repair(Some(2)));
+    }
+
+    #[tokio::test]
     async fn write_after_write_fail_is_alright() {
         // Verify that if a single write fails on a downstairs, a second
         // write can still be acked.
