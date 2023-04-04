@@ -1299,6 +1299,7 @@ impl Upstairs {
             }
         }
 
+        self.set_flush_need().await;
         // This repair is done.  All we have left to do is return the
         // result to our caller.
         if abort_repair {
