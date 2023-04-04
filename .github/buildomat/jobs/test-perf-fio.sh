@@ -90,7 +90,7 @@ banner start
 pfexec ./target/release/run_crucible_fio_test \
     --crucible-commit HEAD \
     --propolis-commit 28be85642e85afd1f47be861f920458beb3514f0 \
-    --output-file /tmp/test_perf_fio.txt
+    --output-file /tmp/test_perf_fio.txt \
     ./iops.fio
 
 echo "$? was our result"
