@@ -2,7 +2,7 @@
 #:
 #: name = "test-perf-fio"
 #: variety = "basic"
-#: target = "helios"
+#: target = "lab"
 #: rust_toolchain = "1.66"
 #: output_rules = [
 #:  "/tmp/test_perf_fio.txt",
