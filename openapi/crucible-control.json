@@ -174,8 +174,8 @@
           "failed_repair",
           "active",
           "faulted",
-          "online_repair_ready",
-          "online_repair",
+          "live_repair_ready",
+          "live_repair",
           "migrating",
           "offline",
           "replay",
@@ -273,7 +273,7 @@
               "minimum": 0
             }
           },
-          "online_repair_aborted": {
+          "live_repair_aborted": {
             "type": "array",
             "items": {
               "type": "integer",
@@ -281,7 +281,7 @@
               "minimum": 0
             }
           },
-          "online_repair_completed": {
+          "live_repair_completed": {
             "type": "array",
             "items": {
               "type": "integer",
@@ -314,8 +314,8 @@
           "extent_limit",
           "extents_confirmed",
           "extents_repaired",
-          "online_repair_aborted",
-          "online_repair_completed",
+          "live_repair_aborted",
+          "live_repair_completed",
           "repair_done",
           "repair_needed",
           "state",

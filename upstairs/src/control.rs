@@ -104,8 +104,8 @@ struct UpstairsStats {
     extents_repaired: Vec<usize>,
     extents_confirmed: Vec<usize>,
     extent_limit: Vec<Option<usize>>,
-    online_repair_completed: Vec<usize>,
-    online_repair_aborted: Vec<usize>,
+    live_repair_completed: Vec<usize>,
+    live_repair_aborted: Vec<usize>,
 }
 
 /**
@@ -131,8 +131,8 @@ async fn upstairs_fill_info(
     let extents_repaired = ds.extents_repaired.clone();
     let extents_confirmed = ds.extents_confirmed.clone();
     let extent_limit = ds.extent_limit.clone();
-    let online_repair_completed = ds.online_repair_completed.clone();
-    let online_repair_aborted = ds.online_repair_aborted.clone();
+    let live_repair_completed = ds.live_repair_completed.clone();
+    let live_repair_aborted = ds.live_repair_aborted.clone();
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
@@ -144,8 +144,8 @@ async fn upstairs_fill_info(
         extents_repaired,
         extents_confirmed,
         extent_limit,
-        online_repair_completed,
-        online_repair_aborted,
+        live_repair_completed,
+        live_repair_aborted,
     }))
 }
 
@@ -230,8 +230,8 @@ async fn fault_downstairs(
     match ds.ds_state[cid as usize] {
         DsState::Active
         | DsState::Offline
-        | DsState::OnlineRepair
-        | DsState::OnlineRepairReady => {}
+        | DsState::LiveRepair
+        | DsState::LiveRepairReady => {}
         x => {
             return Err(HttpError::for_bad_request(
                 Some(String::from("InvalidState")),

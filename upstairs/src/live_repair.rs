@@ -3,8 +3,78 @@
 use super::*;
 use tokio::sync::mpsc;
 
+// Live Repair
+// This handles the situation where one (or two) downstairs are no longer
+// trusted to provide data, but the upstairs is still servicing IOs from the
+// guest.  We need to make or verify all the data on the untrusted downstairs
+// has the same data as the good downstairs, while IO is flowing.
+//
+// This situation could arise from a downstairs replacement, or if a downstairs
+// went away longer than the upstairs could hold data for it, and it’s now
+// missing a bunch of IO activity.
+//
+// While a downstairs is faulted, IOs for that downstairs are skipped
+// automatically and, when it comes to ACK back to the guest, a skip is
+// considered as a failed IO.  As long as there are two downstairs still
+// working, Writes and Flushes can succeed.  A read only needs one working
+// downstairs.
+//
+// * How repair will work
+// A repair happens a single extent at a time.  Repair jobs will have a
+// dependency with all IOs on the same extent.  Any existing IOs on that extent
+// will need to finish, and any new IOs for that extent will depend on all the
+// repair work for that extent before they can proceed.
+// Dependencies will treat IOs to different extents as independent of each
+// other, and repair on one extent should not effect IOs on other extents.
+// IOs that span an extent under repair are considered as being on that extent
+// and are discussed in detail later.
+//
+// There are specific IOop types that are used during live repair.  Repair IOs
+// travel through the same work queue as regular IOs.  All repair jobs include
+// the specific extent under repair.
+//
+// When a downstairs joins we check and see if LiveRepair is required, and
+// if so, a repair task is created to manage the repair.  The three downstairs
+// tasks that normally handle IO in the Upstairs will be used to send repair
+// related IOs.
+//
+// Some special situations of note for LiveRepair.
+//
+// * IO while repairing
+// When there is a repair in progress the upstairs keeps track of an extent
+// high water point (or maybe someday a bitmap) that indicates which extents
+// are clear to receive IO and which are not.  When a new IO is received, each
+// downstairs task will check to see if it is on a good or bad extent.  If
+// on a good extent, then normal behavior, if on a bad extent, then the IO is
+// moved straight to skipped for this downstairs.
+//
+// * IOs that span extents.
+// When an IO arrives that spans two extents, and one extent has been repaired
+// (or the repair has been sent but not completed yet.  This IO needs to be
+// held back until all extents it requires have completed repair.  This may
+// involve pre-reserving repair job IDs, and making those job IDs dependencies
+// for this spanning IO.
+//
+// * Skipped IOs and Dependencies “above” a repair command.
+// For Repair operations (and operations that follow after them).  The
+// downstairs under repair will most likely have a bunch of skipped IOs.  The
+// first repair operation will have dependencies that will need to finish on
+// Active downstairs, but should be ignored for the downstairs that is under
+// repair.  This special case is handled by keeping track of skipped IOs, and,
+// when LiveRepair is active, removing those dependencies for just the
+// downstairs under repair.
+//
+// * Failures during extent repair.
+// When we encounter a failure during live repair, we must complete any
+// repair in progress, though the nature of the falure may change what actual IO
+// is sent to the downstairs.  Because we reserve IDs when a repair begins,
+// and other IOs may depend on those IDs (and those IOs could have already
+// been sent to the downstairs), we must follow through with issuing these
+// IOs, including the final ExtentLiveReopen.  Depending on where the failure
+// was encountered, these IOs may just be NoOp.
+
 // When determining if an extent needs repair, we collect its current
-// information into this struct.
+// information from a downstairs and store the results in this struct.
 #[derive(Debug, Clone)]
 pub struct ExtentInfo {
     pub generation: u64,
@@ -12,6 +82,7 @@ pub struct ExtentInfo {
     pub dirty: bool,
 }
 
+// Return values from the check_for_repair function.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 pub enum RepairCheck {
@@ -21,22 +92,17 @@ pub enum RepairCheck {
     NoRepairNeeded,
     // We need repair, but a repair was already in progress
     RepairInProgress,
-    // Upstairs is not in a valid state for online repair
+    // Upstairs is not in a valid state for live repair
     InvalidState,
 }
-/**
- * Support functions for online repair.
- */
 
-/**
- * Determine if we need to perform an OnlineRepair.
- * Return status in RepairCheck to indicate what the status is.
- */
+// Determine if we need to perform a live repair.
+// Return status in RepairCheck to indicate what the status is.
 pub async fn check_for_repair(
     up: &Arc<Upstairs>,
     dst: &[Target],
 ) -> RepairCheck {
-    info!(up.log, "Checking if online repair is needed");
+    info!(up.log, "Checking if live repair is needed");
     let active = up.active.lock().await;
     let up_state = active.up_state;
     if up_state != UpState::Active {
@@ -44,56 +110,57 @@ pub async fn check_for_repair(
     }
     let mut ds = up.downstairs.lock().await;
     drop(active);
-    /*
-     * Make sure all downstairs are in the correct state before we
-     * proceed.
-     */
+    // Verify that all downstairs and the upstairs are in the proper state
+    // before we begin a live repair.
     let repair = ds
         .ds_state
         .iter()
-        .filter(|state| **state == DsState::OnlineRepair)
+        .filter(|state| **state == DsState::LiveRepair)
         .count();
 
     let repair_ready = ds
         .ds_state
         .iter()
-        .filter(|state| **state == DsState::OnlineRepairReady)
+        .filter(|state| **state == DsState::LiveRepairReady)
         .count();
 
     if repair_ready == 0 {
-        info!(up.log, "No Online Repair required at this time");
+        info!(up.log, "No Live Repair required at this time");
         RepairCheck::NoRepairNeeded
     } else if repair > 0 {
         // This also means repair_ready > 0
-        warn!(up.log, "Upstairs already in repair, no new repairs allowed");
+        // We can only have one live repair going at a time, so if a
+        // downstairs has gone Faulted then to LiveRepairReady, it will have
+        // to wait until the currently running LiveRepair has completed.
+        warn!(up.log, "Upstairs already in repair, trying again later");
         RepairCheck::RepairInProgress
     } else {
-        // If something else kicked this downstairs out, and it has made
-        // it all the way around and is trying to get back to repairing
-        // before the repair task has even noticed, then we should let
-        // the repair task take note and allow it to cleanup.
+        // If a live repair was in progress and encountered an error, that
+        // downstairs itself will be marked Faulted.  It is possible for
+        // that downstairs to reconnect and get back to LiveRepairReady
+        // and be requesting for a repair before the repair task has wrapped
+        // up the failed repair that this downstairs was part of.  For that
+        // situation, let the repair finish and retry this repair request.
         if ds.repair_min_id.is_some() {
-            warn!(
-                up.log,
-                "Upstairs repair task running, no new repairs allowed"
-            );
+            warn!(up.log, "Upstairs repair task running, trying again later");
             return RepairCheck::RepairInProgress;
         }
 
         // Move the upstairs that were RR to officially ready.
         // We do this now while we have the lock to avoid having to do all
-        // these checks again in online_repair_main
+        // these checks again in live_repair_main
         for cid in 0..3 {
-            if ds.ds_state[cid] == DsState::OnlineRepairReady {
+            if ds.ds_state[cid] == DsState::LiveRepairReady {
                 up.ds_transition_with_lock(
                     &mut ds,
                     up_state,
                     cid as u8,
-                    DsState::OnlineRepair,
+                    DsState::LiveRepair,
                 );
             }
         }
-        // This being set indicates an OnlineRepair is in progress.
+
+        // This being set indicates a LiveRepair is in progress.
         ds.repair_min_id = Some(ds.peek_next_id());
         drop(ds);
 
@@ -104,8 +171,8 @@ pub async fn check_for_repair(
         }
         let ds_done_tx = dst[0].ds_done_tx.clone();
         tokio::spawn(async move {
-            let res = online_repair_main(&upc, ds_work_vec, ds_done_tx).await;
-            warn!(upc.log, "Online Repair returns {:?}", res);
+            let res = live_repair_main(&upc, ds_work_vec, ds_done_tx).await;
+            warn!(upc.log, "Live Repair returns {:?}", res);
         });
         RepairCheck::RepairStarted
     }
@@ -128,19 +195,18 @@ async fn notify_ds_new_work(
     }
 }
 
-/**
- * The main task that coordinates repair.
- * This task does the work of taking a downstairs that is in OnlineRepair
- * state and ending with those downstairs being Active, or Faulted (if the
- * repair fails).
- */
-async fn online_repair_main(
+// The main task that coordinates repair.
+// This task does the work of taking a downstairs that is in LiveRepair
+// state and ending with that downstairs being Active, or Faulted (if the
+// repair fails).  This does support repairing two downstairs at the same
+// time, but they both must enter the repair together.
+async fn live_repair_main(
     up: &Arc<Upstairs>,
     ds_work_vec: Vec<mpsc::Sender<u64>>,
     ds_done_tx: mpsc::Sender<u64>,
 ) -> Result<()> {
     let log = up.log.new(o!("task" => "repair".to_string()));
-    warn!(log, "Online Repair main task begins.");
+    warn!(log, "Live Repair main task begins.");
 
     let mut repair_downstairs = Vec::new();
     let mut source_downstairs = None;
@@ -152,7 +218,7 @@ async fn online_repair_main(
     let mut ds = up.downstairs.lock().await;
     if up_state != UpState::Active {
         up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
-        ds.end_online_repair();
+        ds.end_live_repair();
         bail!("Upstairs in invalid state for repair");
     }
     drop(active);
@@ -167,7 +233,7 @@ async fn online_repair_main(
 
     for cid in 0..3 {
         match ds.ds_state[cid] {
-            DsState::OnlineRepair => {
+            DsState::LiveRepair => {
                 repair_downstairs.push(cid as u8);
             }
             DsState::Active => {
@@ -179,34 +245,31 @@ async fn online_repair_main(
                     "Unknown repair action for ds:{} in state {}", cid, state,
                 );
                 // TODO, what other states are okay?
-                // offline could be source?
-                // Other states, ignore?
             }
         }
     }
 
-    // A note on failure situations.
     // If we exit this without repair, then any downstairs that was in
-    // OnlineRepair should move back to Faulted.  This will kick it out
-    // of the upstairs and start another repair attempt.
+    // LiveRepair will move back to Faulted.  This will kick it out
+    // of the upstairs and start another repair attempt when that downstairs
+    // rejoins.
     if source_downstairs.is_none() {
         error!(log, "Failed to find source downstairs for repair");
         up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
-        ds.end_online_repair();
+        ds.end_live_repair();
         bail!("Failed to find a valid source downstairs for repair");
     }
 
     if repair_downstairs.is_empty() {
         error!(log, "Failed to find a downstairs needing repair");
         up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
-        ds.end_online_repair();
+        ds.end_live_repair();
         bail!("Failed to find a downstairs needing repair");
     }
 
-    // This should have been set already when we first moved the downstairs
-    // to OnlineRepair, but really, that was only because of the assertion
-    // in enqueue.  Now that the actual repair begins and we will start
-    // checking it, set to the minimum ID we will compare with.
+    // This will have been set initially when we first moved the downstairs
+    // to LiveRepair.  Now that the actual repair begins and we will start
+    // checking it, set the real minimum ID we will compare with.
     ds.repair_min_id = Some(ds.peek_next_id());
     drop(ds);
 
@@ -215,14 +278,14 @@ async fn online_repair_main(
     let extent_count = match up.ddef.lock().await.get_def() {
         Some(ddef) => ddef.extent_count(),
         None => {
-            panic!("Can't get ddef and we need to repair");
+            panic!("Can't get ddef and we need it to repair");
         }
     };
 
     let mut failed_repair = false;
-    info!(log, "Start Online Repair of extents 0 to {}", extent_count);
+    info!(log, "Start Live Repair of extents 0 to {}", extent_count);
 
-    // Loop over all extents in the region.
+    // Loop over all extents in the region, repairing them as we go..
     // If we encounter an error during repair, we may have to continue to
     // process the next few extents as it's possible for IOs to have reserved
     // future job IDs for repair work and be depending on those IDs.  The
@@ -237,13 +300,15 @@ async fn online_repair_main(
             // we made future job reservations.
             let mut gw = up.guest.guest_work.lock().await;
             let mut ds = up.downstairs.lock().await;
+
             // Verify state has been cleared.
             for cid in 0..3 {
                 assert_eq!(ds.extent_limit[cid], None);
-                assert!(ds.ds_state[cid] != DsState::OnlineRepair);
+                assert!(ds.ds_state[cid] != DsState::LiveRepair);
             }
             // This will not be set until the repair task exits.
             assert!(ds.repair_min_id.is_some());
+
             if ds.query_repair_ids(eid) {
                 // There are some reservations we need to clear out.
                 let _ = up.abort_repair_extent(&mut gw, &mut ds, eid);
@@ -282,10 +347,10 @@ async fn online_repair_main(
 
     match up.submit_flush(Some(flush_br), None, ds_done_tx).await {
         Ok(()) => {
-            info!(up.log, "OnlineRepair final flush submitted");
+            info!(up.log, "LiveRepair final flush submitted");
         }
         Err(e) => {
-            error!(up.log, "OnlineRepair final flush submit failed: {:?}", e);
+            error!(up.log, "LiveRepair final flush submit failed: {:?}", e);
         }
     }
 
@@ -294,17 +359,17 @@ async fn online_repair_main(
     // Wait on flush_brw
     match flush_brw.wait().await {
         Ok(()) => {
-            info!(up.log, "OnlineRepair final flush completed");
+            info!(up.log, "LiveRepair final flush completed");
         }
         Err(e) => {
-            error!(up.log, "OnlineRepair final flush failed: {:?}", e);
+            error!(up.log, "LiveRepair final flush failed: {:?}", e);
         }
     }
 
     // A last check for state here.  If we are failing the repair, then
     // we should not transition to Active.
     // For either failed or passed, we should be sure to clear out any
-    // OnlineRepair settings.
+    // LiveRepair settings.
 
     let active = up.active.lock().await;
     let up_state = active.up_state;
@@ -314,10 +379,10 @@ async fn online_repair_main(
     if failed_repair {
         for cid in 0..3 {
             assert!(ds.extent_limit[cid].is_none());
-            assert!(ds.ds_state[cid] != DsState::OnlineRepair);
+            assert!(ds.ds_state[cid] != DsState::LiveRepair);
         }
         for cid in repair_downstairs.iter() {
-            ds.online_repair_aborted[*cid as usize] += 1;
+            ds.live_repair_aborted[*cid as usize] += 1;
         }
     } else {
         for cid in repair_downstairs.iter() {
@@ -327,10 +392,10 @@ async fn online_repair_main(
                 *cid,
                 DsState::Active,
             );
-            ds.online_repair_completed[*cid as usize] += 1;
+            ds.live_repair_completed[*cid as usize] += 1;
         }
     }
-    ds.end_online_repair();
+    ds.end_live_repair();
     Ok(())
 }
 
@@ -538,12 +603,12 @@ fn repair_or_noop(
     }
 }
 
-// Build the list of dependencies for an online repair job.
+// Build the list of dependencies for a live repair job.
 // Because we need all three repair jobs to happen lock step, we
 // have to prevent any IO from hitting the same extent, which means
 // any IO going to our ImpactedBlocks (the whole extent) must finish
 // first (or come after) our job.
-fn deps_for_online_repair(
+fn deps_for_live_repair(
     ds: &Downstairs,
     impacted_blocks: ImpactedBlocks,
     close_id: u64,
@@ -742,7 +807,7 @@ fn repair_ds_state_change(
     repair: &[u8],
 ) -> bool {
     for cid in repair.iter() {
-        if ds.ds_state[*cid as usize] != DsState::OnlineRepair {
+        if ds.ds_state[*cid as usize] != DsState::LiveRepair {
             return true;
         }
     }
@@ -761,7 +826,7 @@ impl Upstairs {
     ) {
         let mut notify_guest = false;
         for cid in 0..3 {
-            if ds.ds_state[cid] == DsState::OnlineRepair {
+            if ds.ds_state[cid] == DsState::LiveRepair {
                 if ds.ds_set_faulted(cid as u8) {
                     notify_guest = true;
                 }
@@ -816,7 +881,7 @@ impl Upstairs {
             {
                 // All downstairs faulted, let's just quit now as there is
                 // no more work to do.
-                ds.end_online_repair();
+                ds.end_live_repair();
                 error!(
                     self.log,
                     "Abort repair on extent {}: All downstairs are Faulted",
@@ -838,7 +903,7 @@ impl Upstairs {
             let ddef = self.ddef.lock().await.get_def().unwrap();
             let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
-            let deps = deps_for_online_repair(ds, impacted_blocks, ds_id);
+            let deps = deps_for_live_repair(ds, impacted_blocks, ds_id);
 
             warn!(
                 self.log,
@@ -915,37 +980,41 @@ impl Upstairs {
     // and get back the flush, gen, and dirty bit from each downstairs
     // and then compare them.
     //
-    // The high level flow here is:
-    // Reserve our job IDs, both the downstairs and the guest side.
-    // Figure out any dependencies based on current in flight IOs
-    // Insert the reopen job (that we will do last).
-    // Insert the close job.
-    // Wait for close job to send us results from all three downstairs.
-    // Figure out if we need repair or no-op.
-    // Insert repair or no-op job.
-    // Wait for result from all three downstairs on repair/noop, then
-    // Send NoOp job, wait for result.
-    // Wait on reopen job to finish.
+    // To repair an extent the following steps are followed:
     //
-    // When we Create and enqueue the Close and the Reopen jobs, we
-    // leave a job ID gap for the Repair or NoOp job and the NoOp job that
-    // will follow it. By enqueueing the reopen job (with a dependency on
-    // the not yet created repair and NoOp jobs), we can create a "block"
-    // of four IOs that
-    // 1. Will execute in order.
-    // 2. Will prevent new IOs from getting between any of them..
-    // 3. Allow us to "insert" a job in the middle, after getting the
-    //    result from the close, but before the downstairs executes the
-    //    reopen job which is already on the queue.
-    // 4. By inserting the final reopen job first, we allow for other IOs
-    //    to queue up after it.
-    //
-    // Now, If we get an error, then, that is terrible.  Because an Error
-    // can leave us in an inconsistent state, we stop all repair actions
-    // and move the upstairs to Faulted, and disconnect.  However, once we
-    // have started a repair, we need to finish the jobs we created, and
-    // fill in any gaps with NoOp jobs, depending where we failed.  We do
-    // want to allow downstairs that are still working to continue working.
+    // 1) All repair jobs reserve four job IDs: 1,2,3,4.  These IDs will be
+    //    allocated as follows:
+    //    ID 1) ExtentFlushClose or ExtentClose
+    //    ID 2) ExtentLiveRepair or ExtentLiveNoOp
+    //    ID 3) ExtentLiveNoOp
+    //    ID 4) ExtentLiveReopen
+    //    This reservation is how we guarantee that the repair work happens as a
+    //    block and any future IOs come after the completion of the repair.
+    // 2) Put repair job 4 (ExtentLiveReopen) on the work queue with dependencies
+    //    of the other repair jobs 1-3.  This job not only acts as cleanup, but
+    //    also allows other IOs to the same extent that may arrive as we are
+    //    repairing this extent to be queue and have this final repair ID as a
+    //    dependency, which ensures that the IO will happen after the repair
+    //    has completed.
+    // 3) Put repair job 1 on the work queue.  When each downstairs task receives
+    //    this job, it will change it as follows: To good downstair(s): Send
+    //    “flush and close” to the extent, it will return the current gen/flush
+    //    for that extent after close is done.  To bad downstairs: Send close
+    //    only (no flush), return gen/flush/dirty for that extent.
+    // 4) Wait for repair job 1 to complete on all downstairs.
+    // 5) Compare a good extent gen/flush with bad extent gen/flush (dirty bit on
+    //    bad means it needs repair).
+    // 6) Issue repair Job 2.  If there was a mismatch, then “repair” from good
+    //    extent to bad extent.  If no mismatch, then send a NO-OP job to the
+    //    downstairs.  We have potentially future jobs that have it in the dep
+    //    list, so the downstairs has to completed a job with this ID..
+    // 7) Wait for repair job 2 to complete on all downstairs.
+    // 8) Issue repair job 3, NoOp, wait for all three to complete.  This job
+    //    acts as an important barrier, and prevents the final reopen job from
+    //    jumping ahead on a downstairs that does not need repair.
+    // 9) Wait for job 3 to finish.
+    // 10) Wait for job 4 to finish.  All three extents should now match.
+    // 11) Mark this extent as okay for future IO.
     async fn repair_extent(
         &self,
         ds_work_vec: &[mpsc::Sender<u64>],
@@ -956,13 +1025,6 @@ impl Upstairs {
     ) -> Result<()> {
         debug!(self.log, "RE:{} Repair extent begins", eid);
 
-        // To consider:
-        // ZZZ If our source downstairs skipped the IO, we will still
-        // consider that a success I believe?? Make sure that we don't end
-        // up skipping work on a downstairs we care about (like the
-        // close/reopen/repair set of things.  If we are repairing from
-        // a downstairs that has failed, we have to throw up our hands
-        // and abort the whole repair.
         let active = self.active.lock().await;
         let up_state = active.up_state;
         let mut gw = self.guest.guest_work.lock().await;
@@ -1040,7 +1102,7 @@ impl Upstairs {
         // time, we go through the list of dependencies and remove jobs
         // that we skipped or finished for that specific downstairs before
         // we send the repair IO over the wire.
-        let mut deps = deps_for_online_repair(&ds, impacted_blocks, close_id);
+        let mut deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
 
         info!(
             self.log,
@@ -1308,7 +1370,7 @@ impl Upstairs {
             assert_eq!(
                 ds.ds_state
                     .iter()
-                    .filter(|state| **state == DsState::OnlineRepair)
+                    .filter(|state| **state == DsState::LiveRepair)
                     .count(),
                 0
             );
@@ -1325,7 +1387,7 @@ pub mod repair_test {
 
     // Test function to create just enough of an Upstairs for our needs.
     // The caller will indicate which downstairs client it wished to be
-    // moved to OnlineRepair.
+    // moved to LiveRepair.
     async fn create_test_upstairs(fail_id: u8) -> Arc<Upstairs> {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -1343,11 +1405,11 @@ pub mod repair_test {
                 .await;
         }
 
-        // Move our downstairs client fail_id to OnlineRepair.
+        // Move our downstairs client fail_id to LiveRepair.
         up.set_active().await.unwrap();
         up.ds_transition(fail_id, DsState::Faulted).await;
-        up.ds_transition(fail_id, DsState::OnlineRepairReady).await;
-        up.ds_transition(fail_id, DsState::OnlineRepair).await;
+        up.ds_transition(fail_id, DsState::LiveRepairReady).await;
+        up.ds_transition(fail_id, DsState::LiveRepair).await;
         up.downstairs.lock().await.repair_min_id = Some(1000);
 
         up
@@ -1551,13 +1613,13 @@ pub mod repair_test {
             up.ds_transition(cid, DsState::Active).await;
         }
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
         assert_eq!(
             check_for_repair(&up, &dst).await,
             RepairCheck::RepairStarted
         );
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[1], DsState::OnlineRepair);
+        assert_eq!(ds.ds_state[1], DsState::LiveRepair);
         assert!(ds.repair_min_id.is_some())
     }
 
@@ -1578,17 +1640,17 @@ pub mod repair_test {
             up.ds_transition(cid, DsState::Active).await;
         }
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
         up.ds_transition(2, DsState::Faulted).await;
-        up.ds_transition(2, DsState::OnlineRepairReady).await;
+        up.ds_transition(2, DsState::LiveRepairReady).await;
         assert_eq!(
             check_for_repair(&up, &dst).await,
             RepairCheck::RepairStarted
         );
         let ds = up.downstairs.lock().await;
         assert_eq!(ds.ds_state[0], DsState::Active);
-        assert_eq!(ds.ds_state[1], DsState::OnlineRepair);
-        assert_eq!(ds.ds_state[2], DsState::OnlineRepair);
+        assert_eq!(ds.ds_state[1], DsState::LiveRepair);
+        assert_eq!(ds.ds_state[2], DsState::LiveRepair);
         assert!(ds.repair_min_id.is_some())
     }
 
@@ -1609,11 +1671,11 @@ pub mod repair_test {
             up.ds_transition(cid, DsState::Active).await;
         }
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
-        up.ds_transition(1, DsState::OnlineRepair).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepair).await;
         // Make ds 0 ready for repair.
         up.ds_transition(0, DsState::Faulted).await;
-        up.ds_transition(0, DsState::OnlineRepairReady).await;
+        up.ds_transition(0, DsState::LiveRepairReady).await;
         assert_eq!(
             check_for_repair(&up, &dst).await,
             RepairCheck::RepairInProgress
@@ -1636,7 +1698,7 @@ pub mod repair_test {
             up.ds_transition(cid, DsState::Active).await;
         }
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(3);
         drop(ds);
@@ -1647,7 +1709,7 @@ pub mod repair_test {
         );
     }
     // Test the permutations of calling repair_extent with each downstairs
-    // as the one needing OnlineRepair
+    // as the one needing LiveRepair
     #[tokio::test]
     async fn test_repair_extent_no_action_all() {
         for or_ds in 0..3 {
@@ -1802,7 +1864,7 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 3);
     }
 
-    // Loop over the possible downstairs to be in OnlineRepair and
+    // Loop over the possible downstairs to be in LiveRepair and
     // run through the do_repair code path.
     #[tokio::test]
     async fn test_repair_extent_do_repair_all() {
@@ -1963,13 +2025,13 @@ pub mod repair_test {
         }
 
         assert_eq!(job.state_count().done, 3);
-        assert_eq!(ds.ds_state[or_ds as usize], DsState::OnlineRepair);
+        assert_eq!(ds.ds_state[or_ds as usize], DsState::LiveRepair);
     }
 
     #[tokio::test]
     async fn test_repair_extent_close_fails_all() {
         // Test all the permutations of
-        // A downstairs that is in OnlineRepair
+        // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentFlushClose operation.
         for faild_ds in 0..3 {
             for err_ds in 0..3 {
@@ -1983,7 +2045,7 @@ pub mod repair_test {
         // error handling when the initial close command fails.
         // In this test, we will simulate responses from the downstairs tasks.
         //
-        // We take two inputs, the downstairs that is in OnlineRepair, and the
+        // We take two inputs, the downstairs that is in LiveRepair, and the
         // downstairs that will return error for the ExtentClose operation.
         // They may be the same downstairs.
 
@@ -2160,7 +2222,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_extent_repair_fails_all() {
         // Test all the permutations of
-        // A downstairs that is in OnlineRepair
+        // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentLiveRepair operation.
         for or_ds in 0..3 {
             for err_ds in 0..3 {
@@ -2174,7 +2236,7 @@ pub mod repair_test {
         // error handling when the repair command fails.
         // In this test, we will simulate responses from the downstairs tasks.
         //
-        // We take two inputs, the downstairs that is in OnlineRepair, and the
+        // We take two inputs, the downstairs that is in LiveRepair, and the
         // downstairs that will return error for the ExtentLiveRepair
         // operation.  They may be the same downstairs.
 
@@ -2348,7 +2410,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_extent_fail_noop_all() {
         // Test all the permutations of
-        // A downstairs that is in OnlineRepair
+        // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentLiveNoOp operation.
         for or_ds in 0..3 {
             for err_ds in 0..3 {
@@ -2359,7 +2421,7 @@ pub mod repair_test {
 
     async fn test_repair_extent_fail_noop(or_ds: u8, err_ds: u8) {
         // Test repair_extent when the noop job fails.
-        // We take input for both which downstairs is in OnlineRepair, and
+        // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
         assert!(err_ds < 3);
@@ -2502,7 +2564,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_extent_fail_reopen_all() {
         // Test all the permutations of
-        // A downstairs that is in OnlineRepair
+        // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentLiveReopen operation.
         for or_ds in 0..3 {
             for err_ds in 0..3 {
@@ -2513,7 +2575,7 @@ pub mod repair_test {
 
     async fn test_repair_extent_fail_reopen(or_ds: u8, err_ds: u8) {
         // Test repair_extent when the reopen job fails.
-        // We take input for both which downstairs is in OnlineRepair, and
+        // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
         assert!(err_ds < 3);
@@ -2673,8 +2735,8 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_io_no_el_skipped() {
         // Verify that IOs put on the queue when a downstairs is
-        // in OnlineRepair and extent_limit is still None will be skipped
-        // only by the downstairs that is in OnlineRepair..
+        // in LiveRepair and extent_limit is still None will be skipped
+        // only by the downstairs that is in LiveRepair..
         let up = create_test_upstairs(1).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
@@ -2723,7 +2785,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_io_below_el_sent() {
         // Verify that io put on the queue when a downstairs is
-        // in OnlineRepair and the IO is below the extent_limit
+        // in LiveRepair and the IO is below the extent_limit
         // will be sent to all downstairs for processing.
         let up = create_test_upstairs(1).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
@@ -2776,7 +2838,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_io_at_el_sent() {
         // Verify that IOs put on the queue when a downstairs is
-        // in OnlineRepair and extent_limit is at the IO location
+        // in LiveRepair and extent_limit is at the IO location
         // will be sent to all downstairs for processing.
         // For this situation, we are relying on the submit_write method
         // of the Upstairs to correctly add the dependencies for the
@@ -2831,8 +2893,8 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_io_above_el_skipped() {
         // Verify that an IO put on the queue when a downstairs is
-        // in OnlineRepair and the IO is above the extent_limit will
-        // be skipped by the downstairs that is in OnlineRepair..
+        // in LiveRepair and the IO is above the extent_limit will
+        // be skipped by the downstairs that is in LiveRepair..
         let up = create_test_upstairs(1).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
@@ -2883,7 +2945,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_io_span_el_sent() {
         // Verify that IOs put on the queue when a downstairs is
-        // in OnlineRepair and the IO starts at an extent that is below
+        // in LiveRepair and the IO starts at an extent that is below
         // the extent_limit, but extends to beyond the extent limit,
         // The IO will be sent to all downstairs.
         //
@@ -2987,7 +3049,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_read_span_el_sent() {
         // Verify that a read put on the queue when a downstairs is
-        // in OnlineRepair and the IO starts at an extent that is below
+        // in LiveRepair and the IO starts at an extent that is below
         // the extent_limit, but extends to beyond the extent limit,
         // The IO will be sent to all downstairs.
         //
@@ -3054,7 +3116,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_write_span_el_sent() {
         // Verify that a write IO put on the queue when a downstairs is
-        // in OnlineRepair and the IO starts at an extent that is below
+        // in LiveRepair and the IO starts at an extent that is below
         // the extent_limit, but extends to beyond the extent limit,
         // The IO will be sent to all downstairs.
         //
@@ -3120,7 +3182,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_write_span_two_el_sent() {
         // Verify that a write IO put on the queue when a downstairs is
-        // in OnlineRepair and the IO starts at the extent that is under
+        // in LiveRepair and the IO starts at the extent that is under
         // repair and extends for an additional two extents.
         //
         // The IO will be sent to all downstairs.
@@ -3195,9 +3257,9 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_update() {
+    async fn test_live_repair_update() {
         // Make sure that process_ds_completion() will take extent info
-        // result and put it on the online repair hashmap.
+        // result and put it on the live repair hashmap.
         // As we don't have an actual downstairs here, we "fake it" by
         // feeding the responses we expect back from the downstairs.
         let up = create_test_upstairs(1).await;
@@ -3716,7 +3778,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_enqueue_reopen() {
+    async fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does
         // what we expect it to do, which also tests create_reopen_io()
         // function as well.
@@ -3775,7 +3837,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_enqueue_close() {
+    async fn test_live_repair_enqueue_close() {
         // Make sure the create_and_enqueue_close_io() function does
         // what we expect it to do, which also tests create_close_io()
         // function as well.
@@ -3853,7 +3915,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_enqueue_repair_noop() {
+    async fn test_live_repair_enqueue_repair_noop() {
         // Make sure the create_and_enqueue_repair_io() function does
         // what we expect it to do, which also tests create_repair_io()
         // function as well.  In this case we expect the job created to
@@ -3923,7 +3985,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_enqueue_repair_repair() {
+    async fn test_live_repair_enqueue_repair_repair() {
         // Make sure the create_and_enqueue_repair_io() function does
         // what we expect it to do, which also tests create_repair_io()
         // function as well.
@@ -4032,7 +4094,7 @@ pub mod repair_test {
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = gw.next_gw_id();
         let close_id = ds.next_id();
-        let deps = deps_for_online_repair(&ds, impacted_blocks, close_id);
+        let deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
 
         // let repair = vec![0, 2];
         let _reopen_brw = create_and_enqueue_close_io(
@@ -4071,7 +4133,7 @@ pub mod repair_test {
         let gw_repair_id: u64 = gw.next_gw_id();
         let extent_repair_ids = ds.get_repair_ids(eid);
         let repair_id = extent_repair_ids.repair_id;
-        let deps = deps_for_online_repair(&ds, impacted_blocks, repair_id);
+        let deps = deps_for_live_repair(&ds, impacted_blocks, repair_id);
 
         let _repair_brw = create_and_enqueue_noop_io(
             &mut ds,
@@ -4094,7 +4156,7 @@ pub mod repair_test {
     // Rp is a Repair
 
     #[tokio::test]
-    async fn test_online_repair_deps_writes() {
+    async fn test_live_repair_deps_writes() {
         // Test that writes on different blocks in the extent are all
         // captured by the repair at the end.
         //       block
@@ -4150,7 +4212,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_reads() {
+    async fn test_live_repair_deps_reads() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -4205,7 +4267,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_mix() {
+    async fn test_live_repair_deps_mix() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -4268,7 +4330,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_write() {
+    async fn test_live_repair_deps_repair_write() {
         // Write after repair depends on the repair
         //       block
         // op# | 0 1 2 | deps
@@ -4312,7 +4374,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_read() {
+    async fn test_live_repair_deps_repair_read() {
         // Read after repair requires the repair
         //       block
         // op# | 0 1 2 | deps
@@ -4353,7 +4415,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_flush() {
+    async fn test_live_repair_deps_repair_flush() {
         // Flush after repair requires the flush
         //       block
         // op# | 0 1 2 | deps
@@ -4389,7 +4451,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_no_overlap() {
+    async fn test_live_repair_deps_no_overlap() {
         // No overlap, no deps, IO before repair
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -4435,7 +4497,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_after_no_overlap() {
+    async fn test_live_repair_deps_after_no_overlap() {
         // No overlap no deps IO after repair.
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -4481,7 +4543,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_flush_repair_flush() {
+    async fn test_live_repair_deps_flush_repair_flush() {
         // Flush Repair Flush
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -4515,7 +4577,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_flush_repair() {
+    async fn test_live_repair_deps_repair_flush_repair() {
         // Repair Flush Repair
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -4547,7 +4609,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_repair_repair() {
+    async fn test_live_repair_deps_repair_repair_repair() {
         // Repair Repair Repair
         // This is not an expected situation, but does verify that
         // any new repair operation will be dependent on existing
@@ -4578,7 +4640,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_wspan_left() {
+    async fn test_live_repair_deps_repair_wspan_left() {
         // A repair will depend on a write spanning the extent
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -4614,7 +4676,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_wspan_right() {
+    async fn test_live_repair_deps_repair_wspan_right() {
         // A repair will depend on a write spanning the extent
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -4650,7 +4712,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_rspan_left() {
+    async fn test_live_repair_deps_repair_rspan_left() {
         // A repair will depend on a read spanning the extent
 
         // Read spans extent
@@ -4687,7 +4749,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_rspan_right() {
+    async fn test_live_repair_deps_repair_rspan_right() {
         // A repair will depend on a read spanning the extent
         // Read spans other extent
         //       block   block
@@ -4723,7 +4785,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_other() {
+    async fn test_live_repair_deps_repair_other() {
         // A write can be depended on by two different repairs, who won't
         // depend on each other.
         // This situation does not really exist, as a repair won't start
@@ -4766,7 +4828,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_super_spanner() {
+    async fn test_live_repair_deps_super_spanner() {
         // Super spanner
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -4801,7 +4863,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_wafter() {
+    async fn test_live_repair_deps_repair_wafter() {
         // Write after repair spans extent.
         // This write needs to include a future repair that
         // does not exist yet.
@@ -4881,7 +4943,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_rafter() {
+    async fn test_live_repair_deps_repair_rafter() {
         // Read after spans extent
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -4916,7 +4978,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_overlappers() {
+    async fn test_live_repair_deps_repair_overlappers() {
         // IOs that span both sides.
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -4964,7 +5026,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_deps_repair_kitchen_sink() {
+    async fn test_live_repair_deps_repair_kitchen_sink() {
         // Repair simulator
         // In truth, you would never have more than one repair out at
         // the same time (the way it is now) but from a pure dependency point
@@ -5047,12 +5109,12 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_no_repair_yet() {
+    async fn test_live_repair_no_repair_yet() {
         // This is a special repair case.  We have a downstairs that is in
-        // OnlineRepair, but we have not yet started the actual repair
+        // LiveRepair, but we have not yet started the actual repair
         // work. IOs that arrive at this point in time should go ahead
         // on the good downstairs client, and still be skipped on the
-        // OnlineRepair client
+        // LiveRepair client
         //
         //     | block | block |
         // op# | 0 1 2 | 3 4 5 | deps
@@ -5107,9 +5169,9 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_repair_write_push() {
+    async fn test_live_repair_repair_write_push() {
         // This is a special repair case.  We have a downstairs that is in
-        // OnlineRepair, and we have indicated that this extent is
+        // LiveRepair, and we have indicated that this extent is
         // under repair.  The write (that spans extents should have
         // created IDs for future repair work and then made itself
         // dependent on those repairs finishing.
@@ -5165,9 +5227,9 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_repair_read_push() {
+    async fn test_live_repair_repair_read_push() {
         // This is a special repair case.  We have a downstairs that is in
-        // OnlineRepair, and we have indicated that this extent is
+        // LiveRepair, and we have indicated that this extent is
         // under repair.  The read (that spans extents should have
         // created IDs for future repair work and then made itself
         // dependent on those repairs finishing.
@@ -5231,9 +5293,9 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_flush_is_flush() {
+    async fn test_live_repair_flush_is_flush() {
         // This is a special repair case.  We have a downstairs that is in
-        // OnlineRepair, and we have indicated that this extent is
+        // LiveRepair, and we have indicated that this extent is
         // under repair.  A flush should depend on any outstanding
         // repair operations, but won't generate future repair dependencies
         // like reads or writes do, as the flush will make use of the
@@ -5269,8 +5331,8 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_online_repair_send_io_write_below() {
-        // Verify that we will send a write during OnlineRepair when
+    async fn test_live_repair_send_io_write_below() {
+        // Verify that we will send a write during LiveRepair when
         // the IO is an extent that is already repaired.
         let up = create_test_upstairs(1).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
@@ -5378,9 +5440,9 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_abort_basic() {
         // Testing of abort_repair functions.
-        // Starting with one downstairs in OnlineRepair state, the functions
+        // Starting with one downstairs in LiveRepair state, the functions
         // will:
-        // Move the OnlineRepair downstairs to Faulted.
+        // Move the LiveRepair downstairs to Faulted.
         // Move all IO for that downstairs to skipped.
         // Clear the extent_limit setting for that downstairs.
         let up = create_test_upstairs(1).await;
@@ -5422,7 +5484,7 @@ pub mod repair_test {
     #[tokio::test]
     async fn test_repair_abort_reserved_jobs() {
         // Testing of abort_repair functions.
-        // Starting with one downstairs in OnlineRepair state and future
+        // Starting with one downstairs in LiveRepair state and future
         // repair job IDs reserved (but not created yet). The functions
         // will verify that four noop repair jobs will be queued.
         let up = create_test_upstairs(1).await;
@@ -5543,10 +5605,10 @@ pub mod repair_test {
 
     #[tokio::test]
     async fn test_repair_dep_cleanup_done() {
-        // Verify that a downstairs in OnlineRepair state will have its
+        // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered to reflect both the removal of skipped
         // jobs as well as removal of Done jobs that happened before the
-        // downstairs went to OnlineRepair.
+        // downstairs went to LiveRepair.
 
         let up = test_upstairs_okay().await;
         // Channels we want to appear to be working
@@ -5566,8 +5628,8 @@ pub mod repair_test {
 
         // Fault the downstairs
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
-        up.ds_transition(1, DsState::OnlineRepair).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepair).await;
 
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
@@ -5581,11 +5643,11 @@ pub mod repair_test {
         assert!(!ds.dependencies_need_cleanup(0));
         assert!(!ds.dependencies_need_cleanup(2));
 
-        // OnlineRepair downstairs might need a change
+        // LiveRepair downstairs might need a change
         assert!(ds.dependencies_need_cleanup(1));
         for job_id in 1003..1006 {
             let job = ds.ds_active.get_mut(&job_id).unwrap();
-            // jobs 3,4,5 will be skipped for our OnlineRepair downstairs.
+            // jobs 3,4,5 will be skipped for our LiveRepair downstairs.
             assert_eq!(job.state[&0], IOState::New);
             assert_eq!(job.state[&1], IOState::Skipped);
             assert_eq!(job.state[&2], IOState::New);
@@ -5600,8 +5662,8 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1002, 1001, 1000]);
-        // No dependencies are valid for online repair
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
+        // No dependencies are valid for live repair
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
         let job = ds.ds_active.get_mut(&1004).unwrap();
@@ -5609,23 +5671,23 @@ pub mod repair_test {
 
         // Job 1001 is not a dep for 1004
         assert_eq!(&current_deps, &[1003, 1002, 1000]);
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
         let job = ds.ds_active.get_mut(&1005).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1004, 1003, 1002, 1001, 1000]);
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
     }
 
     #[tokio::test]
     async fn test_repair_dep_cleanup_some() {
-        // Verify that a downstairs in OnlineRepair state will have its
+        // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered to reflect both the removal of skipped
         // jobs as well as removal of Done jobs that happened before the
-        // downstairs went to OnlineRepair, and also, won't remove jobs that
+        // downstairs went to LiveRepair, and also, won't remove jobs that
         // happened after the repair has started and should be allowed
         // through.  This test builds on the previous test, so some things
         // are not checked here.
@@ -5649,8 +5711,8 @@ pub mod repair_test {
         drop(ds);
         // Fault the downstairs
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
-        up.ds_transition(1, DsState::OnlineRepair).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepair).await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
         drop(ds);
@@ -5670,7 +5732,7 @@ pub mod repair_test {
         assert!(!ds.dependencies_need_cleanup(0));
         assert!(!ds.dependencies_need_cleanup(2));
 
-        // OnlineRepair downstairs might need a change
+        // LiveRepair downstairs might need a change
         assert!(ds.dependencies_need_cleanup(1));
 
         // For the three latest jobs, they should be New as they are IOs that
@@ -5691,14 +5753,14 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1005, 1004, 1003, 1002, 1001, 1000]);
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
         let job = ds.ds_active.get_mut(&1007).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1006, 1005, 1003, 1002, 1000]);
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, &[1006]);
 
         let job = ds.ds_active.get_mut(&1008).unwrap();
@@ -5708,13 +5770,13 @@ pub mod repair_test {
             &current_deps,
             &[1007, 1006, 1005, 1004, 1003, 1002, 1001, 1000]
         );
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 0);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, &[1007, 1006]);
     }
 
     #[tokio::test]
     async fn test_repair_dep_cleanup_repair() {
-        // Verify that a downstairs in OnlineRepair state will have its
+        // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered.
         // We want to be sure that a repair job that may have ended up
         // with work IDs below the lowest skipped job does not get skipped
@@ -5765,8 +5827,8 @@ pub mod repair_test {
 
         // Fault the downstairs
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
-        up.ds_transition(1, DsState::OnlineRepair).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepair).await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
         drop(ds);
@@ -5813,8 +5875,8 @@ pub mod repair_test {
         // Previous tests have verified what happens before job 1007
         // Starting with job 7, this is special because it will have
         // different dependencies on the Active downstairs vs what the
-        // dependencies will be on the OnlineRepair downstairs.  On active,
-        // it should require jobs 1 and 2. With the OnlineRepair downstairs,
+        // dependencies will be on the LiveRepair downstairs.  On active,
+        // it should require jobs 1 and 2. With the LiveRepair downstairs,
         // it will not depend on anything. This is okay, because the job
         // itself is Skipped there, so we won't actually send it.
 
@@ -5830,16 +5892,16 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
         assert_eq!(&current_deps, &[1002, 1001, 1000]);
 
-        // Verify that the Skipped job on the OnlineRepair downstairs do not
+        // Verify that the Skipped job on the LiveRepair downstairs do not
         // have any dependencies, as, technically, this IO is the first IO to
         // happen after we started repair, and we should not look for any
         // dependencies before starting repair.
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1007);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 1007);
         assert_eq!(new_deps, empty);
 
         // This second write after starting a repair should require jobs 0,4
         // on Active downstairs, and only require the repair on the
-        // OnlineRepair downstairs.
+        // LiveRepair downstairs.
         let job = ds.ds_active.get_mut(&1008).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::New);
@@ -5848,12 +5910,12 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
         assert_eq!(&current_deps, &[1004, 1000]);
 
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1008);
-        // OnlineRepair downstairs won't see past the repair.
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 1008);
+        // LiveRepair downstairs won't see past the repair.
         assert_eq!(new_deps, &[1004]);
 
         // This final job depends on everything on Active downstairs, but
-        // a smaller subset for the OnlineRepair downstairs
+        // a smaller subset for the LiveRepair downstairs
         let job = ds.ds_active.get_mut(&1013).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::New);
@@ -5867,8 +5929,8 @@ pub mod repair_test {
             &[1008, 1007, 1004, 1002, 1001, 1000, 1009, 1010, 1011, 1012]
         );
 
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1013);
-        // OnlineRepair downstairs won't see past the repair, and it won't
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 1013);
+        // LiveRepair downstairs won't see past the repair, and it won't
         // include the skipped IO at 1007, but will have the future repair
         // operations that don't yet exist.
         assert_eq!(new_deps, &[1008, 1004, 1009, 1010, 1011, 1012]);
@@ -5876,7 +5938,7 @@ pub mod repair_test {
 
     #[tokio::test]
     async fn test_repair_dep_cleanup_sk_repair() {
-        // Verify that a downstairs in OnlineRepair state will have its
+        // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered.
         // Simulating what happens when we start repair with just the close
         // and reopen, but not the repair and noop jobs.
@@ -5888,7 +5950,7 @@ pub mod repair_test {
         // op# | 0 1 2 | 3 4 5 |
         // ----|-------|-------|
         //   0 |   W   |       |
-        //                       Online Repair starts here
+        //                       Live Repair starts here
         //   1 | Rclose|       |
         //   2 |       |       | Reserved for future repair
         //   3 |       |       | Reserved for future repair
@@ -5923,8 +5985,8 @@ pub mod repair_test {
 
         // Fault the downstairs
         up.ds_transition(1, DsState::Faulted).await;
-        up.ds_transition(1, DsState::OnlineRepairReady).await;
-        up.ds_transition(1, DsState::OnlineRepair).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepair).await;
 
         // Simulate what happens when we first start repair
         // on extent 0
@@ -5947,7 +6009,7 @@ pub mod repair_test {
         let noop_id = extent_repair_ids.noop_id;
         let reopen_id = extent_repair_ids.reopen_id;
 
-        let mut deps = deps_for_online_repair(&ds, impacted_blocks, close_id);
+        let mut deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
 
         // The initial close IO has the base set of dependencies.
         // Each additional job will depend on the previous.
@@ -6005,15 +6067,15 @@ pub mod repair_test {
         // We start with repair jobs, plus the original jobs.
         assert_eq!(&current_deps, &[1000, 1001, 1002, 1003]);
 
-        // The downstairs in OnlineRepair should not see the first write, but
+        // The downstairs in LiveRepair should not see the first write, but
         // should see all the repair IDs, including ones that don't actually
         // exist yet.
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1004);
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 1004);
         assert_eq!(new_deps, &[1001, 1002, 1003]);
 
         // This second write after starting a repair should require jobs 0,1,4
         // on Active downstairs, and only require the repair on the
-        // OnlineRepair downstairs.
+        // LiveRepair downstairs.
         let job = ds.ds_active.get_mut(&1005).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::New);
@@ -6022,8 +6084,8 @@ pub mod repair_test {
         let current_deps = job.work.deps().to_vec();
         assert_eq!(&current_deps, &[1004, 1001, 1000]);
 
-        let new_deps = ds.remove_dep_if_online_repair(1, current_deps, 1005);
-        // OnlineRepair downstairs won't see past the repair.
+        let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 1005);
+        // LiveRepair downstairs won't see past the repair.
         assert_eq!(new_deps, &[1004, 1001]);
     }
     //       block   block

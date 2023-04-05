@@ -1,5 +1,5 @@
 /*
- * Display internal Upstairs online repair status.
+ * Display internal Upstairs live repair status.
  */
 #pragma D option quiet
 /*

@@ -67,8 +67,8 @@ pub use stats::*;
 mod impacted_blocks;
 pub use impacted_blocks::*;
 
-mod online_repair;
-pub use online_repair::{check_for_repair, ExtentInfo, RepairCheck};
+mod live_repair;
+pub use live_repair::{check_for_repair, ExtentInfo, RepairCheck};
 
 use async_trait::async_trait;
 
@@ -603,7 +603,7 @@ where
                 writes,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -624,7 +624,7 @@ where
                 writes,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -651,7 +651,7 @@ where
                 extent_limit: _,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -678,7 +678,7 @@ where
                 requests,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -712,7 +712,7 @@ where
                 repair_downstairs,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -750,7 +750,7 @@ where
                 repair_downstairs,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -783,7 +783,7 @@ where
                 extent,
             } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -801,7 +801,7 @@ where
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 let deps = u
-                    .online_repair_dep_check(
+                    .live_repair_dep_check(
                         client_id,
                         dependencies.clone(),
                         *new_id,
@@ -989,7 +989,7 @@ where
      * downstairs and make sure they are consistent.  To do that, we will
      * request extent versions and skip over step 3
      * For Faulted, we don't know the condition of the data on the
-     * Downstairs, so we transition this downstairs to OnlineRepairReady.  We
+     * Downstairs, so we transition this downstairs to LiveRepairReady.  We
      * also request extent versions and will have to repair this
      * downstairs, skipping over step 3 as well.
      *
@@ -1002,7 +1002,7 @@ where
      * After receiving our last flush, we now move this downstairs state to
      * Replay and skip ahead to step 5.
      *
-     * (WaitActive and OnlineRepairReady come here from 2):
+     * (WaitActive and LiveRepairReady come here from 2):
      *
      *          Upstairs             Downstairs
      * 4: ExtentVersionsPlease --->
@@ -1463,7 +1463,7 @@ where
                             DsState::Faulted => {
                                 up.ds_transition(
                                     up_coms.client_id,
-                                    DsState::OnlineRepairReady,
+                                    DsState::LiveRepairReady,
                                 ).await;
                             }
                             _ => {
@@ -1629,7 +1629,7 @@ where
      * If the state is Replay, then we set more work and move to active.
      * If the state is WQ or repair, then we do the work required to make
      * the three downstairs match each other.
-     * If we are ORR, then we wait for the online repair task to discover
+     * If we are ORR, then we wait for the live repair task to discover
      * this and start repairing this downstairs.
      */
 
@@ -1661,11 +1661,11 @@ where
                 drop(ds);
                 do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
             }
-            DsState::OnlineRepairReady => {
+            DsState::LiveRepairReady => {
                 drop(ds);
                 warn!(
                     up.log,
-                    "[{}] {} Enter Ready for Online Repair mode",
+                    "[{}] {} Enter Ready for LiveRepair mode",
                     up_coms.client_id,
                     up.uuid
                 );
@@ -1733,7 +1733,7 @@ where
                  * We may have faulted this downstairs (after processing
                  * this IO).  If we have, then we exit this task which will
                  * tear down this connection and require the downstairs to
-                 * reconnect and go into OnlineRepair mode.
+                 * reconnect and go into LiveRepair mode.
                  */
                 if up_c.downstairs.lock().await.ds_state[client_id as usize]
                     == DsState::Faulted
@@ -2630,7 +2630,7 @@ struct Downstairs {
     io_state_count: IOStateCount,
 
     /**
-     * Online Repair info
+     * Live Repair info
      * This will contain the extent info for each downstairs as reported
      * by those downstairs and is used to decide if an extent requires
      * repair or not.
@@ -2638,29 +2638,29 @@ struct Downstairs {
     repair_info: HashMap<u8, ExtentInfo>,
 
     /**
-     * Count of extents repaired online.
+     * Count of extents repaired live.
      */
     extents_repaired: Vec<usize>,
 
     /**
-     * Count of extents checked but not needing online repair.
+     * Count of extents checked but not needing live repair.
      */
     extents_confirmed: Vec<usize>,
 
     /**
-     * Count of time a downstairs OnlineRepair completed.
+     * Count of time a downstairs LiveRepair completed.
      */
-    online_repair_completed: Vec<usize>,
+    live_repair_completed: Vec<usize>,
 
     /**
-     * Count of time a downstairs OnlineRepair was aborted.
+     * Count of time a downstairs LiveRepair was aborted.
      */
-    online_repair_aborted: Vec<usize>,
+    live_repair_aborted: Vec<usize>,
 
     /**
-     * Extent limit, if set, indicates the extent where OnlineRepair
+     * Extent limit, if set, indicates the extent where LiveRepair
      * has already submitted, or possibly even already finished the
-     * OnlineRepair of this extent. If you are changing this value,
+     * LiveRepair of this extent. If you are changing this value,
      * it must happen at the same time the repair IOs are enqueued on
      * the work list for the extent under repair.
      *
@@ -2668,17 +2668,17 @@ struct Downstairs {
      * value should be issued a flush, and extents > this value should
      * not be flushed.
      *
-     * When deciding to skip an IO on a downstairs in OnlineRepair, any
+     * When deciding to skip an IO on a downstairs in LiveRepair, any
      * IO at or below this extent should go ahead and be submitted, and
      * not skipped.  Any IO above this extent should still be skipped.
      *
-     * This is only used during online repair, and will only ever be
+     * This is only used during live repair, and will only ever be
      * set on a downstairs that is undergoing live repair.
      */
     extent_limit: Vec<Option<usize>>,
 
     /**
-     * Online Repair Job IDs
+     * Live Repair Job IDs
      * When we start a repair, the first thing we do is pre reserve
      * all the downstairs IDs we will need for each extent.
      */
@@ -2686,7 +2686,9 @@ struct Downstairs {
 
     /**
      * When repairing, the minimum job ID the downstairs under repair
-     * needs to consider for dependencies.
+     * needs to consider for dependencies.  This being Some also indicates
+     * a live repair task is running and is used to prevent more than
+     * one repair task from running at the same time.
      */
     repair_min_id: Option<u64>,
 }
@@ -2715,8 +2717,8 @@ impl Downstairs {
             repair_info: HashMap::new(),
             extents_repaired: vec![0; 3],
             extents_confirmed: vec![0; 3],
-            online_repair_completed: vec![0; 3],
-            online_repair_aborted: vec![0; 3],
+            live_repair_completed: vec![0; 3],
+            live_repair_aborted: vec![0; 3],
             extent_limit: vec![None; 3],
             repair_job_ids: HashMap::new(),
             repair_min_id: None,
@@ -2724,9 +2726,9 @@ impl Downstairs {
     }
 
     /**
-     * Online repair is over, Clean up any repair related settings.
+     * Live repair is over, Clean up any repair related settings.
      */
-    fn end_online_repair(&mut self) {
+    fn end_live_repair(&mut self) {
         self.repair_info = HashMap::new();
         self.extent_limit = vec![None; 3];
         self.repair_job_ids = HashMap::new();
@@ -2774,20 +2776,20 @@ impl Downstairs {
 
     /*
      * Determine if the conditions exist where we need to remove dependencies
-     * for an IOop during online repair.  We only need to do this if the
-     * downstairs in question is in OnlineRepair, and there are skipped
+     * for an IOop during live repair.  We only need to do this if the
+     * downstairs in question is in LiveRepair, and there are skipped
      * jobs for this downstairs.
      */
     fn dependencies_need_cleanup(&mut self, client_id: u8) -> bool {
-        self.ds_state[client_id as usize] == DsState::OnlineRepair
+        self.ds_state[client_id as usize] == DsState::LiveRepair
             && !self.ds_skipped_jobs[client_id as usize].is_empty()
     }
 
-    // Given a client ID that is undergoing OnlineRepair, go through the list
+    // Given a client ID that is undergoing LiveRepair, go through the list
     // of dependencies and remove any jobs that this downstairs has already
     // skipped, as the downstairs on the other side will not have received
     // these IOs..
-    fn remove_dep_if_online_repair(
+    fn remove_dep_if_live_repair(
         &mut self,
         client_id: u8,
         mut deps: Vec<u64>,
@@ -2801,7 +2803,7 @@ impl Downstairs {
             self.ds_skipped_jobs[client_id as usize],
             deps
         );
-        assert_eq!(self.ds_state[client_id as usize], DsState::OnlineRepair);
+        assert_eq!(self.ds_state[client_id as usize], DsState::LiveRepair);
         assert!(self.repair_min_id.is_some());
 
         deps.retain(|x| !self.ds_skipped_jobs[client_id as usize].contains(x));
@@ -3283,13 +3285,13 @@ impl Downstairs {
             // better have the dependencies already set to reflect the
             // requirement that a repair IO will need to finish first.
             match current {
-                DsState::Faulted | DsState::OnlineRepairReady => {
+                DsState::Faulted | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;
                     self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
                 }
-                DsState::OnlineRepair => {
+                DsState::LiveRepair => {
                     let my_limit = self.extent_limit[cid as usize];
                     assert!(self.repair_min_id.is_some());
                     if io.work.send_io_live_repair(my_limit) {
@@ -3331,7 +3333,7 @@ impl Downstairs {
     }
 
     /**
-     * Enqueue a new downstairs online repair request.
+     * Enqueue a new downstairs live repair request.
      */
     async fn enqueue_repair(&mut self, mut io: DownstairsIO) {
         // Puts the repair IO onto the downstairs work queue.
@@ -3342,7 +3344,7 @@ impl Downstairs {
             // If a downstairs is faulted, we can move that job directly
             // to IOState::Skipped.
             match current {
-                DsState::Faulted | DsState::OnlineRepairReady => {
+                DsState::Faulted | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
@@ -4831,7 +4833,7 @@ pub struct Upstairs {
      */
     log: Logger,
     /*
-     * Online repair tracking structure
+     * Live repair tracking structure
      */
 }
 
@@ -4949,8 +4951,8 @@ impl Upstairs {
         let ds_io_count = ds.io_state_count;
         let ds_repair = ds.extents_repaired.clone();
         let ds_confirm = ds.extents_confirmed.clone();
-        let ds_online_repair_completed = ds.online_repair_completed.clone();
-        let ds_online_repair_aborted = ds.online_repair_aborted.clone();
+        let ds_live_repair_completed = ds.live_repair_completed.clone();
+        let ds_live_repair_aborted = ds.live_repair_aborted.clone();
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -4960,8 +4962,8 @@ impl Upstairs {
                 ds_io_count,
                 ds_repair,
                 ds_confirm,
-                ds_online_repair_completed,
-                ds_online_repair_aborted,
+                ds_live_repair_completed,
+                ds_live_repair_aborted,
             };
             (msg, arg)
         });
@@ -5168,7 +5170,7 @@ impl Upstairs {
     }
 
     /*
-     * Look to see if this specific downstairs is in OnlineRepair, and if so,
+     * Look to see if this specific downstairs is in LiveRepair, and if so,
      * apply special consideration for dependencies, as they could be unique
      * for this downstairs.
      *
@@ -5178,7 +5180,7 @@ impl Upstairs {
      * there will be no replay here and we are basically rebuilding this
      * downstairs from other downstairs.
      */
-    async fn online_repair_dep_check(
+    async fn live_repair_dep_check(
         &self,
         client_id: u8,
         deps: Vec<u64>,
@@ -5187,7 +5189,7 @@ impl Upstairs {
         let mut ds = self.downstairs.lock().await;
 
         if ds.dependencies_need_cleanup(client_id) {
-            ds.remove_dep_if_online_repair(client_id, deps.clone(), ds_id)
+            ds.remove_dep_if_live_repair(client_id, deps.clone(), ds_id)
         } else {
             deps
         }
@@ -5666,7 +5668,7 @@ impl Upstairs {
 
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
             if let Some(eur) = extent_under_repair {
-                // We are in the middle of an online repair. See if we
+                // We are in the middle of a live repair. See if we
                 // are trying to do IO that needs special dependencies.
                 if eid == eur {
                     warn!(
@@ -5767,7 +5769,7 @@ impl Upstairs {
             dep.push(ids.reopen_id);
         }
 
-        // After reserving any OnlineRepair IDs, go get one for this job.
+        // After reserving any LiveRepair IDs, go get one for this job.
         // This is required to avoid circular dependencies.
         let next_id = downstairs.next_id();
 
@@ -6027,8 +6029,8 @@ impl Upstairs {
             DsState::Deactivated => DsState::New,
             DsState::Repair => DsState::New,
             DsState::FailedRepair => DsState::New,
-            DsState::OnlineRepair => DsState::Faulted,
-            DsState::OnlineRepairReady => DsState::Faulted,
+            DsState::LiveRepair => DsState::Faulted,
+            DsState::LiveRepairReady => DsState::Faulted,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -6146,8 +6148,8 @@ impl Upstairs {
                 match old_state {
                     DsState::Active
                     | DsState::Repair
-                    | DsState::OnlineRepair
-                    | DsState::OnlineRepairReady
+                    | DsState::LiveRepair
+                    | DsState::LiveRepairReady
                     | DsState::Offline
                     | DsState::Replay => {} /* Okay */
                     _ => {
@@ -6171,7 +6173,7 @@ impl Upstairs {
                     DsState::WaitQuorum
                     | DsState::Replay
                     | DsState::Repair
-                    | DsState::OnlineRepair => {} // Okay
+                    | DsState::LiveRepair => {} // Okay
                     _ => {
                         panic!(
                             "[{}] {} Invalid transition: {:?} -> {:?}",
@@ -6195,8 +6197,8 @@ impl Upstairs {
                 match old_state {
                     DsState::Active
                     | DsState::Replay
-                    | DsState::OnlineRepair
-                    | DsState::OnlineRepairReady
+                    | DsState::LiveRepair
+                    | DsState::LiveRepairReady
                     | DsState::Repair => {} // Okay
                     _ => {
                         panic!(
@@ -6206,10 +6208,10 @@ impl Upstairs {
                     }
                 }
             }
-            DsState::OnlineRepair => {
-                assert_eq!(old_state, DsState::OnlineRepairReady);
+            DsState::LiveRepair => {
+                assert_eq!(old_state, DsState::LiveRepairReady);
             }
-            DsState::OnlineRepairReady => {
+            DsState::LiveRepairReady => {
                 assert_eq!(old_state, DsState::Faulted);
             }
             DsState::New => {
@@ -7070,7 +7072,7 @@ impl Upstairs {
         match ds_state {
             DsState::Active
             | DsState::Repair  // ZZZ <-- Is this right? We never repair here!
-            | DsState::OnlineRepair => {}
+            | DsState::LiveRepair => {}
             _ => {
                 warn!(
                     self.log,
@@ -7122,7 +7124,7 @@ impl Upstairs {
                          */
                         assert!(ds.completed.contains(&ds_id));
                         // ZZZ I also think this path is possible if we
-                        // are in failure mode for OnlineRepair, as we could
+                        // are in failure mode for LiveRepair, as we could
                         // get an ack back from a job after we failed the DS
                         // (from the upstairs side) and flushed the job away.
                     }
@@ -7295,11 +7297,11 @@ enum DsState {
      * This downstairs was failed, but has disconnected and now we
      * are ready to repair it.
      */
-    OnlineRepairReady,
+    LiveRepairReady,
     /*
-     * This downstairs is undergoing OnlineRepair
+     * This downstairs is undergoing LiveRepair
      */
-    OnlineRepair,
+    LiveRepair,
     /*
      * This downstairs is being migrated to a new location
      */
@@ -7362,11 +7364,11 @@ impl fmt::Display for DsState {
             DsState::Faulted => {
                 write!(f, "Faulted")
             }
-            DsState::OnlineRepairReady => {
-                write!(f, "OnlineRepairReady")
+            DsState::LiveRepairReady => {
+                write!(f, "LiveRepairReady")
             }
-            DsState::OnlineRepair => {
-                write!(f, "OnlineRepair")
+            DsState::LiveRepair => {
+                write!(f, "LiveRepair")
             }
             DsState::Migrating => {
                 write!(f, "Migrating")
@@ -7690,7 +7692,7 @@ impl IOop {
     }
 
     /*
-     * Report if the IOop is one used during OnlineRepair
+     * Report if the IOop is one used during LiveRepair
      */
     pub fn is_repair(&self) -> bool {
         matches!(
@@ -7798,7 +7800,7 @@ impl IOop {
         (job_type, num_blocks, deps)
     }
 
-    // We have a downstairs in OnlineRepair.
+    // We have a downstairs in LiveRepair.
     // Compare the extent IDs for this IO and where we have repaired
     // so far, and determine if this IO should be sent to the downstairs
     // or not (skipped).
@@ -9378,8 +9380,8 @@ pub struct Arg {
     ds_io_count: IOStateCount,
     ds_repair: Vec<usize>,
     ds_confirm: Vec<usize>,
-    ds_online_repair_completed: Vec<usize>,
-    ds_online_repair_aborted: Vec<usize>,
+    ds_live_repair_completed: Vec<usize>,
+    ds_live_repair_aborted: Vec<usize>,
 }
 
 /**
@@ -9527,7 +9529,7 @@ async fn up_listen(
                 match check_for_repair(up, &dst).await {
                     RepairCheck::RepairStarted => {
                         repair_check = false;
-                        info!(up.log, "Online Repair started");
+                        info!(up.log, "Live Repair started");
                     },
                     RepairCheck::NoRepairNeeded => {
                         repair_check = false;
@@ -9535,7 +9537,7 @@ async fn up_listen(
                     RepairCheck::RepairInProgress => {
                         repair_check = true;
                         repair_check_interval = deadline_secs(60);
-                        info!(up.log, "Online Repair in progress, try again");
+                        info!(up.log, "Live Repair in progress, try again");
                     },
                     RepairCheck::InvalidState => {
                         repair_check = false;

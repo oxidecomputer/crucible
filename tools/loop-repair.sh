@@ -74,9 +74,9 @@ for i in {1..10}; do
         sleep 5
     done
 
-    # Now, wait for online_repair to finish.  Note that if the repair has
+    # Now, wait for live_repair to finish.  Note that if the repair has
     # already finished that is okay.
-    while $info_cmd | jq ".ds_state[$choice]" | grep online_repair > /dev/null; do
+    while $info_cmd | jq ".ds_state[$choice]" | grep live_repair > /dev/null; do
         sleep 5
     done
 
