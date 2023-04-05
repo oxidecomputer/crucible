@@ -7071,7 +7071,7 @@ impl Upstairs {
         let ds_state = ds.ds_state[client_id as usize];
         match ds_state {
             DsState::Active
-            | DsState::Repair  // ZZZ <-- Is this right? We never repair here!
+            | DsState::Repair
             | DsState::LiveRepair => {}
             _ => {
                 warn!(
