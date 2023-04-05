@@ -26,6 +26,7 @@ tar cavf out/crucible-nightly.tar.gz \
   tools/test_restart_repair.sh \
   tools/test_nightly.sh \
   tools/loop-repair.sh \
+  tools/loop-double-repair.sh \
   nightly-info.txt
 
 ls -l out/crucible-nightly.tar.gz

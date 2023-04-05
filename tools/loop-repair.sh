@@ -4,21 +4,6 @@
 # Each loop will select a new downstairs and stop/fault/start
 # that downstairs which should kick off a repair.
 
-
-#
-# Make a test that:
-# starts IO
-# Faults a downstairs.
-# waits for repair to start.
-# Faults a downstairs again.
-
-# Also,
-# Faults a downstairs
-# waits for repair to start.
-# Faults a 2nd downstairs.
-# waits for repair to finish on 1
-# waits for 2nd repair to start on 2
-
 set -eu
 total=0
 
@@ -46,21 +31,10 @@ for i in {1..10}; do
     repair_start=$($info_cmd | jq ".extents_repaired[$choice]")
     confirm_start=$($info_cmd | jq ".extents_confirmed[$choice]")
 
-    # ./target/release/dsc cmd stop -c "$choice"
     if ! curl -X POST ${upstairs}/downstairs/fault/"$choice"; then
         echo "Failed to send fault request"
         exit 1
     fi
-
-    # Wait for upstairs to see this has faulted.
-    #while :; do
-    #    if $info_cmd | jq ".ds_state[$choice]" | grep faulted > /dev/null; then
-    #        break
-    #    fi
-    #    sleep 1
-    #done
-
-    #./target/release/dsc cmd start -c "$choice"
 
     # Wait for the repair to start
     # This will catch both start and start and completed if it happens fast.
