@@ -42,36 +42,37 @@ use tokio::sync::mpsc;
 //
 // * IO while repairing
 // When there is a repair in progress the upstairs keeps track of an extent
-// high water point (or maybe someday a bitmap) that indicates which extents
-// are clear to receive IO and which are not.  When a new IO is received, each
-// downstairs task will check to see if it is on a good or bad extent.  If
-// on a good extent, then normal behavior, if on a bad extent, then the IO is
-// moved straight to skipped for this downstairs.
+// high water point called `extent_limit` that indicates the extents at and
+// below that are clear to receive IO.  When a new IO is received, each
+// downstairs task will check to see if it is at (and below) or above this
+// extent limit.  If at/below, then the IO is sent to the downstairs under
+// repair.  If the IO is above, then the IO is moved to skipped for the
+// downstairs under repair.
 //
 // * IOs that span extents.
-// When an IO arrives that spans two extents, and one extent has been repaired
-// (or the repair has been sent but not completed yet.  This IO needs to be
-// held back until all extents it requires have completed repair.  This may
-// involve pre-reserving repair job IDs, and making those job IDs dependencies
-// for this spanning IO.
+// When an IO arrives that spans two extents, and the lower extent matches
+// the current extent limit, this IO needs to be held back until all extents
+// it covers have completed repair.  This may involve allocating and reserving
+// repair job IDs, and making those job IDs dependencies for this spanning IO.
 //
 // * Skipped IOs and Dependencies “above” a repair command.
-// For Repair operations (and operations that follow after them).  The
-// downstairs under repair will most likely have a bunch of skipped IOs.  The
-// first repair operation will have dependencies that will need to finish on
-// Active downstairs, but should be ignored for the downstairs that is under
+// For Repair operations (and operations that follow after them), a downstairs
+// under repair will most likely have a bunch of skipped IOs.  Repair
+// operations will often have dependencies that will need to finish on the
+// Active downstairs, but should be ignored by the downstairs that is under
 // repair.  This special case is handled by keeping track of skipped IOs, and,
 // when LiveRepair is active, removing those dependencies for just the
-// downstairs under repair.
+// downstairs under repair.  This list of skipped jobs is ds_skipped_jobs in
+// the Downstairs structure.
 //
 // * Failures during extent repair.
 // When we encounter a failure during live repair, we must complete any
-// repair in progress, though the nature of the falure may change what actual IO
-// is sent to the downstairs.  Because we reserve IDs when a repair begins,
+// repair in progress, though the nature of the failure may change what actual
+// IO is sent to the downstairs.  Because we reserve IDs when a repair begins,
 // and other IOs may depend on those IDs (and those IOs could have already
 // been sent to the downstairs), we must follow through with issuing these
 // IOs, including the final ExtentLiveReopen.  Depending on where the failure
-// was encountered, these IOs may just be NoOp.
+// was encountered, these IOs may just be NoOps.
 
 // When determining if an extent needs repair, we collect its current
 // information from a downstairs and store the results in this struct.
@@ -227,8 +228,8 @@ async fn live_repair_main(
     assert!(ds.repair_job_ids.is_empty());
     // Verify no extent_limits are Some
     assert_eq!(ds.extent_limit.iter().flatten().count(), 0);
-    // When we transitioned this downstairs to OR, it should have set
-    // the minimum for repair., though we will update it again below.
+    // When we transitioned this downstairs to LiveRepair, it should have set
+    // the minimum for repair, though we will update it again below.
     assert!(ds.repair_min_id.is_some());
 
     for cid in 0..3 {
@@ -273,6 +274,7 @@ async fn live_repair_main(
     ds.repair_min_id = Some(ds.peek_next_id());
     drop(ds);
 
+    // At this point, the actual repair loop for a downstairs starts.
     let source_downstairs = source_downstairs.unwrap();
 
     let extent_count = match up.ddef.lock().await.get_def() {
@@ -988,33 +990,48 @@ impl Upstairs {
     //    ID 2) ExtentLiveRepair or ExtentLiveNoOp
     //    ID 3) ExtentLiveNoOp
     //    ID 4) ExtentLiveReopen
-    //    This reservation is how we guarantee that the repair work happens as a
-    //    block and any future IOs come after the completion of the repair.
-    // 2) Put repair job 4 (ExtentLiveReopen) on the work queue with dependencies
-    //    of the other repair jobs 1-3.  This job not only acts as cleanup, but
-    //    also allows other IOs to the same extent that may arrive as we are
-    //    repairing this extent to be queue and have this final repair ID as a
-    //    dependency, which ensures that the IO will happen after the repair
-    //    has completed.
-    // 3) Put repair job 1 on the work queue.  When each downstairs task receives
-    //    this job, it will change it as follows: To good downstair(s): Send
-    //    “flush and close” to the extent, it will return the current gen/flush
-    //    for that extent after close is done.  To bad downstairs: Send close
-    //    only (no flush), return gen/flush/dirty for that extent.
+    //    This reservation is how we guarantee that the repair work happens as
+    //    a block and any future IOs come after the completion of the repair.
+    // 2) Put repair job 4 (ExtentLiveReopen) on the work queue with
+    //    dependencies of the other repair jobs 1-3.  This job not only acts
+    //    as cleanup, but also allows other IOs to the same extent that may
+    //    arrive as we are repairing this extent to be queue and have this
+    //    final repair ID as a dependency, which ensures that the IO will
+    //    happen after the repair has completed.
+    // 3) Put repair job 1 on the work queue.  When each downstairs task
+    //    receives this job, it will change it as follows: To the good
+    //    downstair(s): Send “flush and close” to the extent, it will return
+    //    the current gen/flush for that extent after close is done.  To the
+    //    bad downstairs: Send close only (no flush), return gen/flush/dirty
+    //    for that extent.
     // 4) Wait for repair job 1 to complete on all downstairs.
-    // 5) Compare a good extent gen/flush with bad extent gen/flush (dirty bit on
-    //    bad means it needs repair).
-    // 6) Issue repair Job 2.  If there was a mismatch, then “repair” from good
-    //    extent to bad extent.  If no mismatch, then send a NO-OP job to the
-    //    downstairs.  We have potentially future jobs that have it in the dep
-    //    list, so the downstairs has to completed a job with this ID..
+    // 5) Compare a good extent gen/flush with bad extent gen/flush (dirty bit
+    //    on the bad downstairs means it needs repair).
+    // 6) Issue repair Job 2.  If there was a mismatch, then we repair from
+    //    good (source) extent to the bad extent.  If there is no mismatch,
+    //    then send a NO-OP job to the downstairs.  We may have future jobs
+    //    that have job ID 2 in their dependency list, so the downstairs has
+    //    to receive and complete a job with ID 2.
     // 7) Wait for repair job 2 to complete on all downstairs.
-    // 8) Issue repair job 3, NoOp, wait for all three to complete.  This job
-    //    acts as an important barrier, and prevents the final reopen job from
-    //    jumping ahead on a downstairs that does not need repair.
+    // 8) Issue repair job 3, A NoOp.  Wait for job 3 to complete on all three
+    //    downstairs.  This job acts as an important barrier, and prevents the
+    //    final reopen job from jumping ahead on a downstairs that does not
+    //    need repair.
     // 9) Wait for job 3 to finish.
     // 10) Wait for job 4 to finish.  All three extents should now match.
-    // 11) Mark this extent as okay for future IO.
+    //
+    // When we start, at the end, and any time we re acquire the downstairs
+    // lock, we have to verify that none of the downstairs have changed
+    // state from what we expect.
+    //
+    // Handling errors.
+    // If we encounter a state change (or an error back from our repair
+    // IO) we have to abort the repair, but with cleanup.  If we have reserved
+    // job IDs (or some other IO has reserved them) we must generate and
+    // submit jobs with these IDs to satisfy potential dependencies that
+    // other jobs may have on these IDs.  If we have started a repair (which
+    // begins with a close of the extent under repair) we must be sure that
+    // the final reopen job finishes on all downstairs as well.
     async fn repair_extent(
         &self,
         ds_work_vec: &[mpsc::Sender<u64>],

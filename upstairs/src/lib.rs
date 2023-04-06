@@ -2554,38 +2554,63 @@ impl WorkCounts {
  */
 #[derive(Debug)]
 struct Downstairs {
-    /*
+    /**
      * UUID for each downstairs, index by client ID
      */
     ds_uuid: HashMap<u8, Uuid>,
 
-    /*
+    /**
      * The IP:Port of each of the downstairs
      */
     ds_target: Vec<SocketAddr>,
 
-    /*
+    /**
      * The IP:Port for repair when contacting the downstairs, hashed by
      * the client index the upstairs gives it.
      */
     ds_repair: HashMap<u8, SocketAddr>,
 
-    /*
+    /**
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
      * TODO: When growing to more than one region, should this become
      * a 2d Vec? Index for region, then index for the DS?
      */
     ds_state: Vec<DsState>,
-    /*
+
+    /**
      * The last flush ID that each downstairs has acked.
      */
     ds_last_flush: Vec<u64>,
+
+    /**
+     * Errors recorded, indexed by client ID.
+     */
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
+
+    /**
+     * The active list of IO for the downstairs.
+     */
     ds_active: HashMap<u64, DownstairsIO>,
+
+    /**
+     * Jobs that have been skipped, indexed by client ID.
+     */
     ds_skipped_jobs: [HashSet<u64>; 3],
+
+    /**
+     * The next Job ID this Upstairs should use for downstairs work.
+     */
     next_id: u64,
+
+    /**
+     * Ringubf of completed downstairs job IDs.
+     */
     completed: AllocRingBuffer<u64>,
+
+    /**
+     * Ringbuf of a summary of each recently completed downstairs IO.
+     */
     completed_jobs: AllocRingBuffer<WorkSummary>,
 
     /**
@@ -2658,19 +2683,19 @@ struct Downstairs {
     live_repair_aborted: Vec<usize>,
 
     /**
-     * Extent limit, if set, indicates the extent where LiveRepair
-     * has already submitted, or possibly even already finished the
-     * LiveRepair of this extent. If you are changing this value,
-     * it must happen at the same time the repair IOs are enqueued on
-     * the work list for the extent under repair.
+     * Extent limit, if set, indicates the extent where LiveRepair has already
+     * submitted, or possibly even already finished the LiveRepair of this
+     * extent. If you are changing this value, it must happen at the same
+     * time the repair IOs are enqueued on the work list for the extent under
+     * repair, don't release the downstairs lock until both are done.
      *
      * This limit, if used in a flush indicates that extents <= this
      * value should be issued a flush, and extents > this value should
      * not be flushed.
      *
      * When deciding to skip an IO on a downstairs in LiveRepair, any
-     * IO at or below this extent should go ahead and be submitted, and
-     * not skipped.  Any IO above this extent should still be skipped.
+     * IO at or below this extent should go ahead and be submitted.  Any IO
+     * above this extent should still be skipped.
      *
      * This is only used during live repair, and will only ever be
      * set on a downstairs that is undergoing live repair.
@@ -2679,16 +2704,19 @@ struct Downstairs {
 
     /**
      * Live Repair Job IDs
-     * When we start a repair, the first thing we do is pre reserve
-     * all the downstairs IDs we will need for each extent.
+     * If, while running live repair, we have an IO that spans repaired
+     * extents and not yet repaired extents, we will reserve job IDs for the
+     * future repair work and store them in this hash map.  When it comes time
+     * to start a repair and allocate the job IDs we will require, we first
+     * check this hash map to see if the IDs were already repaired.
      */
     repair_job_ids: HashMap<u32, ExtentRepairIDs>,
 
     /**
-     * When repairing, the minimum job ID the downstairs under repair
-     * needs to consider for dependencies.  This being Some also indicates
-     * a live repair task is running and is used to prevent more than
-     * one repair task from running at the same time.
+     * When repairing, this will be the  minimum job ID the downstairs under
+     * repair needs to consider for dependencies.  This being `Some` also
+     * indicates a live repair task is running and being `Some` is used to
+     * prevent more than one repair task from running at the same time.
      */
     repair_min_id: Option<u64>,
 }
@@ -7070,9 +7098,7 @@ impl Upstairs {
          */
         let ds_state = ds.ds_state[client_id as usize];
         match ds_state {
-            DsState::Active
-            | DsState::Repair
-            | DsState::LiveRepair => {}
+            DsState::Active | DsState::Repair | DsState::LiveRepair => {}
             _ => {
                 warn!(
                     self.log,
