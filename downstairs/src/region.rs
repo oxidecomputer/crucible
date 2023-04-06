@@ -633,7 +633,6 @@ impl Extent {
 
         // Clean out any irrelevant block contexts, which may be present if
         // downstairs crashed between a write() and a flush().
-        // ZZZ Skip this for dump command?
         extent
             .fully_rehash_and_clean_all_stale_contexts(false)
             .await?;
@@ -1967,7 +1966,7 @@ impl Region {
 
             if computed_hash != write.block_context.hash {
                 error!(self.log, "Failed write hash validation");
-                // ZZZ print out the extent and block where this failed!!
+                // TODO: print out the extent and block where this failed!!
                 crucible_bail!(HashMismatch);
             }
         }

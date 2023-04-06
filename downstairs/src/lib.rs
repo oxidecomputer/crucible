@@ -1018,7 +1018,7 @@ where
                 // can do no more work on this downstairs and should
                 // force everything to come down before more work arrives.
                 //
-                // However, we can respond to the upstairs with the faield
+                // However, we can respond to the upstairs with the failed
                 // result, and let the upstairs take action that will
                 // allow it to abort the repair and continue working in
                 // some degraded state.
@@ -1053,6 +1053,7 @@ where
     Ok(())
 }
 
+// Check and see if this message is A LiveRepair, and if it has failed
 fn check_message_for_abort(m: &Message) -> bool {
     match m {
         Message::ExtentLiveRepairAckId {
@@ -2152,11 +2153,10 @@ impl Downstairs {
             } => {
                 debug!(
                     self.log,
-                    "EXTENT LIVE REPAIR: extent {} sra:{:?}",
+                    "ExtentLiveRepair: extent {} sra:{:?}",
                     extent,
                     source_repair_address
                 );
-                // ZZZ
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)

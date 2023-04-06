@@ -7145,14 +7145,13 @@ impl Upstairs {
                          * This assertion is only true for a limited time after
                          * the downstairs has failed.  An old in-flight IO
                          * could, in theory, ack back to us at some time
-                         * in the future after we cleared the completed
-                         * list.
+                         * in the future after we cleared the completed.
+                         * I also think this path could be  possible if we
+                         * are in failure mode for LiveRepair, as we could
+                         * get an ack back from a job after we failed the DS
+                         * (from the upstairs side) and flushed the job away.
                          */
                         assert!(ds.completed.contains(&ds_id));
-                        // ZZZ I also think this path is possible if we
-                        // are in failure mode for LiveRepair, as we could
-                        // get an ack back from a job after we failed the DS
-                        // (from the upstairs side) and flushed the job away.
                     }
                 }
                 return Err(e);
@@ -9308,7 +9307,6 @@ async fn process_new_io(
             *lastcast += 1;
         }
         BlockOp::RepairOp => {
-            // ZZZ Maybe panic?  Who is sending us this garbage?
             warn!(up.log, "Ignoring external BlockOp::RepairOp");
         }
         // Query ops

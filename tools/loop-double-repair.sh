@@ -6,6 +6,9 @@
 # Once we see the repair is going, we fail a random downstairs, which
 # could include our already repairing downstairs.
 # Then, we wait for all three downstairs to be active again, and loop.
+#
+# We expect that crucible upstairs and downstairs have been started by
+# something outside this script.
 
 set -eu
 total=0
@@ -14,13 +17,9 @@ upstairs="http://127.0.0.1:7777"
 info_cmd="curl -s $upstairs/info"
 info_log=/tmp/startinfo
 
-
+# We don't have jq on the real systems, so this script dumps the info
+# output to a file and parses it using just awk.
 $info_cmd > "$info_log"
-#all_states=$(awk -F, '{print $2","$3","$4}' /tmp/startinfo)
-#ds0state=$(echo $all_states | awk -F\" '{print $4}')
-#ds1state=$(echo $all_states | awk -F\" '{print $6}')
-#ds2state=$(echo $all_states | awk -F\" '{print $8}')
-
 repair_info=$(awk -F, '{print $9","$10","$11}' $info_log | tr '[' ',' | tr ']' ',')
 initial_repair_zero=$(echo $repair_info | awk -F, '{print $2}')
 initial_repair_one=$(echo $repair_info | awk -F, '{print $3}')

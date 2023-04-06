@@ -1,5 +1,5 @@
 /*
- * Trace all the guest submitted and completed IOs.
+ * Track the time it takes for the repair of an extent.
  */
 crucible_upstairs*:::extent-or-start
 {
