@@ -8043,6 +8043,7 @@ impl Guest {
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
+            active_count: 0,
         };
 
         let data = Arc::new(Mutex::new(wc));
@@ -8197,6 +8198,7 @@ impl BlockIO for Guest {
         let wc = WQCounts {
             up_count: 0,
             ds_count: 0,
+            active_count: 0,
         };
 
         let data = Arc::new(Mutex::new(wc));
@@ -8215,6 +8217,7 @@ impl BlockIO for Guest {
 pub struct WQCounts {
     pub up_count: usize,
     pub ds_count: usize,
+    pub active_count: usize,
 }
 
 impl Default for Guest {
@@ -8565,9 +8568,17 @@ async fn process_new_io(
         }
         BlockOp::QueryWorkQueue { data } => {
             // TODO should this first check if the Upstairs is active?
+            let ds = up.downstairs.lock().await;
+            let active_count = ds
+                .ds_state
+                .iter()
+                .filter(|state| **state == DsState::Active)
+                .count();
+            drop(ds);
             *data.lock().await = WQCounts {
                 up_count: up.guest.guest_work.lock().await.active.len(),
                 ds_count: up.downstairs.lock().await.ds_active.len(),
+                active_count,
             };
             req.send_ok().await;
         }
@@ -9235,6 +9246,11 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         }
     }
     println!();
+    let active_count = ds
+        .ds_state
+        .iter()
+        .filter(|state| **state == DsState::Active)
+        .count();
     drop(ds);
 
     let up_done = up.guest.guest_work.lock().await.completed.to_vec();
@@ -9253,6 +9269,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     WQCounts {
         up_count,
         ds_count: kvec.len(),
+        active_count,
     }
 }
 
