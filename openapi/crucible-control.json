@@ -169,7 +169,6 @@
           "wait_quorum",
           "bad_region",
           "disconnected",
-          "verifying",
           "repair",
           "failed_repair",
           "active",
