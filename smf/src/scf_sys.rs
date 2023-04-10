@@ -422,6 +422,7 @@ extern "C" {
     pub fn smf_disable_instance(instance: *const c_char, flags: c_int)
         -> c_int;
     pub fn smf_enable_instance(instance: *const c_char, flags: c_int) -> c_int;
+    pub fn smf_refresh_instance(instance: *const c_char) -> c_int;
 
     pub fn scf_handle_decode_fmri(
         handle: *mut scf_handle_t,
@@ -935,6 +936,9 @@ mod dummy {
         instance: *const c_char,
         flags: c_int,
     ) -> c_int {
+        unimplemented!()
+    }
+    pub fn smf_refresh_instance(instance: *const c_char) -> c_int {
         unimplemented!()
     }
 
