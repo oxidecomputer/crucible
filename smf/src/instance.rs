@@ -107,6 +107,18 @@ impl<'a> Instance<'a> {
     }
 
     /**
+     * Refresh this instance with any changes to its configuration.
+     */
+    pub fn refresh(&self) -> Result<()> {
+        let fmri = CString::new(self.fmri()?).unwrap();
+        if unsafe { smf_refresh_instance(fmri.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(ScfError::last())
+        }
+    }
+
+    /**
      * Get the current state and the next state (if any) of the instance
      * from the restarter.
      */
