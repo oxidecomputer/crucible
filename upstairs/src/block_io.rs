@@ -119,6 +119,7 @@ impl BlockIO for FileBlockIO {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,
+            active_count: 0,
         })
     }
 }
@@ -291,6 +292,7 @@ impl BlockIO for ReqwestBlockIO {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,
+            active_count: 0,
         })
     }
 }
