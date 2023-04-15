@@ -711,7 +711,7 @@ where
 
         info!(
             up.log,
-            "[{}] Proc runs for {} in state {:?}",
+            "[{}] Proc runs for {} in state {}",
             up_coms.client_id,
             target,
             my_state,
@@ -1247,7 +1247,7 @@ where
                             }
                             bad_state => {
                                 panic!(
-                                    "[{}] join from invalid state {:?} {} {}",
+                                    "[{}] join from invalid state {} {} {}",
                                     up_coms.client_id,
                                     bad_state,
                                     up.uuid,
@@ -1391,7 +1391,7 @@ where
                     Some(m) => {
                         bail!(
                             "[{}] unexpected command {:?} \
-                            received in state {:?}",
+                            received in state {}",
                             up_coms.client_id, m, up.ds_state(up_coms.client_id).await
                         );
                     }
@@ -4645,16 +4645,13 @@ impl Upstairs {
                 {
                     info!(
                         self.log,
-                        "deactivate_transition {:#?} Maybe ", *ds_state
+                        "deactivate_transition {} Maybe ", *ds_state
                     );
                 } else if *ds_state == DsState::Offline {
                     // TODO: support this
                     panic!("Can't deactivate when a downstairs is offline");
                 } else {
-                    info!(
-                        self.log,
-                        "deactivate_transition {:#?} NO", *ds_state
-                    );
+                    info!(self.log, "deactivate_transition {} NO", *ds_state);
                     de_done = false;
                 }
             });
@@ -5389,7 +5386,7 @@ impl Upstairs {
 
         info!(
             self.log,
-            "[{}] {} Gone missing, transition from {:?} to {:?}",
+            "[{}] {} Gone missing, transition from {} to {}",
             client_id,
             self.uuid,
             current,
@@ -5447,7 +5444,7 @@ impl Upstairs {
     ) {
         info!(
             self.log,
-            "[{}] {} ({}) {:?} {:?} {:?} ds_transition to {:?}",
+            "[{}] {} ({}) {} {} {} ds_transition to {}",
             client_id,
             self.uuid,
             self.session_id,
@@ -5467,7 +5464,7 @@ impl Upstairs {
                 if old_state == DsState::Offline {
                     if up_state == UpState::Active {
                         panic!(
-                            "[{}] {} Bad up active state change {:?} -> {:?}",
+                            "[{}] {} Bad up active state change {} -> {}",
                             client_id, self.uuid, old_state, new_state,
                         );
                     }
@@ -5592,14 +5589,14 @@ impl Upstairs {
         if old_state != new_state {
             info!(
                 self.log,
-                "[{}] Transition from {:?} to {:?}",
+                "[{}] Transition from {} to {}",
                 client_id,
                 ds.ds_state[client_id as usize],
                 new_state,
             );
             ds.ds_state[client_id as usize] = new_state;
         } else {
-            panic!("[{}] transition to same state: {:?}", client_id, new_state);
+            panic!("[{}] transition to same state: {}", client_id, new_state);
         }
     }
 
@@ -5808,7 +5805,7 @@ impl Upstairs {
              * all downstairs enter the repair path.
              */
             ds.ds_state.iter_mut().for_each(|ds_state| {
-                info!(self.log, "Transition from {:?} to Repair", *ds_state);
+                info!(self.log, "Transition from {} to Repair", *ds_state);
                 /*
                  * This is a panic and not an error because we should
                  * not call this method without already verifying the
@@ -6249,37 +6246,6 @@ impl Upstairs {
     }
 
     /*
-     * Move all downstairs to this new state.
-     * XXX This may just go away if we don't need it.
-     */
-    async fn _ds_transition_all(&self, new_state: DsState) {
-        let mut ds = self.downstairs.lock().await;
-
-        ds.ds_state.iter_mut().for_each(|ds_state| {
-            info!(
-                self.log,
-                "Transition from {:?} to {:?}", *ds_state, new_state,
-            );
-            match new_state {
-                DsState::Active => {
-                    // XXX also possible from Repair
-                    assert_eq!(*ds_state, DsState::WaitQuorum);
-                    *ds_state = new_state;
-                }
-                DsState::Deactivated => {
-                    *ds_state = new_state;
-                }
-                _ => {
-                    panic!(
-                        "Unsupported state transition {:?} -> {:?}",
-                        *ds_state, new_state
-                    );
-                }
-            }
-        });
-    }
-
-    /*
      * Store the downstairs UUID, or compare to what we stored before
      * for a given client ID.  Do a sanity check that this downstairs
      * Region Definition matches the other downstairs.  If we don't have
@@ -6408,7 +6374,7 @@ impl Upstairs {
         if ds_state != DsState::Active && ds_state != DsState::Repair {
             warn!(
                 self.log,
-                "[{}] {} WARNING finish job {} when downstairs state:{:?}",
+                "[{}] {} WARNING finish job {} when downstairs state:{}",
                 client_id,
                 self.uuid,
                 ds_id,
@@ -6640,7 +6606,7 @@ enum DsState {
      */
     Disabled,
 }
-impl fmt::Display for DsState {
+impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DsState::New => {

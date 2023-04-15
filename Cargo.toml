@@ -5,7 +5,7 @@ members = [
     "crucible-client-types",
     "common",
     "control-client",
-    "crucadm",
+    "cmon",
     "crudd",
     "crutest",
     "downstairs",
