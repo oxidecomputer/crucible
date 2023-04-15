@@ -2,8 +2,6 @@
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
-use dropshot::ConfigLogging;
-use dropshot::ConfigLoggingLevel;
 use dropshot::HttpError;
 use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
@@ -44,16 +42,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
         tls: None,
     };
 
-    /*
-     * For simplicity, we'll configure an "info"-level logger that writes to
-     * stderr assuming that it's a terminal.
-     */
-    let config_logging = ConfigLogging::StderrTerminal {
-        level: ConfigLoggingLevel::Info,
-    };
-    let log = config_logging
-        .to_logger("example-basic")
-        .map_err(|error| format!("failed to create logger: {}", error))?;
+    let log = up.log.new(o!("task" => "control".to_string()));
 
     /*
      * Build a description of the API.
