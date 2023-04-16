@@ -970,6 +970,8 @@ dependencies = [
  "ringbuffer",
  "serde",
  "serde_json",
+ "signal-hook",
+ "signal-hook-tokio",
  "statistical",
  "tokio",
  "tokio-util 0.7.3",
