@@ -6520,9 +6520,76 @@ impl FlushInfo {
 }
 
 /*
- * States a downstairs can be in.
- * XXX This very much still under development. Most of these are place
- * holders and the final set of states will change.
+ * States of a downstairs
+ *
+ * This shows the different states a downstairs can be in from the point of
+ * view of the upstairs.
+ *
+ * Double line paths can only be taken if an upstairs is active and goes to
+ * deactivated.
+ *
+ *                       │
+ *                       ▼
+ *                       │
+ *                  ┌────┴──────┐
+ *   ┌───────┐      │           ╞═════◄══════════════════╗
+ *   │  Bad  │      │    New    ╞═════◄════════════════╗ ║
+ *   │Version├──◄───┤           ├─────◄──────┐         ║ ║
+ *   └───────┘      └────┬───┬──┘            │         ║ ║
+ *                       ▼   └───►───┐       │         ║ ║
+ *                  ┌────┴──────┐    │       │         ║ ║
+ *                  │   Wait    │    │       │         ║ ║
+ *                  │  Active   ├─►┐ │       │         ║ ║
+ *                  └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
+ *   ┌───────┐      ┌────┴──────┐  │ └──┤            │ ║ ║
+ *   │  Bad  │      │   Wait    │  └────┤Disconnected│ ║ ║
+ *   │Region ├──◄───┤  Quorum   ├──►────┤            │ ║ ║
+ *   └───────┘      └────┬──────┘       └────┬───────┘ ║ ║
+ *               ........▼..........         │         ║ ║
+ *  ┌─────────┐  :  ┌────┴──────┐  :         ▲         ║ ║
+ *  │ Failed  │  :  │  Repair   │  :         │       ╔═╝ ║
+ *  │ Repair  ├─◄───┤           ├──►─────────┘       ║   ║
+ *  └─────────┘  :  └────┬──────┘  :                 ║   ║
+ *  Not Active   :       │         :                 ▲   ▲  Not Active
+ *  .............. . . . │. . . . ...................║...║............
+ *  Active               ▼                           ║   ║  Active
+ *                  ┌────┴──────┐         ┌──────────╨┐  ║
+ *              ┌─►─┤  Active   ├─────►───┤Deactivated│  ║
+ *              │   │           │  ┌──────┤           ├─◄──────┐
+ *              │   └─┬───┬───┬─┘  │      └───────────┘  ║     │
+ *              │     ▼   ▼   ▲    ▲                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   ▲  ┌─┘                     ║     │
+ *              │     │   │ ┌─┴──┴──┐                    ║     │
+ *              │     │   │ │Replay │                    ║     │
+ *              │     │   │ │       ├─►─┐                ║     │
+ *              │     │   │ └─┬──┬──┘   │                ║     │
+ *              │     │   ▼   ▼  ▲      │                ║     │
+ *              │     │   │   │  │      │                ▲     │
+ *              │     │ ┌─┴───┴──┴──┐   │   ┌────────────╨──┐  │
+ *              │     │ │  Offline  │   └─►─┤   Faulted     │  │
+ *              │     │ │           ├─────►─┤               │  │
+ *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
+ *              │     │                       ▲ ▲       ▼ ▲    ▲
+ *              │     └───────────►───────────┘ │       │ │    │
+ *              │                               │       │ │    │
+ *              │                      ┌────────┴─┐   ┌─┴─┴────┴─┐
+ *              └──────────────────────┤   Live   ├─◄─┤  Live    │
+ *                                     │  Repair  │   │  Repair  │
+ *                                     │          │   │  Ready   │
+ *                                     └──────────┘   └──────────┘
+ *
+ *
+ *      The downstairs state can go to Disabled from any other state, as that
+ *      transition happens when a message is received from the actual
+ *      downstairs on the other side of the connection..
+ *      The only path back at that point is for the Upstairs (who will self
+ *      deactivate when it detects this) is to go back to New and through
+ *      the reconcile process.
+ *      ┌───────────┐
+ *      │ Disabled  │
+ *      └───────────┘
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -6554,10 +6621,6 @@ enum DsState {
      * downstairs has to go back through the whole negotiation process.
      */
     Disconnected,
-    /*
-     * Comparing downstairs for consistency.
-     */
-    Verifying,
     /*
      * Initial startup, downstairs are repairing from each other.
      */
@@ -6631,9 +6694,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::Disconnected => {
                 write!(f, "Disconnected")
-            }
-            DsState::Verifying => {
-                write!(f, "Verifying")
             }
             DsState::Repair => {
                 write!(f, "Repair")
