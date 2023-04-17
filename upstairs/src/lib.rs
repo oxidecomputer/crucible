@@ -1449,22 +1449,28 @@ where
                         if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
+                        let active = up.active.lock().await;
+                        let up_state = active.up_state;
+                        let mut ds = up.downstairs.lock().await;
+                        drop(active);
 
-                        let my_state = {
-                            let state = &up.downstairs.lock().await.ds_state;
-                            state[up_coms.client_id as usize]
-                        };
+                        let my_state = ds.ds_state[up_coms.client_id as usize];
                         match my_state {
                             DsState::WaitActive => {
-                                up.ds_transition(
-                                    up_coms.client_id, DsState::WaitQuorum
-                                ).await;
+                                up.ds_transition_with_lock(
+                                    &mut ds,
+                                    up_state,
+                                    up_coms.client_id,
+                                    DsState::WaitQuorum
+                                );
                             }
                             DsState::Faulted => {
-                                up.ds_transition(
+                                up.ds_transition_with_lock(
+                                    &mut ds,
+                                    up_state,
                                     up_coms.client_id,
                                     DsState::LiveRepairReady,
-                                ).await;
+                                );
                             }
                             _ => {
                                 panic!(
@@ -1486,9 +1492,7 @@ where
                             dirty: dirty_bits,
                         };
 
-                        let old_rm = up.downstairs
-                          .lock()
-                          .await
+                        let old_rm = ds
                           .region_metadata
                           .insert(up_coms.client_id, dsr);
 
@@ -1499,6 +1503,7 @@ where
                             old_rm,
                         );
                         negotiated = 5;
+                        drop(ds);
                         //up.ds_state_show().await;
 
                         /*
@@ -7228,9 +7233,76 @@ impl FlushInfo {
 }
 
 /*
- * States a downstairs can be in.
- * XXX This very much still under development. Most of these are place
- * holders and the final set of states will change.
+ * States of a downstairs
+ *
+ * This shows the different states a downstairs can be in from the point of
+ * view of the upstairs.
+ *
+ * Double line paths can only be taken if an upstairs is active and goes to
+ * deactivated.
+ *
+ *                       │
+ *                       ▼
+ *                       │
+ *                  ┌────┴──────┐
+ *   ┌───────┐      │           ╞═════◄══════════════════╗
+ *   │  Bad  │      │    New    ╞═════◄════════════════╗ ║
+ *   │Version├──◄───┤           ├─────◄──────┐         ║ ║
+ *   └───────┘      └────┬───┬──┘            │         ║ ║
+ *                       ▼   └───►───┐       │         ║ ║
+ *                  ┌────┴──────┐    │       │         ║ ║
+ *                  │   Wait    │    │       │         ║ ║
+ *                  │  Active   ├─►┐ │       │         ║ ║
+ *                  └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
+ *   ┌───────┐      ┌────┴──────┐  │ └──┤            │ ║ ║
+ *   │  Bad  │      │   Wait    │  └────┤Disconnected│ ║ ║
+ *   │Region ├──◄───┤  Quorum   ├──►────┤            │ ║ ║
+ *   └───────┘      └────┬──────┘       └────┬───────┘ ║ ║
+ *               ........▼..........         │         ║ ║
+ *  ┌─────────┐  :  ┌────┴──────┐  :         ▲         ║ ║
+ *  │ Failed  │  :  │  Repair   │  :         │       ╔═╝ ║
+ *  │ Repair  ├─◄───┤           ├──►─────────┘       ║   ║
+ *  └─────────┘  :  └────┬──────┘  :                 ║   ║
+ *  Not Active   :       │         :                 ▲   ▲  Not Active
+ *  .............. . . . │. . . . ...................║...║............
+ *  Active               ▼                           ║   ║  Active
+ *                  ┌────┴──────┐         ┌──────────╨┐  ║
+ *              ┌─►─┤  Active   ├─────►───┤Deactivated│  ║
+ *              │   │           │  ┌──────┤           ├─◄──────┐
+ *              │   └─┬───┬───┬─┘  │      └───────────┘  ║     │
+ *              │     ▼   ▼   ▲    ▲                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   ▲  ┌─┘                     ║     │
+ *              │     │   │ ┌─┴──┴──┐                    ║     │
+ *              │     │   │ │Replay │                    ║     │
+ *              │     │   │ │       ├─►─┐                ║     │
+ *              │     │   │ └─┬──┬──┘   │                ║     │
+ *              │     │   ▼   ▼  ▲      │                ║     │
+ *              │     │   │   │  │      │                ▲     │
+ *              │     │ ┌─┴───┴──┴──┐   │   ┌────────────╨──┐  │
+ *              │     │ │  Offline  │   └─►─┤   Faulted     │  │
+ *              │     │ │           ├─────►─┤               │  │
+ *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
+ *              │     │                       ▲ ▲       ▼ ▲    ▲
+ *              │     └───────────►───────────┘ │       │ │    │
+ *              │                               │       │ │    │
+ *              │                      ┌────────┴─┐   ┌─┴─┴────┴─┐
+ *              └──────────────────────┤   Live   ├─◄─┤  Live    │
+ *                                     │  Repair  │   │  Repair  │
+ *                                     │          │   │  Ready   │
+ *                                     └──────────┘   └──────────┘
+ *
+ *
+ *      The downstairs state can go to Disabled from any other state, as that
+ *      transition happens when a message is received from the actual
+ *      downstairs on the other side of the connection..
+ *      The only path back at that point is for the Upstairs (who will self
+ *      deactivate when it detects this) is to go back to New and through
+ *      the reconcile process.
+ *      ┌───────────┐
+ *      │ Disabled  │
+ *      └───────────┘
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -7262,10 +7334,6 @@ enum DsState {
      * downstairs has to go back through the whole negotiation process.
      */
     Disconnected,
-    /*
-     * Comparing downstairs for consistency.
-     */
-    Verifying,
     /*
      * Initial startup, downstairs are repairing from each other.
      */
@@ -7339,9 +7407,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::Disconnected => {
                 write!(f, "Disconnected")
-            }
-            DsState::Verifying => {
-                write!(f, "Verifying")
             }
             DsState::Repair => {
                 write!(f, "Repair")
