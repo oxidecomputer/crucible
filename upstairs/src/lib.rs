@@ -6549,9 +6549,9 @@ impl FlushInfo {
 }
 
 /*
- * States of a downstairs (from the upstairs point of view).
+ * States of a downstairs
  *
- * This shows the different states a downstairs can be in (from the point of
+ * This shows the different states a downstairs can be in from the point of
  * view of the upstairs.
  *
  * Double line paths can only be taken if an upstairs is active and goes to
