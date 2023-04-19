@@ -12,7 +12,7 @@ PORTBASE="$(svcprop -c -p config/portbase "${SMF_FMRI}")"
 DOWNSTAIRS_PREFIX="$(svcprop -c -p config/downstairs_prefix "${SMF_FMRI}")"
 SNAPSHOT_PREFIX="$(svcprop -c -p config/snapshot_prefix "${SMF_FMRI}")"
 
-ipadm show-addr "$DATALINK/linklocal" || ipadm create-addr -t -T addrconf "$DATALINK/linklocal"
+ipadm show-addr "$DATALINK/ll" || ipadm create-addr -t -T addrconf "$DATALINK/ll"
 ipadm show-addr "$DATALINK/omicron6"  || ipadm create-addr -t -T static -a "$LISTEN_ADDR" "$DATALINK/omicron6"
 route get -inet6 default -inet6 "$GATEWAY" || route add -inet6 default -inet6 "$GATEWAY"
 
