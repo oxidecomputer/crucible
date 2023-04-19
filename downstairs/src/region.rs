@@ -3,13 +3,14 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use tokio::sync::{Mutex, MutexGuard};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use futures::TryStreamExt;
+use nix::unistd::{sysconf, SysconfVar};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -19,6 +20,8 @@ use crucible_protocol::{EncryptionContext, SnapshotDetails};
 use repair_client::types::FileType;
 use repair_client::Client;
 
+use std::os::fd::AsRawFd;
+
 use super::*;
 
 #[derive(Debug)]
@@ -27,6 +30,7 @@ pub struct Extent {
     read_only: bool,
     block_size: u64,
     extent_size: Block,
+    iov_max: usize,
     /// Inner contains information about the actual extent file that holds
     /// the data, and the metadata (stored in the database) about that
     /// extent.
@@ -516,6 +520,12 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 }
 
 impl Extent {
+    fn get_iov_max() -> Result<usize> {
+        let i: i64 = sysconf(SysconfVar::IOV_MAX)?
+            .ok_or_else(|| anyhow!("IOV_MAX returned None!"))?;
+        Ok(i.try_into()?)
+    }
+
     /**
      * Open an existing extent file at the location requested.
      * Read in the metadata from the first block of the file.
@@ -613,6 +623,7 @@ impl Extent {
             read_only,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
+            iov_max: Extent::get_iov_max()?,
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
@@ -779,6 +790,7 @@ impl Extent {
             read_only: false,
             block_size: def.block_size(),
             extent_size: def.extent_size(),
+            iov_max: Extent::get_iov_max()?,
             inner: Some(Mutex::new(Inner {
                 file,
                 metadb,
@@ -858,7 +870,7 @@ impl Extent {
         cdt::extent__read__start!(|| {
             (job_id, self.number, requests.len() as u64)
         });
-        let mut inner = self.inner().await;
+        let inner = self.inner().await;
 
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls and sqlite
@@ -876,17 +888,23 @@ impl Extent {
             // contiguous with the request before it. Since we're counting
             // pairs, and the number of pairs is one less than the number of
             // requests, we need to add 1 to get our actual run length.
-            let n_contiguous_requests = requests[req_run_start..]
-                .windows(2)
-                .take_while(|reqs| {
-                    reqs[0].offset.value + 1 == reqs[1].offset.value
-                })
-                .count()
-                + 1;
+            let mut n_contiguous_requests = 1;
+
+            for request_window in requests[req_run_start..].windows(2) {
+                if (request_window[0].offset.value + 1
+                    == request_window[1].offset.value)
+                    && ((n_contiguous_requests + 1) < self.iov_max)
+                {
+                    n_contiguous_requests += 1;
+                } else {
+                    break;
+                }
+            }
 
             // Create our responses and push them into the output. While we're
-            // at it, check for overflows
+            // at it, check for overflows.
             let resp_run_start = responses.len();
+            let mut iovecs = Vec::with_capacity(n_contiguous_requests);
             for req in requests[req_run_start..][..n_contiguous_requests].iter()
             {
                 let resp =
@@ -895,18 +913,25 @@ impl Extent {
                 responses.push(resp);
             }
 
+            // Create what amounts to an iovec for each response data buffer.
+            for resp in
+                &mut responses[resp_run_start..][..n_contiguous_requests]
+            {
+                iovecs.push(IoSliceMut::new(&mut resp.data[..]));
+            }
+
             // Finally we get to read the actual data. That's why we're here
             cdt::extent__read__file__start!(|| {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
-            inner.file.seek(SeekFrom::Start(
-                first_req.offset.value * self.block_size,
-            ))?;
-            let mut read_buffer = BytesMut::with_capacity(
-                n_contiguous_requests * self.block_size as usize,
-            );
-            read_buffer.resize(read_buffer.capacity(), 0);
-            inner.file.read_exact(&mut read_buffer)?;
+
+            nix::sys::uio::preadv(
+                inner.file.as_raw_fd(),
+                &mut iovecs,
+                first_req.offset.value as i64 * self.block_size as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
             cdt::extent__read__file__done!(|| {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
@@ -923,7 +948,7 @@ impl Extent {
                 (job_id, self.number, n_contiguous_requests as u64)
             });
 
-            // Now it's time to put everything into the responses.
+            // Now it's time to put block contexts into the responses.
             // We use into_iter here to move values out of enc_ctxts/hashes,
             // avoiding a clone(). For code consistency, we use iters for the
             // response and data chunks too. These iters will be the same length
@@ -931,20 +956,10 @@ impl Extent {
             let resp_iter =
                 responses[resp_run_start..][..n_contiguous_requests].iter_mut();
             let ctx_iter = block_contexts.into_iter();
-            let data_iter = read_buffer.chunks_exact(self.block_size as usize);
 
-            // We could make this a little cleaner if we pulled in itertools and
-            // used multizip from that, but i don't think it's worth it.
-            for ((resp, r_ctx), r_data) in
-                resp_iter.zip(ctx_iter).zip(data_iter)
-            {
-                // Shove everything into the response
+            for (resp, r_ctx) in resp_iter.zip(ctx_iter) {
                 resp.block_contexts =
                     r_ctx.into_iter().map(|x| x.block_context).collect();
-
-                // XXX if resp.data was Bytes instead of BytesMut we could avoid
-                // a copy here and instead assign it to a frozen subslice.
-                resp.data.copy_from_slice(r_data);
             }
 
             req_run_start += n_contiguous_requests;
@@ -1159,75 +1174,52 @@ impl Extent {
             (job_id, self.number, writes.len() as u64)
         });
 
-        // PERFORMANCE TODO: While sqlite is the bulk of our performance cost
-        // in writes, we're still paying quite the price on small writes
-        // here. It would be nice if we could improve that a bit. An easy win
-        // would be to replace the seek+write with the syscall that does both
-        // in one go. I also wonder whether memory-mapping would be
-        // advantageous here.
+        // PERFORMANCE TODO:
         //
-        // Something else worth considering for small writes is that, based on
+        // Something worth considering for small writes is that, based on
         // my memory of conversations we had with propolis folks about what
         // OSes expect out of an NVMe driver, I believe our contract with the
         // upstairs doesn't require us to have the writes inside the file
         // until after a flush() returns. If that is indeed true, we could
         // buffer a certain amount of writes, only actually writing that
         // buffer when either a flush is issued or the buffer exceeds some
-        // set size(based on our memory constraints). This would have
+        // set size (based on our memory constraints). This would have
         // benefits on any workload that frequently writes to the same block
         // between flushes, would have benefits for small contiguous writes
         // issued over multiple write commands by letting us batch them into
-        // a larger write, and(speculation) may benefit non-contiguous writes
+        // a larger write, and (speculation) may benefit non-contiguous writes
         // by cutting down the number of sqlite transactions. But, it
         // introduces complexity. The time spent implementing that would
         // probably better be spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
             (job_id, self.number, writes.len() as u64)
         });
-        // Buffer writes for fewer syscalls. The 65536 buffer size here is
-        // chosen somewhat arbitrarily.
-        let mut write_buffer = [0u8; 65536];
-        let mut bytes_in_run = 0;
-        let mut next_block_in_run = u64::MAX;
+
+        // Now, batch writes into iovecs and use pwritev to write them all out.
+        let mut batched_pwritev = BatchedPwritev::new(
+            inner.file.as_raw_fd(),
+            writes.len(),
+            self.block_size,
+            self.iov_max,
+        );
+
         for write in writes {
             let block = write.offset.value;
+
             // TODO, can this be `only_write_unwritten &&
             // write_to_skip.contains()`?
             if writes_to_skip.contains(&block) {
                 debug_assert!(only_write_unwritten);
+                batched_pwritev.perform_writes()?;
                 continue;
             }
 
-            // If the current write isn't contiguous with previous writes,
-            // write our buffer to the file and seek. This is also the
-            // avenue by which we seek for the first write.
-            if block != next_block_in_run {
-                if bytes_in_run > 0 {
-                    inner.file.write_all(&write_buffer[..bytes_in_run])?;
-                    bytes_in_run = 0;
-                }
-
-                // Write any buffered data, and then seek
-                inner.file.seek(SeekFrom::Start(block * self.block_size))?;
-            }
-
-            // If the write buffer is full, write out to the file
-            if write_buffer.len() - bytes_in_run < self.block_size as usize {
-                inner.file.write_all(&write_buffer[..bytes_in_run])?;
-                bytes_in_run = 0;
-            }
-
-            write_buffer[bytes_in_run..][..self.block_size as usize]
-                .copy_from_slice(&write.data);
-            bytes_in_run += self.block_size as usize;
-
-            next_block_in_run = block + 1;
+            batched_pwritev.add_write(write)?;
         }
 
-        // Write any remaining buffered data
-        if bytes_in_run > 0 {
-            inner.file.write_all(&write_buffer[..bytes_in_run])?;
-        }
+        // Write any remaining data
+        batched_pwritev.perform_writes()?;
+
         cdt::extent__write__file__done!(|| {
             (job_id, self.number, writes.len() as u64)
         });
@@ -1448,7 +1440,7 @@ impl Extent {
 
         inner.file.seek(SeekFrom::Start(0))?;
 
-        // Buffer the file so we dont spend all day waiting on syscall
+        // Buffer the file so we dont spend all day waiting on syscalls
         let mut inner_file_buffered =
             BufReader::with_capacity(64 * 1024, &inner.file);
 
@@ -1473,8 +1465,6 @@ impl Extent {
         inner.truncate_encryption_contexts_and_hashes(
             extent_block_indexes_and_hashes,
         )?;
-
-        inner.file.seek(SeekFrom::Start(0))?;
 
         // Intentionally not clearing the dirty flag - we want to know that the
         // extent is still considered dirty.
@@ -1920,6 +1910,7 @@ impl Region {
             self.def.extent_count(),
         )
     }
+
     pub fn def(&self) -> RegionDefinition {
         self.def
     }
@@ -2389,6 +2380,108 @@ pub async fn save_stream_to_file(
     Ok(())
 }
 
+struct BatchedPwritevState<'a> {
+    byte_offset: u64,
+    iovecs: Vec<IoSlice<'a>>,
+    next_block_in_run: u64,
+}
+
+struct BatchedPwritev<'a> {
+    fd: std::os::fd::RawFd,
+    capacity: usize,
+    state: Option<BatchedPwritevState<'a>>,
+    block_size: u64,
+    iov_max: usize,
+}
+
+impl<'a> BatchedPwritev<'a> {
+    pub fn new(
+        fd: std::os::fd::RawFd,
+        capacity: usize,
+        block_size: u64,
+        iov_max: usize,
+    ) -> Self {
+        Self {
+            fd,
+            capacity,
+            state: None,
+            block_size,
+            iov_max,
+        }
+    }
+
+    /// Add a write to the batch. If the write would cause the list of iovecs to
+    /// be larger than IOV_MAX, then `perform_writes` is called.
+    pub fn add_write(
+        &mut self,
+        write: &'a crucible_protocol::Write,
+    ) -> Result<(), CrucibleError> {
+        let block = write.offset.value;
+
+        let should_perform_writes = if let Some(state) = &self.state {
+            // Is this write contiguous with the last?
+            if block == state.next_block_in_run {
+                // If so, then add it to the list. Make sure to flush if the
+                // total size would become larger than IOV_MAX.
+                (state.iovecs.len() + 1) >= self.iov_max
+            } else {
+                // If not, then flush, and start the state all over.
+                true
+            }
+        } else {
+            false
+        };
+
+        if should_perform_writes {
+            self.perform_writes()?;
+        }
+
+        // If perform_writes was called above, then state will be None. If
+        // perform_writes was not called, then:
+        //
+        // - block == state.next_block_in_run, and
+        // - (state.iovecs.len() + 1) <= self.iov_max
+        //
+        // hence the assertion below.
+        if let Some(state) = &mut self.state {
+            assert_eq!(block, state.next_block_in_run);
+            state.iovecs.push(IoSlice::new(&write.data));
+            state.next_block_in_run += 1;
+        } else {
+            // start fresh
+            self.state = Some(BatchedPwritevState {
+                byte_offset: write.offset.value * self.block_size,
+                iovecs: {
+                    let mut iovecs = Vec::with_capacity(self.capacity);
+                    iovecs.push(IoSlice::new(&write.data));
+                    iovecs
+                },
+                next_block_in_run: block + 1,
+            });
+        }
+
+        Ok(())
+    }
+
+    // Write bytes out to file target
+    pub fn perform_writes(&mut self) -> Result<(), CrucibleError> {
+        if let Some(state) = &mut self.state {
+            assert!(!state.iovecs.is_empty());
+
+            nix::sys::uio::pwritev(
+                self.fd,
+                &state.iovecs[..],
+                state.byte_offset as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
+            self.state = None;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::fs::rename;
@@ -2425,6 +2518,7 @@ mod test {
             read_only: false,
             block_size: 512,
             extent_size: Block::new_512(100),
+            iov_max: Extent::get_iov_max().unwrap(),
             inner: Some(Mutex::new(inn)),
         }
     }
@@ -3623,6 +3717,7 @@ mod test {
             read_from_files.append(&mut data);
         }
 
+        assert_eq!(buffer.len(), read_from_files.len());
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
@@ -3646,6 +3741,7 @@ mod test {
             read_from_region.append(&mut response.data.to_vec());
         }
 
+        assert_eq!(buffer.len(), read_from_region.len());
         assert_eq!(buffer, read_from_region);
 
         Ok(())
@@ -5203,5 +5299,434 @@ mod test {
         assert_eq!(responses[0].data[..], [0u8; 512][..]);
 
         Ok(())
+    }
+
+    async fn prepare_random_region(
+    ) -> Result<(tempfile::TempDir, Region, Vec<u8>)> {
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let ddef = region.def();
+        let total_size = ddef.total_size() as usize;
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // Write in random data
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = vec![0; total_size];
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid: u64 = i as u64 / ddef.extent_size().value;
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
+            let data = data.freeze();
+            let hash = integrity_hash(&[&data[..]]);
+
+            writes.push(crucible_protocol::Write {
+                eid,
+                offset,
+                data,
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            });
+        }
+
+        region.region_write(&writes, 0, false).await?;
+
+        Ok((dir, region, buffer))
+    }
+
+    #[tokio::test]
+    async fn test_read_single_large_contiguous() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a single large contiguous range
+        let requests: Vec<crucible::ReadRequest> = (1..8)
+            .map(|i| crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(i),
+            })
+            .collect();
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &data[512..(8 * 512)],
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_single_large_contiguous_span_extents() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a single large contiguous range that spans
+        // multiple extents
+        let requests: Vec<crucible::ReadRequest> = (9..28)
+            .map(|i| crucible_protocol::ReadRequest {
+                eid: i / 10,
+                offset: Block::new_512(i % 10),
+            })
+            .collect();
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &data[(9 * 512)..(28 * 512)],
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_multiple_disjoint_large_contiguous() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a multiple disjoint large contiguous ranges
+        let requests: Vec<crucible::ReadRequest> = vec![
+            (1..4)
+                .map(|i| crucible_protocol::ReadRequest {
+                    eid: i / 10,
+                    offset: Block::new_512(i % 10),
+                })
+                .collect::<Vec<crucible::ReadRequest>>(),
+            (15..24)
+                .map(|i| crucible_protocol::ReadRequest {
+                    eid: i / 10,
+                    offset: Block::new_512(i % 10),
+                })
+                .collect::<Vec<crucible::ReadRequest>>(),
+            (27..28)
+                .map(|i| crucible_protocol::ReadRequest {
+                    eid: i / 10,
+                    offset: Block::new_512(i % 10),
+                })
+                .collect::<Vec<crucible::ReadRequest>>(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &[
+                &data[512..(4 * 512)],
+                &data[(15 * 512)..(24 * 512)],
+                &data[(27 * 512)..(28 * 512)],
+            ]
+            .concat(),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_multiple_disjoint_none_contiguous() -> Result<()> {
+        let (_dir, region, data) = prepare_random_region().await?;
+
+        // Call region_read with a multiple disjoint non-contiguous ranges
+        let requests: Vec<crucible::ReadRequest> = vec![
+            crucible_protocol::ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            },
+            crucible_protocol::ReadRequest {
+                eid: 1,
+                offset: Block::new_512(4),
+            },
+            crucible_protocol::ReadRequest {
+                eid: 1,
+                offset: Block::new_512(9),
+            },
+            crucible_protocol::ReadRequest {
+                eid: 2,
+                offset: Block::new_512(4),
+            },
+        ];
+
+        let responses = region.region_read(&requests, 0).await?;
+
+        // Validate returned data
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &[
+                &data[0..512],
+                &data[(14 * 512)..(15 * 512)],
+                &data[(19 * 512)..(20 * 512)],
+                &data[(24 * 512)..(25 * 512)],
+            ]
+            .concat(),
+        );
+
+        Ok(())
+    }
+
+    fn prepare_writes(
+        offsets: std::ops::Range<usize>,
+        data: &mut [u8],
+    ) -> Vec<crucible_protocol::Write> {
+        let mut writes: Vec<crucible_protocol::Write> =
+            Vec::with_capacity(offsets.len());
+        let mut rng = rand::thread_rng();
+
+        for i in offsets {
+            let mut buffer: Vec<u8> = vec![0; 512];
+            rng.fill_bytes(&mut buffer);
+
+            // alter data as writes are prepared
+            data[(i * 512)..((i + 1) * 512)].copy_from_slice(&buffer[..]);
+
+            let hash = integrity_hash(&[&buffer]);
+
+            writes.push(crucible_protocol::Write {
+                eid: (i as u64) / 10,
+                offset: Block::new_512((i as u64) % 10),
+                data: Bytes::from(buffer),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            });
+        }
+
+        assert!(!writes.is_empty());
+
+        writes
+    }
+
+    async fn validate_whole_region(region: &Region, data: &[u8]) -> Result<()> {
+        let num_blocks = region.def().extent_size().value
+            * region.def().extent_count() as u64;
+
+        let requests: Vec<crucible_protocol::ReadRequest> = (0..num_blocks)
+            .map(|i| crucible_protocol::ReadRequest {
+                eid: i / 10,
+                offset: Block::new_512(i % 10),
+            })
+            .collect();
+
+        let responses = region.region_read(&requests, 1).await?;
+
+        assert_eq!(
+            &responses
+                .iter()
+                .flat_map(|resp| resp.data.to_vec())
+                .collect::<Vec<u8>>(),
+            &data,
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_single_large_contiguous() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a single large contiguous range
+        let writes = prepare_writes(1..8, &mut data);
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_single_large_contiguous_span_extents() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a single large contiguous range that spans
+        // multiple extents
+        let writes = prepare_writes(9..28, &mut data);
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_multiple_disjoint_large_contiguous() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a multiple disjoint large contiguous ranges
+        let writes = vec![
+            prepare_writes(1..4, &mut data),
+            prepare_writes(15..24, &mut data),
+            prepare_writes(27..28, &mut data),
+        ]
+        .concat();
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_multiple_disjoint_none_contiguous() -> Result<()> {
+        let (_dir, region, mut data) = prepare_random_region().await?;
+
+        // Call region_write with a multiple disjoint non-contiguous ranges
+        let writes = vec![
+            prepare_writes(0..1, &mut data),
+            prepare_writes(14..15, &mut data),
+            prepare_writes(19..20, &mut data),
+            prepare_writes(24..25, &mut data),
+        ]
+        .concat();
+
+        region.region_write(&writes, 0, false).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_single_large_contiguous() -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a single large contiguous range
+        let writes = prepare_writes(1..8, &mut data);
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_single_large_contiguous_span_extents(
+    ) -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a single large contiguous range that spans
+        // multiple extents
+        let writes = prepare_writes(9..28, &mut data);
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_multiple_disjoint_large_contiguous(
+    ) -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a multiple disjoint large contiguous ranges
+        let writes = vec![
+            prepare_writes(1..4, &mut data),
+            prepare_writes(15..24, &mut data),
+            prepare_writes(27..28, &mut data),
+        ]
+        .concat();
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
+    }
+
+    #[tokio::test]
+    async fn test_write_unwritten_multiple_disjoint_none_contiguous(
+    ) -> Result<()> {
+        // Create a blank region
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+
+        // Create 3 extents, each size 10 blocks
+        assert_eq!(region.def().extent_size().value, 10);
+        region.extend(3).await?;
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+
+        // Call region_write with a multiple disjoint non-contiguous ranges
+        let writes = vec![
+            prepare_writes(0..1, &mut data),
+            prepare_writes(14..15, &mut data),
+            prepare_writes(19..20, &mut data),
+            prepare_writes(24..25, &mut data),
+        ]
+        .concat();
+
+        // write_unwritten = true
+        region.region_write(&writes, 0, true).await?;
+
+        // Validate written data by reading everything back and comparing with
+        // data buffer
+        validate_whole_region(&region, &data).await
     }
 }

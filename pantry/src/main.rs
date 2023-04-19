@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
             let (log, pantry) = initialize_pantry().await?;
 
             let (_, join_handle) =
-                server::run_server(&log, listen, pantry).await?;
+                server::run_server(&log, listen, &pantry).await?;
 
             join_handle.await?.map_err(|e| anyhow!(e))
         }

@@ -117,8 +117,13 @@ pub struct Opt {
     lossy: bool,
 
     ///  quit after all crucible work queues are empty.
-    #[clap(short, global = true, long, action)]
+    #[clap(short, global = true, long, action, conflicts_with = "stable")]
     quit: bool,
+
+    /// Quit only after all crucible work queues are empty and all downstairs
+    /// are reporting active.
+    #[clap(global = true, long, action, conflicts_with = "quit")]
+    stable: bool,
 
     #[clap(short, global = true, long, action)]
     key: Option<String>,
@@ -895,9 +900,18 @@ async fn main() -> Result<()> {
     println!("CLIENT: Tests done.  All submitted work has been ACK'd");
     loop {
         let wc = guest.show_work().await?;
-        println!("CLIENT: Up:{} ds:{}", wc.up_count, wc.ds_count);
+        println!(
+            "CLIENT: Up:{} ds:{} act:{}",
+            wc.up_count, wc.ds_count, wc.active_count
+        );
         if opt.quit && wc.up_count + wc.ds_count == 0 {
             println!("CLIENT: All crucible jobs finished, exiting program");
+            return Ok(());
+        } else if opt.stable
+            && wc.up_count + wc.ds_count == 0
+            && wc.active_count == 3
+        {
+            println!("CLIENT: All jobs finished, all DS active.");
             return Ok(());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -1271,12 +1285,14 @@ async fn generic_workload(
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
     let count_width = count.to_string().len();
+    let block_width = ri.total_blocks.to_string().len();
+    let size_width = (10 * ri.block_size).to_string().len();
     for c in 1..=count {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
             println!(
-                "{:>0width$}/{:>0width$} FLUSH",
+                "{:>0width$}/{:>0width$} Flush",
                 c,
                 count,
                 width = count_width,
@@ -1308,14 +1324,22 @@ async fn generic_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                println!(
-                    "{:>0width$}/{:>0width$} WRITE {}:{}",
+                print!(
+                    "{:>0width$}/{:>0width$} Write \
+                    block {:>bw$}  len {:>sw$}  data:",
                     c,
                     count,
                     offset.value,
                     data.len(),
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
+                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                for i in 0..size {
+                    print!("{:>3} ", ri.write_log.get_seed(block_index + i));
+                }
+                println!();
                 guest.write(offset, data).await?;
             } else {
                 // Read (+ verify)
@@ -1323,12 +1347,15 @@ async fn generic_workload(
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
                 println!(
-                    "{:>0width$}/{:>0width$} READ  {}:{}",
+                    "{:>0width$}/{:>0width$} Read  \
+                    block {:>bw$}  len {:>sw$}",
                     c,
                     count,
                     offset.value,
                     data.len(),
                     width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
                 guest.read(offset, data.clone()).await?;
 
@@ -2171,6 +2198,7 @@ async fn demo_workload(
     let mut wc = WQCounts {
         up_count: 0,
         ds_count: 0,
+        active_count: 0,
     };
     println!(
         "Submit work and wait for {} jobs to finish",

@@ -11,12 +11,15 @@ mod test {
     use crucible::{Bytes, *};
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
+    use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
+    use sha2::Digest;
     use slog::{o, Drain, Logger};
     use tempfile::*;
+    use tokio::sync::mpsc;
     use uuid::*;
 
     // Create a simple logger
@@ -2644,25 +2647,28 @@ mod test {
 
     // The following tests are for the Pantry
 
-    #[tokio::test]
-    async fn test_pantry_import_from_url_ovmf() {
+    /// Given a &TestDownstairsSet, spawn a Pantry, attach a
+    /// CruciblePantryClient, and return both plus the Volume ID.
+    async fn get_pantry_and_client_for_tds(
+        tds: &TestDownstairsSet,
+    ) -> (Arc<Pantry>, Uuid, CruciblePantryClient) {
         const BLOCK_SIZE: usize = 512;
 
-        // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::big(false).await.unwrap();
-        let opts = tds.opts();
+        // Start a new pantry
 
-        // Start the pantry
         let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
         let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
-            pantry,
+            &pantry,
         )
         .await
         .unwrap();
 
+        // Create a Volume out of it, and attach a CruciblePantryClient
+
         let volume_id = Uuid::new_v4();
+        let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -2700,6 +2706,21 @@ mod test {
             .await
             .unwrap();
 
+        (pantry, volume_id, client)
+    }
+
+    #[tokio::test]
+    async fn test_pantry_import_from_url_ovmf() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, and get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
         let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
 
@@ -2730,7 +2751,8 @@ mod test {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
-        client.job_result_ok(&response.job_id).await.unwrap();
+        let result = client.job_result_ok(&response.job_id).await.unwrap();
+        assert!(result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
 
@@ -2793,55 +2815,10 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
-        let opts = tds.opts();
 
-        // Start the pantry
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, and get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
 
@@ -2873,7 +2850,8 @@ mod test {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
-        assert!(client.job_result_ok(&response.job_id).await.is_err());
+        let result = client.job_result_ok(&response.job_id).await.unwrap();
+        assert!(!result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
     }
@@ -2938,51 +2916,9 @@ mod test {
             drop(volume);
         }
 
-        // Start the pantry, then use it to import img.raw
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
-                read_only_parent: None,
-            };
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, and get the client for it, then use it to import img.raw
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let response = client
             .import_from_url(
@@ -2996,7 +2932,8 @@ mod test {
             .unwrap();
 
         // Test not polling here
-        client.job_result_ok(&response.job_id).await.unwrap();
+        let result = client.job_result_ok(&response.job_id).await.unwrap();
+        assert!(result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
 
@@ -3034,56 +2971,10 @@ mod test {
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
-        let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to snapshot
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to snapshot
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         client
             .snapshot(
@@ -3107,54 +2998,9 @@ mod test {
         let tds = TestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         for i in 0..10 {
             client
@@ -3214,54 +3060,9 @@ mod test {
         let tds = TestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
-        let volume_id = Uuid::new_v4();
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
-
-        // Start the pantry, then use it to bulk_write in data
-
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
-            &log,
-            "127.0.0.1:0".parse().unwrap(),
-            pantry,
-        )
-        .await
-        .unwrap();
-
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
-
-        client
-            .attach(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::AttachRequest {
-                    // the type here is
-                    // crucible_pantry_client::types::VolumeConstructionRequest,
-                    // not
-                    // crucible::VolumeConstructionRequest, but they are the
-                    // same thing! take a trip through JSON
-                    // to get to the right type
-                    volume_construction_request: serde_json::from_str(
-                        &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            )
-            .await
-            .unwrap();
+        // Start a pantry, get the client for it, then use it to bulk_write in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
 
         let base64_encoded_data = engine::general_purpose::STANDARD.encode(
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
@@ -3395,7 +3196,7 @@ mod test {
         let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
-            pantry,
+            &pantry,
         )
         .await
         .unwrap();
@@ -3446,7 +3247,8 @@ mod test {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
-        client.job_result_ok(&response.job_id).await.unwrap();
+        let result = client.job_result_ok(&response.job_id).await.unwrap();
+        assert!(result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
 
@@ -3478,5 +3280,270 @@ mod test {
             .unwrap();
 
         assert_eq!(data, *buffer.as_vec().await);
+    }
+
+    #[tokio::test]
+    async fn test_pantry_bulk_read() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it, then use it to bulk_write then
+        // bulk_read in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // first, bulk_write some data in
+
+        for i in 0..10 {
+            client
+                .bulk_write(
+                    &volume_id.to_string(),
+                    &crucible_pantry_client::types::BulkWriteRequest {
+                        offset: i * 512,
+                        base64_encoded_data: engine::general_purpose::STANDARD
+                            .encode(vec![i as u8; 512]),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        // then bulk_read it out
+
+        for i in 0..10 {
+            let data = client
+                .bulk_read(
+                    &volume_id.to_string(),
+                    &crucible_pantry_client::types::BulkReadRequest {
+                        offset: i * 512,
+                        size: 512,
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                data.base64_encoded_data,
+                engine::general_purpose::STANDARD.encode(vec![i as u8; 512]),
+            );
+        }
+
+        // perform one giant bulk_read
+
+        let data = client
+            .bulk_read(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkReadRequest {
+                    offset: 0,
+                    size: 512 * 10,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            data.base64_encoded_data,
+            engine::general_purpose::STANDARD.encode(
+                [
+                    vec![0_u8; 512],
+                    vec![1_u8; 512],
+                    vec![2_u8; 512],
+                    vec![3_u8; 512],
+                    vec![4_u8; 512],
+                    vec![5_u8; 512],
+                    vec![6_u8; 512],
+                    vec![7_u8; 512],
+                    vec![8_u8; 512],
+                    vec![9_u8; 512],
+                ]
+                .concat()
+            ),
+        );
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pantry_bulk_read_max_chunk_size() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::big(false).await.unwrap();
+
+        // Start a pantry, get the client for it, then use it to bulk_write in
+        // data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // bulk write in a bunch of data
+
+        let base64_encoded_data = engine::general_purpose::STANDARD.encode(
+            vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
+        );
+
+        client
+            .bulk_write(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkWriteRequest {
+                    offset: 0,
+                    base64_encoded_data,
+                },
+            )
+            .await
+            .unwrap();
+
+        // then, bulk read it out
+
+        let data = client
+            .bulk_read(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkReadRequest {
+                    offset: 0,
+                    size: crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE
+                        as u32,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            data.base64_encoded_data,
+            engine::general_purpose::STANDARD.encode(vec![
+                    0x99;
+                    crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE
+                ],),
+        );
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pantry_validate() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it, then use it to bulk_write in
+        // data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // parallel bulk write in a bunch of random data in a random order
+
+        const THREADS: usize = 10;
+        const CHUNK_SIZE: usize = 512;
+
+        let total_size = tds.blocks_per_extent() as usize
+            * tds.extent_count() as usize
+            * BLOCK_SIZE;
+
+        assert_eq!(total_size % CHUNK_SIZE, 0);
+        assert_eq!((total_size / CHUNK_SIZE) % THREADS, 0);
+
+        let mut handles = Vec::with_capacity(THREADS);
+        let mut senders = Vec::with_capacity(THREADS);
+
+        for _i in 0..THREADS {
+            let (tx, mut rx) = mpsc::channel(100);
+            let client = client.clone();
+
+            handles.push(tokio::spawn(async move {
+                while let Some((offset, base64_encoded_data)) = rx.recv().await
+                {
+                    client
+                        .bulk_write(
+                            &volume_id.to_string(),
+                            &crucible_pantry_client::types::BulkWriteRequest {
+                                offset,
+                                base64_encoded_data,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }));
+
+            senders.push(tx);
+        }
+
+        for i in 0..(total_size / CHUNK_SIZE) {
+            let mut data = vec![0u8; CHUNK_SIZE];
+            rand::thread_rng().fill(&mut data[..]);
+            let base64_encoded_data =
+                engine::general_purpose::STANDARD.encode(&data);
+
+            senders[i % THREADS]
+                .send(((i * CHUNK_SIZE) as u64, base64_encoded_data))
+                .await
+                .unwrap();
+        }
+
+        for sender in senders {
+            drop(sender);
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // then, bulk read it out
+        let mut buffer = Vec::with_capacity(total_size);
+
+        for i in 0..(total_size / CHUNK_SIZE) {
+            let response = client
+                .bulk_read(
+                    &volume_id.to_string(),
+                    &crucible_pantry_client::types::BulkReadRequest {
+                        offset: (i * CHUNK_SIZE) as u64,
+                        size: CHUNK_SIZE as u32,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let mut data = engine::general_purpose::STANDARD
+                .decode(&response.base64_encoded_data)
+                .unwrap();
+
+            buffer.append(&mut data);
+        }
+
+        // sha256 here, then send digest to validate function
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&*buffer.to_vec());
+        let digest = hex::encode(hasher.finalize());
+
+        let response = client
+            .validate(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::ValidateRequest {
+                    expected_digest:
+                        crucible_pantry_client::types::ExpectedDigest::Sha256(
+                            digest.to_string(),
+                        ),
+                },
+            )
+            .await
+            .unwrap();
+
+        while !client
+            .is_job_finished(&response.job_id)
+            .await
+            .unwrap()
+            .job_is_finished
+        {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        let response = client.job_result_ok(&response.job_id).await.unwrap();
+        assert!(response.job_result_ok);
+
+        client.detach(&volume_id.to_string()).await.unwrap();
     }
 }

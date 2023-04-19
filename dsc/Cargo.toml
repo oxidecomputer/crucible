@@ -6,17 +6,17 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-byte-unit = "4.0.18"
-clap = { version = "4.1", features = ["derive", "env"] }
-csv = "1.1.6"
+byte-unit = "4.0.19"
+clap = { version = "4.1", features = ["derive", "env", "wrap_help"] }
+csv = "1.2.1"
 dsc-client = { path = "../dsc-client" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 rand = "0.8.5"
 rand_chacha = "0.3.1"
-schemars = { version = "0.8.11", features = [ "uuid" ] }
+schemars = { version = "0.8.12", features = [ "uuid" ] }
 serde = { version = "1", features = ["derive"] }
 statistical = "1.0.0"
-tokio = { version = "1.25.0", features = ["full"] }
+tokio = { version = "1.27.0", features = ["full"] }
 
 [dev-dependencies]
 expectorate = "1.0.6"

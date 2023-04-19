@@ -162,9 +162,9 @@ impl PantryEntry {
     pub async fn bulk_write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
         if data.len() > Self::MAX_CHUNK_SIZE {
             bail!(
-                "data len {} over max chunk size{}!",
+                "data len {} over max chunk size {}!",
                 data.len(),
-                Self::MAX_CHUNK_SIZE
+                Self::MAX_CHUNK_SIZE,
             );
         }
 
@@ -175,8 +175,67 @@ impl PantryEntry {
         Ok(())
     }
 
+    pub async fn bulk_read(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
+        if size > Self::MAX_CHUNK_SIZE {
+            bail!(
+                "request len {} over max chunk size {}!",
+                size,
+                Self::MAX_CHUNK_SIZE,
+            );
+        }
+
+        let buffer = crucible::Buffer::new(size);
+
+        self.volume
+            .read_from_byte_offset(offset, buffer.clone())
+            .await?;
+
+        let response = buffer.as_vec().await;
+        Ok(response.clone())
+    }
+
     pub async fn scrub(&self, log: &Logger) -> Result<()> {
         self.volume.scrub(log, None, None).await?;
+        Ok(())
+    }
+
+    pub async fn validate(
+        &self,
+        expected_digest: ExpectedDigest,
+    ) -> Result<()> {
+        let mut hasher = match expected_digest {
+            ExpectedDigest::Sha256(_) => Sha256::new(),
+        };
+
+        let total_size = self.volume.total_size().await? as usize;
+
+        for chunk in (0..total_size).step_by(Self::MAX_CHUNK_SIZE) {
+            let start = chunk;
+            let end = std::cmp::min(start + Self::MAX_CHUNK_SIZE, total_size);
+
+            let data = crucible::Buffer::new(end - start);
+
+            self.volume
+                .read_from_byte_offset(start as u64, data.clone())
+                .await?;
+
+            hasher.update(&*data.as_vec().await);
+        }
+
+        let digest = hex::encode(hasher.finalize());
+
+        match expected_digest {
+            ExpectedDigest::Sha256(expected_digest) => {
+                if expected_digest != digest {
+                    bail!(
+                        "sha256 digest mismatch! expected {}, saw {}",
+                        expected_digest,
+                        digest,
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -194,7 +253,7 @@ pub struct Pantry {
     /// Store a Volume Construction Request and Volume, indexed by id. Use this
     /// Mutex -> Arc<Mutex> structure in order for multiple requests to act on
     /// multiple PantryEntry objects at the same time.
-    entries: Mutex<BTreeMap<String, Arc<Mutex<PantryEntry>>>>,
+    entries: Mutex<BTreeMap<String, Arc<PantryEntry>>>,
 
     /// Pantry can run background jobs on Volumes, and currently running jobs
     /// are stored here.
@@ -217,8 +276,6 @@ impl Pantry {
     ) -> Result<()> {
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get(&volume_id) {
-            let entry = entry.lock().await;
-
             // This function must be idempotent for the same inputs. If an entry
             // at this ID exists already, compare the existing volume
             // construction request, and return either Ok or conflict
@@ -266,10 +323,10 @@ impl Pantry {
 
         entries.insert(
             volume_id.clone(),
-            Arc::new(Mutex::new(PantryEntry {
+            Arc::new(PantryEntry {
                 volume,
                 volume_construction_request,
-            })),
+            }),
         );
 
         info!(self.log, "volume {} constructed and inserted ok", volume_id);
@@ -280,7 +337,7 @@ impl Pantry {
     pub async fn entry(
         &self,
         volume_id: String,
-    ) -> Result<Arc<Mutex<PantryEntry>>, HttpError> {
+    ) -> Result<Arc<PantryEntry>, HttpError> {
         let entries = self.entries.lock().await;
         match entries.get(&volume_id) {
             Some(entry) => {
@@ -349,11 +406,7 @@ impl Pantry {
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move {
-            entry
-                .lock()
-                .await
-                .import_from_url(url, expected_digest)
-                .await
+            entry.import_from_url(url, expected_digest).await
         });
 
         let mut jobs = self.jobs.lock().await;
@@ -370,8 +423,6 @@ impl Pantry {
     ) -> Result<(), HttpError> {
         let entry = self.entry(volume_id).await?;
         entry
-            .lock()
-            .await
             .snapshot(snapshot_id)
             .await
             .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
@@ -387,8 +438,6 @@ impl Pantry {
     ) -> Result<(), HttpError> {
         let entry = self.entry(volume_id).await?;
         entry
-            .lock()
-            .await
             .bulk_write(offset, data)
             .await
             .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
@@ -396,13 +445,45 @@ impl Pantry {
         Ok(())
     }
 
+    pub async fn bulk_read(
+        &self,
+        volume_id: String,
+        offset: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, HttpError> {
+        let entry = self.entry(volume_id).await?;
+        let response = entry
+            .bulk_read(offset, size)
+            .await
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+        Ok(response)
+    }
+
     pub async fn scrub(&self, volume_id: String) -> Result<String, HttpError> {
         let entry = self.entry(volume_id).await?;
         let entry = entry.clone();
         let log = self.log.clone();
 
+        let join_handle = tokio::spawn(async move { entry.scrub(&log).await });
+
+        let mut jobs = self.jobs.lock().await;
+        let job_id = Uuid::new_v4().to_string();
+        jobs.insert(job_id.clone(), join_handle);
+
+        Ok(job_id)
+    }
+
+    pub async fn validate(
+        &self,
+        volume_id: String,
+        expected_digest: ExpectedDigest,
+    ) -> Result<String, HttpError> {
+        let entry = self.entry(volume_id).await?;
+        let entry = entry.clone();
+
         let join_handle =
-            tokio::spawn(async move { entry.lock().await.scrub(&log).await });
+            tokio::spawn(async move { entry.validate(expected_digest).await });
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
@@ -419,8 +500,7 @@ impl Pantry {
         info!(self.log, "detach removing entry for volume {}", volume_id);
 
         match entries.remove(&volume_id) {
-            Some(guard) => {
-                let entry = guard.lock().await;
+            Some(entry) => {
                 info!(self.log, "detaching volume {}", volume_id);
                 entry.detach().await?;
                 drop(entry);
