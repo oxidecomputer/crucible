@@ -14,7 +14,7 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='/opt/oxide/crucible/bin/agent_method_script.sh'
+    exec='/opt/oxide/lib/svc/manifest/crucible/agent.sh'
     timeout_seconds='30'
     />
 
