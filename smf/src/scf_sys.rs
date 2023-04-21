@@ -938,7 +938,7 @@ mod dummy {
     ) -> c_int {
         unimplemented!()
     }
-    pub fn smf_refresh_instance(instance: *const c_char) -> c_int {
+    pub unsafe fn smf_refresh_instance(instance: *const c_char) -> c_int {
         unimplemented!()
     }
 

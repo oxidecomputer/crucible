@@ -255,6 +255,7 @@ pub async fn join_all<'a>(
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
+    fn ds__ping__sent(_: u64, _: u64) {}
     fn volume__read__start(_: u32, _: Uuid) {}
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}
@@ -1291,22 +1292,28 @@ where
                         if negotiated != 4 {
                             bail!("Received ExtentVersions out of order!");
                         }
+                        let active = up.active.lock().await;
+                        let up_state = active.up_state;
+                        let mut ds = up.downstairs.lock().await;
+                        drop(active);
 
-                        let my_state = {
-                            let state = &up.downstairs.lock().await.ds_state;
-                            state[up_coms.client_id as usize]
-                        };
+                        let my_state = ds.ds_state[up_coms.client_id as usize];
                         match my_state {
                             DsState::WaitActive => {
-                                up.ds_transition(
-                                    up_coms.client_id, DsState::WaitQuorum
-                                ).await;
+                                up.ds_transition_with_lock(
+                                    &mut ds,
+                                    up_state,
+                                    up_coms.client_id,
+                                    DsState::WaitQuorum
+                                );
                             }
                             DsState::Faulted => {
-                                up.ds_transition(
+                                up.ds_transition_with_lock(
+                                    &mut ds,
+                                    up_state,
                                     up_coms.client_id,
                                     DsState::OnlineRepairReady,
-                                ).await;
+                                );
                             }
                             _ => {
                                 panic!(
@@ -1328,9 +1335,7 @@ where
                             dirty: dirty_bits,
                         };
 
-                        let old_rm = up.downstairs
-                          .lock()
-                          .await
+                        let old_rm = ds
                           .region_metadata
                           .insert(up_coms.client_id, dsr);
 
@@ -1341,6 +1346,7 @@ where
                             old_rm,
                         );
                         negotiated = 5;
+                        drop(ds);
                         //up.ds_state_show().await;
 
                         /*
@@ -1544,6 +1550,7 @@ where
     let mut more_work_interval = deadline_secs(1);
     let mut ping_interval = deadline_secs(10);
     let mut timeout_deadline = deadline_secs(50);
+    let mut ping_count = 0;
 
     /*
      * We create a task that handles messages from the downstairs (usually
@@ -1779,6 +1786,8 @@ where
                  * been idle for (TBD) seconds.
                  */
                 fw.send(Message::Ruok).await?;
+                ping_count += 1;
+                cdt::ds__ping__sent!(|| (ping_count, up_coms.client_id as u64));
 
                 if up.lossy {
                     /*
@@ -2239,6 +2248,7 @@ async fn looper(
 ) {
     let mut firstgo = true;
     let mut connected = false;
+    let mut notify = 0;
 
     let log = up.log.new(o!("looper" => up_coms.client_id.to_string()));
     'outer: loop {
@@ -2264,7 +2274,10 @@ async fn looper(
         /*
          * Set a connect timeout, and connect to the target:
          */
-        info!(log, "[{1}] connecting to {0}", target, up_coms.client_id);
+        if notify == 0 {
+            info!(log, "[{1}] connecting to {0}", target, up_coms.client_id);
+        }
+        notify = (notify + 1) % 10;
         let deadline = tokio::time::sleep_until(deadline_secs(10));
         tokio::pin!(deadline);
         let tcp = sock.connect(target);
@@ -6515,9 +6528,76 @@ impl FlushInfo {
 }
 
 /*
- * States a downstairs can be in.
- * XXX This very much still under development. Most of these are place
- * holders and the final set of states will change.
+ * States of a downstairs
+ *
+ * This shows the different states a downstairs can be in from the point of
+ * view of the upstairs.
+ *
+ * Double line paths can only be taken if an upstairs is active and goes to
+ * deactivated.
+ *
+ *                       │
+ *                       ▼
+ *                       │
+ *                  ┌────┴──────┐
+ *   ┌───────┐      │           ╞═════◄══════════════════╗
+ *   │  Bad  │      │    New    ╞═════◄════════════════╗ ║
+ *   │Version├──◄───┤           ├─────◄──────┐         ║ ║
+ *   └───────┘      └────┬───┬──┘            │         ║ ║
+ *                       ▼   └───►───┐       │         ║ ║
+ *                  ┌────┴──────┐    │       │         ║ ║
+ *                  │   Wait    │    │       │         ║ ║
+ *                  │  Active   ├─►┐ │       │         ║ ║
+ *                  └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
+ *   ┌───────┐      ┌────┴──────┐  │ └──┤            │ ║ ║
+ *   │  Bad  │      │   Wait    │  └────┤Disconnected│ ║ ║
+ *   │Region ├──◄───┤  Quorum   ├──►────┤            │ ║ ║
+ *   └───────┘      └────┬──────┘       └────┬───────┘ ║ ║
+ *               ........▼..........         │         ║ ║
+ *  ┌─────────┐  :  ┌────┴──────┐  :         ▲         ║ ║
+ *  │ Failed  │  :  │  Repair   │  :         │       ╔═╝ ║
+ *  │ Repair  ├─◄───┤           ├──►─────────┘       ║   ║
+ *  └─────────┘  :  └────┬──────┘  :                 ║   ║
+ *  Not Active   :       │         :                 ▲   ▲  Not Active
+ *  .............. . . . │. . . . ...................║...║............
+ *  Active               ▼                           ║   ║  Active
+ *                  ┌────┴──────┐         ┌──────────╨┐  ║
+ *              ┌─►─┤  Active   ├─────►───┤Deactivated│  ║
+ *              │   │           │  ┌──────┤           ├─◄──────┐
+ *              │   └─┬───┬───┬─┘  │      └───────────┘  ║     │
+ *              │     ▼   ▼   ▲    ▲                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   ▲  ┌─┘                     ║     │
+ *              │     │   │ ┌─┴──┴──┐                    ║     │
+ *              │     │   │ │Replay │                    ║     │
+ *              │     │   │ │       ├─►─┐                ║     │
+ *              │     │   │ └─┬──┬──┘   │                ║     │
+ *              │     │   ▼   ▼  ▲      │                ║     │
+ *              │     │   │   │  │      │                ▲     │
+ *              │     │ ┌─┴───┴──┴──┐   │   ┌────────────╨──┐  │
+ *              │     │ │  Offline  │   └─►─┤   Faulted     │  │
+ *              │     │ │           ├─────►─┤               │  │
+ *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
+ *              │     │                       ▲ ▲       ▼ ▲    ▲
+ *              │     └───────────►───────────┘ │       │ │    │
+ *              │                               │       │ │    │
+ *              │                      ┌────────┴─┐   ┌─┴─┴────┴─┐
+ *              └──────────────────────┤   Live   ├─◄─┤  Live    │
+ *                                     │  Repair  │   │  Repair  │
+ *                                     │          │   │  Ready   │
+ *                                     └──────────┘   └──────────┘
+ *
+ *
+ *      The downstairs state can go to Disabled from any other state, as that
+ *      transition happens when a message is received from the actual
+ *      downstairs on the other side of the connection..
+ *      The only path back at that point is for the Upstairs (who will self
+ *      deactivate when it detects this) is to go back to New and through
+ *      the reconcile process.
+ *      ┌───────────┐
+ *      │ Disabled  │
+ *      └───────────┘
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -6549,10 +6629,6 @@ enum DsState {
      * downstairs has to go back through the whole negotiation process.
      */
     Disconnected,
-    /*
-     * Comparing downstairs for consistency.
-     */
-    Verifying,
     /*
      * Initial startup, downstairs are repairing from each other.
      */
@@ -6626,9 +6702,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::Disconnected => {
                 write!(f, "Disconnected")
-            }
-            DsState::Verifying => {
-                write!(f, "Verifying")
             }
             DsState::Repair => {
                 write!(f, "Repair")
@@ -8224,13 +8297,13 @@ struct Condition {
  * Send work to all the targets.
  * If a send fails, report an error.
  */
-async fn send_work(t: &[Target], val: u64) {
+async fn send_work(t: &[Target], val: u64, log: &Logger) {
     for (client_id, d_client) in t.iter().enumerate() {
-        let res = d_client.ds_work_tx.send(val).await;
+        let res = d_client.ds_work_tx.try_send(val);
         if let Err(e) = res {
-            println!(
-                "ERROR {:#?} Failed to notify client {} of work {}",
-                e, client_id, val,
+            warn!(
+                log,
+                "{:?} Failed to notify client {} of work {}", e, client_id, val,
             );
         }
     }
@@ -8412,7 +8485,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::Read { offset, data } => {
@@ -8423,7 +8496,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
@@ -8434,7 +8507,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::WriteUnwritten { offset, data } => {
@@ -8445,7 +8518,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::Flush { snapshot_details } => {
@@ -8469,7 +8542,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         // Query ops
@@ -8558,7 +8631,7 @@ async fn process_new_io(
                 req.send_err(CrucibleError::UpstairsInactive).await;
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
     }
@@ -8737,7 +8810,7 @@ async fn up_listen(
                         error!(up.log, "flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
-                        send_work(&dst, 1).await;
+                        send_work(&dst, 1, &up.log).await;
                     }
                 }
                 /*
