@@ -24,4 +24,4 @@ args=(
   '-l' "[$LISTEN_ADDR]:$LISTEN_PORT"
 )
 
-exec /opt/oxide/crucible_pantry/bin/crucible-pantry run "${args[@]}"
+exec /opt/oxide/pantry/bin/crucible-pantry run "${args[@]}"
