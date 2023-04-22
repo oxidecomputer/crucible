@@ -502,8 +502,12 @@ async fn load_write_log(
 // How to determine when a test will stop running.
 // Either by count, or a message over a channel.
 enum WhenToQuit {
-    Count { count: usize },
-    Signal { shutdown_rx: mpsc::Receiver<SignalAction> },
+    Count {
+        count: usize,
+    },
+    Signal {
+        shutdown_rx: mpsc::Receiver<SignalAction>,
+    },
 }
 
 #[derive(Debug)]
@@ -515,7 +519,7 @@ enum SignalAction {
 // When a signal is received, send a message over a channel.
 async fn handle_signals(
     mut signals: Signals,
-    shutdown_tx: mpsc::Sender<SignalAction>
+    shutdown_tx: mpsc::Sender<SignalAction>,
 ) {
     while let Some(signal) = signals.next().await {
         match signal {
@@ -1475,7 +1479,7 @@ async fn generic_workload(
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
-                    _ => {}  // Ignore everything else
+                    _ => {} // Ignore everything else
                 }
             }
         }
