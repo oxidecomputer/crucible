@@ -503,17 +503,31 @@ async fn load_write_log(
 // Either by count, or a message over a channel.
 enum WhenToQuit {
     Count { count: usize },
-    Signal { shutdown_rx: mpsc::Receiver<()> },
+    Signal { shutdown_rx: mpsc::Receiver<SignalAction> },
+}
+
+#[derive(Debug)]
+enum SignalAction {
+    Shutdown,
+    Verify,
 }
 
 // When a signal is received, send a message over a channel.
-async fn handle_signals(mut signals: Signals, shutdown_tx: mpsc::Sender<()>) {
+async fn handle_signals(
+    mut signals: Signals,
+    shutdown_tx: mpsc::Sender<SignalAction>
+) {
     while let Some(signal) = signals.next().await {
         match signal {
             SIGUSR1 => {
-                shutdown_tx.send(()).await.unwrap();
+                shutdown_tx.send(SignalAction::Shutdown).await.unwrap();
             }
-            _ => unreachable!(),
+            SIGUSR2 => {
+                shutdown_tx.send(SignalAction::Verify).await.unwrap();
+            }
+            x => {
+                panic!("Received unsupported signal {}", x);
+            }
         }
     }
 }
@@ -663,10 +677,10 @@ async fn main() -> Result<()> {
         load_write_log(&guest, &mut region_info, verify_in, verify).await?;
     }
 
-    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
     if opt.continuous {
         println!("Setup signal handler");
-        let signals = Signals::new([SIGUSR1])?;
+        let signals = Signals::new([SIGUSR1, SIGUSR2])?;
         tokio::spawn(handle_signals(signals, shutdown_tx));
     }
 
@@ -1450,9 +1464,18 @@ async fn generic_workload(
                 }
             }
             WhenToQuit::Signal { shutdown_rx } => {
-                if shutdown_rx.try_recv().is_ok() {
-                    println!("shutting down in response to SIGUSR1");
-                    break;
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(guest, ri, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {}  // Ignore everything else
                 }
             }
         }
