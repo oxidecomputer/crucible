@@ -763,12 +763,13 @@ where
      * As the "client", we must begin the negotiation.
      */
     let m = Message::HereIAm {
-        version: 1,
+        version: CRUCIBLE_MESSAGE_VERSION,
         upstairs_id: up.uuid,
         session_id: up.session_id,
         gen: up.get_generation().await,
         read_only: up.read_only,
         encrypted: up.encrypted(),
+        supported_versions: vec![CRUCIBLE_MESSAGE_VERSION],
     };
     fw.send(m).await?;
 
@@ -941,22 +942,40 @@ where
                             up.encrypted(),
                         );
                     }
+                    Some(Message::VersionMismatch { version }) => {
+                        // Upstairs cannot communicate with the downstairs.
+                        up.ds_transition(
+                            up_coms.client_id, DsState::BadVersion
+                        ).await;
+                        bail!(
+                            "downstairs version is {}, ours is {}!",
+                            version,
+                            CRUCIBLE_MESSAGE_VERSION,
+                        );
+                    }
                     Some(Message::YesItsMe { version, repair_addr }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
 
                         /*
-                         * XXX Valid version to compare with should come
-                         * from main task. In the future we will also have
-                         * to handle a version mismatch.
+                         * For now, we only match on a single version and
+                         * ignore any additional supported versions.
+                         * In the future, we may support a version that
+                         * is different than ours.
                          */
-                        if version != 1 {
-                            up.ds_transition(
-                                up_coms.client_id,
-                                DsState::BadVersion
-                            ).await;
-                            bail!("expected version 1, got {}", version);
+                        match version {
+                            CRUCIBLE_MESSAGE_VERSION => {}
+                            x => {
+                                up.ds_transition(
+                                    up_coms.client_id,
+                                    DsState::BadVersion
+                                ).await;
+                                bail!("expected version {}, got {}",
+                                    CRUCIBLE_MESSAGE_VERSION,
+                                    x
+                                );
+                            }
                         }
 
                         negotiated = 1;
@@ -5591,6 +5610,15 @@ impl Upstairs {
                 // A move to Disabled can happen at any time we are talking
                 // to a downstairs.
             }
+            DsState::BadVersion => match old_state {
+                DsState::New | DsState::Disconnected => {}
+                _ => {
+                    panic!(
+                        "[{}] {} Invalid transition: {:?} -> {:?}",
+                        client_id, self.uuid, old_state, new_state
+                    );
+                }
+            },
             _ => {
                 panic!(
                     "Make a check for transition {} to {}",
