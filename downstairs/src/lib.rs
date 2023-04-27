@@ -1260,8 +1260,12 @@ where
                             {
                                 warn!(
                                     log,
-                                    "downstairs requires down rev version {}",
-                                    CRUCIBLE_MESSAGE_VERSION
+                                    "downstairs and upstairs using different \
+                                     but compatible versions, Upstairs is {}, \
+                                     but supports {:?}, downstairs is {}",
+                                    version,
+                                    supported_versions,
+                                    CRUCIBLE_MESSAGE_VERSION,
                                 );
                             } else {
                                 let m = Message::VersionMismatch {
@@ -1276,8 +1280,9 @@ where
                                     );
                                 }
                                 bail!(
-                                    "Required version {}, got {}",
+                                    "Required version {}, Or {:?} got {}",
                                     CRUCIBLE_MESSAGE_VERSION,
+                                    supported_versions,
                                     version,
                                 );
                             }
@@ -5878,6 +5883,7 @@ mod test {
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: Uuid::new_v4(),
@@ -5909,12 +5915,13 @@ mod test {
     #[tokio::test]
     async fn test_version_downrev() -> Result<()> {
         // Test that a newer crucible version will result in a message
-        // indicating their is a version mismatch.
+        // indicating there is a version mismatch.
         let tcp = start_ds_and_connect(5557, 5558).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION - 1,
             upstairs_id: Uuid::new_v4(),
@@ -5942,12 +5949,13 @@ mod test {
     #[tokio::test]
     async fn test_version_uprev_only() -> Result<()> {
         // Test sending only the +1 version to the DS, verify it rejects
-        // this version as supported.
+        // this version as unsupported.
         let tcp = start_ds_and_connect(5579, 5560).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION + 1,
             upstairs_id: Uuid::new_v4(),
@@ -5981,6 +5989,7 @@ mod test {
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION + 1,
             upstairs_id: Uuid::new_v4(),
@@ -6021,6 +6030,7 @@ mod test {
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
 
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION + 4,
             upstairs_id: Uuid::new_v4(),

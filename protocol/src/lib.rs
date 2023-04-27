@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
+use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
@@ -133,9 +134,28 @@ pub struct SnapshotDetails {
 }
 
 /**
+ * Convenience constants to provide some documentation on what changes have
+ * been introduced in the various Crucible upstairs to downstairs versions.
+ */
+#[repr(u32)]
+#[derive(IntoPrimitive)]
+pub enum MessageVersion {
+    /// Initial support for LiveRepair.
+    V2 = 2,
+
+    /// Original format that remained too long.
+    V1 = 1,
+}
+impl MessageVersion {
+    pub const fn current() -> Self {
+        Self::V2
+    }
+}
+
+/**
  * Crucible Upstairs Downstairs message protocol version.
- * Crude, but its something.  This should be changed whenever there is
- * any change to the enum Message below.
+ * This, along with the MessageVersion enum above should be updated whenever
+ * changes are made to the Message enum below.
  */
 pub const CRUCIBLE_MESSAGE_VERSION: u32 = 2;
 
@@ -828,5 +848,14 @@ mod tests {
         };
 
         Ok(())
+    }
+
+    #[test]
+    fn latest_message_version() {
+        let cur = MessageVersion::current();
+        assert_eq!(
+            CRUCIBLE_MESSAGE_VERSION,
+            <MessageVersion as Into<u32>>::into(cur)
+        );
     }
 }

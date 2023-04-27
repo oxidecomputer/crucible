@@ -760,6 +760,11 @@ where
     let mut self_promotion = false;
 
     /*
+     * If we support other Message versions, include those here.
+     */
+    let alternate_message_versions = Vec::new();
+
+    /*
      * As the "client", we must begin the negotiation.
      */
     let m = Message::HereIAm {
@@ -769,7 +774,7 @@ where
         gen: up.get_generation().await,
         read_only: up.read_only,
         encrypted: up.encrypted(),
-        supported_versions: vec![CRUCIBLE_MESSAGE_VERSION],
+        supported_versions: alternate_message_versions.clone(),
     };
     fw.send(m).await?;
 
@@ -948,9 +953,10 @@ where
                             up_coms.client_id, DsState::BadVersion
                         ).await;
                         bail!(
-                            "downstairs version is {}, ours is {}!",
+                            "downstairs version is {}, ours is {} (alts {:?})",
                             version,
                             CRUCIBLE_MESSAGE_VERSION,
+                            alternate_message_versions,
                         );
                     }
                     Some(Message::YesItsMe { version, repair_addr }) => {
@@ -964,18 +970,16 @@ where
                          * In the future, we may support a version that
                          * is different than ours.
                          */
-                        match version {
-                            CRUCIBLE_MESSAGE_VERSION => {}
-                            x => {
-                                up.ds_transition(
-                                    up_coms.client_id,
-                                    DsState::BadVersion
-                                ).await;
-                                bail!("expected version {}, got {}",
-                                    CRUCIBLE_MESSAGE_VERSION,
-                                    x
-                                );
-                            }
+                        if version != CRUCIBLE_MESSAGE_VERSION {
+                            up.ds_transition(
+                                up_coms.client_id,
+                                DsState::BadVersion
+                            ).await;
+                            bail!("expected version {} (alt {:?}), got {}",
+                                CRUCIBLE_MESSAGE_VERSION,
+                                alternate_message_versions,
+                                version
+                            );
                         }
 
                         negotiated = 1;
