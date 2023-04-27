@@ -187,7 +187,7 @@ pub enum Message {
         // If we expect the region to be  encrypted.
         encrypted: bool,
         // Additional Message versions this upstairs supports.
-        supported_versions: Vec<u32>,
+        alternate_versions: Vec<u32>,
     } = 0,
     /**
      * This is the first message (when things are good) that the downstairs
@@ -757,7 +757,7 @@ mod tests {
             gen: 123,
             read_only: false,
             encrypted: true,
-            supported_versions: Vec::new(),
+            alternate_versions: Vec::new(),
         };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
@@ -828,7 +828,7 @@ mod tests {
             gen: 23849183,
             read_only: true,
             encrypted: false,
-            supported_versions: Vec::new(),
+            alternate_versions: Vec::new(),
         };
         let mut buffer = BytesMut::new();
 

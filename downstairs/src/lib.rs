@@ -1241,7 +1241,7 @@ where
                         gen,
                         read_only,
                         encrypted,
-                        supported_versions,
+                        alternate_versions,
                     }) => {
                         if negotiated != 0 {
                             bail!("Received connect out of order {}",
@@ -1255,7 +1255,7 @@ where
                         // to see if our version is one of the supported
                         // versions the upstairs has told us it can support.
                         if version != CRUCIBLE_MESSAGE_VERSION {
-                            if supported_versions
+                            if alternate_versions
                                 .contains(&CRUCIBLE_MESSAGE_VERSION)
                             {
                                 warn!(
@@ -1264,7 +1264,7 @@ where
                                      but compatible versions, Upstairs is {}, \
                                      but supports {:?}, downstairs is {}",
                                     version,
-                                    supported_versions,
+                                    alternate_versions,
                                     CRUCIBLE_MESSAGE_VERSION,
                                 );
                             } else {
@@ -1282,7 +1282,7 @@ where
                                 bail!(
                                     "Required version {}, Or {:?} got {}",
                                     CRUCIBLE_MESSAGE_VERSION,
-                                    supported_versions,
+                                    alternate_versions,
                                     version,
                                 );
                             }
@@ -5891,7 +5891,7 @@ mod test {
             gen: 1,
             read_only: false,
             encrypted: false,
-            supported_versions: Vec::new(),
+            alternate_versions: Vec::new(),
         };
         fw.send(m).await?;
 
@@ -5929,7 +5929,7 @@ mod test {
             gen: 1,
             read_only: false,
             encrypted: false,
-            supported_versions: vec![CRUCIBLE_MESSAGE_VERSION - 1],
+            alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION - 1],
         };
         fw.send(m).await?;
 
@@ -5963,7 +5963,7 @@ mod test {
             gen: 1,
             read_only: false,
             encrypted: false,
-            supported_versions: vec![CRUCIBLE_MESSAGE_VERSION + 1],
+            alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION + 1],
         };
         fw.send(m).await?;
 
@@ -5997,7 +5997,7 @@ mod test {
             gen: 1,
             read_only: false,
             encrypted: false,
-            supported_versions: vec![
+            alternate_versions: vec![
                 CRUCIBLE_MESSAGE_VERSION,
                 CRUCIBLE_MESSAGE_VERSION + 1,
             ],
@@ -6038,7 +6038,7 @@ mod test {
             gen: 1,
             read_only: false,
             encrypted: false,
-            supported_versions: vec![
+            alternate_versions: vec![
                 CRUCIBLE_MESSAGE_VERSION - 1,
                 CRUCIBLE_MESSAGE_VERSION,
                 CRUCIBLE_MESSAGE_VERSION + 1,

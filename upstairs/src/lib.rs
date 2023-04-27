@@ -774,7 +774,7 @@ where
         gen: up.get_generation().await,
         read_only: up.read_only,
         encrypted: up.encrypted(),
-        supported_versions: alternate_message_versions.clone(),
+        alternate_versions: alternate_message_versions.clone(),
     };
     fw.send(m).await?;
 
