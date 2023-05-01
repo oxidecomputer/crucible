@@ -3004,8 +3004,7 @@ pub async fn start_downstairs(
     info!(log, "Crucible Version: {}", info);
     info!(
         log,
-	"Upstairs <-> Downstairs Message Version: {}",
-	CRUCIBLE_MESSAGE_VERSION
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
     );
 
     info!(log, "Using address: {:?}", local_addr);

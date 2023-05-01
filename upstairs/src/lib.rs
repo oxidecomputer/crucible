@@ -8893,8 +8893,7 @@ pub async fn up_main(
     info!(log, "Crucible Version: {:#?}", info);
     info!(
         log,
-        "Upstairs <-> Downstairs Message Version: {}",
-        CRUCIBLE_MESSAGE_VERSION
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
     );
 
     /*

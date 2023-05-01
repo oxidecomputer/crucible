@@ -1,6 +1,6 @@
 // Copyright 2021 Oxide Computer Company
-use std::fs::File;
 use std::fmt;
+use std::fs::File;
 use std::hash::Hasher;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
