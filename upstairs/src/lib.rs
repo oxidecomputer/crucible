@@ -8889,6 +8889,13 @@ pub async fn up_main(
     }
     let log = Logger::root(drain.fuse(), o!());
     info!(log, "Upstairs starts");
+    let info = crucible_common::BuildInfo::default();
+    info!(log, "Crucible Version: {:#?}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}",
+        CRUCIBLE_MESSAGE_VERSION
+    );
 
     /*
      * Build the Upstairs struct that we use to share data between

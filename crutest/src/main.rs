@@ -21,6 +21,7 @@ mod stats;
 pub use stats::*;
 
 use crucible::*;
+use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
 
 /*
  * The various tests this program supports.
@@ -84,6 +85,7 @@ enum Workload {
     Repair,
     Span,
     Verify,
+    Version,
 }
 
 #[derive(Debug, Parser)]
@@ -509,6 +511,17 @@ async fn main() -> Result<()> {
 
     let opt = opts()?;
 
+    // If we just want the version, print that and exit.
+    if let Workload::Version = opt.workload {
+        let info = crucible_common::BuildInfo::default();
+        println!("{}", info);
+        println!(
+            "Upstairs <-> Downstairs Message Version: {}",
+            CRUCIBLE_MESSAGE_VERSION
+        );
+        return Ok(());
+    }
+
     if opt.workload == Workload::Verify && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
     }
@@ -657,6 +670,12 @@ async fn main() -> Result<()> {
             println!("Run burst test (demo in a loop)");
             burst_workload(&guest, 460, 190, &mut region_info, &opt.verify_out)
                 .await?;
+        }
+        Workload::Cli { .. } => {
+            panic!("This case handled above");
+        }
+        Workload::CliServer { .. } => {
+            panic!("This case handled above");
         }
         Workload::Deactivate => {
             /*
@@ -886,8 +905,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        c => {
-            panic!("Unsupported cmd {:?}", c);
+        Workload::Version => {
+            panic!("This case handled above");
         }
     }
 

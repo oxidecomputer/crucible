@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
+use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -181,6 +182,7 @@ enum Args {
         #[clap(long, default_value = "127.0.0.1:4567", action)]
         bind_addr: SocketAddr,
     },
+    Version,
 }
 
 #[tokio::main]
@@ -387,6 +389,15 @@ async fn main() -> Result<()> {
             }
 
             run_dropshot(bind_addr, &log).await
+        }
+        Args::Version => {
+            let info = crucible_common::BuildInfo::default();
+            println!("Crucible Version: {}", info);
+            println!(
+                "Upstairs <-> Downstairs Message Version: {}",
+                CRUCIBLE_MESSAGE_VERSION
+            );
+            Ok(())
         }
     }
 }
