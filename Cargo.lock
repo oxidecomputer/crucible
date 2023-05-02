@@ -329,7 +329,7 @@ version = "8.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "031718ddb8f78aa5def78a09e90defe30151d1f6c672f937af4dd916429ed996"
 dependencies = [
- "semver 1.0.16",
+ "semver 1.0.17",
  "serde",
  "toml 0.5.11",
  "url",
@@ -2381,7 +2381,7 @@ dependencies = [
  "reqwest",
  "ring",
  "schemars",
- "semver 1.0.16",
+ "semver 1.0.17",
  "serde",
  "serde_derive",
  "serde_json",
@@ -2397,9 +2397,9 @@ dependencies = [
 
 [[package]]
 name = "omicron-zone-package"
-version = "0.8.3"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dc0973625837d1c4e31d4aa60e72008f3af3aa9b0d0ebfd5b5dc67d2e721a48"
+checksum = "d6dcc25318120198af566dd006a34b15439a59f52c18f3a690338dac18239bfe"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2407,8 +2407,10 @@ dependencies = [
  "filetime",
  "flate2",
  "futures-util",
+ "hex",
  "reqwest",
- "semver 1.0.16",
+ "ring",
+ "semver 1.0.17",
  "serde",
  "serde_derive",
  "tar",
@@ -3653,9 +3655,9 @@ dependencies = [
 
 [[package]]
 name = "semver"
-version = "1.0.16"
+version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58bc9567378fc7690d6b2addae4e60ac2eeea07becb2c64b9f218b53865cba2a"
+checksum = "bebd363326d05ec3e2f532ab7660680f3b02130d780c299bca73469d521bc0ed"
 dependencies = [
  "serde",
 ]
