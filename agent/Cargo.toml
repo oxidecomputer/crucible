@@ -9,7 +9,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = [ "serde" ] }
 clap = { version = "4.1", features = ["derive"] }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main" }
-futures = "0.3.27"
+futures = "0.3.28"
 http = "0.2.9"
 hyper = "0.14"
 schemars = { version = "0.8.12", features = [ "chrono", "uuid1" ] }
