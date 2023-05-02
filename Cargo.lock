@@ -3423,9 +3423,9 @@ dependencies = [
 
 [[package]]
 name = "ringbuffer"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1973f95452ec56a4b2c683f5eabc15617e38f4faf2776ed4a0011d5070ecb37e"
+checksum = "b6e4fbb37fd18bd949f42583141d650fcdce49dbf759264e4dd3a5df0bc15dc6"
 
 [[package]]
 name = "rusqlite"
