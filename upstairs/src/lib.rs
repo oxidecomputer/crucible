@@ -5544,6 +5544,7 @@ impl Upstairs {
                     | DsState::Repair
                     | DsState::OnlineRepair
                     | DsState::OnlineRepairReady
+                    | DsState::Offline
                     | DsState::Replay => {} /* Okay */
                     _ => {
                         panic!(
