@@ -69,6 +69,10 @@ pub use impacted_blocks::*;
 
 use async_trait::async_trait;
 
+// Max number of outstanding IOs between the upstairs and the downstairs
+// before we give up and mark that downstairs faulted.
+const IO_OUTSTANDING_MAX: usize = 1000;
+
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.
@@ -1619,12 +1623,12 @@ where
                 {
                     warn!(
                         up_c.log,
-                        "[{}] exits pm_task, this downstairs faulted",
+                        "[{}] will exit pm_task, this downstairs faulted",
                         client_id
                     );
                     // Until OnlineRepair is actually supported, we are
                     // doing more harm than good by remaining up.
-                    panic!("[{}] received Write/WU/Flush error ", client_id);
+                    bail!("[{}] This downstairs now faulted", client_id);
                 }
 
                 if up_c.ds_deactivate(client_id).await {
@@ -3012,6 +3016,20 @@ impl Downstairs {
             .values()
             .filter(|job| {
                 Some(&IOState::InProgress) == job.state.get(&client_id)
+            })
+            .count()
+    }
+
+    /**
+     * Return a count of downstairs request IDs of total new and submitted
+     * work we have for a downstairs.
+     */
+    fn total_live_work(&self, client_id: u8) -> usize {
+        self.ds_active
+            .values()
+            .filter(|job| {
+                Some(&IOState::InProgress) == job.state.get(&client_id)
+                    || Some(&IOState::New) == job.state.get(&client_id)
             })
             .count()
     }
@@ -5584,6 +5602,9 @@ impl Upstairs {
             DsState::OnlineRepair => {
                 assert_eq!(old_state, DsState::OnlineRepairReady);
             }
+            DsState::OnlineRepairReady => {
+                assert_eq!(old_state, DsState::Faulted);
+            }
             DsState::New => {
                 // Before new, we must have been in
                 // on of these states.
@@ -6416,15 +6437,27 @@ impl Upstairs {
          * we already received, because it may never come back.
          */
         let ds_state = ds.ds_state[client_id as usize];
-        if ds_state != DsState::Active && ds_state != DsState::Repair {
-            warn!(
-                self.log,
-                "[{}] {} WARNING finish job {} when downstairs state:{}",
-                client_id,
-                self.uuid,
-                ds_id,
-                ds_state
-            );
+        match ds_state {
+            DsState::Active | DsState::Repair => {}
+            DsState::Faulted => {
+                error!(
+                    self.log,
+                    "[{}] Dropping job {}, this downstairs is faulted",
+                    client_id,
+                    ds_id,
+                );
+                return Err(CrucibleError::NoLongerActive.into());
+            }
+            _ => {
+                warn!(
+                    self.log,
+                    "[{}] {} WARNING finish job {} when downstairs state:{}",
+                    client_id,
+                    self.uuid,
+                    ds_id,
+                    ds_state
+                );
+            }
         }
 
         // Mark this ds_id for the client_id as completed.
@@ -8439,6 +8472,46 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
     warn!(up.log, "up_ds_listen loop done");
 }
 
+async fn gone_too_long(up: &Arc<Upstairs>) {
+    // Check outstanding IOops for each downstairs.
+    // If the number is too high, then mark that downstairs as failed, scrub
+    // any outstanding jobs.
+    let active = up.active.lock().await;
+    let mut ds = up.downstairs.lock().await;
+    let up_state = active.up_state;
+    drop(active);
+
+    // If we are not active, then just exit.
+    if up_state != UpState::Active {
+        return;
+    }
+
+    for cid in 0..3 {
+        // Only downstairs in these states are checked.
+        match ds.ds_state[cid as usize] {
+            DsState::Active
+            | DsState::OnlineRepair
+            | DsState::Offline
+            | DsState::Replay => {
+                if ds.total_live_work(cid) > IO_OUTSTANDING_MAX {
+                    warn!(
+                        up.log,
+                        "[up] downstairs {} is too far behind, -> failed", cid,
+                    );
+                    ds.ds_set_faulted(cid);
+                    up.ds_transition_with_lock(
+                        &mut ds,
+                        up_state,
+                        cid,
+                        DsState::Faulted,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /**
  * The upstairs has received a new IO request from the guest. Here we
  * decide what to for that request.
@@ -8813,6 +8886,10 @@ async fn up_listen(
             }
             req = up.guest.recv() => {
                 process_new_io(up, &dst, req, &mut lastcast).await;
+
+                // Check to see if the number of outstanding IOs (between
+                // the upstairs and downstairs) is too many.
+                gone_too_long(up).await;
             }
             _ = sleep_until(leak_deadline) => {
                 if let Some(iop_limit) = up.guest.get_iop_limit() {
