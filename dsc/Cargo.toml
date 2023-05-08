@@ -19,7 +19,7 @@ statistical = "1.0.0"
 tokio = { version = "1.27.0", features = ["full"] }
 
 [dev-dependencies]
-expectorate = "1.0.6"
+expectorate = "1.0.7"
 openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 tempfile = "3"

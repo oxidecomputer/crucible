@@ -22,13 +22,13 @@ crucible-common = { path = "../common" }
 crucible-smf = { path = "../smf" }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 tokio = { version = "1.27", features = [ "full" ] }
-uuid = { version = "1.3.0", features = [ "serde", "v4" ] }
+uuid = { version = "1.3.2", features = [ "serde", "v4" ] }
 reqwest = { version = "0.11", features = ["json", "stream"] }
 hex = "0.4"
 sha2 = "0.10"
 
 [dev-dependencies]
-expectorate = "1.0.6"
+expectorate = "1.0.7"
 openapiv3 = "1.0"
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 subprocess = "0.2.9"
