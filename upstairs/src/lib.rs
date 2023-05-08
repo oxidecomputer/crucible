@@ -4121,18 +4121,18 @@ impl Downstairs {
                         }
                     }
                 }
-                    /*
-                     * Write and WriteUnwritten IOs have no action here
-                     * If this job was LiveRepair, we should never get here,
-                     * as those jobs should never be acked before all three
-                     * are done.
-                     */
-		IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
-		IOop::ExtentClose { .. }
-		| IOop::ExtentFlushClose { .. }
-		| IOop::ExtentLiveRepair { .. }
-		| IOop::ExtentLiveReopen { .. }
-		| IOop::ExtentLiveNoOp { .. } => {
+                /*
+                 * Write and WriteUnwritten IOs have no action here
+                 * If this job was LiveRepair, we should never get here,
+                 * as those jobs should never be acked before all three
+                 * are done.
+                 */
+                IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
+                IOop::ExtentClose { .. }
+                | IOop::ExtentFlushClose { .. }
+                | IOop::ExtentLiveRepair { .. }
+                | IOop::ExtentLiveReopen { .. }
+                | IOop::ExtentLiveNoOp { .. } => {
                     panic!(
                         "Bad  job received in process_ds_completion: {:?}",
                         job
@@ -7076,8 +7076,7 @@ impl Upstairs {
         let ds_state = ds.ds_state[client_id as usize];
         match ds_state {
             DsState::Active | DsState::Repair | DsState::LiveRepair => {}
-            DsState::Faulted => {
-            }
+            DsState::Faulted => {}
             _ => {
                 warn!(
                     self.log,
