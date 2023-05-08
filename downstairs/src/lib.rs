@@ -3000,6 +3000,13 @@ pub async fn start_downstairs(
         let mut ds = d.lock().await;
         ds.address = Some(local_addr);
     }
+    let info = crucible_common::BuildInfo::default();
+    info!(log, "Crucible Version: {}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
+    );
+
     info!(log, "Using address: {:?}", local_addr);
 
     let repair_address = match address {

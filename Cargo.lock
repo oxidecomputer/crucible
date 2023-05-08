@@ -673,12 +673,13 @@ dependencies = [
 
 [[package]]
 name = "crucible-common"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "nix",
  "rusqlite",
  "rustls-pemfile",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -687,6 +688,7 @@ dependencies = [
  "toml 0.7.3",
  "twox-hash",
  "uuid 1.3.2",
+ "vergen",
 ]
 
 [[package]]
@@ -953,6 +955,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "reedline",
  "ringbuffer",
+ "schemars",
  "serde",
  "serde_json",
  "statistical",
@@ -2164,7 +2167,7 @@ version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac8cd24d9f185bb7223958d8c1ff7a961b74b1953fd05dba7cc568a63b3861ec"
 dependencies = [
- "rustc_version",
+ "rustc_version 0.1.7",
 ]
 
 [[package]]
@@ -3453,6 +3456,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc_version"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfa0f585226d2e68097d4f95d113b15b83a82e819ab25717ec0590d9584ef366"
+dependencies = [
+ "semver 1.0.17",
+]
+
+[[package]]
 name = "rustfmt-wrapper"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3530,9 +3542,9 @@ dependencies = [
 
 [[package]]
 name = "rustversion"
-version = "1.0.6"
+version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2cc38e8fa666e2de3c4aba7edeb5ffc5246c1c2ed0e3d17e560aeeba736b23f"
+checksum = "4f3208ce4d8448b3f3e7d168a73f5e0c43a61e32930de3bceeccedb388b6bf06"
 
 [[package]]
 name = "rusty-fork"
@@ -3758,7 +3770,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with_macros",
- "time 0.3.17",
+ "time 0.3.20",
 ]
 
 [[package]]
@@ -3916,7 +3928,7 @@ dependencies = [
  "hostname",
  "slog",
  "slog-json",
- "time 0.3.17",
+ "time 0.3.20",
 ]
 
 [[package]]
@@ -3942,7 +3954,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "time 0.3.17",
+ "time 0.3.20",
 ]
 
 [[package]]
@@ -3955,7 +3967,7 @@ dependencies = [
  "slog",
  "term",
  "thread_local",
- "time 0.3.17",
+ "time 0.3.20",
 ]
 
 [[package]]
@@ -4295,9 +4307,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.17"
+version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a561bf4617eebd33bca6434b988f39ed798e527f51a1e797d0ee4f61c0a38376"
+checksum = "cd0cbfecb4d19b5ea75bb31ad904eb5b9fa13f21079c3b92017ebdf4999a5890"
 dependencies = [
  "itoa",
  "libc",
@@ -4315,9 +4327,9 @@ checksum = "2e153e1f1acaef8acc537e68b44906d2db6436e2b35ac2c6b42640fff91f00fd"
 
 [[package]]
 name = "time-macros"
-version = "0.2.6"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d967f99f534ca7e495c575c62638eebc2898a8c84c119b89e250477bc4ba16b2"
+checksum = "fd80a657e71da814b8e5d60d3374fc6d35045062245d80224748ae522dd76f36"
 dependencies = [
  "time-core",
 ]
@@ -4862,6 +4874,19 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "vergen"
+version = "8.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1b86a8af1dedf089b1c78338678e4c7492b6045649042d94faf19690499d236"
+dependencies = [
+ "anyhow",
+ "git2",
+ "rustc_version 0.4.0",
+ "rustversion",
+ "time 0.3.20",
+]
 
 [[package]]
 name = "version_check"
