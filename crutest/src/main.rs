@@ -672,10 +672,10 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Workload::Cli { .. } => {
-            panic!("This case handled above");
+            unreachable!("This case handled above");
         }
         Workload::CliServer { .. } => {
-            panic!("This case handled above");
+            unreachable!("This case handled above");
         }
         Workload::Deactivate => {
             /*
