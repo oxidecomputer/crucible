@@ -8494,10 +8494,13 @@ async fn gone_too_long(up: &Arc<Upstairs>) {
             | DsState::OnlineRepair
             | DsState::Offline
             | DsState::Replay => {
-                if ds.total_live_work(cid) > IO_OUTSTANDING_MAX {
+                let work_count = ds.total_live_work(cid);
+                if work_count > IO_OUTSTANDING_MAX {
                     warn!(
                         up.log,
-                        "[up] downstairs {} is too far behind, -> failed", cid,
+                        "[up] downstairs {} failed, too many outstanding jobs {}",
+                        work_count,
+                        cid,
                     );
                     ds.ds_set_faulted(cid);
                     up.ds_transition_with_lock(
