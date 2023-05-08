@@ -180,13 +180,13 @@ pub async fn check_for_repair(
 }
 
 // Send a notification to all downstairs clients there is new work.
-async fn notify_ds_new_work(
+fn notify_ds_new_work(
     ds_work_vec: &[mpsc::Sender<u64>],
     log: &Logger,
     msg: String,
 ) {
     for (cid, ds_work_tx) in ds_work_vec.iter().enumerate() {
-        let res = ds_work_tx.send(1).await;
+        let res = ds_work_tx.try_send(1);
         if let Err(e) = res {
             error!(
                 log,
@@ -356,7 +356,7 @@ async fn live_repair_main(
         }
     }
 
-    notify_ds_new_work(&ds_work_vec, &up.log, "final flush".to_string()).await;
+    notify_ds_new_work(&ds_work_vec, &up.log, "final flush".to_string());
 
     // Wait on flush_brw
     match flush_brw.wait().await {
@@ -844,7 +844,7 @@ impl Upstairs {
         // If we get an error, it's possible the other end has already
         // given up on us, so just forge ahead.
         if notify_guest {
-            match ds_done_tx.send(0).await {
+            match ds_done_tx.try_send(0) {
                 Ok(()) => {}
                 Err(e) => {
                     error!(
@@ -1073,8 +1073,7 @@ impl Upstairs {
                 ds_work_vec,
                 &self.log,
                 "Abort cleanup".to_string(),
-            )
-            .await;
+            );
 
             return res;
         }
@@ -1190,8 +1189,7 @@ impl Upstairs {
             ds_work_vec,
             &self.log,
             "Initial repair work".to_string(),
-        )
-        .await;
+        );
 
         info!(
             self.log,
@@ -1261,8 +1259,7 @@ impl Upstairs {
         drop(ds);
 
         // The next op is on the queue, now tell the downstairs
-        notify_ds_new_work(ds_work_vec, &self.log, "repair job".to_string())
-            .await;
+        notify_ds_new_work(ds_work_vec, &self.log, "repair job".to_string());
 
         // Wait on the results of our repair (or noop) request.
         info!(
@@ -1318,8 +1315,7 @@ impl Upstairs {
             ds_work_vec,
             &self.log,
             "NoOp repair work".to_string(),
-        )
-        .await;
+        );
 
         // Wait on the results of our NoOp command.
         info!(

@@ -1634,8 +1634,8 @@ where
      * If the state is Replay, then we set more work and move to active.
      * If the state is WQ or repair, then we do the work required to make
      * the three downstairs match each other.
-     * If we are ORR, then we wait for the live repair task to discover
-     * this and start repairing this downstairs.
+     * If we are LiveRepairReady, then we wait for the live repair task to
+     * discover this and start repairing this downstairs.
      */
 
     let mut more_work = false;
@@ -2609,7 +2609,7 @@ struct Downstairs {
     next_id: u64,
 
     /**
-     * Ringubf of completed downstairs job IDs.
+     * Ringbuf of completed downstairs job IDs.
      */
     completed: AllocRingBuffer<u64>,
 
@@ -2779,7 +2779,7 @@ impl Downstairs {
     /**
      * See what the next ID will be, without getting it.
      */
-    fn peek_next_id(&mut self) -> u64 {
+    fn peek_next_id(&self) -> u64 {
         self.next_id
     }
 
@@ -4121,13 +4121,22 @@ impl Downstairs {
                         }
                     }
                 }
-                _ => {
                     /*
                      * Write and WriteUnwritten IOs have no action here
                      * If this job was LiveRepair, we should never get here,
                      * as those jobs should never be acked before all three
                      * are done.
                      */
+		IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
+		IOop::ExtentClose { .. }
+		| IOop::ExtentFlushClose { .. }
+		| IOop::ExtentLiveRepair { .. }
+		| IOop::ExtentLiveReopen { .. }
+		| IOop::ExtentLiveNoOp { .. } => {
+                    panic!(
+                        "Bad  job received in process_ds_completion: {:?}",
+                        job
+                    );
                 }
             }
         } else {
@@ -4865,9 +4874,6 @@ pub struct Upstairs {
      * Logger used by the upstairs
      */
     log: Logger,
-    /*
-     * Live repair tracking structure
-     */
 }
 
 impl Upstairs {
@@ -7070,6 +7076,8 @@ impl Upstairs {
         let ds_state = ds.ds_state[client_id as usize];
         match ds_state {
             DsState::Active | DsState::Repair | DsState::LiveRepair => {}
+            DsState::Faulted => {
+            }
             _ => {
                 warn!(
                     self.log,
