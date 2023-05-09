@@ -278,6 +278,10 @@ async fn scrub(
 #[derive(Deserialize, JsonSchema)]
 struct ValidateRequest {
     pub expected_digest: ExpectedDigest,
+
+    // Size to validate in bytes, starting from offset 0. If not specified, the
+    // total volume size is used.
+    pub size_to_validate: Option<usize>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -300,7 +304,7 @@ async fn validate(
     let pantry = rc.context();
 
     let job_id = pantry
-        .validate(path.id.clone(), body.expected_digest)
+        .validate(path.id.clone(), body.expected_digest, body.size_to_validate)
         .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
