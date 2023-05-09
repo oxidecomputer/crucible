@@ -538,6 +538,10 @@ fn apply_smf(
 
     for (_, region_snapshots) in running_snapshots.iter_mut() {
         for snapshot in region_snapshots.values_mut() {
+            if snapshot.state != State::Requested {
+                continue;
+            }
+
             let name = format!(
                 "{}-{}-{}",
                 snapshot_prefix, snapshot.id.0, snapshot.name
@@ -889,6 +893,13 @@ fn worker(
                  * No matter what the state is, we run apply_smf(). Creating and
                  * deleting running snapshots only requires us to create and
                  * delete services. The snapshots are not created by us.
+                 *
+                 * If the running snapshot is Requested, we apply_smf() first,
+                 * then set the state to Created. This is a little different
+                 * from how Regions are handled.
+                 *
+                 * If the running snapshot is Tombstoned, we apply_smf() first,
+                 * then we set the state to Destroyed
                  */
                 info!(
                     log,
