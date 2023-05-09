@@ -291,6 +291,13 @@ pub struct DeleteSnapshotRequest {
     pub name: String,
 }
 
+// The different types of resources the worker thread monitors for changes. This
+// wraps the object that has been added, or changed somehow.
+pub enum Resource {
+    Region(Region),
+    RunningSnapshot(RegionId, String, RunningSnapshot),
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

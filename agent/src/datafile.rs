@@ -259,7 +259,7 @@ impl DataFile {
             id: request.id.clone(),
             name: request.name.clone(),
             port_number,
-            state: State::Created, // no work to do, just run smf
+            state: State::Requested,
         };
 
         info!(
@@ -302,26 +302,26 @@ impl DataFile {
         let running_snapshots =
             inner.running_snapshots.get_mut(&request.id).unwrap();
 
-        if running_snapshots.get(&request.name).is_none() {
-            info!(
-                self.log,
-                "not running for region {} snapshot {}, returning Ok",
-                request.id.0,
-                request.name
-            );
+        match running_snapshots.get_mut(&request.name) {
+            None => {
+                info!(
+                    self.log,
+                    "not running for region {} snapshot {}, returning Ok",
+                    request.id.0,
+                    request.name
+                );
 
-            return Ok(());
-        }
+                return Ok(());
+            }
 
-        info!(
-            self.log,
-            "removing snapshot {}-{}", request.id.0, request.name
-        );
+            Some(request) => {
+                info!(
+                    self.log,
+                    "removing snapshot {}-{}", request.id.0, request.name
+                );
 
-        running_snapshots.remove(&request.name);
-
-        if running_snapshots.is_empty() {
-            inner.running_snapshots.remove(&request.id);
+                request.state = State::Tombstoned;
+            }
         }
 
         /*
@@ -436,6 +436,36 @@ impl DataFile {
     }
 
     /**
+     * Mark a particular running snapshot as failed to provision.
+     */
+    pub fn fail_rs(&self, region_id: &RegionId, snapshot_name: &str) {
+        let mut inner = self.inner.lock().unwrap();
+
+        let mut rs = inner
+            .running_snapshots
+            .get_mut(region_id)
+            .unwrap()
+            .get_mut(snapshot_name)
+            .unwrap();
+
+        let nstate = State::Failed;
+        if rs.state == nstate {
+            return;
+        }
+
+        info!(
+            self.log,
+            "running snapshot {} state: {:?} -> {:?}",
+            rs.id.0,
+            rs.state,
+            nstate,
+        );
+        rs.state = nstate;
+
+        self.store(inner);
+    }
+
+    /**
      * Mark a particular region as provisioned.
      */
     pub fn created(&self, id: &RegionId) -> Result<()> {
@@ -466,6 +496,51 @@ impl DataFile {
     }
 
     /**
+     * Mark a particular running snapshot as provisioned.
+     */
+    pub fn created_rs(
+        &self,
+        region_id: &RegionId,
+        snapshot_name: &str,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+
+        let mut rs = inner
+            .running_snapshots
+            .get_mut(region_id)
+            .unwrap()
+            .get_mut(snapshot_name)
+            .unwrap();
+
+        let nstate = State::Created;
+
+        match &rs.state {
+            State::Requested => (),
+            State::Tombstoned => {
+                /*
+                 * Nexus requested that we destroy this running snapshot before
+                 * we finished provisioning it.
+                 */
+                return Ok(());
+            }
+
+            x => bail!("created running_snapshot in weird state {:?}", x),
+        }
+
+        info!(
+            self.log,
+            "running snapshot {} state: {:?} -> {:?}",
+            rs.id.0,
+            rs.state,
+            nstate,
+        );
+        rs.state = nstate;
+
+        self.store(inner);
+        Ok(())
+    }
+
+    /**
      * Mark a particular region as destroyed.
      */
     pub fn destroyed(&self, id: &RegionId) -> Result<()> {
@@ -483,6 +558,40 @@ impl DataFile {
             "region {} state: {:?} -> {:?}", r.id.0, r.state, nstate,
         );
         r.state = nstate;
+
+        // XXX shouldn't this remove the record?
+
+        self.store(inner);
+        Ok(())
+    }
+
+    /**
+     * Mark a particular running snapshot as destroyed.
+     */
+    pub fn destroyed_rs(
+        &self,
+        region_id: &RegionId,
+        snapshot_name: &str,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+
+        let mut rs = inner
+            .running_snapshots
+            .get_mut(region_id)
+            .unwrap()
+            .get_mut(snapshot_name)
+            .unwrap();
+
+        let nstate = State::Destroyed;
+
+        info!(
+            self.log,
+            "running snapshot {} state: {:?} -> {:?}",
+            rs.id.0,
+            rs.state,
+            nstate,
+        );
+        rs.state = nstate;
 
         // XXX shouldn't this remove the record?
 
@@ -547,11 +656,11 @@ impl DataFile {
     }
 
     /**
-     * The worker thread will request the first region that is in a
-     * particular state.  If there are no tasks in the provided state,
-     * we sleep waiting for work to do.
+     * The worker thread will request the first resource that is in a
+     * particular state. If there are no resources in the provided state,
+     * wait on the condition variable.
      */
-    pub fn first_in_states(&self, states: &[State]) -> Region {
+    pub fn first_in_states(&self, states: &[State]) -> Resource {
         let mut inner = self.inner.lock().unwrap();
 
         loop {
@@ -565,7 +674,19 @@ impl DataFile {
             for s in states {
                 for r in inner.regions.values() {
                     if &r.state == s {
-                        return r.clone();
+                        return Resource::Region(r.clone());
+                    }
+                }
+
+                for (rid, r) in &inner.running_snapshots {
+                    for (name, rs) in r {
+                        if &rs.state == s {
+                            return Resource::RunningSnapshot(
+                                rid.clone(),
+                                name.clone(),
+                                rs.clone(),
+                            );
+                        }
                     }
                 }
             }
