@@ -18,6 +18,7 @@ mod datafile;
 mod model;
 mod server;
 
+use model::Resource;
 use model::State;
 
 #[derive(Debug, Parser)]
@@ -337,8 +338,9 @@ fn apply_smf(
         .iter()
         .flat_map(|(_, n)| {
             n.iter()
-                .map(|(_, s)| {
-                    format!("{}-{}-{}", snapshot_prefix, s.id.0, s.name)
+                .filter(|(_, rs)| rs.state == State::Created)
+                .map(|(_, rs)| {
+                    format!("{}-{}-{}", snapshot_prefix, rs.id.0, rs.name)
                 })
                 .collect::<Vec<String>>()
         })
@@ -536,6 +538,10 @@ fn apply_smf(
 
     for (_, region_snapshots) in running_snapshots.iter_mut() {
         for snapshot in region_snapshots.values_mut() {
+            if snapshot.state != State::Requested {
+                continue;
+            }
+
             let name = format!(
                 "{}-{}-{}",
                 snapshot_prefix, snapshot.id.0, snapshot.name
@@ -786,36 +792,123 @@ fn worker(
          * - create a running snapshot
          * - delete a running snapshot
          *
-         * We use first_in_states to both get the next available Region
-         * and to wait on the condvar when there are no regions available.
-         *
-         * If the region is State::Requested, we create that region then run
-         * the apply_smf().
-         * If the region is State:Tombstoned, we apply_smf() first, then we
-         * finish up destroying the region.
+         * We use first_in_states to both get the next available Resource enum,
+         * which wraps either a Region or RegionSnapshot that has changed.
+         * Otherwise, first_in_states will wait on the condvar.
          */
-        let r = df.first_in_states(&[State::Tombstoned, State::Requested]);
+        let work = df.first_in_states(&[State::Tombstoned, State::Requested]);
 
-        match &r.state {
-            State::Requested => {
-                // if regions need to be created, do that before apply_smf.
-                let region_dataset =
-                    regions_dataset.ensure_child_dataset(&r.id.0).unwrap();
+        match work {
+            Resource::Region(r) => {
+                /*
+                 * If the region is State::Requested, we create that region then run
+                 * the apply_smf().
+                 *
+                 * If the region is State:Tombstoned, we apply_smf() first, then we
+                 * finish up destroying the region.
+                 */
+                match &r.state {
+                    State::Requested => {
+                        // if regions need to be created, do that before apply_smf.
+                        let region_dataset = regions_dataset
+                            .ensure_child_dataset(&r.id.0)
+                            .unwrap();
 
-                let res = worker_region_create(
-                    &log,
-                    &downstairs_program,
-                    &r,
-                    &region_dataset.path().unwrap(),
-                )
-                .and_then(|_| df.created(&r.id));
+                        let res = worker_region_create(
+                            &log,
+                            &downstairs_program,
+                            &r,
+                            &region_dataset.path().unwrap(),
+                        )
+                        .and_then(|_| df.created(&r.id));
 
-                if let Err(e) = res {
-                    error!(log, "region {:?} create failed: {:?}", r.id.0, e);
-                    df.fail(&r.id);
+                        if let Err(e) = res {
+                            error!(
+                                log,
+                                "region {:?} create failed: {:?}", r.id.0, e
+                            );
+                            df.fail(&r.id);
+                        }
+
+                        info!(log, "applying SMF actions post create...");
+                        let result = apply_smf(
+                            &log,
+                            &df,
+                            regions_dataset.path().unwrap(),
+                            &downstairs_prefix,
+                            &snapshot_prefix,
+                        );
+                        if let Err(e) = result {
+                            error!(log, "SMF application failure: {:?}", e);
+                        } else {
+                            info!(log, "SMF ok!");
+                        }
+                    }
+
+                    State::Tombstoned => {
+                        info!(log, "applying SMF actions before removal...");
+                        let result = apply_smf(
+                            &log,
+                            &df,
+                            regions_dataset.path().unwrap(),
+                            &downstairs_prefix,
+                            &snapshot_prefix,
+                        );
+
+                        if let Err(e) = result {
+                            error!(log, "SMF application failure: {:?}", e);
+                        } else {
+                            info!(log, "SMF ok!");
+                        }
+
+                        // After SMF successfully shuts off downstairs, remove zfs
+                        // dataset.
+                        let region_dataset = regions_dataset
+                            .from_child_dataset(&r.id.0)
+                            .unwrap();
+
+                        let res =
+                            worker_region_destroy(&log, &r, region_dataset)
+                                .and_then(|_| df.destroyed(&r.id));
+
+                        if let Err(e) = res {
+                            error!(
+                                log,
+                                "region {:?} destroy failed: {:?}", r.id.0, e
+                            );
+                            df.fail(&r.id);
+                        }
+                    }
+                    _ => {
+                        error!(
+                            log,
+                            "worker got unexpected region state: {:?}", r
+                        );
+                        std::process::exit(1);
+                    }
                 }
+            }
 
-                info!(log, "applying SMF actions post create...");
+            Resource::RunningSnapshot(region_id, snapshot_name, rs) => {
+                /*
+                 * No matter what the state is, we run apply_smf(). Creating and
+                 * deleting running snapshots only requires us to create and
+                 * delete services. The snapshots are not created by us.
+                 *
+                 * If the running snapshot is Requested, we apply_smf() first,
+                 * then set the state to Created. This is a little different
+                 * from how Regions are handled.
+                 *
+                 * If the running snapshot is Tombstoned, we apply_smf() first,
+                 * then we set the state to Destroyed
+                 */
+                info!(
+                    log,
+                    "applying SMF actions for running snapshot {} (state {:?})...",
+                    rs.id.0,
+                    rs.state,
+                );
+
                 let result = apply_smf(
                     &log,
                     &df,
@@ -823,44 +916,44 @@ fn worker(
                     &downstairs_prefix,
                     &snapshot_prefix,
                 );
-                if let Err(e) = result {
-                    error!(log, "SMF application failure: {:?}", e);
-                } else {
-                    info!(log, "SMF ok!");
-                }
-            }
-            State::Tombstoned => {
-                info!(log, "applying SMF actions before removal...");
-                let result = apply_smf(
-                    &log,
-                    &df,
-                    regions_dataset.path().unwrap(),
-                    &downstairs_prefix,
-                    &snapshot_prefix,
-                );
 
                 if let Err(e) = result {
                     error!(log, "SMF application failure: {:?}", e);
                 } else {
                     info!(log, "SMF ok!");
+
+                    // `apply_smf` returned Ok, so the desired state transition
+                    // succeeded: update the datafile.
+                    let res = match &rs.state {
+                        State::Requested => {
+                            df.created_rs(&region_id, &snapshot_name)
+                        }
+
+                        State::Tombstoned => {
+                            df.destroyed_rs(&region_id, &snapshot_name)
+                        }
+
+                        _ => {
+                            error!(
+                                log,
+                                "worker got unexpected running snapshot state: {:?}",
+                                rs,
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+
+                    if let Err(e) = res {
+                        error!(
+                            log,
+                            "running snapshot {} state change failed: {:?}",
+                            rs.id.0,
+                            e
+                        );
+
+                        df.fail_rs(&region_id, &snapshot_name);
+                    }
                 }
-
-                // After SMF successfully shuts off downstairs, remove zfs
-                // dataset.
-                let region_dataset =
-                    regions_dataset.from_child_dataset(&r.id.0).unwrap();
-
-                let res = worker_region_destroy(&log, &r, region_dataset)
-                    .and_then(|_| df.destroyed(&r.id));
-
-                if let Err(e) = res {
-                    error!(log, "region {:?} destroy failed: {:?}", r.id.0, e);
-                    df.fail(&r.id);
-                }
-            }
-            _ => {
-                eprintln!("worker got unexpected region state: {:?}", r);
-                std::process::exit(1);
             }
         }
     }
