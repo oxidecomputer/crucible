@@ -541,7 +541,9 @@ impl DataFile {
     }
 
     /**
-     * Mark a particular region as destroyed.
+     * Mark a particular region as destroyed. Do not remove the record: it's
+     * important for calls to the agent to be idempotent in order to safely be
+     * used in a saga.
      */
     pub fn destroyed(&self, id: &RegionId) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
@@ -559,14 +561,14 @@ impl DataFile {
         );
         r.state = nstate;
 
-        // XXX shouldn't this remove the record?
-
         self.store(inner);
         Ok(())
     }
 
     /**
-     * Mark a particular running snapshot as destroyed.
+     * Mark a particular running snapshot as destroyed. Do not remove the
+     * record: it's important for calls to the agent to be idempotent in order
+     * to safely be used in a saga.
      */
     pub fn destroyed_rs(
         &self,
@@ -592,8 +594,6 @@ impl DataFile {
             nstate,
         );
         rs.state = nstate;
-
-        // XXX shouldn't this remove the record?
 
         self.store(inner);
         Ok(())
