@@ -844,6 +844,7 @@ fn worker(
                             info!(log, "SMF ok!");
                         }
                     }
+
                     State::Tombstoned => {
                         info!(log, "applying SMF actions before removal...");
                         let result = apply_smf(
@@ -907,6 +908,7 @@ fn worker(
                     rs.id.0,
                     rs.state,
                 );
+
                 let result = apply_smf(
                     &log,
                     &df,
@@ -919,36 +921,37 @@ fn worker(
                     error!(log, "SMF application failure: {:?}", e);
                 } else {
                     info!(log, "SMF ok!");
-                }
 
-                // `apply_smf` returned Ok, so the desired state transition
-                // succeeded: update the datafile.
-                let res = match &rs.state {
-                    State::Requested => {
-                        df.created_rs(&region_id, &snapshot_name)
-                    }
+                    // `apply_smf` returned Ok, so the desired state transition
+                    // succeeded: update the datafile.
+                    let res = match &rs.state {
+                        State::Requested => {
+                            df.created_rs(&region_id, &snapshot_name)
+                        }
 
-                    State::Tombstoned => {
-                        df.destroyed_rs(&region_id, &snapshot_name)
-                    }
+                        State::Tombstoned => {
+                            df.destroyed_rs(&region_id, &snapshot_name)
+                        }
 
-                    _ => {
-                        eprintln!(
-                            "worker got unexpected running snapshot state: {:?}",
-                            rs,
+                        _ => {
+                            eprintln!(
+                                "worker got unexpected running snapshot state: {:?}",
+                                rs,
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+
+                    if let Err(e) = res {
+                        error!(
+                            log,
+                            "running snapshot {} state change failed: {:?}",
+                            rs.id.0,
+                            e
                         );
-                        std::process::exit(1);
-                    }
-                };
 
-                if let Err(e) = res {
-                    error!(
-                        log,
-                        "running snapshot {} state change failed: {:?}",
-                        rs.id.0,
-                        e
-                    );
-                    df.fail_rs(&region_id, &snapshot_name);
+                        df.fail_rs(&region_id, &snapshot_name);
+                    }
                 }
             }
         }
