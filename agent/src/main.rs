@@ -880,9 +880,9 @@ fn worker(
                         }
                     }
                     _ => {
-                        eprintln!(
-                            "worker got unexpected region state: {:?}",
-                            r
+                        error!(
+                            log,
+                            "worker got unexpected region state: {:?}", r
                         );
                         std::process::exit(1);
                     }
@@ -934,7 +934,8 @@ fn worker(
                         }
 
                         _ => {
-                            eprintln!(
+                            error!(
+                                log,
                                 "worker got unexpected running snapshot state: {:?}",
                                 rs,
                             );
