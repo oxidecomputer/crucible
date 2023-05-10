@@ -496,7 +496,7 @@ impl DataFile {
     }
 
     /**
-     * Mark a particular running snapshot as provisioned.
+     * Mark a particular running snapshot as created.
      */
     pub fn created_rs(
         &self,
