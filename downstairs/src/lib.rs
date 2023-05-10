@@ -1229,12 +1229,27 @@ where
                         let mut ds = ads.lock().await;
 
                         if let Some(upstairs_connection) = upstairs_connection {
-                            info!(
-                                log,
-                                "upstairs {:?} disconnected, {} jobs left",
-                                upstairs_connection,
-                                ds.jobs(upstairs_connection).await?,
-                            );
+
+                            // If our upstairs never completed activation,
+                            // or some other upstairs activated, we won't
+                            // be able to report how many jobs.
+                            match ds.jobs(upstairs_connection).await {
+                                Ok(jobs) => {
+                                    info!(
+                                        log,
+                                        "upstairs {:?} disconnected, {} jobs left",
+                                        upstairs_connection,
+                                        jobs,
+                                    );
+                                }
+                                Err(e) => {
+                                    info!(
+                                        log,
+                                        "upstairs {:?} disconnected, {}",
+                                        upstairs_connection, e
+                                    );
+                                }
+                            }
 
                             if ds.is_active(upstairs_connection) {
                                 info!(
@@ -1262,14 +1277,51 @@ where
                         gen,
                         read_only,
                         encrypted,
+                        alternate_versions,
                     }) => {
                         if negotiated != 0 {
                             bail!("Received connect out of order {}",
                                 negotiated);
                         }
+                        info!(log, "Connection request from {} with version {}",
+                            upstairs_id, version);
 
-                        if version != 1 {
-                            bail!("expected version 1, got {}", version);
+                        // Verify we can communicate with the upstairs.  First
+                        // check our message version.  If that fails,  check
+                        // to see if our version is one of the supported
+                        // versions the upstairs has told us it can support.
+                        if version != CRUCIBLE_MESSAGE_VERSION {
+                            if alternate_versions
+                                .contains(&CRUCIBLE_MESSAGE_VERSION)
+                            {
+                                warn!(
+                                    log,
+                                    "downstairs and upstairs using different \
+                                     but compatible versions, Upstairs is {}, \
+                                     but supports {:?}, downstairs is {}",
+                                    version,
+                                    alternate_versions,
+                                    CRUCIBLE_MESSAGE_VERSION,
+                                );
+                            } else {
+                                let m = Message::VersionMismatch {
+                                    version: CRUCIBLE_MESSAGE_VERSION,
+                                };
+                                let mut fw = fw.lock().await;
+                                if let Err(e) = fw.send(m).await {
+                                    warn!(
+                                        log,
+                                        "Failed to send VersionMismatch: {}",
+                                        e
+                                    );
+                                }
+                                bail!(
+                                    "Required version {}, Or {:?} got {}",
+                                    CRUCIBLE_MESSAGE_VERSION,
+                                    alternate_versions,
+                                    version,
+                                );
+                            }
                         }
 
                         // Reject an Upstairs negotiation if there is a mismatch
@@ -1311,12 +1363,16 @@ where
                             gen,
                         });
                         info!(
-                            log, "upstairs {:?} connected",
-                            upstairs_connection.unwrap());
+                            log, "upstairs {:?} connected, version {}",
+                            upstairs_connection.unwrap(),
+                            CRUCIBLE_MESSAGE_VERSION);
 
                         let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(
-                            Message::YesItsMe { version: 1, repair_addr }
+                            Message::YesItsMe {
+                                version: CRUCIBLE_MESSAGE_VERSION,
+                                repair_addr
+                            }
                         ).await {
                             bail!("Failed sending YesItsMe: {}", e);
                         }
@@ -3054,6 +3110,13 @@ pub async fn start_downstairs(
         let mut ds = d.lock().await;
         ds.address = Some(local_addr);
     }
+    let info = crucible_common::BuildInfo::default();
+    info!(log, "Crucible Version: {}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
+    );
+
     info!(log, "Using address: {:?}", local_addr);
 
     let repair_address = match address {
@@ -3169,6 +3232,7 @@ mod test {
     use rand_chacha::ChaCha20Rng;
     use std::net::Ipv4Addr;
     use tempfile::{tempdir, TempDir};
+    use tokio::net::TcpSocket;
     use tokio::sync::mpsc::error::TryRecvError;
 
     // Create a simple logger
@@ -5882,6 +5946,237 @@ mod test {
         // Work struct.
         assert!(result.is_ok());
 
+        Ok(())
+    }
+
+    /*
+     * Test function that will start up a downstairs (at the provided port)
+     * then create a tcp connection to that downstairs, returning the tcp
+     * connection to the caller.
+     */
+    async fn start_ds_and_connect(
+        listen_port: u16,
+        repair_port: u16,
+    ) -> Result<tokio::net::TcpStream> {
+        /*
+         * Pick some small enough values for what we need.
+         */
+        let bs = 512;
+        let es = 4;
+        let ec = 5;
+        let dir = tempdir()?;
+
+        let ads = create_test_downstairs(bs, es, ec, &dir).await?;
+
+        let _ = start_downstairs(
+            ads,
+            "127.0.0.1".parse().unwrap(),
+            None,
+            listen_port,
+            repair_port,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let sock = TcpSocket::new_v4().unwrap();
+
+        let addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            listen_port,
+        );
+        Ok(sock.connect(addr).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_version_match() -> Result<()> {
+        // A simple test to verify that sending the current crucible
+        // message version to the downstairs will trigger a response
+        // indicating the version is supported.
+        let tcp = start_ds_and_connect(5555, 5556).await.unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: Vec::new(),
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::YesItsMe {
+                version,
+                repair_addr,
+            }) => {
+                assert_eq!(version, CRUCIBLE_MESSAGE_VERSION);
+                assert_eq!(repair_addr, "127.0.0.1:5556".parse().unwrap());
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_version_downrev() -> Result<()> {
+        // Test that a newer crucible version will result in a message
+        // indicating there is a version mismatch.
+        let tcp = start_ds_and_connect(5557, 5558).await.unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION - 1,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION - 1],
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::VersionMismatch { version }) => {
+                assert_eq!(version, CRUCIBLE_MESSAGE_VERSION);
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_version_uprev_only() -> Result<()> {
+        // Test sending only the +1 version to the DS, verify it rejects
+        // this version as unsupported.
+        let tcp = start_ds_and_connect(5579, 5560).await.unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION + 1,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION + 1],
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::VersionMismatch { version }) => {
+                assert_eq!(version, CRUCIBLE_MESSAGE_VERSION);
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn test_version_uprev_compatable() -> Result<()> {
+        // Test sending the +1 version to the DS, but also include the
+        // current version on the supported list.  The downstairs should
+        // see that and respond with the version it does support.
+        let tcp = start_ds_and_connect(5561, 5562).await.unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION + 1,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: vec![
+                CRUCIBLE_MESSAGE_VERSION,
+                CRUCIBLE_MESSAGE_VERSION + 1,
+            ],
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::YesItsMe {
+                version,
+                repair_addr,
+            }) => {
+                assert_eq!(version, CRUCIBLE_MESSAGE_VERSION);
+                assert_eq!(repair_addr, "127.0.0.1:5562".parse().unwrap());
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn test_version_uprev_list() -> Result<()> {
+        // Test sending an invalid version to the DS, but also include the
+        // current version on the supported list, but with several
+        // choices.
+        let tcp = start_ds_and_connect(5563, 5564).await.unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION + 4,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: vec![
+                CRUCIBLE_MESSAGE_VERSION - 1,
+                CRUCIBLE_MESSAGE_VERSION,
+                CRUCIBLE_MESSAGE_VERSION + 1,
+            ],
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::YesItsMe {
+                version,
+                repair_addr,
+            }) => {
+                assert_eq!(version, CRUCIBLE_MESSAGE_VERSION);
+                assert_eq!(repair_addr, "127.0.0.1:5564".parse().unwrap());
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
         Ok(())
     }
 }

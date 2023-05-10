@@ -1,4 +1,5 @@
 // Copyright 2021 Oxide Computer Company
+use std::fmt;
 use std::fs::File;
 use std::hash::Hasher;
 use std::io::{ErrorKind, Read, Write};
@@ -239,4 +240,62 @@ pub fn integrity_hash(args: &[&[u8]]) -> u64 {
         hasher.write(arg);
     }
     hasher.finish()
+}
+
+/// Detailed build information about Crucible.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct BuildInfo {
+    pub version: String,
+    pub git_sha: String,
+    pub git_commit_timestamp: String,
+    pub git_branch: String,
+    pub rustc_semver: String,
+    pub rustc_channel: String,
+    pub rustc_host_triple: String,
+    pub rustc_commit_sha: String,
+    pub cargo_triple: String,
+    pub debug: bool,
+    pub opt_level: u8,
+}
+
+impl Default for BuildInfo {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            git_sha: env!("VERGEN_GIT_SHA").to_string(),
+            git_commit_timestamp: env!("VERGEN_GIT_COMMIT_TIMESTAMP")
+                .to_string(),
+            git_branch: env!("VERGEN_GIT_BRANCH").to_string(),
+            rustc_semver: env!("VERGEN_RUSTC_SEMVER").to_string(),
+            rustc_channel: env!("VERGEN_RUSTC_CHANNEL").to_string(),
+            rustc_host_triple: env!("VERGEN_RUSTC_HOST_TRIPLE").to_string(),
+            rustc_commit_sha: env!("VERGEN_RUSTC_COMMIT_HASH").to_string(),
+            cargo_triple: env!("VERGEN_CARGO_TARGET_TRIPLE").to_string(),
+            debug: env!("VERGEN_CARGO_DEBUG").parse().unwrap(),
+            opt_level: env!("VERGEN_CARGO_OPT_LEVEL").parse().unwrap(),
+        }
+    }
+}
+
+impl std::fmt::Display for BuildInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Crucible Version: {}\n\
+            Commit SHA: {}\n\
+            Commit timestamp: {}  branch: {}\n\
+            rustc: {} {} {}\n\
+            Cargo: {}  Debug: {} Opt level: {}",
+            self.version,
+            self.git_sha,
+            self.git_commit_timestamp,
+            self.git_branch,
+            self.rustc_semver,
+            self.rustc_channel,
+            self.rustc_host_triple,
+            self.cargo_triple,
+            self.debug,
+            self.opt_level
+        )
+    }
 }

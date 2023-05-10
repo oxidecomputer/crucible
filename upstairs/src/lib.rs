@@ -72,6 +72,10 @@ pub use live_repair::{check_for_repair, ExtentInfo, RepairCheck};
 
 use async_trait::async_trait;
 
+// Max number of outstanding IOs between the upstairs and the downstairs
+// before we give up and mark that downstairs faulted.
+const IO_OUTSTANDING_MAX: usize = 1000;
+
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.
@@ -258,6 +262,7 @@ pub async fn join_all<'a>(
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
+    fn ds__ping__sent(_: u64, _: u64) {}
     fn volume__read__start(_: u32, _: Uuid) {}
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}
@@ -917,15 +922,21 @@ where
     let mut self_promotion = false;
 
     /*
+     * If we support other Message versions, include those here.
+     */
+    let alternate_message_versions = Vec::new();
+
+    /*
      * As the "client", we must begin the negotiation.
      */
     let m = Message::HereIAm {
-        version: 1,
+        version: CRUCIBLE_MESSAGE_VERSION,
         upstairs_id: up.uuid,
         session_id: up.session_id,
         gen: up.get_generation().await,
         read_only: up.read_only,
         encrypted: up.encrypted(),
+        alternate_versions: alternate_message_versions.clone(),
     };
     fw.send(m).await?;
 
@@ -1098,22 +1109,39 @@ where
                             up.encrypted(),
                         );
                     }
+                    Some(Message::VersionMismatch { version }) => {
+                        // Upstairs cannot communicate with the downstairs.
+                        up.ds_transition(
+                            up_coms.client_id, DsState::BadVersion
+                        ).await;
+                        bail!(
+                            "downstairs version is {}, ours is {} (alts {:?})",
+                            version,
+                            CRUCIBLE_MESSAGE_VERSION,
+                            alternate_message_versions,
+                        );
+                    }
                     Some(Message::YesItsMe { version, repair_addr }) => {
                         if negotiated != 0 {
                             bail!("Got version already!");
                         }
 
                         /*
-                         * XXX Valid version to compare with should come
-                         * from main task. In the future we will also have
-                         * to handle a version mismatch.
+                         * For now, we only match on a single version and
+                         * ignore any additional supported versions.
+                         * In the future, we may support a version that
+                         * is different than ours.
                          */
-                        if version != 1 {
+                        if version != CRUCIBLE_MESSAGE_VERSION {
                             up.ds_transition(
                                 up_coms.client_id,
                                 DsState::BadVersion
                             ).await;
-                            bail!("expected version 1, got {}", version);
+                            bail!("expected version {} (alt {:?}), got {}",
+                                CRUCIBLE_MESSAGE_VERSION,
+                                alternate_message_versions,
+                                version
+                            );
                         }
 
                         negotiated = 1;
@@ -1700,6 +1728,7 @@ where
     let mut more_work_interval = deadline_secs(1);
     let mut ping_interval = deadline_secs(10);
     let mut timeout_deadline = deadline_secs(50);
+    let mut ping_count = 0;
 
     /*
      * We create a task that handles messages from the downstairs (usually
@@ -1743,10 +1772,12 @@ where
                 if up_c.downstairs.lock().await.ds_state[client_id as usize]
                     == DsState::Faulted
                 {
-                    bail!(
-                        "[{}] exits pm_task, this downstairs faulted",
+                    warn!(
+                        up_c.log,
+                        "[{}] will exit pm_task, this downstairs faulted",
                         client_id
                     );
+                    bail!("[{}] This downstairs now faulted", client_id);
                 }
 
                 if up_c.ds_deactivate(client_id).await {
@@ -1932,6 +1963,8 @@ where
                  * been idle for (TBD) seconds.
                  */
                 fw.send(Message::Ruok).await?;
+                ping_count += 1;
+                cdt::ds__ping__sent!(|| (ping_count, up_coms.client_id as u64));
 
                 if up.lossy {
                     /*
@@ -2392,6 +2425,7 @@ async fn looper(
 ) {
     let mut firstgo = true;
     let mut connected = false;
+    let mut notify = 0;
 
     let log = up.log.new(o!("looper" => up_coms.client_id.to_string()));
     'outer: loop {
@@ -2417,7 +2451,10 @@ async fn looper(
         /*
          * Set a connect timeout, and connect to the target:
          */
-        info!(log, "[{1}] connecting to {0}", target, up_coms.client_id);
+        if notify == 0 {
+            info!(log, "[{1}] connecting to {0}", target, up_coms.client_id);
+        }
+        notify = (notify + 1) % 10;
         let deadline = tokio::time::sleep_until(deadline_secs(10));
         tokio::pin!(deadline);
         let tcp = sock.connect(target);
@@ -3281,6 +3318,20 @@ impl Downstairs {
             .values()
             .filter(|job| {
                 Some(&IOState::InProgress) == job.state.get(&client_id)
+            })
+            .count()
+    }
+
+    /**
+     * Return a count of downstairs request IDs of total new and submitted
+     * work we have for a downstairs.
+     */
+    fn total_live_work(&self, client_id: u8) -> usize {
+        self.ds_active
+            .values()
+            .filter(|job| {
+                Some(&IOState::InProgress) == job.state.get(&client_id)
+                    || Some(&IOState::New) == job.state.get(&client_id)
             })
             .count()
     }
@@ -6280,6 +6331,15 @@ impl Upstairs {
                 // A move to Disabled can happen at any time we are talking
                 // to a downstairs.
             }
+            DsState::BadVersion => match old_state {
+                DsState::New | DsState::Disconnected => {}
+                _ => {
+                    panic!(
+                        "[{}] {} Invalid transition: {:?} -> {:?}",
+                        client_id, self.uuid, old_state, new_state
+                    );
+                }
+            },
             _ => {
                 panic!(
                     "Make a check for transition {} to {}",
@@ -7076,7 +7136,15 @@ impl Upstairs {
         let ds_state = ds.ds_state[client_id as usize];
         match ds_state {
             DsState::Active | DsState::Repair | DsState::LiveRepair => {}
-            DsState::Faulted => {}
+            DsState::Faulted => {
+                error!(
+                    self.log,
+                    "[{}] Dropping job {}, this downstairs is faulted",
+                    client_id,
+                    ds_id,
+                );
+                return Err(CrucibleError::NoLongerActive.into());
+            }
             _ => {
                 warn!(
                     self.log,
@@ -9091,13 +9159,13 @@ struct Condition {
  * Send work to all the targets.
  * If a send fails, report an error.
  */
-async fn send_work(t: &[Target], val: u64) {
+async fn send_work(t: &[Target], val: u64, log: &Logger) {
     for (client_id, d_client) in t.iter().enumerate() {
-        let res = d_client.ds_work_tx.send(val).await;
+        let res = d_client.ds_work_tx.try_send(val);
         if let Err(e) = res {
-            println!(
-                "ERROR {:#?} Failed to notify client {} of work {}",
-                e, client_id, val,
+            warn!(
+                log,
+                "{:?} Failed to notify client {} of work {}", e, client_id, val,
             );
         }
     }
@@ -9209,6 +9277,49 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
     warn!(up.log, "up_ds_listen loop done");
 }
 
+async fn gone_too_long(up: &Arc<Upstairs>) {
+    // Check outstanding IOops for each downstairs.
+    // If the number is too high, then mark that downstairs as failed, scrub
+    // any outstanding jobs.
+    let active = up.active.lock().await;
+    let mut ds = up.downstairs.lock().await;
+    let up_state = active.up_state;
+    drop(active);
+
+    // If we are not active, then just exit.
+    if up_state != UpState::Active {
+        return;
+    }
+
+    for cid in 0..3 {
+        // Only downstairs in these states are checked.
+        match ds.ds_state[cid as usize] {
+            DsState::Active
+            | DsState::LiveRepair
+            | DsState::Offline
+            | DsState::Replay => {
+                let work_count = ds.total_live_work(cid);
+                if work_count > IO_OUTSTANDING_MAX {
+                    warn!(
+                        up.log,
+                        "[up] downstairs {} failed, too many outstanding jobs {}",
+                        work_count,
+                        cid,
+                    );
+                    ds.ds_set_faulted(cid);
+                    up.ds_transition_with_lock(
+                        &mut ds,
+                        up_state,
+                        cid,
+                        DsState::Faulted,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /**
  * The upstairs has received a new IO request from the guest. Here we
  * decide what to for that request.
@@ -9287,7 +9398,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::Read { offset, data } => {
@@ -9298,7 +9409,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
@@ -9309,7 +9420,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::WriteUnwritten { offset, data } => {
@@ -9320,7 +9431,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::Flush { snapshot_details } => {
@@ -9344,7 +9455,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
         BlockOp::RepairOp => {
@@ -9436,7 +9547,7 @@ async fn process_new_io(
                 req.send_err(CrucibleError::UpstairsInactive).await;
                 return;
             }
-            send_work(dst, *lastcast).await;
+            send_work(dst, *lastcast, &up.log).await;
             *lastcast += 1;
         }
     }
@@ -9597,6 +9708,10 @@ async fn up_listen(
             }
             req = up.guest.recv() => {
                 process_new_io(up, &dst, req, &mut lastcast).await;
+
+                // Check to see if the number of outstanding IOs (between
+                // the upstairs and downstairs) is too many.
+                gone_too_long(up).await;
             }
             _ = sleep_until(repair_check_interval), if repair_check => {
                 match check_for_repair(up, &dst).await {
@@ -9645,7 +9760,7 @@ async fn up_listen(
                         error!(up.log, "flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
-                        send_work(&dst, 1).await;
+                        send_work(&dst, 1, &up.log).await;
                     }
                 }
                 /*
@@ -9692,6 +9807,12 @@ pub async fn up_main(
     }
     let log = Logger::root(drain.fuse(), o!());
     info!(log, "Upstairs starts");
+    let info = crucible_common::BuildInfo::default();
+    info!(log, "Crucible Version: {:#?}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
+    );
 
     /*
      * Build the Upstairs struct that we use to share data between

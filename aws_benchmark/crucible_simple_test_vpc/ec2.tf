@@ -5,7 +5,7 @@ resource "aws_key_pair" "temp" {
 
 module "upstairs" {
   source  = "terraform-aws-modules/ec2-instance/aws"
-  version = "~> 4.0"
+  version = "~> 5.0"
 
   name = "upstairs"
 
@@ -62,7 +62,7 @@ resource "aws_volume_attachment" "downstairs" {
 
 module "downstairs" {
   source  = "terraform-aws-modules/ec2-instance/aws"
-  version = "~> 4.0"
+  version = "~> 5.0"
 
   for_each = toset(["0", "1", "2"])
 
