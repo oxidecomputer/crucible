@@ -1,7 +1,9 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 
-use dropshot::{ConfigDropshot, ConfigLogging, ConfigLoggingLevel};
+use dropshot::{
+    ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use oximeter::{
     types::{Cumulative, Sample},
@@ -141,8 +143,10 @@ pub async fn ox_stats(
         request_body_max_bytes: 2048,
         tls: None,
     };
-    let logging_config = ConfigLogging::StderrTerminal {
+    let logging_config = ConfigLogging::File {
         level: ConfigLoggingLevel::Error,
+        path: "/dev/stdout".into(),
+        if_exists: ConfigLoggingIfExists::Append,
     };
 
     let server_info = ProducerEndpoint {

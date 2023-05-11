@@ -2,7 +2,7 @@
 #![allow(clippy::needless_collect)]
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
-use dropshot::{ConfigLogging, ConfigLoggingLevel};
+use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use slog::{error, info, o, warn, Logger};
 use std::collections::HashSet;
 use std::io::Write;
@@ -214,8 +214,10 @@ async fn main() -> Result<()> {
             downstairs_prefix,
             snapshot_prefix,
         } => {
-            let log = ConfigLogging::StderrTerminal {
+            let log = ConfigLogging::File {
                 level: ConfigLoggingLevel::Info,
+                path: "/dev/stdout".into(),
+                if_exists: ConfigLoggingIfExists::Append,
             }
             .to_logger(PROG)?;
 
