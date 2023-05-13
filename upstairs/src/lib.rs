@@ -2475,6 +2475,8 @@ struct Downstairs {
     ds_last_flush: Vec<u64>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
     ds_active: HashMap<u64, DownstairsIO>,
+    ds_new: Vec<Vec<u64>>,
+
     next_id: u64,
     completed: AllocRingBuffer<u64>,
     completed_jobs: AllocRingBuffer<WorkSummary>,
@@ -2551,6 +2553,7 @@ impl Downstairs {
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
             ds_active: HashMap::new(),
+            ds_new: vec![Vec::new(); 3],
             completed: AllocRingBuffer::with_capacity(2048),
             completed_jobs: AllocRingBuffer::with_capacity(8),
             next_id: 1000,
@@ -2994,17 +2997,8 @@ impl Downstairs {
      * Return a list of downstairs request IDs that represent unissued
      * requests for this client.
      */
-    fn new_work(&self, client_id: u8) -> Vec<u64> {
-        self.ds_active
-            .values()
-            .filter_map(|job| {
-                if let Some(IOState::New) = job.state.get(&client_id) {
-                    Some(job.ds_id)
-                } else {
-                    None
-                }
-            })
-            .collect()
+    fn new_work(&mut self, client_id: u8) -> Vec<u64> {
+        self.ds_new[client_id as usize].drain(..).collect()
     }
 
     /**
@@ -3012,12 +3006,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: u8) -> usize {
-        self.ds_active
-            .values()
-            .filter(|job| {
-                Some(&IOState::InProgress) == job.state.get(&client_id)
-            })
-            .count()
+        self.io_state_count.in_progress[client_id as usize] as usize
     }
 
     /**
@@ -3025,14 +3014,11 @@ impl Downstairs {
      * work we have for a downstairs.
      */
     fn total_live_work(&self, client_id: u8) -> usize {
-        self.ds_active
-            .values()
-            .filter(|job| {
-                Some(&IOState::InProgress) == job.state.get(&client_id)
-                    || Some(&IOState::New) == job.state.get(&client_id)
-            })
-            .count()
+        (self.io_state_count.new[client_id as usize]
+            + self.io_state_count.in_progress[client_id as usize])
+            as usize
     }
+
     /**
      * Build a list of jobs that are ready to be acked.
      */
@@ -3076,6 +3062,7 @@ impl Downstairs {
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
+                    self.ds_new[cid as usize].push(io.ds_id);
                 }
             }
         }
