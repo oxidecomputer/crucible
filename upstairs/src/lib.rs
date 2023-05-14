@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -21,7 +21,6 @@ pub use crucible_protocol::*;
 use anyhow::{anyhow, bail, Result};
 pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
-use itertools::Itertools;
 use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
@@ -2474,7 +2473,7 @@ struct Downstairs {
      */
     ds_last_flush: Vec<u64>,
     downstairs_errors: HashMap<u8, u64>, // client id -> errors
-    ds_active: HashMap<u64, DownstairsIO>,
+    ds_active: BTreeMap<u64, DownstairsIO>,
     ds_new: Vec<Vec<u64>>,
 
     next_id: u64,
@@ -2552,7 +2551,7 @@ impl Downstairs {
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
-            ds_active: HashMap::new(),
+            ds_active: BTreeMap::new(),
             ds_new: vec![Vec::new(); 3],
             completed: AllocRingBuffer::with_capacity(2048),
             completed_jobs: AllocRingBuffer::with_capacity(8),
@@ -2815,19 +2814,14 @@ impl Downstairs {
      * when there is work in the queue.
      */
     fn ds_deactivate_offline(&mut self, client_id: u8) {
-        let mut kvec: Vec<u64> =
-            self.ds_active.keys().cloned().collect::<Vec<u64>>();
-        kvec.sort_unstable();
-
         info!(
             self.log,
             "[{}] client skip all {} jobs for deactivate",
             client_id,
-            kvec.len(),
+            self.ds_active.len(),
         );
-        for ds_id in kvec.iter() {
-            let job = self.ds_active.get_mut(ds_id).unwrap();
 
+        for (ds_id, job) in self.ds_active.iter_mut() {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
@@ -2858,23 +2852,17 @@ impl Downstairs {
      */
     fn re_new(&mut self, client_id: u8) {
         let lf = self.ds_last_flush[client_id as usize];
-        let mut kvec: Vec<u64> =
-            self.ds_active.keys().cloned().collect::<Vec<u64>>();
-        kvec.sort_unstable();
 
         info!(
             self.log,
-            "[{}] client re-new {} jobs since flush {}",
-            client_id,
-            kvec.len(),
-            lf
+            "[{client_id}] client re-new {} jobs since flush {lf}",
+            self.ds_active.len(),
         );
-        for ds_id in kvec.iter() {
-            let is_read = self.is_read(*ds_id).unwrap();
-            let wc = self.state_count(*ds_id).unwrap();
-            let jobs_completed_ok = wc.completed_ok();
 
-            let job = self.ds_active.get_mut(ds_id).unwrap();
+        for (ds_id, job) in self.ds_active.iter_mut() {
+            let is_read = job.work.is_read();
+            let wc = job.state_count();
+            let jobs_completed_ok = wc.completed_ok();
 
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
@@ -2939,20 +2927,15 @@ impl Downstairs {
     // notify the correct upstairs task that all downstairs related work
     // for a skipped job has completed.
     fn ds_set_faulted(&mut self, client_id: u8) -> bool {
-        let mut kvec: Vec<u64> =
-            self.ds_active.keys().cloned().collect::<Vec<u64>>();
-        kvec.sort_unstable();
-
         info!(
             self.log,
-            "[{}] client skip {} in process jobs because fault",
-            client_id,
-            kvec.len(),
+            "[{client_id}] client skip {} in process jobs because fault",
+            self.ds_active.len(),
         );
         let mut notify_guest = false;
-        for ds_id in kvec.iter() {
-            let job = self.ds_active.get_mut(ds_id).unwrap();
+        let mut retire_check = vec![];
 
+        for (ds_id, job) in self.ds_active.iter_mut() {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
@@ -2968,7 +2951,9 @@ impl Downstairs {
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
                 if job.ack_status == AckStatus::Acked {
-                    self.retire_check(*ds_id);
+                    // Push this onto a queue to do the retire check when
+                    // we aren't doing a mutable iteration.
+                    retire_check.push(*ds_id);
                 } else if job.ack_status == AckStatus::NotAcked {
                     let wc = job.state_count();
                     if (wc.error + wc.skipped + wc.done) == 3 {
@@ -2990,6 +2975,11 @@ impl Downstairs {
                 }
             }
         }
+
+        for ds_id in retire_check {
+            self.retire_check(ds_id);
+        }
+
         notify_guest
     }
 
@@ -4001,35 +3991,32 @@ impl Downstairs {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
 
-            // Sort the job list, and retire all the jobs that happened before
-            // and including this flush.
+            // Retire all the jobs that happened before and including this
+            // flush.
 
-            let mut kvec: Vec<u64> = self
-                .ds_active
-                .keys()
-                .cloned()
-                .filter(|&x| x <= ds_id)
-                .collect::<Vec<u64>>();
+            loop {
+                let id = match self.ds_active.keys().next() {
+                    Some(id) if *id > ds_id => return,
+                    None => return,
+                    Some(id) => *id,
+                };
 
-            kvec.sort_unstable();
-
-            for id in kvec.iter() {
                 // Remove everything before this flush (because flushes depend
                 // on everything, and everything depends on flushes).
-                assert!(*id <= ds_id);
+                assert!(id <= ds_id);
 
                 // Assert the job is actually done, then complete it
-                let wc = self.state_count(*id).unwrap();
+                let wc = self.state_count(id).unwrap();
 
                 // Asserting that wc.active = 0 here because flushes depend on
                 // everything, and everything depends on flushes.
                 assert_eq!(wc.active, 0);
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
-                assert!(!self.completed.contains(id));
+                assert!(!self.completed.contains(&id));
 
-                let oj = self.ds_active.remove(id).unwrap();
+                let oj = self.ds_active.remove(&id).unwrap();
                 assert_eq!(oj.ack_status, AckStatus::Acked);
-                self.completed.push(*id);
+                self.completed.push(id);
                 let summary = oj.io_summarize();
                 self.completed_jobs.push(summary);
                 for cid in 0..3 {
@@ -4056,24 +4043,6 @@ impl Downstairs {
                 gen_number: _gen_number,
                 snapshot_details: _,
                 extent_limit: _,
-            } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    /**
-     * Check if an active job is a read or not.
-     */
-    fn is_read(&self, ds_id: u64) -> Result<bool> {
-        let job = self
-            .ds_active
-            .get(&ds_id)
-            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
-
-        match &job.work {
-            IOop::Read {
-                dependencies: _dependencies,
-                requests: _,
             } => Ok(true),
             _ => Ok(false),
         }
@@ -4721,9 +4690,7 @@ impl Upstairs {
         }
         let mut ds = self.downstairs.lock().await;
 
-        let mut kvec: Vec<u64> =
-            ds.ds_active.keys().cloned().collect::<Vec<u64>>();
-        if kvec.is_empty() {
+        if ds.ds_active.is_empty() {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
             self.ds_transition_with_lock(
                 &mut ds,
@@ -4733,13 +4700,13 @@ impl Upstairs {
             );
             return true;
         } else {
-            kvec.sort_unstable();
+            let last_id = ds.ds_active.keys().next_back().unwrap();
+
             /*
              * The last job must be a flush.  It's possible to get
              * here right after deactivating is set, but before the final
              * flush happens.
              */
-            let last_id = kvec.last().unwrap();
             if !ds.is_flush(*last_id).unwrap() {
                 info!(
                     self.log,
@@ -4753,8 +4720,7 @@ impl Upstairs {
              * Now count our jobs.  Any job not done or skipped means
              * we are not ready to deactivate.
              */
-            for id in kvec.iter() {
-                let job = ds.ds_active.get(id).unwrap();
+            for (id, job) in &ds.ds_active {
                 let state = job.state.get(&client_id).unwrap();
                 if state == &IOState::New || state == &IOState::InProgress {
                     info!(
@@ -4952,21 +4918,12 @@ impl Upstairs {
          * all jobs. It's currently important that flushes depend on everything,
          * and everything depends on flushes.
          */
-        let num_jobs = downstairs.ds_active.keys().len();
+        let num_jobs = downstairs.ds_active.len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
-        for job_id in downstairs
-            .ds_active
-            .keys()
-            .sorted()
-            .collect::<Vec<&u64>>()
-            .iter()
-            .rev()
-        {
-            let job = &downstairs.ds_active[job_id];
-
+        for (id, job) in downstairs.ds_active.iter().rev() {
             // Flushes must depend on everything
-            dep.push(**job_id);
+            dep.push(*id);
 
             // Depend on the last flush, but then bail out
             if job.work.is_flush() {
@@ -5130,30 +5087,21 @@ impl Upstairs {
          * with an existing job, it would be nice if those were removed from
          * this job's dependencies.
          */
-        let num_jobs = downstairs.ds_active.keys().len();
+        let num_jobs = downstairs.ds_active.len();
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
-        for job_id in downstairs
-            .ds_active
-            .keys()
-            .sorted()
-            .collect::<Vec<&u64>>()
-            .iter()
-            .rev()
-        {
-            let job = &downstairs.ds_active[job_id];
-
+        for (id, job) in downstairs.ds_active.iter().rev() {
             // Depend on the last flush - flushes are a barrier for
             // all writes.
             if job.work.is_flush() {
-                dep.push(**job_id);
+                dep.push(*id);
             }
 
             // If this job impacts the same blocks as something already active,
             // create a dependency.
             if impacted_blocks.conflicts(&job.impacted_blocks) {
-                dep.push(**job_id);
+                dep.push(*id);
             }
         }
 
@@ -5331,25 +5279,16 @@ impl Upstairs {
         let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
-        for job_id in downstairs
-            .ds_active
-            .keys()
-            .sorted()
-            .collect::<Vec<&u64>>()
-            .iter()
-            .rev()
-        {
-            let job = &downstairs.ds_active[job_id];
-
+        for (id, job) in downstairs.ds_active.iter().rev() {
             if job.work.is_flush() {
-                dep.push(**job_id);
+                dep.push(*id);
                 break;
             } else if job.work.is_write()
                 && impacted_blocks.conflicts(&job.impacted_blocks)
             {
                 // If this is a write and it impacts the same blocks as
                 // something already active, create a dependency.
-                dep.push(**job_id);
+                dep.push(*id);
             }
         }
 
@@ -9227,7 +9166,8 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let up_count = up.guest.guest_work.lock().await.active.len();
 
     let mut ds = up.downstairs.lock().await;
-    let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
+    let ds_count = ds.ds_active.len();
+
     println!(
         "----------------------------------------------------------------"
     );
@@ -9237,9 +9177,9 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
         up.get_generation().await,
         gior,
         up_count,
-        kvec.len(),
+        ds_count,
     );
-    if kvec.is_empty() {
+    if ds.ds_active.is_empty() {
         if up_count != 0 {
             show_guest_work(&up.guest).await;
         }
@@ -9257,9 +9197,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             "REPLAY",
         );
 
-        kvec.sort_unstable();
-        for id in kvec.iter() {
-            let job = ds.ds_active.get(id).unwrap();
+        for (id, job) in &ds.ds_active {
             let ack = job.ack_status;
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
@@ -9413,7 +9351,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
     WQCounts {
         up_count,
-        ds_count: kvec.len(),
+        ds_count,
         active_count,
     }
 }
