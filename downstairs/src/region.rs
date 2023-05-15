@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use futures::TryStreamExt;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -253,9 +253,8 @@ impl Inner {
             tag,
         ])?;
 
-        // YYY this assertion fails on the DO NOTHING clause
-        ensure!(rows_affected <= 1);
-        // assert_eq!(rows_affected, 1);
+        // can be 1 or 0 depending on if this is a duplicate write or not.
+        assert!(rows_affected <= 1);
 
         Ok(())
     }
