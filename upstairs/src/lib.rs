@@ -463,16 +463,25 @@ where
     new_work.sort_unstable();
 
     let mut active_count = u.downstairs.lock().await.submitted_work(client_id);
-    for new_id in new_work.iter() {
+    for ndx in 0..new_work.len() {
         if active_count >= 100 {
-            // Flow control enacted, stop sending work
+            // Flow control enacted, stop sending work -- and requeue all of
+            // our remaining work to assure it isn't dropped
+            u.downstairs.lock().await.requeue_work(client_id, &new_work[ndx..]);
             return Ok(true);
         }
+
+        let new_id = new_work[ndx];
+
         /*
          * Walk the list of work to do, update its status as in progress
          * and send the details to our downstairs.
          */
         if u.lossy && random() && random() {
+            /*
+             * Requeue this work so it isn't completely lost.
+             */
+            u.downstairs.lock().await.requeue_work(client_id, &[new_id]);
             continue;
         }
 
@@ -480,7 +489,7 @@ where
          * If in_progress returns None, it means that this job on this
          * client should be skipped.
          */
-        let job = u.downstairs.lock().await.in_progress(*new_id, client_id);
+        let job = u.downstairs.lock().await.in_progress(new_id, client_id);
         if job.is_none() {
             continue;
         }
@@ -491,11 +500,11 @@ where
                 dependencies,
                 writes,
             } => {
-                cdt::ds__write__io__start!(|| (*new_id, client_id as u64));
+                cdt::ds__write__io__start!(|| (new_id, client_id as u64));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
-                    job_id: *new_id,
+                    job_id: new_id,
                     dependencies: dependencies.clone(),
                     writes: writes.clone(),
                 })
@@ -506,13 +515,13 @@ where
                 writes,
             } => {
                 cdt::ds__write__unwritten__io__start!(|| (
-                    *new_id,
+                    new_id,
                     client_id as u64
                 ));
                 fw.send(Message::WriteUnwritten {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
-                    job_id: *new_id,
+                    job_id: new_id,
                     dependencies: dependencies.clone(),
                     writes: writes.clone(),
                 })
@@ -530,11 +539,11 @@ where
                 // to get the Option<limit> for our unique client.
                 let extent_limit =
                     u.downstairs.lock().await.extent_limit[client_id as usize];
-                cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
+                cdt::ds__flush__io__start!(|| (new_id, client_id as u64));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
-                    job_id: *new_id,
+                    job_id: new_id,
                     dependencies: dependencies.clone(),
                     flush_number,
                     gen_number,
@@ -547,11 +556,11 @@ where
                 dependencies,
                 requests,
             } => {
-                cdt::ds__read__io__start!(|| (*new_id, client_id as u64));
+                cdt::ds__read__io__start!(|| (new_id, client_id as u64));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
-                    job_id: *new_id,
+                    job_id: new_id,
                     dependencies: dependencies.clone(),
                     requests,
                 })
@@ -579,7 +588,7 @@ where
                     fw.send(Message::ExtentLiveFlushClose {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
-                        job_id: *new_id,
+                        job_id: new_id,
                         dependencies: dependencies.clone(),
                         extent_id: extent,
                         flush_number,
@@ -591,7 +600,7 @@ where
                     fw.send(Message::ExtentLiveClose {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
-                        job_id: *new_id,
+                        job_id: new_id,
                         dependencies: dependencies.clone(),
                         extent_id: extent,
                     })
@@ -612,7 +621,7 @@ where
                     fw.send(Message::ExtentLiveRepair {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
-                        job_id: *new_id,
+                        job_id: new_id,
                         dependencies: dependencies.clone(),
                         extent_id: extent,
                         source_client_id: source_downstairs,
@@ -631,7 +640,7 @@ where
                 fw.send(Message::ExtentLiveReopen {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
-                    job_id: *new_id,
+                    job_id: new_id,
                     dependencies: dependencies.clone(),
                     extent_id: extent,
                 })
@@ -642,7 +651,7 @@ where
                 fw.send(Message::ExtentLiveNoOp {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
-                    job_id: *new_id,
+                    job_id: new_id,
                     dependencies: dependencies.clone(),
                 })
                 .await?
@@ -2989,6 +2998,14 @@ impl Downstairs {
      */
     fn new_work(&mut self, client_id: u8) -> Vec<u64> {
         self.ds_new[client_id as usize].drain(..).collect()
+    }
+
+    /**
+     * Called to requeue work that was previously found by calling
+     * [`new_work`], presumably due to flow control.
+     */
+    fn requeue_work(&mut self, client_id: u8, work: &[u64]) {
+        self.ds_new[client_id as usize].extend_from_slice(work);
     }
 
     /**
