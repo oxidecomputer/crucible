@@ -48,6 +48,10 @@ pub struct Opt {
 
     #[clap(long, action)]
     bw_limit_in_bytes: Option<usize>,
+
+    /// Submit all zeroes instead of random data
+    #[clap(long, action)]
+    all_zeroes: bool,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -127,27 +131,32 @@ async fn main() -> Result<()> {
         1
     };
 
-    let write_buffers: Vec<Bytes> = (0..io_depth)
-        .map(|_| {
-            Bytes::from(
-                (0..io_size)
-                    .map(|_| rng.sample(rand::distributions::Standard))
-                    .collect::<Vec<u8>>(),
-            )
-        })
-        .collect();
-
     let read_buffers: Vec<Buffer> =
         (0..io_depth).map(|_| Buffer::new(io_size)).collect();
 
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;
-    let mut io_operation_time = Instant::now();
+    let mut measurement_time = Instant::now();
+    let mut total_io_time = Duration::ZERO;
     let mut iops: Vec<f32> = vec![];
     let mut bws: Vec<f32> = vec![];
 
     'outer: loop {
         let mut futures = Vec::with_capacity(io_depth);
+
+        let write_buffers: Vec<Bytes> = (0..io_depth)
+            .map(|_| {
+                Bytes::from(if opt.all_zeroes {
+                    vec![0u8; io_size]
+                } else {
+                    (0..io_size)
+                        .map(|_| rng.sample(rand::distributions::Standard))
+                        .collect::<Vec<u8>>()
+                })
+            })
+            .collect();
+
+        let io_operation_time = Instant::now();
 
         for i in 0..io_depth {
             let offset: u64 =
@@ -172,15 +181,14 @@ async fn main() -> Result<()> {
 
         crucible::join_all(futures).await?;
 
+        total_io_time += io_operation_time.elapsed();
         io_operations_sent +=
             ceiling_div!(io_size * io_depth, 16 * 1024 * 1024);
         bw_consumed += io_size * io_depth;
 
-        let diff = io_operation_time.elapsed();
-
-        if diff > Duration::from_secs(1) {
-            let fractional_seconds: f32 =
-                diff.as_secs() as f32 + (diff.subsec_nanos() as f32 / 1e9);
+        if measurement_time.elapsed() > Duration::from_secs(1) {
+            let fractional_seconds: f32 = total_io_time.as_secs() as f32
+                + (total_io_time.subsec_nanos() as f32 / 1e9);
 
             iops.push(io_operations_sent as f32 / fractional_seconds);
             bws.push(bw_consumed as f32 / fractional_seconds);
@@ -191,7 +199,7 @@ async fn main() -> Result<()> {
 
             io_operations_sent = 0;
             bw_consumed = 0;
-            io_operation_time = Instant::now();
+            measurement_time = Instant::now();
         }
     }
 
