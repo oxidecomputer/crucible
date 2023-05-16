@@ -653,7 +653,7 @@ where
                 flush_number,
                 gen_number,
                 snapshot_details,
-                extent_limit: _,
+                extent_limit,
             } => {
                 let deps = u
                     .live_repair_dep_check(
@@ -662,9 +662,18 @@ where
                         *new_id,
                     )
                     .await;
-                // Include the extent_limit value specific for this client.
-                let extent_limit =
-                    u.downstairs.lock().await.extent_limit[client_id as usize];
+                // If our downstairs is under repair, then include any extent
+                // limit sent in the IOop.
+                let my_extent_limit =
+                    if u
+                        .downstairs
+                        .lock()
+                        .await
+                        .ds_state[client_id as usize] == DsState::LiveRepair {
+                    extent_limit
+                } else {
+                    None
+                };
                 cdt::ds__flush__io__start!(|| (*new_id, client_id as u64));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
@@ -674,7 +683,7 @@ where
                     flush_number,
                     gen_number,
                     snapshot_details,
-                    extent_limit,
+                    extent_limit: my_extent_limit,
                 })
                 .await?
             }
@@ -5559,6 +5568,17 @@ impl Upstairs {
          * and make sure it matches.
          */
 
+        let mut extent_under_repair = None;
+        for cid in 0..3 {
+            if let Some(eur) = downstairs.extent_limit[cid] {
+                if extent_under_repair.is_none() {
+                    extent_under_repair = Some(eur);
+                } else {
+                    // We only support one extent being repaired at a time
+                    assert_eq!(Some(eur), extent_under_repair);
+                }
+            }
+        }
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
@@ -5571,7 +5591,7 @@ impl Upstairs {
             self.get_generation().await,
             snapshot_details,
             ImpactedBlocks::Empty,
-            None,
+            extent_under_repair,
         );
 
         let mut sub = HashMap::new();
