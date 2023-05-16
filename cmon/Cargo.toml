@@ -1,11 +1,12 @@
 [package]
-name = "crucadm"
+name = "cmon"
 version = "0.1.0"
 license = "MPL-2.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.1", features = ["derive", "env"] }
+clap = { version = "4.1", features = ["derive", "env", "wrap_help"] }
+clearscreen = "2.0.1"
 crucible = { path = "../upstairs" }
 crucible-control-client = { path = "../control-client" }
-tokio = { version = "1.25.0", features = ["full"] }
+tokio = { version = "1.27.0", features = ["full"] }

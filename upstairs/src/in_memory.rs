@@ -121,6 +121,7 @@ impl BlockIO for InMemoryBlockIO {
         Ok(WQCounts {
             up_count: 0,
             ds_count: 0,
+            active_count: 0,
         })
     }
 }

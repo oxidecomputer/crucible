@@ -61,7 +61,7 @@ for t in crucible-downstairs crucible-hammer crutest dsc crudd; do
 done
 
 mkdir -p /work/scripts
-for s in tools/test_perf.sh tools/crudd-speed-battery.sh tools/dtrace/perf-downstairs-tick.d; do
+for s in tools/test_perf.sh tools/crudd-speed-battery.sh tools/dtrace/perf-downstairs-tick.d tools/test_mem.sh; do
 	cp "$s" /work/scripts/
 done
 
@@ -90,6 +90,8 @@ tar cavf out/crucible-nightly.tar.gz \
     target/release/dsc \
     target/release/crudd \
     tools/hammer_loop.sh \
+    tools/test_perf.sh \
+    tools/test_mem.sh \
     tools/test_reconnect.sh \
     tools/test_repair.sh \
     tools/test_restart_repair.sh \

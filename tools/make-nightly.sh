@@ -20,6 +20,7 @@ tar cavf out/crucible-nightly.tar.gz \
   target/release/dsc \
   tools/hammer_loop.sh \
   tools/test_perf.sh \
+  tools/test_mem.sh \
   tools/test_reconnect.sh \
   tools/test_repair.sh \
   tools/test_restart_repair.sh \

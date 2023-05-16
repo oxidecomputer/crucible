@@ -8,10 +8,14 @@ use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
+use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
+use signal_hook::consts::signal::*;
+use signal_hook_tokio::Signals;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -21,6 +25,7 @@ mod stats;
 pub use stats::*;
 
 use crucible::*;
+use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
 
 /*
  * The various tests this program supports.
@@ -84,15 +89,20 @@ enum Workload {
     Repair,
     Span,
     Verify,
+    Version,
 }
 
 #[derive(Debug, Parser)]
 #[clap(name = "client", term_width = 80)]
 #[clap(about = "A Crucible upstairs test client", long_about = None)]
 pub struct Opt {
+    /// For tests that support it, run until a SIGUSR1 signal is received.
+    #[clap(long, global = true, action, conflicts_with = "count")]
+    continuous: bool,
+
     ///  For tests that support it, pass this count value for the number
     ///  of loops the test should do.
-    #[clap(short, long, global = true, default_value = "0", action)]
+    #[clap(short, long, global = true, action, default_value = "0")]
     count: usize,
 
     #[clap(
@@ -117,8 +127,13 @@ pub struct Opt {
     lossy: bool,
 
     ///  quit after all crucible work queues are empty.
-    #[clap(short, global = true, long, action)]
+    #[clap(short, global = true, long, action, conflicts_with = "stable")]
     quit: bool,
+
+    /// Quit only after all crucible work queues are empty and all downstairs
+    /// are reporting active.
+    #[clap(global = true, long, action, conflicts_with = "quit")]
+    stable: bool,
 
     #[clap(short, global = true, long, action)]
     key: Option<String>,
@@ -486,6 +501,43 @@ async fn load_write_log(
     Ok(())
 }
 
+// How to determine when a test will stop running.
+// Either by count, or a message over a channel.
+enum WhenToQuit {
+    Count {
+        count: usize,
+    },
+    Signal {
+        shutdown_rx: mpsc::Receiver<SignalAction>,
+    },
+}
+
+#[derive(Debug)]
+enum SignalAction {
+    Shutdown,
+    Verify,
+}
+
+// When a signal is received, send a message over a channel.
+async fn handle_signals(
+    mut signals: Signals,
+    shutdown_tx: mpsc::Sender<SignalAction>,
+) {
+    while let Some(signal) = signals.next().await {
+        match signal {
+            SIGUSR1 => {
+                shutdown_tx.send(SignalAction::Shutdown).await.unwrap();
+            }
+            SIGUSR2 => {
+                shutdown_tx.send(SignalAction::Verify).await.unwrap();
+            }
+            x => {
+                panic!("Received unsupported signal {}", x);
+            }
+        }
+    }
+}
+
 /**
  * This is an example Crucible client.
  * Here we make use of the interfaces that Crucible exposes.
@@ -503,6 +555,17 @@ async fn main() -> Result<()> {
     }));
 
     let opt = opts()?;
+
+    // If we just want the version, print that and exit.
+    if let Workload::Version = opt.workload {
+        let info = crucible_common::BuildInfo::default();
+        println!("{}", info);
+        println!(
+            "Upstairs <-> Downstairs Message Version: {}",
+            CRUCIBLE_MESSAGE_VERSION
+        );
+        return Ok(());
+    }
 
     if opt.workload == Workload::Verify && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
@@ -631,6 +694,13 @@ async fn main() -> Result<()> {
         load_write_log(&guest, &mut region_info, verify_in, verify).await?;
     }
 
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
+    if opt.continuous {
+        println!("Setup signal handler");
+        let signals = Signals::new([SIGUSR1, SIGUSR2])?;
+        tokio::spawn(handle_signals(signals, shutdown_tx));
+    }
+
     /*
      * Call the function for the workload option passed from the command
      * line.
@@ -652,6 +722,12 @@ async fn main() -> Result<()> {
             println!("Run burst test (demo in a loop)");
             burst_workload(&guest, 460, 190, &mut region_info, &opt.verify_out)
                 .await?;
+        }
+        Workload::Cli { .. } => {
+            unreachable!("This case handled above");
+        }
+        Workload::CliServer { .. } => {
+            unreachable!("This case handled above");
         }
         Workload::Deactivate => {
             /*
@@ -723,15 +799,18 @@ async fn main() -> Result<()> {
         }
 
         Workload::Generic => {
-            let count = {
-                if opt.count == 0 {
-                    500
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else if opt.count == 0 {
+                    WhenToQuit::Count { count: 500 }
                 } else {
-                    opt.count
+                    WhenToQuit::Count { count: opt.count }
                 }
             };
 
-            generic_workload(&guest, count, &mut region_info).await?;
+            generic_workload(&guest, &mut wtq, &mut region_info).await?;
         }
 
         Workload::One => {
@@ -881,8 +960,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        c => {
-            panic!("Unsupported cmd {:?}", c);
+        Workload::Version => {
+            panic!("This case handled above");
         }
     }
 
@@ -895,9 +974,18 @@ async fn main() -> Result<()> {
     println!("CLIENT: Tests done.  All submitted work has been ACK'd");
     loop {
         let wc = guest.show_work().await?;
-        println!("CLIENT: Up:{} ds:{}", wc.up_count, wc.ds_count);
+        println!(
+            "CLIENT: Up:{} ds:{} act:{}",
+            wc.up_count, wc.ds_count, wc.active_count
+        );
         if opt.quit && wc.up_count + wc.ds_count == 0 {
             println!("CLIENT: All crucible jobs finished, exiting program");
+            return Ok(());
+        } else if opt.stable
+            && wc.up_count + wc.ds_count == 0
+            && wc.active_count == 3
+        {
+            println!("CLIENT: All jobs finished, all DS active.");
             return Ok(());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -1262,7 +1350,7 @@ async fn fill_workload(
  */
 async fn generic_workload(
     guest: &Arc<Guest>,
-    count: usize,
+    wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     /*
@@ -1270,17 +1358,31 @@ async fn generic_workload(
      */
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    let count_width = count.to_string().len();
-    for c in 1..=count {
+    let count_width = match wtq {
+        WhenToQuit::Count { count } => count.to_string().len(),
+        _ => 5,
+    };
+    let block_width = ri.total_blocks.to_string().len();
+    let size_width = (10 * ri.block_size).to_string().len();
+
+    let mut c = 1;
+    loop {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            println!(
-                "{:>0width$}/{:>0width$} FLUSH",
-                c,
-                count,
-                width = count_width,
-            );
+            match wtq {
+                WhenToQuit::Count { count } => {
+                    println!(
+                        "{:>0width$}/{:>0width$} Flush",
+                        c,
+                        count,
+                        width = count_width,
+                    );
+                }
+                WhenToQuit::Signal { .. } => {
+                    println!("{:>0width$} Flush", c, width = count_width);
+                }
+            }
             guest.flush(None).await?;
         } else {
             // Read or Write both need this
@@ -1308,27 +1410,57 @@ async fn generic_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                println!(
-                    "{:>0width$}/{:>0width$} WRITE {}:{}",
-                    c,
-                    count,
+                match wtq {
+                    WhenToQuit::Count { count } => {
+                        print!(
+                            "{:>0width$}/{:>0width$}",
+                            c,
+                            count,
+                            width = count_width,
+                        );
+                    }
+                    WhenToQuit::Signal { .. } => {
+                        print!("{:>0width$}", c, width = count_width);
+                    }
+                }
+                print!(
+                    " Write block {:>bw$}  len {:>sw$}  data:",
                     offset.value,
                     data.len(),
-                    width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
+
+                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                for i in 0..size {
+                    print!(" {:>3}", ri.write_log.get_seed(block_index + i));
+                }
+                println!();
                 guest.write(offset, data).await?;
             } else {
                 // Read (+ verify)
                 let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
+                match wtq {
+                    WhenToQuit::Count { count } => {
+                        print!(
+                            "{:>0width$}/{:>0width$}",
+                            c,
+                            count,
+                            width = count_width,
+                        );
+                    }
+                    WhenToQuit::Signal { .. } => {
+                        print!("{:>0width$}", c, width = count_width);
+                    }
+                }
                 println!(
-                    "{:>0width$}/{:>0width$} READ  {}:{}",
-                    c,
-                    count,
+                    " Read  block {:>bw$}  len {:>sw$}",
                     offset.value,
                     data.len(),
-                    width = count_width,
+                    bw = block_width,
+                    sw = size_width,
                 );
                 guest.read(offset, data.clone()).await?;
 
@@ -1344,6 +1476,29 @@ async fn generic_workload(
                         bail!("Verify Error at {} len:{}", block_index, length);
                     }
                     ValidateStatus::Good => {}
+                }
+            }
+        }
+        c += 1;
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(guest, ri, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
                 }
             }
         }
@@ -1797,7 +1952,8 @@ async fn deactivate_workload(
             count,
             width = count_width
         );
-        generic_workload(guest, 20, ri).await?;
+        let mut wtq = WhenToQuit::Count { count: 20 };
+        generic_workload(guest, &mut wtq, ri).await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
             c,
@@ -1845,7 +2001,8 @@ async fn deactivate_workload(
         }
     }
     println!("One final");
-    generic_workload(guest, 20, ri).await?;
+    let mut wtq = WhenToQuit::Count { count: 20 };
+    generic_workload(guest, &mut wtq, ri).await?;
 
     println!("final verify");
     if let Err(e) = verify_volume(guest, ri, false).await {
@@ -2171,6 +2328,7 @@ async fn demo_workload(
     let mut wc = WQCounts {
         up_count: 0,
         ds_count: 0,
+        active_count: 0,
     };
     println!(
         "Submit work and wait for {} jobs to finish",

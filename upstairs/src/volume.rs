@@ -782,6 +782,7 @@ impl BlockIO for Volume {
         let mut wq_counts = WQCounts {
             up_count: 0,
             ds_count: 0,
+            active_count: 0,
         };
 
         for sub_volume in &self.sub_volumes {

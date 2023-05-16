@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
+use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
@@ -132,32 +133,87 @@ pub struct SnapshotDetails {
     pub snapshot_name: String,
 }
 
+/**
+ * Convenience constants to provide some documentation on what changes have
+ * been introduced in the various Crucible upstairs to downstairs versions.
+ */
+#[repr(u32)]
+#[derive(IntoPrimitive)]
+pub enum MessageVersion {
+    /// Initial support for LiveRepair.
+    V2 = 2,
+
+    /// Original format that remained too long.
+    V1 = 1,
+}
+impl MessageVersion {
+    pub const fn current() -> Self {
+        Self::V2
+    }
+}
+
+/**
+ * Crucible Upstairs Downstairs message protocol version.
+ * This, along with the MessageVersion enum above should be updated whenever
+ * changes are made to the Message enum below.
+ */
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 2;
+
+/*
+ * If you add or change the Message enum, you must also increment the
+ * CRUCIBLE_MESSAGE_VERSION.  It's just a few lines above you, why not
+ * go do that right now before you forget.
+ */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[repr(u16)]
 pub enum Message {
     /**
      * Initial negotiation messages
+     * This is the first message that the upstairs sends to the downstairs
+     * as soon as the connection starts.
      */
     HereIAm {
+        // The Message version the upstairs is running.
         version: u32,
+        // The UUID of the region set.
         upstairs_id: Uuid,
+        // The unique UUID just for this running upstairs session
         session_id: Uuid,
+        // Generation number (IGNORED)
         gen: u64,
+        // If we expect the region to be read-only.
         read_only: bool,
+        // If we expect the region to be  encrypted.
         encrypted: bool,
-    },
+        // Additional Message versions this upstairs supports.
+        alternate_versions: Vec<u32>,
+    } = 0,
+    /**
+     * This is the first message (when things are good) that the downstairs
+     * will reply to the upstairs with.
+     */
     YesItsMe {
+        // The version the downstairs will be using.
         version: u32,
+        // The IP:Port that repair commands will use to communicate.
         repair_addr: SocketAddr,
-    },
+    } = 1,
 
-    // Reasons to reject the initial negotiation
+    /*
+     * These messages indicate that there is an incompatibility between the
+     * upstairs and the downstairs and what the problem is.
+     */
+    VersionMismatch {
+        // Version of Message this downstairs wanted.
+        version: u32,
+    } = 2,
     ReadOnlyMismatch {
         expected: bool,
-    },
+    } = 3,
     EncryptedMismatch {
         expected: bool,
-    },
+    } = 4,
 
     /**
      * Forcefully tell this downstairs to promote us (an Upstairs) to
@@ -416,6 +472,11 @@ pub enum Message {
      */
     Unknown(u32, BytesMut),
 }
+/*
+ * If you just added or changed the Message enum above, you must also
+ * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
+ * forget.
+ */
 
 #[derive(Debug)]
 pub struct CrucibleEncoder {}
@@ -696,6 +757,7 @@ mod tests {
             gen: 123,
             read_only: false,
             encrypted: true,
+            alternate_versions: Vec::new(),
         };
         assert_eq!(input, round_trip(&input)?);
         Ok(())
@@ -766,6 +828,7 @@ mod tests {
             gen: 23849183,
             read_only: true,
             encrypted: false,
+            alternate_versions: Vec::new(),
         };
         let mut buffer = BytesMut::new();
 
@@ -785,5 +848,14 @@ mod tests {
         };
 
         Ok(())
+    }
+
+    #[test]
+    fn latest_message_version() {
+        let cur = MessageVersion::current();
+        assert_eq!(
+            CRUCIBLE_MESSAGE_VERSION,
+            <MessageVersion as Into<u32>>::into(cur)
+        );
     }
 }
