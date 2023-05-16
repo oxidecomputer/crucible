@@ -200,6 +200,7 @@ async fn main() -> Result<()> {
             io_operations_sent = 0;
             bw_consumed = 0;
             measurement_time = Instant::now();
+            total_io_time = Duration::ZERO;
         }
     }
 
