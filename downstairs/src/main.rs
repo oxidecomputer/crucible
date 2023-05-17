@@ -7,13 +7,12 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use slog::{info, o, Drain, Logger};
-use slog_dtrace::{with_drain, ProbeRegistration};
+use slog::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use usdt::register_probes;
 use uuid::Uuid;
 
+use crucible_common::build_logger;
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
@@ -194,19 +193,7 @@ async fn main() -> Result<()> {
      */
     let mut region;
 
-    // Register DTrace, and setup slog logging to use it.
-    register_probes().unwrap();
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator)
-        .build()
-        .filter_level(slog::Level::Info)
-        .fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
-    let (drain, registration) = with_drain(drain);
-    if let ProbeRegistration::Failed(ref e) = registration {
-        panic!("Failed to register probes: {:#?}", e);
-    }
-    let log = Logger::root(drain.fuse(), o!());
+    let log = build_logger();
 
     match args {
         Args::Create {

@@ -2149,7 +2149,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2193,7 +2193,7 @@ mod test {
         let gc = guest.clone();
 
         // Read-only Upstairs should return errors if writes are attempted.
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
 
@@ -2227,7 +2227,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2300,7 +2300,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2358,7 +2358,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2417,7 +2417,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2474,7 +2474,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2531,7 +2531,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2586,7 +2586,8 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await.unwrap();
+        let _join_handle =
+            up_main(opts, 1, None, gc, None, None).await.unwrap();
 
         guest.activate().await.unwrap();
 
@@ -2622,7 +2623,8 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await.unwrap();
+        let _join_handle =
+            up_main(opts, 1, None, gc, None, None).await.unwrap();
 
         guest.activate().await.unwrap();
 

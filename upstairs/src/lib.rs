@@ -27,8 +27,7 @@ use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{error, info, o, warn, Drain, Logger};
-use slog_dtrace::{with_drain, ProbeRegistration};
+use slog::{error, info, o, warn, Logger};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch, Mutex, MutexGuard, Notify, RwLock};
 use tokio::time::{sleep_until, Instant};
@@ -4411,19 +4410,7 @@ impl Upstairs {
             read_only: false,
         };
 
-        // Register DTrace, and setup slog logging to use it.
-        register_probes().unwrap();
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator)
-            .build()
-            .filter_level(slog::Level::Info)
-            .fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-        let (drain, registration) = with_drain(drain);
-        if let ProbeRegistration::Failed(ref e) = registration {
-            panic!("Failed to register probes: {:#?}", e);
-        }
-        let log = Logger::root(drain.fuse(), o!());
+        let log = build_logger();
 
         Self::new(&opts, 0, None, Arc::new(Guest::default()), log)
     }
@@ -8956,19 +8943,14 @@ pub async fn up_main(
     region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
+    upstairs_log: Option<Logger>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     register_probes().unwrap();
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator)
-        .build()
-        .filter_level(slog::Level::Info)
-        .fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
-    let (drain, registration) = with_drain(drain);
-    if let ProbeRegistration::Failed(ref e) = registration {
-        panic!("Failed to register probes: {:#?}", e);
-    }
-    let log = Logger::root(drain.fuse(), o!());
+
+    let log = match upstairs_log {
+        Some(log) => log,
+        None => build_logger(),
+    };
     info!(log, "Upstairs starts");
     let info = crucible_common::BuildInfo::default();
     info!(log, "Crucible Version: {:#?}", info);
