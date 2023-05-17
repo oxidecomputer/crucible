@@ -52,6 +52,10 @@ pub struct Opt {
     /// Submit all zeroes instead of random data
     #[clap(long, action)]
     all_zeroes: bool,
+
+    /// How long to wait before the auto flush check fires
+    #[clap(long, action)]
+    flush_timeout: Option<f32>,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -78,7 +82,7 @@ async fn main() -> Result<()> {
         id: Uuid::new_v4(),
         target: opt.target,
         lossy: false,
-        flush_timeout: None,
+        flush_timeout: opt.flush_timeout,
         key: opt.key,
         cert_pem: opt.cert_pem,
         key_pem: opt.key_pem,
@@ -200,6 +204,7 @@ async fn main() -> Result<()> {
             io_operations_sent = 0;
             bw_consumed = 0;
             measurement_time = Instant::now();
+            total_io_time = Duration::ZERO;
         }
     }
 

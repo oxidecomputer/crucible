@@ -266,6 +266,7 @@ mod cdt {
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__write__unwritten__start(_: u64) {}
+    fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
@@ -295,9 +296,9 @@ mod cdt {
     fn volume__flush__done(_: u32, _: Uuid) {}
 }
 
-pub fn deadline_secs(secs: u64) -> Instant {
+pub fn deadline_secs(secs: f32) -> Instant {
     Instant::now()
-        .checked_add(Duration::from_secs(secs))
+        .checked_add(Duration::from_secs_f32(secs))
         .unwrap()
 }
 
@@ -796,8 +797,8 @@ where
     let mut negotiated = 0;
 
     // XXX figure out what deadlines make sense here
-    let mut ping_interval = deadline_secs(5);
-    let mut timeout_deadline = deadline_secs(50);
+    let mut ping_interval = deadline_secs(5.0);
+    let mut timeout_deadline = deadline_secs(50.0);
 
     /*
      * Either we get all the way through the negotiation, or we hit the
@@ -892,7 +893,7 @@ where
             }
             _ = sleep_until(ping_interval) => {
                 fw.send(Message::Ruok).await?;
-                ping_interval = deadline_secs(5);
+                ping_interval = deadline_secs(5.0);
             }
             r = up_coms.ds_active_rx.changed(),
                 if negotiated == 1 && !self_promotion =>
@@ -933,8 +934,8 @@ where
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
-                timeout_deadline = deadline_secs(50);
-                ping_interval = deadline_secs(5);
+                timeout_deadline = deadline_secs(50.0);
+                ping_interval = deadline_secs(5.0);
 
                 match f.transpose()? {
                     None => {
@@ -1582,9 +1583,9 @@ where
      *
      * XXX figure out what deadlines make sense here
      */
-    let mut more_work_interval = deadline_secs(1);
-    let mut ping_interval = deadline_secs(10);
-    let mut timeout_deadline = deadline_secs(50);
+    let mut more_work_interval = deadline_secs(1.0);
+    let mut ping_interval = deadline_secs(10.0);
+    let mut timeout_deadline = deadline_secs(50.0);
     let mut ping_count = 0;
 
     /*
@@ -1667,8 +1668,8 @@ where
             }
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
-                timeout_deadline = deadline_secs(50);
-                ping_interval = deadline_secs(10);
+                timeout_deadline = deadline_secs(50.0);
+                ping_interval = deadline_secs(10.0);
 
                 match f.transpose()? {
                     None => {
@@ -1795,7 +1796,7 @@ where
                     );
 
                     more_work = true;
-                    more_work_interval = deadline_secs(1);
+                    more_work_interval = deadline_secs(1.0);
                 }
             }
             _ = sleep_until(more_work_interval), if more_work => {
@@ -1804,7 +1805,7 @@ where
                     warn!(up.log, "[{}] flow control end ", up_coms.client_id);
                 }
 
-                more_work_interval = deadline_secs(1);
+                more_work_interval = deadline_secs(1.0);
             }
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -1848,7 +1849,7 @@ where
                     bail!("[{}] exits ping deactivation", up_coms.client_id);
                 }
 
-                ping_interval = deadline_secs(10);
+                ping_interval = deadline_secs(10.0);
             }
         }
     }
@@ -1891,14 +1892,14 @@ where
      * reconciliation work notification to arrive from the upstairs task
      * responsible for making all downstairs the same.
      */
-    let mut ping_interval = deadline_secs(5);
-    let mut timeout_deadline = deadline_secs(40);
+    let mut ping_interval = deadline_secs(5.0);
+    let mut timeout_deadline = deadline_secs(40.0);
     loop {
         tokio::select! {
             f = fr.next() => {
                 // When the downstairs responds, push the deadlines
-                timeout_deadline = deadline_secs(40);
-                ping_interval = deadline_secs(5);
+                timeout_deadline = deadline_secs(40.0);
+                ping_interval = deadline_secs(5.0);
 
                 match f.transpose()? {
                     None => {
@@ -2204,7 +2205,7 @@ where
                     bail!("[{}] exits ping deactivation", up_coms.client_id);
                 }
 
-                ping_interval = deadline_secs(10);
+                ping_interval = deadline_secs(10.0);
             }
         }
     }
@@ -2313,7 +2314,7 @@ async fn looper(
             info!(log, "[{1}] connecting to {0}", target, up_coms.client_id);
         }
         notify = (notify + 1) % 10;
-        let deadline = tokio::time::sleep_until(deadline_secs(10));
+        let deadline = tokio::time::sleep_until(deadline_secs(10.0));
         tokio::pin!(deadline);
         let tcp = sock.connect(target);
         tokio::pin!(tcp);
@@ -5122,6 +5123,8 @@ impl Upstairs {
             }
         }
 
+        cdt::gw__write__deps!(|| (num_jobs as u64, dep.len() as u64));
+
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
@@ -5880,7 +5883,7 @@ impl Upstairs {
                     send_reconcile_work(dst, *lastcast);
                     *lastcast += 1;
                     info!(self.log, "Sent repair work, now wait for resp");
-                    let mut progress_check = deadline_secs(5);
+                    let mut progress_check = deadline_secs(5.0);
 
                     /*
                      * What to do if a downstairs goes away and never
@@ -5919,7 +5922,7 @@ impl Upstairs {
                                  * an ACK from that downstairs.
                                  */
                                 info!(self.log, "progress_check");
-                                progress_check = deadline_secs(5);
+                                progress_check = deadline_secs(5.0);
                                 self.ds_state_show().await;
                                 let mut ds = self.downstairs.lock().await;
                                 if let Err(e) = ds.repair_or_abort() {
@@ -8761,11 +8764,11 @@ async fn up_listen(
     dst: Vec<Target>,
     mut ds_status_rx: mpsc::Receiver<Condition>,
     mut ds_reconcile_done_rx: mpsc::Receiver<Repair>,
-    timeout: Option<u32>,
+    timeout: Option<f32>,
 ) {
     info!(up.log, "up_listen starts"; "task" => "up_listen");
     info!(up.log, "Wait for all three downstairs to come online");
-    let flush_timeout = timeout.unwrap_or(5);
+    let flush_timeout = timeout.unwrap_or(5.0);
     info!(up.log, "Flush timeout: {}", flush_timeout);
     let mut lastcast = 1;
 
@@ -8780,8 +8783,8 @@ async fn up_listen(
     let mut leak_deadline = Instant::now().checked_add(leak_tick).unwrap();
 
     up.stat_update("start").await;
-    let mut flush_check = deadline_secs(flush_timeout.into());
-    let mut show_work_interval = deadline_secs(5);
+    let mut flush_check = deadline_secs(flush_timeout);
+    let mut show_work_interval = deadline_secs(5.0);
     loop {
         /*
          * Wait for all three downstairs to connect (for each region set).
@@ -8876,11 +8879,11 @@ async fn up_listen(
                  */
                 up.stat_update("loop").await;
 
-                flush_check = deadline_secs(flush_timeout.into());
+                flush_check = deadline_secs(flush_timeout);
             }
             _ = sleep_until(show_work_interval) => {
                 // show_all_work(up).await;
-                show_work_interval = deadline_secs(5);
+                show_work_interval = deadline_secs(5.0);
             }
         }
     }
