@@ -209,7 +209,7 @@ impl Inner {
         block_context: &DownstairsBlockContext,
     ) -> Result<()> {
         let stmt =
-            "INSERT INTO block_context (block, hash, nonce, tag, on_disk_hash) \
+            "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5)";
 
         let (nonce, tag) = if let Some(encryption_context) =
@@ -231,7 +231,8 @@ impl Inner {
             block_context.on_disk_hash.to_le_bytes(),
         ])?;
 
-        assert_eq!(rows_affected, 1);
+        // We avoid INSERTing duplicate rows, so this should always be 0 or 1.
+        assert!(rows_affected <= 1);
 
         Ok(())
     }
@@ -765,6 +766,11 @@ impl Extent {
                     on_disk_hash BLOB NOT NULL,
                     PRIMARY KEY (block, hash, nonce, tag, on_disk_hash)
                 )",
+                [],
+            )?;
+            metadb.execute(
+                "CREATE UNIQUE INDEX block_context_rows_unencrypted ON block_context
+                    (block, hash, on_disk_hash)",
                 [],
             )?;
 
@@ -3463,6 +3469,47 @@ mod test {
         );
         assert_eq!(ctxs[0].block_context.hash, 1024);
         assert_eq!(ctxs[0].on_disk_hash, 65536);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_context_insert() -> Result<()> {
+        let dir = tempdir()?;
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).await?;
+        region.extend(1).await?;
+
+        let ext = &region.extents[0];
+        let mut inner = ext.inner().await;
+
+        assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+
+        // Submit the same contents for block 0 over and over, simulating a user
+        // writing the same unencrypted contents to the same offset.
+
+        for _ in 0..10 {
+            inner.set_block_contexts(&[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 123,
+                },
+                block: 0,
+                on_disk_hash: 123,
+            }])?;
+        }
+
+        // Duplicate rows should not be inserted
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+        assert_eq!(ctxs.len(), 1);
+
+        // Truncation should still work
+
+        inner.truncate_encryption_contexts_and_hashes(vec![(0, 123)])?;
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+        assert_eq!(ctxs.len(), 1);
 
         Ok(())
     }
