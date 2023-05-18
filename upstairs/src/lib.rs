@@ -2924,6 +2924,7 @@ impl Downstairs {
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::New, client_id);
+                self.ds_new[client_id as usize].push(*ds_id);
             }
         }
     }
