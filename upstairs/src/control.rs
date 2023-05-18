@@ -96,7 +96,8 @@ impl UpstairsInfo {
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct UpstairsStats {
     state: UpState,
-    ds_state: Vec<DsState>,
+    ds_state: Vec<String>,
+    ds_short_state: Vec<String>,
     up_jobs: usize,
     ds_jobs: usize,
     repair_done: usize,
@@ -120,7 +121,8 @@ async fn upstairs_fill_info(
     let api_context = rqctx.context();
 
     let act = api_context.up.active.lock().await.up_state;
-    let ds_state = api_context.up.ds_state_copy().await;
+    let ds_state = api_context.up.ds_state_string().await;
+    let ds_short_state = api_context.up.ds_state_short_string().await;
     let up_jobs = api_context.up.guest.guest_work.lock().await.active.len();
     let ds = api_context.up.downstairs.lock().await;
     let ds_jobs = ds.ds_active.len();
@@ -133,6 +135,7 @@ async fn upstairs_fill_info(
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
         ds_state,
+        ds_short_state,
         up_jobs,
         ds_jobs,
         repair_done,

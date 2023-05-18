@@ -160,28 +160,6 @@
           "jobs"
         ]
       },
-      "DsState": {
-        "type": "string",
-        "enum": [
-          "new",
-          "bad_version",
-          "wait_active",
-          "wait_quorum",
-          "bad_region",
-          "disconnected",
-          "repair",
-          "failed_repair",
-          "active",
-          "faulted",
-          "online_repair_ready",
-          "online_repair",
-          "migrating",
-          "offline",
-          "replay",
-          "deactivated",
-          "disabled"
-        ]
-      },
       "Error": {
         "description": "Error information from a response.",
         "type": "object",
@@ -241,10 +219,16 @@
             "format": "uint",
             "minimum": 0
           },
+          "ds_short_state": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "ds_state": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DsState"
+              "type": "string"
             }
           },
           "extent_limit": {
@@ -293,6 +277,7 @@
         },
         "required": [
           "ds_jobs",
+          "ds_short_state",
           "ds_state",
           "extent_limit",
           "extents_confirmed",

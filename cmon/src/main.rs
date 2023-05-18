@@ -99,7 +99,7 @@ async fn show_repair_stats(args: Args) {
                     print!(" {:5}", ui.extents_repaired[cid]);
                 }
                 for cid in 0..3 {
-                    print!(" {:?}", ui.ds_state[cid]);
+                    print!(" {:>4}", ui.ds_short_state[cid]);
                 }
                 println!();
             }

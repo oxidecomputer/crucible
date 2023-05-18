@@ -6275,8 +6275,30 @@ impl Upstairs {
     }
 
     /**
+     * Return a copy of the DsState vec, turned into a Vec of strings.
+     */
+    async fn ds_state_string(&self) -> Vec<String> {
+        let mut all_states = Vec::new();
+        let ds = self.downstairs.lock().await;
+        for state in ds.ds_state.iter() {
+            all_states.push(format!("{}", state));
+        }
+        all_states
+    }
+    /**
+     * Return a copy of the DsState vec, turned into a Vec of strings.
+     */
+    async fn ds_state_short_string(&self) -> Vec<String> {
+        let mut all_states = Vec::new();
+        let ds = self.downstairs.lock().await;
+        for state in ds.ds_state.iter() {
+            all_states.push(state.short_fmt());
+        }
+        all_states
+    }
+
+    /**
      * Return a copy of the DsState vec.
-     * DTraces uses this.
      */
     async fn ds_state_copy(&self) -> Vec<DsState> {
         self.downstairs.lock().await.ds_state.clone()
@@ -6801,6 +6823,63 @@ impl std::fmt::Display for DsState {
             }
             DsState::Disabled => {
                 write!(f, "Disabled")
+            }
+        }
+    }
+}
+impl DsState {
+    fn short_fmt(&self) -> String {
+        match self {
+            DsState::New => {
+                format!("NEW")
+            }
+            DsState::BadVersion => {
+                format!("BV")
+            }
+            DsState::WaitActive => {
+                format!("WA")
+            }
+            DsState::WaitQuorum => {
+                format!("WQ")
+            }
+            DsState::BadRegion => {
+                format!("BR")
+            }
+            DsState::Disconnected => {
+                format!("DISC")
+            }
+            DsState::Repair => {
+                format!("REPR")
+            }
+            DsState::FailedRepair => {
+                format!("FR")
+            }
+            DsState::Active => {
+                format!("ACTV")
+            }
+            DsState::Faulted => {
+                format!("FALT")
+            }
+            DsState::OnlineRepairReady => {
+                format!("LRR")
+            }
+            DsState::OnlineRepair => {
+                format!("LR")
+            }
+            DsState::Migrating => {
+                format!("MIGR")
+            }
+            DsState::Offline => {
+                format!("OFFL")
+            }
+            DsState::Replay => {
+                format!("REPL")
+            }
+            DsState::Deactivated => {
+                format!("DEAC")
+            }
+            DsState::Disabled => {
+                format!("DSBL")
             }
         }
     }
