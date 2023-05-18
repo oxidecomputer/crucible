@@ -467,7 +467,10 @@ where
         if active_count >= 100 {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
-            u.downstairs.lock().await.requeue_work(client_id, &new_work[ndx..]);
+            u.downstairs
+                .lock()
+                .await
+                .requeue_work(client_id, &new_work[ndx..]);
             return Ok(true);
         }
 
