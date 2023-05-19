@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 bytes = "1"
-clap = { version = "4.1", features = ["derive"] }
+clap = { version = "4.3", features = ["derive"] }
 crucible = { path = "../upstairs" }
 crucible-common = { path = "../common" }
 rand = "0.8.5"
