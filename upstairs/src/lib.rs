@@ -42,6 +42,7 @@ use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 use rand_chacha::ChaCha20Rng;
 
 pub mod control;
+mod dummy_downstairs_tests;
 mod pseudo_file;
 mod test;
 

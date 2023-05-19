@@ -4,7 +4,7 @@
 use super::*;
 
 #[cfg(test)]
-mod up_test {
+pub(crate) mod up_test {
     use super::*;
 
     use std::collections::HashSet;
@@ -21,7 +21,7 @@ mod up_test {
     }
 
     // Create a simple logger
-    fn csl() -> Logger {
+    pub fn csl() -> Logger {
         let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
         Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
