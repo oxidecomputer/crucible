@@ -375,10 +375,16 @@ pub(crate) mod protocol_test {
                 ..Default::default()
             };
 
-            let join_handle =
-                up_main(crucible_opts, 1, None, guest.clone(), None)
-                    .await
-                    .unwrap();
+            let join_handle = up_main(
+                crucible_opts,
+                1,
+                None,
+                guest.clone(),
+                None,
+                Some(log.new(o!("upstairs" => 1))),
+            )
+            .await
+            .unwrap();
 
             let ds1 = Arc::new(ds1.into_connected_downstairs().await);
             let ds2 = Arc::new(ds2.into_connected_downstairs().await);
