@@ -174,6 +174,7 @@ impl Volume {
             Some(region_def),
             guest_clone,
             producer_registry,
+            None,
         )
         .await?;
 
