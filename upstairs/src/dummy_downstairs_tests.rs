@@ -353,6 +353,12 @@ pub(crate) mod protocol_test {
 
     impl TestHarness {
         pub async fn new() -> TestHarness {
+            let default_panic = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                default_panic(info);
+                std::process::exit(1);
+            }));
+
             let log = csl();
 
             let ds1 = Downstairs::new(log.new(o!("downstairs" => 1))).await;
