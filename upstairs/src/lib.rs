@@ -664,12 +664,10 @@ where
                     .await;
                 // If our downstairs is under repair, then include any extent
                 // limit sent in the IOop.
-                let my_extent_limit =
-                    if u
-                        .downstairs
-                        .lock()
-                        .await
-                        .ds_state[client_id as usize] == DsState::LiveRepair {
+                let my_extent_limit = if u.downstairs.lock().await.ds_state
+                    [client_id as usize]
+                    == DsState::LiveRepair
+                {
                     extent_limit
                 } else {
                     None

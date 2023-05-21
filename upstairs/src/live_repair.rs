@@ -3434,7 +3434,7 @@ pub mod repair_test {
                 vec![], // Dependencies
                 1,      // gw_id
                 ImpactedBlocks::Empty,
-                source,        // Source extent
+                source,         // Source extent
                 &repair_extent, // Repair extent
             );
 
