@@ -15,20 +15,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible::*;
-use crucible_common::{Block, CrucibleError, MAX_BLOCK_SIZE};
+use crucible_common::{build_logger, Block, CrucibleError, MAX_BLOCK_SIZE};
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
-use slog::{debug, error, info, o, warn, Drain, Logger};
-use slog_dtrace::{with_drain, ProbeRegistration};
+use slog::{error, info, debug, o, warn, Logger};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
-use usdt::register_probes;
 use uuid::Uuid;
 
 pub mod admin;
@@ -3014,21 +3012,7 @@ pub async fn build_downstairs_for_region(
 ) -> Result<Arc<Mutex<Downstairs>>> {
     let log = match log_request {
         Some(log) => log,
-        None => {
-            // Register DTrace, and setup slog logging to use it.
-            register_probes().unwrap();
-            let decorator = slog_term::TermDecorator::new().build();
-            let drain = slog_term::FullFormat::new(decorator)
-                .build()
-                .filter_level(slog::Level::Info)
-                .fuse();
-            let drain = slog_async::Async::new(drain).build().fuse();
-            let (drain, registration) = with_drain(drain);
-            if let ProbeRegistration::Failed(ref e) = registration {
-                panic!("Failed to register probes: {:#?}", e);
-            }
-            Logger::root(drain.fuse(), o!())
-        }
+        None => build_logger(),
     };
     let region =
         Region::open(data, Default::default(), true, read_only, &log).await?;
@@ -3237,8 +3221,7 @@ mod test {
 
     // Create a simple logger
     fn csl() -> Logger {
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+        build_logger()
     }
 
     fn add_work(

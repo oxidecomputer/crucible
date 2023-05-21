@@ -22,8 +22,7 @@ pub mod up_test {
 
     // Create a simple logger
     fn csl() -> Logger {
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+        build_logger()
     }
 
     fn extent_tuple(eid: u64, offset: u64) -> (u64, Block) {
