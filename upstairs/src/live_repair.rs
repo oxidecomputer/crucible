@@ -1398,6 +1398,7 @@ impl Upstairs {
 #[cfg(test)]
 pub mod repair_test {
     use super::*;
+    use slog::Drain;
 
     // Test function to create just enough of an Upstairs for our needs.
     // The caller will indicate which downstairs client it wished to be
