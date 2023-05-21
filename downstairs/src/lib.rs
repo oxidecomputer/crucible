@@ -21,7 +21,7 @@ use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
-use slog::{error, info, debug, o, warn, Logger};
+use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
