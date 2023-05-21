@@ -17,6 +17,7 @@ tar cavf out/crucible-nightly.tar.gz \
   target/release/crutest \
   target/release/crucible-downstairs \
   target/release/crucible-hammer \
+  target/release/cmon \
   target/release/dsc \
   tools/hammer_loop.sh \
   tools/test_perf.sh \

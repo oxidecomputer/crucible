@@ -548,7 +548,7 @@ fn repair_or_noop(
     gw_repair_id: u64,
     impacted_blocks: ImpactedBlocks,
     source: u8,
-    repair: Vec<u8>,
+    repair: &Vec<u8>,
 ) -> DownstairsIO {
     assert!(repair.len() < 3);
 
@@ -605,11 +605,11 @@ fn repair_or_noop(
     }
 }
 
-// Build the list of dependencies for a live repair job.
-// Because we need all three repair jobs to happen lock step, we
-// have to prevent any IO from hitting the same extent, which means
-// any IO going to our ImpactedBlocks (the whole extent) must finish
-// first (or come after) our job.
+// Build the list of dependencies for a live repair job.  These are jobs that
+// must finish before this repair job can move begin.  Because we need all
+// three repair jobs to happen lock step, we have to prevent any IO from
+// hitting the same extent, which means any IO going to our ImpactedBlocks
+// (the whole extent) must finish first (or come after) our job.
 fn deps_for_live_repair(
     ds: &Downstairs,
     impacted_blocks: ImpactedBlocks,
@@ -630,10 +630,11 @@ fn deps_for_live_repair(
     {
         let job = &ds.ds_active[job_id];
 
-        // If we scheduled a job that required reservation of repair IDs,
-        // and we are now determining that repair jobs dependencies, don't
-        // include that original job in our dependency list as it already
-        // has this repair job on its list.
+        // We are finding dependencies based on impacted blocks.
+        // We may have reserved future job IDs for repair, and it's possible
+        // that this job we are finding dependencies for now is actually a
+        // future repair job we reserved.  If so, don't include ourself in
+        // our own list of dependencies.
         if job.ds_id > close_id {
             continue;
         }
@@ -743,7 +744,7 @@ async fn create_and_enqueue_repair_io(
     gw_repair_id: u64,
     impacted_blocks: ImpactedBlocks,
     source: u8,
-    repair: Vec<u8>,
+    repair: &Vec<u8>,
 ) -> block_req::BlockReqWaiter {
     let repair_io = repair_or_noop(
         ds,
@@ -753,7 +754,7 @@ async fn create_and_enqueue_repair_io(
         gw_repair_id,
         impacted_blocks,
         source,
-        repair.clone(),
+        repair,
     );
 
     let mut sub = HashMap::new();
@@ -1251,7 +1252,7 @@ impl Upstairs {
                 gw_repair_id,
                 impacted_blocks,
                 source,
-                repair.clone(),
+                &repair,
             )
             .await
         };
@@ -3434,7 +3435,7 @@ pub mod repair_test {
                 1,      // gw_id
                 ImpactedBlocks::Empty,
                 source,        // Source extent
-                repair_extent, // Repair extent
+                &repair_extent, // Repair extent
             );
 
             println!("repair op: {:?}", repair_op);
@@ -3467,7 +3468,7 @@ pub mod repair_test {
             1,      // gw_id
             ImpactedBlocks::Empty,
             source,
-            repair.clone(),
+            &repair,
         );
 
         println!("repair op: {:?}", repair_op);
@@ -3971,7 +3972,7 @@ pub mod repair_test {
             gw_repair_id,
             impacted_blocks,
             source,
-            repair.clone(),
+            &repair,
         )
         .await;
 
@@ -4048,7 +4049,7 @@ pub mod repair_test {
             gw_repair_id,
             impacted_blocks,
             source,
-            repair.clone(),
+            &repair,
         )
         .await;
 

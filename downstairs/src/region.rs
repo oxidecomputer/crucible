@@ -1479,7 +1479,6 @@ impl Extent {
         // around at least right?
         inner.dirty_blocks.clear();
 
-        // println!("extent {} fully_rehash_and_clean_stale_context", self.number);
         Ok(())
     }
 }
