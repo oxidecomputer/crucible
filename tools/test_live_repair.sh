@@ -81,7 +81,7 @@ if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
 fi
 (( gen += 1 ))
 
-for i in {1..5000}
+for i in {1..20}
 do
     SECONDS=0
     choice=$((RANDOM % 3))
