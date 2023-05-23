@@ -4,6 +4,19 @@
 # Each loop will select a new downstairs and stop/fault/start
 # that downstairs which should kick off a repair.
 
+# To run crutest sample:
+# ./target/release/crutest generic --continuous -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -q --verify-out alan --control 127.0.0.1:7777
+
+# To run dsc sample (from gc21)
+# zpool import oxp_0ca797a6-f467-4296-bc27-e7590c8330c2
+# zpool import oxp_627cda87-085b-44af-a70e-d067599c3fe2
+# zpool import oxp_9f5a50c7-08ce-41f7-8efd-5d1323a1f070
+# cd /tmp/lr-nightly/
+# ./target/release/dsc start \
+# --region-dir /oxp_0ca797a6-f467-4296-bc27-e7590c8330c2/dsc/region/ \
+# --region-dir /oxp_627cda87-085b-44af-a70e-d067599c3fe2/dsc/region/ \
+# --region-dir /oxp_9f5a50c7-08ce-41f7-8efd-5d1323a1f070/dsc/region/
+
 set -eu
 total=0
 
