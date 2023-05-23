@@ -317,7 +317,7 @@ async fn live_repair_main(
 
             if ds.query_repair_ids(eid) {
                 // There are some reservations we need to clear out.
-                let _ = up.abort_repair_extent(&mut gw, &mut ds, eid);
+                up.abort_repair_extent(&mut gw, &mut ds, eid).await;
             } else {
                 // Nothing left to repair, we can stop looking now.
                 warn!(log, "Exit repair at extent {}", eid);
@@ -1210,11 +1210,7 @@ impl Upstairs {
 
         let mut abort_repair = self
             .wait_and_process_repair_ack(
-                close_brw,
-                close_id,
-                eid,
-                false,
-                ds_done_tx,
+                close_brw, close_id, eid, false, ds_done_tx,
             )
             .await;
 
@@ -1232,15 +1228,10 @@ impl Upstairs {
         drop(active);
 
         // Verify none of the downstairs changed state
-        if !abort_repair {
-            if repair_ds_state_change(&mut ds, source, &repair) {
-                warn!(
-                    self.log,
-                    "RE: downstairs state change, aborting repair now"
-                );
-                self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
-                abort_repair = true;
-            }
+        if !abort_repair && repair_ds_state_change(&mut ds, source, &repair) {
+            warn!(self.log, "RE: downstairs state change, aborting repair now");
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+            abort_repair = true;
         }
 
         // If we are aborting the repair, then send a NoOp now.
@@ -1306,15 +1297,10 @@ impl Upstairs {
         let mut ds = self.downstairs.lock().await;
 
         drop(active);
-        if !abort_repair {
-            if repair_ds_state_change(&mut ds, source, &repair) {
-                warn!(
-                    self.log,
-                    "RE: downstairs state change, aborting repair now"
-                );
-                self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
-                abort_repair = true;
-            }
+        if !abort_repair && repair_ds_state_change(&mut ds, source, &repair) {
+            warn!(self.log, "RE: downstairs state change, aborting repair now");
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+            abort_repair = true;
         }
 
         // This is the same if we are in error or not.
@@ -5502,9 +5488,7 @@ pub mod repair_test {
 
         up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
             .await;
-        up.abort_repair_extent(&mut gw, &mut ds, eid as u32)
-            .await
-            .unwrap();
+        up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         assert_eq!(ds.ds_state[0], DsState::Active);
         assert_eq!(ds.ds_state[1], DsState::Faulted);
@@ -5547,9 +5531,7 @@ pub mod repair_test {
 
         up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
             .await;
-        up.abort_repair_extent(&mut gw, &mut ds, eid as u32)
-            .await
-            .unwrap();
+        up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         // Check all three IOs again, downstairs 1 will be skipped..
         let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
@@ -5600,9 +5582,7 @@ pub mod repair_test {
 
         up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
             .await;
-        up.abort_repair_extent(&mut gw, &mut ds, eid as u32)
-            .await
-            .unwrap();
+        up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         // Check all three IOs again, all downstairs will be skipped..
         let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
