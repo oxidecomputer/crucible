@@ -216,12 +216,10 @@ async fn live_repair_main(
     // in a vaild state to begin.
     let active = up.active.lock().await;
     let up_state = active.up_state;
-    let mut ds = up.downstairs.lock().await;
     if up_state != UpState::Active {
-        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
-        ds.end_live_repair();
         bail!("Upstairs in invalid state for repair");
     }
+    let mut ds = up.downstairs.lock().await;
     drop(active);
 
     // Make sure things are as we expect them to be.
@@ -298,10 +296,16 @@ async fn live_repair_main(
 
         if failed_repair {
             info!(log, "extent {} repair has failed", eid);
+            let active = up.active.lock().await;
+            let up_state = active.up_state;
+            if up_state != UpState::Active {
+                bail!("Upstairs in invalid state for repair");
+            }
             // This repair has failed, we only need to keep going if
             // we made future job reservations.
             let mut gw = up.guest.guest_work.lock().await;
             let mut ds = up.downstairs.lock().await;
+            drop(active);
 
             // Verify state has been cleared.
             for cid in 0..3 {
@@ -375,6 +379,9 @@ async fn live_repair_main(
 
     let active = up.active.lock().await;
     let up_state = active.up_state;
+    if up_state != UpState::Active {
+        bail!("Upstairs no longer in valid state for repair");
+    }
     let mut ds = up.downstairs.lock().await;
     drop(active);
 
@@ -865,7 +872,7 @@ impl Upstairs {
         gw: &mut MutexGuard<'_, GuestWork>,
         ds: &mut MutexGuard<'_, Downstairs>,
         eid: u32,
-    ) -> Result<()> {
+    ) {
         warn!(self.log, "Extent {} Aborting repair", eid);
 
         // If there were job IDs reserved for future repairs, we must
@@ -890,7 +897,7 @@ impl Upstairs {
                     "Abort repair on extent {}: All downstairs are Faulted",
                     eid,
                 );
-                return Ok(());
+                return;
             }
             warn!(self.log, "Extent {} Create and send noop jobs", eid);
 
@@ -932,7 +939,6 @@ impl Upstairs {
                 noops.push(noop_brw);
             }
         }
-        Ok(())
     }
 
     // Helper function to:
@@ -1045,6 +1051,10 @@ impl Upstairs {
 
         let active = self.active.lock().await;
         let up_state = active.up_state;
+        if up_state != UpState::Active {
+            // If we are not active, then just abort
+            bail!("Abort repair, upstairs no longer active");
+        }
         let mut gw = self.guest.guest_work.lock().await;
         let mut ds = self.downstairs.lock().await;
         drop(active);
@@ -1053,8 +1063,7 @@ impl Upstairs {
         // we started this repair.  If we find things are different, it's
         // easier to abort now.  Once we move forward with this repair, the
         // cleanup is more complicated.
-        let abort_repair = repair_ds_state_change(&mut ds, source, &repair);
-        if abort_repair || up_state != UpState::Active {
+        if repair_ds_state_change(&mut ds, source, &repair) {
             error!(
                 self.log,
                 "RE: unexpected downstairs state change, aborting repair now"
@@ -1063,7 +1072,7 @@ impl Upstairs {
             // Since we have done nothing yet, we can call abort here and
             // not have to issue jobs if none have been reserved.
             self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
-            let res = self.abort_repair_extent(&mut gw, &mut ds, eid).await;
+            self.abort_repair_extent(&mut gw, &mut ds, eid).await;
 
             drop(ds);
             drop(gw);
@@ -1075,8 +1084,7 @@ impl Upstairs {
                 &self.log,
                 "Abort cleanup".to_string(),
             );
-
-            return res;
+            bail!("Abort repair due to state change in downstairs");
         }
         assert!(ds.repair_min_id.is_some());
         assert!(ds.repair_info.is_empty());
@@ -1205,7 +1213,7 @@ impl Upstairs {
                 close_brw,
                 close_id,
                 eid,
-                abort_repair,
+                false,
                 ds_done_tx,
             )
             .await;
@@ -1215,18 +1223,23 @@ impl Upstairs {
         // to re-verify that things are in a good place to continue.
         let active = self.active.lock().await;
         let up_state = active.up_state;
+        if up_state != UpState::Active {
+            // If we are not active, then just abort
+            bail!("Abort repair, upstairs no longer active");
+        }
         let mut gw = self.guest.guest_work.lock().await;
         let mut ds = self.downstairs.lock().await;
         drop(active);
 
+        // Verify none of the downstairs changed state
         if !abort_repair {
-            abort_repair = repair_ds_state_change(&mut ds, source, &repair);
-            if abort_repair || up_state != UpState::Active {
+            if repair_ds_state_change(&mut ds, source, &repair) {
                 warn!(
                     self.log,
                     "RE: downstairs state change, aborting repair now"
                 );
                 self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+                abort_repair = true;
             }
         }
 
@@ -1271,6 +1284,8 @@ impl Upstairs {
             gw_repair_id
         );
 
+        // wait_and_process_repair_ack takes the current value of abort_repair
+        // and will return it or a new value if there is a new error.
         let mut abort_repair = self
             .wait_and_process_repair_ack(
                 repair_brw,
@@ -1283,18 +1298,22 @@ impl Upstairs {
 
         let active = self.active.lock().await;
         let up_state = active.up_state;
+        if up_state != UpState::Active {
+            // If we are not active, then just abort
+            bail!("Abort repair, upstairs no longer active");
+        }
         let mut gw = self.guest.guest_work.lock().await;
         let mut ds = self.downstairs.lock().await;
 
         drop(active);
         if !abort_repair {
-            abort_repair = repair_ds_state_change(&mut ds, source, &repair);
-            if abort_repair {
+            if repair_ds_state_change(&mut ds, source, &repair) {
                 warn!(
                     self.log,
                     "RE: downstairs state change, aborting repair now"
                 );
                 self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+                abort_repair = true;
             }
         }
 
@@ -1327,6 +1346,8 @@ impl Upstairs {
             gw_noop_id
         );
 
+        // wait_and_process_repair_ack takes the current value of abort_repair
+        // and will return it or a new value if there is a new error.
         let abort_repair = self
             .wait_and_process_repair_ack(
                 noop_brw,
@@ -1347,6 +1368,8 @@ impl Upstairs {
             gw_reopen_id
         );
 
+        // wait_and_process_repair_ack takes the current value of abort_repair
+        // and will return it or a new value if there is a new error.
         let mut abort_repair = self
             .wait_and_process_repair_ack(
                 reopen_brw,
@@ -1363,6 +1386,10 @@ impl Upstairs {
         if !abort_repair {
             let active = self.active.lock().await;
             let up_state = active.up_state;
+            if up_state != UpState::Active {
+                // If we are not active, then just abort
+                bail!("Abort repair, upstairs no longer active");
+            }
             let mut ds = self.downstairs.lock().await;
             drop(active);
             abort_repair = repair_ds_state_change(&mut ds, source, &repair);
