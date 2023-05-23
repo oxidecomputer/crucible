@@ -704,11 +704,13 @@ pub(crate) mod protocol_test {
 
         let mut ds1_message_second_time = None;
 
-        for _ in 0..5 {
+        for _ in 0..10 {
             if let Ok(m) = ds1_messages.try_recv() {
                 ds1_message_second_time = Some(m);
                 break;
             }
+
+            eprintln!("waiting for ds1 message in test_replay_occurs");
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
