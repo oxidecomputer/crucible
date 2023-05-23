@@ -5391,44 +5391,6 @@ pub mod repair_test {
         assert!(ds.in_progress(job_id, 2).is_some());
     }
 
-    // Test to verify that reserving job IDs for future repair work
-    // is indeed used by the repair when it arrives to perform it.
-    //
-    // Also, what happens to the repair job IDs after the repair
-    // has completed?  Flush needed to remove them...
-
-    // Maybe make the cleanup remove them?
-
-    // Deps don't see past previous repairs
-    // R W Repair R W Repair R W
-    //       block
-    // op# | 0 1 2 | deps
-    // ----|-------|-----
-    //   0 | R     |
-    //   1 |     W |
-    //   2 | RpRpRp| 0,1
-    //   3 | R     | 2
-    //   4 |     W | 2
-
-    // Blanks
-    // op# | 0 1 2 | deps
-    // ----|-------|-----
-    //   0 |       |
-    //   1 |       |
-    //   2 |       |
-
-    //       block   block   block
-    // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
-    // ----|-------|-------|-------|-----
-    //   0 |       |       |       |
-    //   1 |       |       |       |
-    //   2 |       |       |       |
-    //   3 |       |       |       |
-    //   4 |       |       |       |
-    //   5 |       |       |       |
-    //   6 |       |       |       |
-    //   7 |       |       |       |
-
     // Test function to put some work on the work queues.
     async fn submit_three_ios(
         up: &Arc<Upstairs>,
