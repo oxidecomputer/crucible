@@ -133,9 +133,9 @@ pub trait BlockIO: Sync {
     /// implemented for those.
     async fn replace_downstairs(
         &self,
-        id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        _id: Uuid,
+        _old: SocketAddr,
+        _new: SocketAddr,
     ) -> Result<ReplaceResult, CrucibleError> {
         panic!("should never hit here!");
     }
@@ -7309,9 +7309,9 @@ impl Upstairs {
 
     async fn replace_downstairs(
         &self,
-        id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        _id: Uuid,
+        _old: SocketAddr,
+        _new: SocketAddr,
     ) -> Result<ReplaceResult, CrucibleError> {
         crucible_bail!(GenericError, "write more code!");
     }
