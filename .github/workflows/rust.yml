@@ -36,11 +36,16 @@ jobs:
       run: cargo test --lib --verbose -- test_pantry --nocapture
     - name: Install latest nextest release
       uses: taiki-e/install-action@nextest
-    - name: Test with latest nextest release
+    - name: Test with latest nextest release just pantry
       uses: actions-rs/cargo@v1
       with:
         command: nextest
-        args: run --all-features
+        args: run pantry --verbose
+    - name: Test nextest all
+      uses: actions-rs/cargo@v1
+      with:
+        command: nextest
+        args: run --verbose
     - name: list all the tests
       run: cargo test --lib --verbose -- --list
     - name: Test all the libraries
