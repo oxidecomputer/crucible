@@ -33,7 +33,7 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: cargo nextest install
-      run: cargo install nextest; cargo nextest run
+      run: cargo install nextest; cargo --list; cargo nextest run
     - name: cargo nextest does not run
       run: cargo --list
     - name: Test just this one
