@@ -32,6 +32,10 @@ jobs:
     - uses: dtolnay/rust-toolchain@1.66
     - name: Build
       run: cargo build --verbose
+    - name: cargo nextest install
+      run: cargo install nextest
+    - name: cargo nextest run
+      run: cargo nextest run
     - name: Test just this one
       run: cargo test --lib --verbose test_new_range_panics_when_last_block_before_first -- --nocapture
     - name: list all the tests
