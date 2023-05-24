@@ -34,5 +34,29 @@ jobs:
       run: cargo build --verbose
     - name: Test just this one
       run: cargo test --lib --verbose test_new_range_panics_when_last_block_before_first -- --nocapture
+    - name: list all the tests
+      run: cargo test --lib --verbose -- --list
+    - name: Run block_req tests
+      run: cargo test --lib --verbose -- block_req
+    - name: Run du tests
+      run: cargo test --lib --verbose -- dummy_downstairs_tests
+    - name: Run dump tests
+      run: cargo test --lib --verbose -- dump
+    - name: Run impacted_blocks tests
+      run: cargo test --lib --verbose -- impacted_blocks
+    - name: Run live_repair tests
+      run: cargo test --lib --verbose -- live_repair
+    - name: Run mend tests
+      run: cargo test --lib --verbose -- mend
+    - name: Run region
+      run: cargo test --lib --verbose -- region
+    - name: Run import
+      run: cargo test --lib --verbose -- import
+    - name: Run integration_test
+      run: cargo test --lib --verbose -- integration_test
+    - name: Run up_test
+      run: cargo test --lib --verbose -- up_test
+    - name: Run volume
+      run: cargo test --lib --verbose -- volume
     - name: Test all the libraries
       run: cargo test --lib --verbose -- --test-threads=1
