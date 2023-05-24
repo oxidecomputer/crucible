@@ -32,9 +32,13 @@ jobs:
     - uses: dtolnay/rust-toolchain@1.66
     - name: Build
       run: cargo build --verbose
-    - name: cargo nextest different
-    - uses: taiki-e/install-action@nextest
-      run: cargo --list; echo "now run"; cargo nextest run
+    - name: Install latest nextest release
+      uses: taiki-e/install-action@nextest
+    - name: Test with latest nextest release
+      uses: actions-rs/cargo@v1
+      with:
+        command: nextest
+        args: run --all-features
     - name: Test just this one
       run: cargo test --lib --verbose test_new_range_panics_when_last_block_before_first -- --nocapture
     - name: list all the tests
