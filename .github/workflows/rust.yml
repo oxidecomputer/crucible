@@ -58,5 +58,15 @@ jobs:
       run: cargo test --lib --verbose -- up_test
     - name: Run volume
       run: cargo test --lib --verbose -- volume
+    - name: Run tests with an s
+      run: cargo test --lib --verbose -- tests
+    - name: Run tests_version
+      run: cargo test --lib --verbose -- test_version
+    - name: Run test pantry
+      run: cargo test --lib --verbose -- test_pantry
+    - name: Run test extent
+      run: cargo test --lib --verbose -- extent
+    - name: Run test buffer
+      run: cargo test --lib --verbose -- buffer
     - name: Test all the libraries
       run: cargo test --lib --verbose -- --test-threads=1
