@@ -2968,8 +2968,11 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_snapshot() {
+        use slog::info;
         const BLOCK_SIZE: usize = 512;
 
+        let log = csl();
+        info!(log, " ZZZ this can't work on ubuntu??");
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
@@ -2978,6 +2981,7 @@ mod test {
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
+        info!(log, " ZZZ take a snapshot");
         client
             .snapshot(
                 &volume_id.to_string(),
@@ -2988,6 +2992,7 @@ mod test {
             .await
             .unwrap();
 
+        info!(log, " ZZZ detatch after snapshot");
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 
