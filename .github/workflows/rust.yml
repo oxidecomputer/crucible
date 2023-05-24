@@ -43,6 +43,5 @@ jobs:
         args: run --all-features
     - name: list all the tests
       run: cargo test --lib --verbose -- --list
-    - name: Run block_req tests
     - name: Test all the libraries
       run: cargo test --lib --verbose -- --test-threads=1
