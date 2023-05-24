@@ -33,4 +33,4 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Test Libraries
-      run: cargo test --lib --verbose
+      run: cargo test --lib --verbose -- --test-threads=1
