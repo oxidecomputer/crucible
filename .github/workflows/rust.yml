@@ -32,11 +32,11 @@ jobs:
     - uses: dtolnay/rust-toolchain@1.66
     - name: Build
       run: cargo build --verbose
-    - name: Run just test pantry
-      run: cargo test --lib --verbose -- test_pantry --nocapture
+    - name: cargo test just pantry
+      run: cargo test --lib --verbose -- pantry --nocapture
     - name: Install latest nextest release
       uses: taiki-e/install-action@nextest
-    - name: Test with latest nextest release just pantry
+    - name: nextest test just pantry
       uses: actions-rs/cargo@v1
       with:
         command: nextest
