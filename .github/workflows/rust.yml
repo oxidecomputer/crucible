@@ -32,21 +32,5 @@ jobs:
     - uses: dtolnay/rust-toolchain@1.66
     - name: Build
       run: cargo build --verbose
-    - name: cargo test just pantry
-      run: cargo test --lib --verbose -- pantry --nocapture
-    - name: Install latest nextest release
-      uses: taiki-e/install-action@nextest
-    - name: nextest test just pantry
-      uses: actions-rs/cargo@v1
-      with:
-        command: nextest
-        args: run pantry --verbose
-    - name: Test nextest all
-      uses: actions-rs/cargo@v1
-      with:
-        command: nextest
-        args: run --verbose
-    - name: list all the tests
-      run: cargo test --lib --verbose -- --list
-    - name: Test all the libraries
-      run: cargo test --lib --verbose -- --test-threads=1 --nocapture
+    - name: Test Libraries
+      run: cargo test --lib --verbose
