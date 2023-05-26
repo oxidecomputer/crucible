@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 byte-unit = "4.0.19"
-clap = { version = "4.1", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4.3", features = ["derive", "env", "wrap_help"] }
 csv = "1.2.1"
 dsc-client = { path = "../dsc-client" }
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
