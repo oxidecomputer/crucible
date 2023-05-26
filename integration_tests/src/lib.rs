@@ -235,6 +235,21 @@ mod test {
 
             Ok(())
         }
+
+        pub async fn new_downstairs(&self) -> Result<TestDownstairs> {
+            TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                false,
+                self.blocks_per_extent,
+                self.extent_count,
+            )
+            .await
+        }
+
+        pub async fn downstairs1_address(&self) -> SocketAddr {
+            self.downstairs1.address().await
+        }
     }
 
     #[tokio::test]
@@ -2126,6 +2141,62 @@ mod test {
 
         // Validate a flush still works
         volume.flush(None).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_volume_replace_downstairs() -> Result<()> {
+        // Replace a downstairs with a new one
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them
+        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        // Create a new downstairs, then replace one of the old ones with that
+        // one.
+        let new_downstairs = test_downstairs_set.new_downstairs().await?;
+
+        // XXX this should work!
+        volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs1_address().await,
+                new_downstairs.address().await,
+            )
+            .await
+            .err()
+            .unwrap();
 
         Ok(())
     }

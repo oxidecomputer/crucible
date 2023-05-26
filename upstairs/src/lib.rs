@@ -127,6 +127,19 @@ pub trait BlockIO: Sync {
     /// returns the guest side and downstairs side job queue depths.
     async fn show_work(&self) -> Result<WQCounts, CrucibleError>;
 
+    /// Replace one downstairs with a new one.
+    ///
+    /// This only make sense for Volume, Subvolume, and Guest, so it is only
+    /// implemented for those.
+    async fn replace_downstairs(
+        &self,
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        panic!("should never hit here!");
+    }
+
     // Common methods for BlockIO
 
     async fn byte_offset_to_block(
@@ -205,6 +218,14 @@ pub async fn join_all<'a>(
         .into_iter()
         .collect::<Result<Vec<()>, CrucibleError>>()
         .map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReplaceResult {
+    ReplaceStarted,
+    ReplaceStartedAlready,
+    ReplacedCompletedAlready,
+    Missing,
 }
 
 /// DTrace probes in the upstairs
@@ -7285,6 +7306,15 @@ impl Upstairs {
         let mut ds = self.downstairs.lock().await;
         ds.ds_repair.remove(&client_id);
     }
+
+    async fn replace_downstairs(
+        &self,
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        crucible_bail!(GenericError, "write more code!");
+    }
 }
 
 #[derive(Debug)]
@@ -8310,8 +8340,14 @@ pub enum BlockOp {
         gen: u64,
     },
     Deactivate,
-    // Repair command
+    // Management commands
     RepairOp,
+    ReplaceDownstairs {
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+        result: Arc<Mutex<ReplaceResult>>,
+    },
     // Query ops
     QueryBlockSize {
         data: Arc<Mutex<u64>>,
@@ -9115,6 +9151,26 @@ impl BlockIO for Guest {
         let wc = data.lock().await;
         Ok(*wc)
     }
+
+    async fn replace_downstairs(
+        &self,
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        let data = Arc::new(Mutex::new(ReplaceResult::Missing));
+        let sw = BlockOp::ReplaceDownstairs {
+            id,
+            old,
+            new,
+            result: data.clone(),
+        };
+
+        self.send(sw).await.wait().await?;
+
+        let result = data.lock().await;
+        Ok(*result)
+    }
 }
 
 /*
@@ -9467,6 +9523,21 @@ async fn process_new_io(
         BlockOp::RepairOp => {
             warn!(up.log, "Ignoring external BlockOp::RepairOp");
         }
+        BlockOp::ReplaceDownstairs {
+            id,
+            old,
+            new,
+            result,
+        } => match up.replace_downstairs(id, old, new).await {
+            Ok(v) => {
+                *result.lock().await = v;
+                req.send_ok().await;
+            }
+
+            Err(e) => {
+                req.send_err(e).await;
+            }
+        },
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             let size = match up.ddef.lock().await.get_def() {

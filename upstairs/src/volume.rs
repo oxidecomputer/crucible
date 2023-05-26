@@ -802,6 +802,35 @@ impl BlockIO for Volume {
 
         Ok(wq_counts)
     }
+
+    async fn replace_downstairs(
+        &self,
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        for subvol in &self.sub_volumes {
+            let result = subvol.replace_downstairs(id, old, new).await?;
+            match result {
+                ReplaceResult::ReplaceStarted
+                | ReplaceResult::ReplaceStartedAlready
+                | ReplaceResult::ReplacedCompletedAlready => {
+                    // found the subvolume, so stop!
+                    return Ok(result);
+                }
+
+                ReplaceResult::Missing => {
+                    // keep looking!
+                }
+            }
+        }
+
+        // Do not attempt to replace a downstairs in the read only parent - this
+        // operation only makes sense for the subvolumes, as that's the
+        // read-write portion of the volume.
+
+        Ok(ReplaceResult::Missing)
+    }
 }
 
 // Traditional subvolume is just one region set
@@ -949,6 +978,15 @@ impl BlockIO for SubVolume {
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         self.block_io.show_work().await
+    }
+
+    async fn replace_downstairs(
+        &self,
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        self.block_io.replace_downstairs(id, old, new).await
     }
 }
 
