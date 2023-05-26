@@ -148,7 +148,11 @@ function mem_test() {
     else
         reported_downstairs="$total_downstairs"
     fi
-    echo "Total downstairs: $reported_downstairs"
+    echo "Total downstairs (pmap -x): $reported_downstairs"
+
+    region_summary=$(du -sAh $region_dir | awk '{print $1}')
+    region_size=$(du -sA $region_dir | awk '{print $1}')
+    echo "Size on disk of all region dirs: $region_summary or $region_size"
 
     set +o errexit
     "$dsc" cmd shutdown >> "$test_mem_log" 2>&1
@@ -185,7 +189,8 @@ echo "Memory usage test begins at $(date)"
 echo "Memory usage values in kilobytes unless specified otherwise"
 
 #            ES   EC
-mem_test 131072   20
-mem_test 131072  200
+mem_test 16384    16
+mem_test 16384   160
+mem_test 16384  1600
 
 echo "Memory usage test finished on $(date)"
