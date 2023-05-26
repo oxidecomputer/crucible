@@ -26,7 +26,7 @@ oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 ringbuffer = "0.13"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
-reedline = "0.19.0"
+reedline = "0.19.1"
 schemars = { version = "0.8.12", features = [ "uuid1" ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
