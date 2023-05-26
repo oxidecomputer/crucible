@@ -1971,6 +1971,7 @@ impl Region {
 
             if computed_hash != write.block_context.hash {
                 error!(self.log, "Failed write hash validation");
+                // TODO: print out the extent and block where this failed!!
                 crucible_bail!(HashMismatch);
             }
         }
@@ -2094,7 +2095,7 @@ impl Region {
         flush_number: u64,
         job_id: u64,
     ) -> Result<(), CrucibleError> {
-        info!(
+        debug!(
             self.log,
             "Flush just extent {} with f:{} and g:{}",
             eid,
@@ -2135,7 +2136,7 @@ impl Region {
                 if el > self.def.extent_count().try_into().unwrap() {
                     crucible_bail!(InvalidExtent);
                 }
-                el
+                el + 1 // +1 because our loop is exclusive.
             }
             None => self.def.extent_count().try_into().unwrap(),
         };
@@ -2230,7 +2231,7 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
     if let Err(e) = file.sync_all() {
         crucible_bail!(IoError, "{:?}: fsync failure: {:?}", path, e);
     }
-    info!(log, "fsync completed for: {:?}", path);
+    debug!(log, "fsync completed for: {:?}", path);
 
     Ok(())
 }
@@ -4876,8 +4877,8 @@ mod test {
         let inner = &region.extents[1].inner.as_ref().unwrap();
         assert!(inner.lock().await.dirty().unwrap());
 
-        // Call flush, but limit the flush to extents < 1
-        region.region_flush(1, 2, &None, 3, Some(1)).await.unwrap();
+        // Call flush, but limit the flush to extent 0
+        region.region_flush(1, 2, &None, 3, Some(0)).await.unwrap();
 
         // Verify the dirty bit is no longer set for 0, but still set
         // for extent 1.
@@ -4914,7 +4915,7 @@ mod test {
         assert!(inner.lock().await.dirty().unwrap());
 
         // Call flush, but limit the flush to extents < 2
-        region.region_flush(1, 2, &None, 3, Some(2)).await.unwrap();
+        region.region_flush(1, 2, &None, 3, Some(1)).await.unwrap();
 
         // Verify the dirty bit is no longer set for 1, but still set
         // for extent 2.
@@ -4942,7 +4943,7 @@ mod test {
             .unwrap();
         region.extend(10).await.unwrap();
 
-        // Write to extent 1 block 9 first
+        // Write to extents 0 to 9
         let mut job_id = 1;
         for ext in 0..10 {
             let writes = create_generic_write(ext, Block::new_512(5));
@@ -4958,20 +4959,20 @@ mod test {
 
         // Walk up the extent_limit, verify at each flush extents are
         // flushed.
-        for ext in 1..10 {
-            println!("Flush to extent limit {}", ext);
+        for ext in 0..10 {
+            println!("Send flush to extent limit {}", ext);
             region
                 .region_flush(1, 2, &None, 3, Some(ext))
                 .await
                 .unwrap();
 
             // This ext should no longer be dirty.
-            println!("extent n-1 {} should not be dirty now", ext - 1);
-            let inner = &region.extents[ext - 1].inner.as_ref().unwrap();
+            println!("extent {} should not be dirty now", ext);
+            let inner = &region.extents[ext].inner.as_ref().unwrap();
             assert!(!inner.lock().await.dirty().unwrap());
 
             // Any extent above the current point should still be dirty.
-            for d_ext in ext..10 {
+            for d_ext in ext + 1..10 {
                 println!("verify {} still dirty", d_ext);
                 let inner = &region.extents[d_ext].inner.as_ref().unwrap();
                 assert!(inner.lock().await.dirty().unwrap());
