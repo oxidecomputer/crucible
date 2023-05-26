@@ -39,3 +39,10 @@ jobs:
       with:
         command: nextest
         args: run --verbose
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: dtolnay/rust-toolchain@1.66
+    - name: Test Libraries
+      run: cargo clippy --all-targets

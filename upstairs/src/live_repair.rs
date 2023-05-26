@@ -566,13 +566,12 @@ fn repair_or_noop(
         debug!(ds.log, "Get repair info for {} bad", broken_extent);
         let repair_ei = ds.repair_info.remove(broken_extent).unwrap();
 
-        let repair = if repair_ei.dirty {
-            true
-        } else if repair_ei.generation != good_ei.generation {
-            true
-        } else {
-            repair_ei.flush_number != good_ei.flush_number
-        };
+        let repair =
+            if repair_ei.dirty || repair_ei.generation != good_ei.generation {
+                true
+            } else {
+                repair_ei.flush_number != good_ei.flush_number
+            };
 
         if repair {
             need_repair.push(*broken_extent);
