@@ -1053,19 +1053,12 @@ where
 
 // Check and see if this message is A LiveRepair, and if it has failed
 fn check_message_for_abort(m: &Message) -> bool {
-    match m {
-        Message::ExtentLiveRepairAckId {
-            upstairs_id: _,
-            session_id: _,
-            job_id: _,
-            result,
-        } => {
-            if result.is_err() {
-                return true;
-            }
+    if let Message::ExtentLiveRepairAckId { result, .. } = m {
+        if result.is_err() {
+            return true;
         }
-        _ => {}
     }
+
     false
 }
 
