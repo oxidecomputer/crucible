@@ -235,6 +235,21 @@ mod test {
 
             Ok(())
         }
+
+        pub async fn new_downstairs(&self) -> Result<TestDownstairs> {
+            TestDownstairs::new(
+                "127.0.0.1".parse()?,
+                true,
+                false,
+                self.blocks_per_extent,
+                self.extent_count,
+            )
+            .await
+        }
+
+        pub async fn downstairs1_address(&self) -> SocketAddr {
+            self.downstairs1.address().await
+        }
     }
 
     #[tokio::test]
@@ -2130,6 +2145,62 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn integration_test_volume_replace_downstairs() -> Result<()> {
+        // Replace a downstairs with a new one
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them
+        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        // Create a new downstairs, then replace one of the old ones with that
+        // one.
+        let new_downstairs = test_downstairs_set.new_downstairs().await?;
+
+        // XXX this should work!
+        volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs1_address().await,
+                new_downstairs.address().await,
+            )
+            .await
+            .err()
+            .unwrap();
+
+        Ok(())
+    }
+
     // The following tests work at the "guest" layer. The volume
     // layers above (in general) will eventually call a BlockIO trait
     // on a guest layer.
@@ -2149,7 +2220,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2193,7 +2264,7 @@ mod test {
         let gc = guest.clone();
 
         // Read-only Upstairs should return errors if writes are attempted.
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
 
@@ -2227,7 +2298,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2300,7 +2371,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2358,7 +2429,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2417,7 +2488,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2474,7 +2545,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2531,7 +2602,7 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await?;
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
 
         guest.activate().await?;
         guest.query_work_queue().await?;
@@ -2586,7 +2657,8 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await.unwrap();
+        let _join_handle =
+            up_main(opts, 1, None, gc, None, None).await.unwrap();
 
         guest.activate().await.unwrap();
 
@@ -2622,7 +2694,8 @@ mod test {
         let guest = Arc::new(Guest::new());
         let gc = guest.clone();
 
-        let _join_handle = up_main(opts, 1, None, gc, None).await.unwrap();
+        let _join_handle =
+            up_main(opts, 1, None, gc, None, None).await.unwrap();
 
         guest.activate().await.unwrap();
 
@@ -2966,8 +3039,11 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_snapshot() {
+        use slog::info;
         const BLOCK_SIZE: usize = 512;
 
+        let log = csl();
+        info!(log, " ZZZ this can't work on ubuntu??");
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
@@ -2976,6 +3052,7 @@ mod test {
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
+        info!(log, " ZZZ take a snapshot");
         client
             .snapshot(
                 &volume_id.to_string(),
@@ -2986,6 +3063,7 @@ mod test {
             .await
             .unwrap();
 
+        info!(log, " ZZZ detatch after snapshot");
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 

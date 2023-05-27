@@ -109,7 +109,8 @@ async fn main() -> Result<()> {
 
     let guest = Arc::new(guest);
     let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), None).await?;
+        up_main(crucible_opts, opt.gen, None, guest.clone(), None, None)
+            .await?;
     println!("Crucible runtime is spawned");
 
     guest.activate().await?;

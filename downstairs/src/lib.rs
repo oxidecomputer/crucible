@@ -15,20 +15,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible::*;
-use crucible_common::{Block, CrucibleError, MAX_BLOCK_SIZE};
+use crucible_common::{build_logger, Block, CrucibleError, MAX_BLOCK_SIZE};
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
-use slog::{error, info, o, warn, Drain, Logger};
-use slog_dtrace::{with_drain, ProbeRegistration};
+use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
-use usdt::register_probes;
 use uuid::Uuid;
 
 pub mod admin;
@@ -736,7 +734,7 @@ where
 
             // TODO: Add dtrace probes
             // Do both the flush, and then the close
-            let new_flush = IOop::ExtentLiveRepair {
+            let new_repair = IOop::ExtentLiveRepair {
                 dependencies: dependencies.to_vec(),
                 extent: *extent_id,
                 source_downstairs: *source_client_id,
@@ -745,7 +743,8 @@ where
             };
 
             let mut d = ad.lock().await;
-            d.add_work(upstairs_connection, *job_id, new_flush).await?;
+            debug!(d.log, "Received ExtentLiveRepair {}", job_id);
+            d.add_work(upstairs_connection, *job_id, new_repair).await?;
             Some(*job_id)
         }
         Message::ExtentLiveReopen {
@@ -798,6 +797,7 @@ where
             };
 
             let mut d = ad.lock().await;
+            debug!(d.log, "Received NoOP {}", job_id);
             d.add_work(upstairs_connection, *job_id, new_open).await?;
             Some(*job_id)
         }
@@ -812,7 +812,7 @@ where
         } => {
             let msg = {
                 let d = ad.lock().await;
-                info!(
+                debug!(
                     d.log,
                     "{} Flush extent {} with f:{} g:{}",
                     repair_id,
@@ -851,7 +851,7 @@ where
         } => {
             let msg = {
                 let mut d = ad.lock().await;
-                info!(d.log, "{} Close extent {}", repair_id, extent_id);
+                debug!(d.log, "{} Close extent {}", repair_id, extent_id);
                 match d.region.extents.get_mut(*extent_id) {
                     Some(ext) => {
                         let (_, _, _) = ext.close().await?;
@@ -879,7 +879,7 @@ where
         } => {
             let msg = {
                 let mut d = ad.lock().await;
-                info!(
+                debug!(
                     d.log,
                     "{} Repair extent {} source:[{}] {:?} dest:{:?}",
                     repair_id,
@@ -913,7 +913,7 @@ where
         } => {
             let msg = {
                 let mut d = ad.lock().await;
-                info!(d.log, "{} Reopen extent {}", repair_id, extent_id);
+                debug!(d.log, "{} Reopen extent {}", repair_id, extent_id);
                 match d.region.reopen_extent(*extent_id).await {
                     Ok(()) => Message::RepairAckId {
                         repair_id: *repair_id,
@@ -1012,7 +1012,17 @@ where
                     .do_work(upstairs_connection, job_id)
                     .await?;
 
+                // If this is a repair job, and that repair failed, we
+                // can do no more work on this downstairs and should
+                // force everything to come down before more work arrives.
+                //
+                // However, we can respond to the upstairs with the failed
+                // result, and let the upstairs take action that will
+                // allow it to abort the repair and continue working in
+                // some degraded state.
+                let mut abort_needed = false;
                 if let Some(m) = m {
+                    abort_needed = check_message_for_abort(&m);
                     ads.lock()
                         .await
                         .complete_work_stat(upstairs_connection, &m, job_id)
@@ -1027,12 +1037,29 @@ where
                         .complete_work(upstairs_connection, job_id, m)
                         .await?;
                 }
+
+                // Now, if the message requires an abort, we handle
+                // that now by exiting this task with error.
+                if abort_needed {
+                    bail!("Repair has failed, exiting task");
+                }
             }
         }
     }
 
     // None means the channel is closed
     Ok(())
+}
+
+// Check and see if this message is A LiveRepair, and if it has failed
+fn check_message_for_abort(m: &Message) -> bool {
+    if let Message::ExtentLiveRepairAckId { result, .. } = m {
+        if result.is_err() {
+            return true;
+        }
+    }
+
+    false
 }
 
 async fn proc_stream(
@@ -1672,7 +1699,8 @@ where
                         warn!(
                             log,
                             "upstairs {:?} disconnected, {} jobs left",
-                            upstairs_connection, ds.jobs(upstairs_connection).await?,
+                            upstairs_connection,
+                            ds.jobs(upstairs_connection).await?,
                         );
 
                         if ds.is_active(upstairs_connection) {
@@ -1690,6 +1718,8 @@ where
                             if let Err(e) = fw.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
+                            let mut ds = ads.lock().await;
+                            show_work(&mut ds).await;
                         } else if let Err(e) = message_channel_tx.send(msg).await {
                             bail!("Failed sending message to proc_frame: {}", e);
                         }
@@ -1954,7 +1984,7 @@ impl Downstairs {
         assert_eq!(job.ds_id, job_id);
         match &job.work {
             IOop::Read {
-                dependencies: _dependencies,
+                dependencies,
                 requests,
             } => {
                 /*
@@ -1970,6 +2000,13 @@ impl Downstairs {
                 } else {
                     self.region.region_read(requests, job_id).await
                 };
+                debug!(
+                    self.log,
+                    "Read      :{} deps:{:?} res:{}",
+                    job_id,
+                    dependencies,
+                    responses.is_ok(),
+                );
 
                 Ok(Some(Message::ReadResponse {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2006,7 +2043,7 @@ impl Downstairs {
                 }))
             }
             IOop::Write {
-                dependencies: _dependencies,
+                dependencies,
                 writes,
             } => {
                 let result = if self.write_errors && random() && random() {
@@ -2018,6 +2055,13 @@ impl Downstairs {
                 } else {
                     self.region.region_write(writes, job_id, false).await
                 };
+                debug!(
+                    self.log,
+                    "Write     :{} deps:{:?} res:{}",
+                    job_id,
+                    dependencies,
+                    result.is_ok(),
+                );
 
                 Ok(Some(Message::WriteAck {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2027,7 +2071,7 @@ impl Downstairs {
                 }))
             }
             IOop::Flush {
-                dependencies: _dependencies,
+                dependencies,
                 flush_number,
                 gen_number,
                 snapshot_details,
@@ -2050,6 +2094,12 @@ impl Downstairs {
                         )
                         .await
                 };
+                debug!(
+                    self.log,
+                    "Flush     :{} extent_limit {:?} deps:{:?} res:{} f:{} g:{}",
+                    job_id, extent_limit, dependencies, result.is_ok(),
+                    flush_number, gen_number,
+                );
 
                 Ok(Some(Message::FlushAck {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2059,10 +2109,9 @@ impl Downstairs {
                 }))
             }
             IOop::ExtentClose {
-                dependencies: _,
+                dependencies,
                 extent,
             } => {
-                info!(self.log, "Closing extent {}", extent);
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
@@ -2071,6 +2120,14 @@ impl Downstairs {
                 } else {
                     Err(CrucibleError::InvalidExtent)
                 };
+                debug!(
+                    self.log,
+                    "JustClose :{} extent {} deps:{:?} res:{}",
+                    job_id,
+                    extent,
+                    dependencies,
+                    result.is_ok(),
+                );
 
                 Ok(Some(Message::ExtentLiveCloseAck {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2080,19 +2137,18 @@ impl Downstairs {
                 }))
             }
             IOop::ExtentFlushClose {
-                dependencies: _,
+                dependencies,
                 extent,
                 flush_number,
                 gen_number,
                 source_downstairs: _,
                 repair_downstairs: _,
             } => {
-                info!(self.log, "Flush then Closing extent {}", extent);
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    // if flush fails, return that result.
+                    // If flush fails, return that result.
                     // Else, if close fails, return that result.
                     // Else, return the f/g/d from the close.
                     match self
@@ -2117,6 +2173,16 @@ impl Downstairs {
                         }
                     }
                 };
+                debug!(
+                    self.log,
+                    "FlushClose:{} extent {} deps:{:?} res:{} f:{} g:{}",
+                    job_id,
+                    extent,
+                    dependencies,
+                    result.is_ok(),
+                    flush_number,
+                    gen_number,
+                );
 
                 Ok(Some(Message::ExtentLiveCloseAck {
                     upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2126,25 +2192,44 @@ impl Downstairs {
                 }))
             }
             IOop::ExtentLiveRepair {
-                dependencies: _,
+                dependencies,
                 extent,
                 source_downstairs: _,
-                source_repair_address: _,
+                source_repair_address,
                 repair_downstairs: _,
             } => {
-                info!(self.log, "TODO: write code to repair extent {}", extent);
-                // TODO: Implement the actual repair
-                Ok(Some(Message::ExtentLiveAckId {
+                debug!(
+                    self.log,
+                    "ExtentLiveRepair: extent {} sra:{:?}",
+                    extent,
+                    source_repair_address
+                );
+                let result = if !self.is_active(job.upstairs_connection) {
+                    error!(self.log, "Upstairs inactive error");
+                    Err(CrucibleError::UpstairsInactive)
+                } else {
+                    self.region
+                        .repair_extent(*extent, *source_repair_address)
+                        .await
+                };
+                debug!(
+                    self.log,
+                    "LiveRepair:{} extent {} deps:{:?} res:{}",
+                    job_id,
+                    extent,
+                    dependencies,
+                    result.is_ok(),
+                );
+
+                Ok(Some(Message::ExtentLiveRepairAckId {
                     upstairs_id: job.upstairs_connection.upstairs_id,
                     session_id: job.upstairs_connection.session_id,
                     job_id,
-                    result: Err(CrucibleError::Unsupported(
-                        "ExtentRepair not supported".to_string(),
-                    )),
+                    result,
                 }))
             }
             IOop::ExtentLiveReopen {
-                dependencies: _,
+                dependencies,
                 extent,
             } => {
                 let result = if !self.is_active(job.upstairs_connection) {
@@ -2153,6 +2238,14 @@ impl Downstairs {
                 } else {
                     self.region.reopen_extent(*extent).await
                 };
+                debug!(
+                    self.log,
+                    "LiveReopen:{} extent {} deps:{:?} res:{}",
+                    job_id,
+                    extent,
+                    dependencies,
+                    result.is_ok(),
+                );
                 Ok(Some(Message::ExtentLiveAckId {
                     upstairs_id: job.upstairs_connection.upstairs_id,
                     session_id: job.upstairs_connection.session_id,
@@ -2160,13 +2253,21 @@ impl Downstairs {
                     result,
                 }))
             }
-            IOop::ExtentLiveNoOp { dependencies: _ } => {
+            IOop::ExtentLiveNoOp { dependencies } => {
+                debug!(self.log, "Work of: LiveNoOp {}", job_id);
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     Ok(())
                 };
+                debug!(
+                    self.log,
+                    "LiveNoOp  :{} deps:{:?} res:{}",
+                    job_id,
+                    dependencies,
+                    result.is_ok(),
+                );
                 Ok(Some(Message::ExtentLiveAckId {
                     upstairs_id: job.upstairs_connection.upstairs_id,
                     session_id: job.upstairs_connection.session_id,
@@ -2904,21 +3005,7 @@ pub async fn build_downstairs_for_region(
 ) -> Result<Arc<Mutex<Downstairs>>> {
     let log = match log_request {
         Some(log) => log,
-        None => {
-            // Register DTrace, and setup slog logging to use it.
-            register_probes().unwrap();
-            let decorator = slog_term::TermDecorator::new().build();
-            let drain = slog_term::FullFormat::new(decorator)
-                .build()
-                .filter_level(slog::Level::Info)
-                .fuse();
-            let drain = slog_async::Async::new(drain).build().fuse();
-            let (drain, registration) = with_drain(drain);
-            if let ProbeRegistration::Failed(ref e) = registration {
-                panic!("Failed to register probes: {:#?}", e);
-            }
-            Logger::root(drain.fuse(), o!())
-        }
+        None => build_logger(),
     };
     let region =
         Region::open(data, Default::default(), true, read_only, &log).await?;
@@ -3127,8 +3214,7 @@ mod test {
 
     // Create a simple logger
     fn csl() -> Logger {
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+        build_logger()
     }
 
     fn add_work(

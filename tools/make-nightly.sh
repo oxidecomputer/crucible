@@ -17,6 +17,7 @@ tar cavf out/crucible-nightly.tar.gz \
   target/release/crutest \
   target/release/crucible-downstairs \
   target/release/crucible-hammer \
+  target/release/cmon \
   target/release/dsc \
   tools/hammer_loop.sh \
   tools/test_perf.sh \
@@ -25,6 +26,8 @@ tar cavf out/crucible-nightly.tar.gz \
   tools/test_repair.sh \
   tools/test_restart_repair.sh \
   tools/test_nightly.sh \
+  tools/loop-repair.sh \
+  tools/loop-double-repair.sh \
   nightly-info.txt
 
 ls -l out/crucible-nightly.tar.gz
