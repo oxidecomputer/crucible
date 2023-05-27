@@ -467,7 +467,10 @@ where
         if active_count >= 100 {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
-            u.downstairs.lock().await.requeue_work(client_id, &new_work[ndx..]);
+            u.downstairs
+                .lock()
+                .await
+                .requeue_work(client_id, &new_work[ndx..]);
             return Ok(true);
         }
 
@@ -2924,6 +2927,7 @@ impl Downstairs {
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::New, client_id);
+                self.ds_new[client_id as usize].push(*ds_id);
             }
         }
     }
