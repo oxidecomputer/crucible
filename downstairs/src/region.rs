@@ -154,11 +154,9 @@ impl Inner {
         block: u64,
         count: u64,
     ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
-        // NOTE: "ORDER BY RANDOM()" would be a good --lossy addition here
         let stmt =
             "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
-             WHERE block BETWEEN ?1 AND ?2 \
-             ORDER BY ROWID ASC";
+             WHERE block BETWEEN ?1 AND ?2";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
         let stmt_iter =
@@ -769,6 +767,25 @@ impl Extent {
             // until we call flush and remove context rows where the integrity
             // hash does not match what was actually flushed to disk.
 
+            // in WITHOUT ROWID mode, SQLite arranges the tables on-disk ordered by the
+            // primary key. since we're always doing operations on contiguous ranges of blocks, this is great for us. The only catch is that you can actually see worse performance with large rows (not a problem for us).
+            //
+            // From https://www.sqlite.org/withoutrowid.html:
+            // > WITHOUT ROWID tables work best when individual rows are not too
+            // > large. A good rule-of-thumb is that the average size of a
+            // > single row in a WITHOUT ROWID table should be less than about
+            // > 1/20th the size of a database page. That means that rows should
+            // > not contain more than about 50 bytes each for a 1KiB page size
+            // > or about 200 bytes each for 4KiB page size.
+            //
+            // The default SQLite page size is 4KiB, per https://sqlite.org/pgszchng2016.html
+            //
+            // The primary key is also a uniqueness constraint. Because the
+            // on_disk_hash is a hash of the data AFTER encryption, we only need
+            // (block, on_disk_hash). A duplicate write with a different
+            // encryption context necessarily results in a different on disk
+            // hash. Likewise for a write with a different nonce, or a different
+            // nonce.
             metadb.execute(
                 "CREATE TABLE block_context (
                     block INTEGER,
@@ -776,13 +793,8 @@ impl Extent {
                     nonce BLOB,
                     tag BLOB,
                     on_disk_hash INTEGER,
-                    PRIMARY KEY (block, hash, nonce, tag, on_disk_hash)
-                )",
-                [],
-            )?;
-            metadb.execute(
-                "CREATE UNIQUE INDEX block_context_rows_unencrypted ON block_context
-                    (block, hash, on_disk_hash)",
+                    PRIMARY KEY (block, on_disk_hash)
+                ) WITHOUT ROWID",
                 [],
             )?;
 
