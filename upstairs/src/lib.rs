@@ -3335,7 +3335,7 @@ impl Downstairs {
      * requests for this client.
      */
     fn new_work(&mut self, client_id: u8) -> Vec<u64> {
-        self.ds_new[client_id as usize].drain(..).collect()
+        std::mem::take(&mut self.ds_new[client_id as usize])
     }
 
     /**
