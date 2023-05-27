@@ -10,6 +10,7 @@ use ErrorKind::NotFound;
 use anyhow::{anyhow, bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use slog::Drain;
 use tempfile::NamedTempFile;
 
 mod region;
@@ -23,7 +24,15 @@ pub mod x509;
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(thiserror::Error, Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(
+    thiserror::Error,
+    Debug,
+    PartialEq,
+    Clone,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
 pub enum CrucibleError {
     #[error("Error: {0}")]
     GenericError(String),
@@ -290,4 +299,39 @@ impl std::fmt::Display for BuildInfo {
             self.opt_level
         )
     }
+}
+
+/**
+ * A common logger setup for all to use.
+ */
+pub fn build_logger() -> slog::Logger {
+    let main_drain = if atty::is(atty::Stream::Stdout) {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        slog_async::Async::new(drain)
+            .overflow_strategy(slog_async::OverflowStrategy::Block)
+            .build_no_guard()
+    } else {
+        let drain = slog_bunyan::with_name("crucible", std::io::stdout())
+            .build()
+            .fuse();
+        slog_async::Async::new(drain)
+            .overflow_strategy(slog_async::OverflowStrategy::Block)
+            .build_no_guard()
+    };
+
+    let (dtrace_drain, probe_reg) = slog_dtrace::Dtrace::new();
+
+    let filtered_main = slog::LevelFilter::new(main_drain, slog::Level::Info);
+
+    let log = slog::Logger::root(
+        slog::Duplicate::new(filtered_main.fuse(), dtrace_drain.fuse()).fuse(),
+        slog::o!(),
+    );
+
+    if let slog_dtrace::ProbeRegistration::Failed(err) = probe_reg {
+        slog::error!(&log, "Error registering slog-dtrace probes: {:?}", err);
+    }
+
+    log
 }

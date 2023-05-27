@@ -140,6 +140,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Added ExtentLiveRepairAckId for LiveRepair
+    V3 = 3,
+
     /// Initial support for LiveRepair.
     V2 = 2,
 
@@ -148,7 +151,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V2
+        Self::V3
     }
 }
 
@@ -157,7 +160,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 2;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 3;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -368,6 +371,16 @@ pub enum Message {
         session_id: Uuid,
         job_id: u64,
         result: Result<(u64, u64, bool), CrucibleError>,
+    },
+
+    /// The given "ExtentLiveRepair" message ID was completed.  This message
+    /// will only be from ExtentLiveRepair, as this operations failure
+    /// will require special action in the upstairs.
+    ExtentLiveRepairAckId {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        result: Result<(), CrucibleError>,
     },
 
     /// The given "ExtentLive" message ID was completed.  This message
