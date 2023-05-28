@@ -1860,34 +1860,29 @@ impl Region {
         };
         save_stream_to_file(extent_db, repair_stream.into_inner()).await?;
 
-        // These next two are optional.
-        // YYY
-        for opt_file in &[ExtentType::DbWal] {
-            let filename = extent_file_name(eid as u32, opt_file.clone());
+        // the WAL log isn't always there
+        let opt_file = ExtentType::DbWal;
+        let wal_filename = extent_file_name(eid as u32, opt_file.clone());
 
-            if repair_files.contains(&filename) {
-                let extent_shm = extent.create_copy_file(
-                    copy_dir.clone(),
-                    Some(opt_file.clone()),
-                )?;
-                let repair_stream = match repair_server
-                    .get_extent_file(eid as u32, opt_file.to_file_type())
-                    .await
-                {
-                    Ok(rs) => rs,
-                    Err(e) => {
-                        crucible_bail!(
-                            RepairRequestError,
-                            "Failed to get extent {} {} file: {:?}",
-                            eid,
-                            opt_file,
-                            e,
-                        );
-                    }
-                };
-                save_stream_to_file(extent_shm, repair_stream.into_inner())
-                    .await?;
-            }
+        if repair_files.contains(&wal_filename) {
+            let extent_wal = extent
+                .create_copy_file(copy_dir.clone(), Some(opt_file.clone()))?;
+            let repair_stream = match repair_server
+                .get_extent_file(eid as u32, opt_file.to_file_type())
+                .await
+            {
+                Ok(rs) => rs,
+                Err(e) => {
+                    crucible_bail!(
+                        RepairRequestError,
+                        "Failed to get extent {} {} file: {:?}",
+                        eid,
+                        opt_file,
+                        e,
+                    );
+                }
+            };
+            save_stream_to_file(extent_wal, repair_stream.into_inner()).await?;
         }
 
         // After we have all files: move the repair dir.
