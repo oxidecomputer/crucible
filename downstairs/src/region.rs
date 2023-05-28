@@ -164,10 +164,10 @@ impl Inner {
         let stmt_iter =
             stmt.query_map(params![block, block + count - 1], |row| {
                 let block_index: u64 = row.get(0)?;
-                let hash: i64 = row.get(1)?;
+                let hash: Vec<u8> = row.get(1)?;
                 let nonce: Option<Vec<u8>> = row.get(2)?;
                 let tag: Option<Vec<u8>> = row.get(3)?;
-                let on_disk_hash: i64 = row.get(4)?;
+                let on_disk_hash: Vec<u8> = row.get(4)?;
 
                 Ok((block_index, hash, nonce, tag, on_disk_hash))
             })?;
@@ -188,11 +188,11 @@ impl Inner {
 
             let ctx = DownstairsBlockContext {
                 block_context: BlockContext {
-                    hash: hash as u64,
+                    hash: u64::from_le_bytes(hash[..].try_into()?),
                     encryption_context,
                 },
                 block: block_index,
-                on_disk_hash: on_disk_hash as u64,
+                on_disk_hash: u64::from_le_bytes(on_disk_hash[..].try_into()?),
             };
 
             results[(ctx.block - block) as usize].push(ctx);
@@ -225,10 +225,10 @@ impl Inner {
 
         let rows_affected = tx.prepare_cached(stmt)?.execute(params![
             block_context.block,
-            block_context.block_context.hash as i64,
+            block_context.block_context.hash.to_le_bytes(),
             nonce,
             tag,
-            block_context.on_disk_hash as i64,
+            block_context.on_disk_hash.to_le_bytes(),
         ])?;
 
         // We avoid INSERTing duplicate rows, so this should always be 0 or 1.
@@ -272,7 +272,7 @@ impl Inner {
             let mut stmt = tx.prepare_cached(stmt)?;
             for (block, on_disk_hash) in extent_block_indexes_and_hashes {
                 let _rows_affected =
-                    stmt.execute(params![block, on_disk_hash as i64])?;
+                    stmt.execute(params![block, on_disk_hash.to_le_bytes()])?;
             }
         }
         tx.commit()?;
@@ -760,10 +760,10 @@ impl Extent {
             metadb.execute(
                 "CREATE TABLE block_context (
                     block INTEGER,
-                    hash INTEGER,
+                    hash BLOB NOT NULL,
                     nonce BLOB,
                     tag BLOB,
-                    on_disk_hash INTEGER,
+                    on_disk_hash BLOB NOT NULL,
                     PRIMARY KEY (block, hash, nonce, tag, on_disk_hash)
                 )",
                 [],
