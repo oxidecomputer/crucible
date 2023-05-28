@@ -7258,9 +7258,9 @@ impl Upstairs {
 
     async fn replace_downstairs(
         &self,
-        id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        _id: Uuid,
+        _old: SocketAddr,
+        _new: SocketAddr,
     ) -> Result<ReplaceResult, CrucibleError> {
         crucible_bail!(GenericError, "write more code!");
     }
