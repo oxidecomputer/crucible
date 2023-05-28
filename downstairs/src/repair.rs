@@ -103,6 +103,8 @@ pub enum FileType {
     Data,
     #[serde(rename = "db")]
     Database,
+    #[serde(rename = "db_shm")]
+    DatabaseSharedMemory,
     #[serde(rename = "db_wal")]
     DatabaseLog,
 }
@@ -129,8 +131,11 @@ async fn get_extent_file(
         FileType::Database => {
             extent_path.set_extension("db");
         }
-        FileType::DatabaseLog => {
+        FileType::DatabaseSharedMemory => {
             extent_path.set_extension("db-wal");
+        }
+        FileType::DatabaseLog => {
+            extent_path.set_extension("db-shm");
         }
         FileType::Data => (),
     };
@@ -230,6 +235,7 @@ async fn extent_file_list(
     let possible_files = vec![
         (extent_file_name(eid, ExtentType::Data), true),
         (extent_file_name(eid, ExtentType::Db), true),
+        (extent_file_name(eid, ExtentType::DbShm), false),
         (extent_file_name(eid, ExtentType::DbWal), false),
     ];
 
@@ -283,7 +289,7 @@ mod test {
         let ed = extent_dir(&dir, 1);
         let mut ex_files = extent_file_list(ed, 1).await.unwrap();
         ex_files.sort();
-        let expected = vec!["001", "001.db", "001.db-wal"];
+        let expected = vec!["001", "001.db", "001.db-shm", "001.db-wal"];
         println!("files: {:?}", ex_files);
         assert_eq!(ex_files, expected);
 
@@ -294,7 +300,7 @@ mod test {
     async fn extent_expected_files_short() -> Result<()> {
         // Verify that the list of files returned for an extent matches
         // what we expect. In this case we expect the extent data file and
-        // the .db file, but not the .db-wal database files.
+        // the .db file, but not the .db-shm or .db-wal database files.
         let dir = tempdir()?;
         let mut region =
             Region::create(&dir, new_region_options(), csl()).await?;
@@ -303,11 +309,13 @@ mod test {
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);
 
-        // Delete db-wal
+        // Delete db-wal and db-shm
         let mut rm_file = extent_dir.clone();
         rm_file.push(extent_file_name(1, ExtentType::Data));
         rm_file.set_extension("db-wal");
         std::fs::remove_file(&rm_file).unwrap();
+        rm_file.set_extension("db-shm");
+        std::fs::remove_file(rm_file).unwrap();
 
         let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
         ex_files.sort();
@@ -320,10 +328,11 @@ mod test {
 
     #[tokio::test]
     async fn extent_expected_files_short_with_close() -> Result<()> {
-        // Verify that the list of files returned for an extent matches what we
-        // expect. In this case we expect the extent data file and the .db file,
-        // but not the or .db-wal database files. We close the extent here
-        // first, and on illumos that behaves a little different than elsewhere.
+        // Verify that the list of files returned for an extent matches
+        // what we expect. In this case we expect the extent data file and
+        // the .db file, but not the .db-shm or .db-wal database files.
+        // We close the extent here first, and on illumos that behaves
+        // a little different than elsewhere.
         let dir = tempdir()?;
         let mut region =
             Region::create(&dir, new_region_options(), csl()).await?;
@@ -335,12 +344,14 @@ mod test {
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);
 
-        // Delete db-wal. On illumos the close of the extent may remove these
-        // for us, so we ignore errors on the removal.
+        // Delete db-wal and db-shm.  On illumos the close of the extent
+        // may remove these for us, so we ignore errors on the removal.
         let mut rm_file = extent_dir.clone();
         rm_file.push(extent_file_name(1, ExtentType::Data));
         rm_file.set_extension("db-wal");
         let _ = std::fs::remove_file(&rm_file);
+        rm_file.set_extension("db-shm");
+        let _ = std::fs::remove_file(rm_file);
 
         let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
         ex_files.sort();

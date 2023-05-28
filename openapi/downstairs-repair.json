@@ -120,6 +120,7 @@
         "enum": [
           "data",
           "db",
+          "db_shm",
           "db_wal"
         ]
       }

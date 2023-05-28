@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use anyhow::{anyhow, bail, Result};
 use futures::TryStreamExt;
 use nix::unistd::{sysconf, SysconfVar};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -324,6 +324,7 @@ impl Default for ExtentMeta {
 pub enum ExtentType {
     Data,
     Db,
+    DbShm,
     DbWal,
 }
 
@@ -332,6 +333,7 @@ impl fmt::Display for ExtentType {
         match self {
             ExtentType::Data => Ok(()),
             ExtentType::Db => write!(f, "db"),
+            ExtentType::DbShm => write!(f, "db-shm"),
             ExtentType::DbWal => write!(f, "db-wal"),
         }
     }
@@ -346,6 +348,7 @@ impl ExtentType {
         match self {
             ExtentType::Data => FileType::Data,
             ExtentType::Db => FileType::Db,
+            ExtentType::DbShm => FileType::DbShm,
             ExtentType::DbWal => FileType::DbWal,
         }
     }
@@ -359,7 +362,7 @@ pub fn extent_file_name(number: u32, extent_type: ExtentType) -> String {
         ExtentType::Data => {
             format!("{:03X}", number & 0xFFF)
         }
-        ExtentType::Db | ExtentType::DbWal => {
+        ExtentType::Db | ExtentType::DbShm | ExtentType::DbWal => {
             format!("{:03X}.{}", number & 0xFFF, extent_type)
         }
     }
@@ -453,7 +456,7 @@ pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
 
 /**
  * Validate a list of sorted repair files.
- * There are either two or three files we expect to find, any more or less
+ * There are either two or four files we expect to find, any more or less
  * and we have a bad list.  No duplicates.
  */
 pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
@@ -465,7 +468,10 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
     ];
 
     let mut all = some.clone();
-    all.extend(vec![extent_file_name(eid, ExtentType::DbWal)]);
+    all.extend(vec![
+        extent_file_name(eid, ExtentType::DbShm),
+        extent_file_name(eid, ExtentType::DbWal),
+    ]);
 
     // Either we have some or all.
     files == some || files == all
@@ -474,25 +480,7 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
 /// Always open sqlite with journaling, and synchronous.
 /// Note: these pragma_updates are not durable
 fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
-    // By default, sqlite uses these shm files for synchronization to support
-    // DB access from multiple processes. We don't need that at all in crucible;
-    // we are only going to access the DB from the single process. So we change
-    // it to unix-excl which prevents other processes from accessing the DB, and
-    // keeps everything in the heap, but still allows multiple connections from
-    // in-process. If we ultimately decide we don't want to hold multiple
-    // connections per DB (and thus, we don't want any parallelism of SQLite
-    // operations within an extent), we could change this to unix-none to forego
-    // locking altogether.
-    //
-    // See https://www.sqlite.org/vfs.html#standard_unix_vfses for more info.
-    // metadb.pragma_update(None, "", "")?;
-    let metadb: Connection = Connection::open_with_flags_and_vfs(
-        path,
-        OpenFlags::default(),
-        "unix-excl",
-    )?;
-
-    // let metadb = Connection::open(path)?;
+    let metadb = Connection::open(path)?;
 
     assert!(metadb.is_autocommit());
     metadb.pragma_update(None, "journal_mode", "WAL")?;
@@ -1708,9 +1696,9 @@ impl Region {
      *    from 012.replace dir
      *  7. Remove any files in extent dir that don't exist in replacing dir
      *     For example, if the replacement extent has 012 and 012.db, but
-     *     the current (bad) extent has 012 012.db
-     *     and 012.db-wal, we want to remove the 012.db-wal
-     *     file when we replace 012 and 012.db with the new versions.
+     *     the current (bad) extent has 012 012.db 012.db-shm
+     *     and 012.db-wal, we want to remove the 012.db-shm and 012.db-wal
+     *     files when we replace 012 and 012.db with the new versions.
      *  8. fsync files after copying them (new location).
      *  9. fsync containing extent dir
      * 10. Rename 012.replace dir to 012.completed dir.
@@ -1802,7 +1790,7 @@ impl Region {
         // The repair file list should always contain the extent data
         // file itself, and the .db file (metadata) for that extent.
         // Missing these means the repair will not succeed.
-        // Optionally, there could be .db-wal.
+        // Optionally, there could be both .db-shm and .db-wal.
         if !validate_repair_files(eid, &repair_files) {
             crucible_bail!(
                 RepairFilesInvalid,
@@ -1849,8 +1837,7 @@ impl Region {
         save_stream_to_file(extent_db, repair_stream.into_inner()).await?;
 
         // These next two are optional.
-        // YYY
-        for opt_file in &[ExtentType::DbWal] {
+        for opt_file in &[ExtentType::DbShm, ExtentType::DbWal] {
             let filename = extent_file_name(eid as u32, opt_file.clone());
 
             if repair_files.contains(&filename) {
@@ -2304,9 +2291,31 @@ pub fn move_replacement_extent<P: AsRef<Path>>(
     }
     sync_path(&original_file, log)?;
 
-    // The .db-wal file may or may not exist. If they don't exist on the source
-    // side, then be sure to remove them locally to avoid database corruption
-    // from a mismatch between old and new.
+    // The .db-shm and .db-wal files may or may not exist.  If they don't
+    // exist on the source side, then be sure to remove them locally to
+    // avoid database corruption from a mismatch between old and new.
+    new_file.set_extension("db-shm");
+    original_file.set_extension("db-shm");
+    if new_file.exists() {
+        if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
+            crucible_bail!(
+                IoError,
+                "copy {:?} to {:?} got: {:?}",
+                new_file,
+                original_file,
+                e
+            );
+        }
+        sync_path(&original_file, log)?;
+    } else if original_file.exists() {
+        info!(
+            log,
+            "Remove old file {:?} as there is no replacement",
+            original_file.clone()
+        );
+        std::fs::remove_file(&original_file)?;
+    }
+
     new_file.set_extension("db-wal");
     original_file.set_extension("db-wal");
     if new_file.exists() {
@@ -2722,6 +2731,10 @@ mod test {
         dest_path.set_extension("db");
         std::fs::copy(source_path.clone(), dest_path.clone())?;
 
+        source_path.set_extension("db-shm");
+        dest_path.set_extension("db-shm");
+        std::fs::copy(source_path.clone(), dest_path.clone())?;
+
         source_path.set_extension("db-wal");
         dest_path.set_extension("db-wal");
         std::fs::copy(source_path.clone(), dest_path.clone())?;
@@ -2752,11 +2765,11 @@ mod test {
 
     #[tokio::test]
     async fn reopen_extent_cleanup_replay_short() -> Result<()> {
-        // test move_replacement_extent(), create a copy dir, populate it and
-        // let the reopen do the work. This time we make sure our copy dir only
-        // has extent data and .db files, and not .db-wal.
-        // Verify these files are delete from the original extent after the
-        // reopen has cleaned them up.
+        // test move_replacement_extent(), create a copy dir, populate it
+        // and let the reopen do the work.  This time we make sure our
+        // copy dir only has extent data and .db files, and not .db-shm
+        // nor .db-wal.  Verify these files are delete from the original
+        // extent after the reopen has cleaned them up.
         // Create the region, make three extents
         let dir = tempdir()?;
         let mut region =
@@ -2788,11 +2801,16 @@ mod test {
         let rd = replace_dir(&dir, 1);
         rename(cp.clone(), rd.clone())?;
 
-        // The close may remove the db-wal file, manually create them here, just
-        // to verify they are removed after the reopen as they are not included
-        // in the files to be recovered and this test exists to verify they will
-        // be deleted.
+        // The close may remove the db-shm and db-wal files, manually
+        // create them here, just to verify they are removed after the
+        // reopen as they are not included in the files to be recovered
+        // and this test exists to verify they will be deleted.
         let mut invalid_db = extent_path(&dir, 1);
+        invalid_db.set_extension("db-shm");
+        println!("Recreate {:?}", invalid_db);
+        std::fs::copy(source_path.clone(), invalid_db.clone())?;
+        assert!(Path::new(&invalid_db).exists());
+
         invalid_db.set_extension("db-wal");
         println!("Recreate {:?}", invalid_db);
         std::fs::copy(source_path.clone(), invalid_db.clone())?;
@@ -2805,7 +2823,9 @@ mod test {
         // Reopen extent 1
         region.reopen_extent(1).await?;
 
-        // Make sure there is no longer a db-wal
+        // Make sure there is no longer a db-shm and db-wal
+        dest_path.set_extension("db-shm");
+        assert!(!Path::new(&dest_path).exists());
         dest_path.set_extension("db-wal");
         assert!(!Path::new(&dest_path).exists());
 
@@ -2886,6 +2906,7 @@ mod test {
         let good_files: Vec<String> = vec![
             "001".to_string(),
             "001.db".to_string(),
+            "001.db-shm".to_string(),
             "001.db-wal".to_string(),
         ];
 
@@ -2922,10 +2943,6 @@ mod test {
 
     #[test]
     fn validate_repair_files_quad_duplicate() {
-        // XXX I don't know why this test exists. we definitely shouldnt be
-        // involving shm in anything anymore. but what was this supposed to even
-        // be doing? idk.
-
         // This is an expected list of files for an extent
         let good_files: Vec<String> = vec![
             "001".to_string(),
@@ -2942,6 +2959,7 @@ mod test {
         let good_files: Vec<String> = vec![
             "001".to_string(),
             "001.db".to_string(),
+            "001.db-shm".to_string(),
             "001.db-wal".to_string(),
         ];
 
@@ -2953,6 +2971,18 @@ mod test {
         // Duplicate file in list
         let good_files: Vec<String> = vec![
             "001".to_string(),
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+        assert!(!validate_repair_files(1, &good_files));
+    }
+
+    #[test]
+    fn validate_repair_files_not_good_enough() {
+        // We require 2 or 4 files, not 3
+        let good_files: Vec<String> = vec![
             "001".to_string(),
             "001.db".to_string(),
             "001.db-wal".to_string(),
@@ -3094,6 +3124,11 @@ mod test {
     #[test]
     fn extent_name_basic_ext() {
         assert_eq!(extent_file_name(4, ExtentType::Db), "004.db");
+    }
+
+    #[test]
+    fn extent_name_basic_ext_shm() {
+        assert_eq!(extent_file_name(4, ExtentType::DbShm), "004.db-shm");
     }
 
     #[test]
