@@ -2676,7 +2676,7 @@ struct Downstairs {
     ds_active: BTreeMap<u64, DownstairsIO>,
 
     /**
-     * XXX
+     * Cache of new jobs, indexed by client ID.
      */
     ds_new: Vec<Vec<u64>>,
 
@@ -3175,6 +3175,10 @@ impl Downstairs {
                 self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
             }
         }
+
+        // All of IOState::New jobs are now IOState::Skipped, so clear our
+        // cache of new jobs for this downstairs.
+        self.ds_new[client_id as usize].clear();
     }
 
     /**
@@ -3325,6 +3329,10 @@ impl Downstairs {
             self.retire_check(ds_id);
         }
 
+        // We have eliminated all of our jobs in IOState::New above; flush
+        // our cache to reflect that.
+        self.ds_new[client_id as usize].clear();
+
         // As this downstairs is now faulted, we clear the extent_limit.
         self.extent_limit[client_id as usize] = None;
         notify_guest
@@ -3410,6 +3418,7 @@ impl Downstairs {
                     if io.work.send_io_live_repair(my_limit) {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
+                        self.ds_new[cid as usize].push(io.ds_id);
                     } else {
                         // Move this IO to skipped, we are not ready for
                         // the downstairs to receive it.
@@ -3465,6 +3474,7 @@ impl Downstairs {
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
+                    self.ds_new[cid as usize].push(io.ds_id);
                 }
             }
         }
