@@ -626,16 +626,7 @@ fn deps_for_live_repair(
 
     // Search backwards in the list of active jobs, stop at the
     // last flush
-    for job_id in ds
-        .ds_active
-        .keys()
-        .sorted()
-        .collect::<Vec<&u64>>()
-        .iter()
-        .rev()
-    {
-        let job = &ds.ds_active[job_id];
-
+    for (id, job) in ds.ds_active.iter().rev() {
         // We are finding dependencies based on impacted blocks.
         // We may have reserved future job IDs for repair, and it's possible
         // that this job we are finding dependencies for now is actually a
@@ -647,13 +638,13 @@ fn deps_for_live_repair(
         // If this operation impacts the same blocks as something
         // already active, create a dependency.
         if impacted_blocks.conflicts(&job.impacted_blocks) {
-            deps.push(**job_id);
+            deps.push(*id);
         }
 
         // A flush job won't show impacted blocks. We can stop looking
         // for dependencies beyond the last flush.
         if job.work.is_flush() {
-            deps.push(**job_id);
+            deps.push(*id);
             break;
         }
     }
@@ -3064,9 +3055,7 @@ pub mod repair_test {
 
         // Verify that the future repair jobs were added to our IOs
         // dependency list.
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
         assert_eq!(jobs[1].work.deps(), &[1004, 1000, 1001, 1002, 1003]);
@@ -3133,9 +3122,7 @@ pub mod repair_test {
         //
         // These future jobs are not actually created yet, so they
         // won't show up in the work queue.
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
     }
@@ -3199,9 +3186,7 @@ pub mod repair_test {
 
         // Verify that the future repair jobs were added to our IOs
         // dependency list.
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
     }
@@ -3273,9 +3258,7 @@ pub mod repair_test {
 
         // Verify that the future repair jobs were added to our IOs
         // dependency list.
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(
             jobs[0].work.deps(),
@@ -4219,9 +4202,7 @@ pub mod repair_test {
         create_and_enqueue_close_op(&up, eid).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         // 4 Jobs were created
         assert_eq!(jobs.len(), 4);
@@ -4274,9 +4255,7 @@ pub mod repair_test {
         create_and_enqueue_close_op(&up, eid).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         // 4 Jobs were created
         assert_eq!(jobs.len(), 4);
@@ -4340,9 +4319,7 @@ pub mod repair_test {
         create_and_enqueue_close_op(&up, eid).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         // 4 Jobs were created
         assert_eq!(jobs.len(), 4);
@@ -4388,9 +4365,7 @@ pub mod repair_test {
         .unwrap();
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         // 2 Jobs were created
         assert_eq!(jobs.len(), 2);
@@ -4430,9 +4405,7 @@ pub mod repair_test {
 
         let ds = up.downstairs.lock().await;
 
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4466,9 +4439,7 @@ pub mod repair_test {
 
         let ds = up.downstairs.lock().await;
 
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4511,9 +4482,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 1).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -4557,9 +4526,7 @@ pub mod repair_test {
         .unwrap();
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -4592,9 +4559,7 @@ pub mod repair_test {
             .unwrap();
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -4624,9 +4589,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 1).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -4655,9 +4618,7 @@ pub mod repair_test {
 
         let ds = up.downstairs.lock().await;
 
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -4692,9 +4653,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 1).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4728,9 +4687,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 0).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4764,10 +4721,7 @@ pub mod repair_test {
 
         create_and_enqueue_repair_op(&up, 1).await;
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4801,9 +4755,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 0).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4842,10 +4794,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 1).await;
 
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -4879,9 +4828,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 1).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4948,10 +4895,7 @@ pub mod repair_test {
         .unwrap();
 
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
         assert!(jobs[0].work.deps().is_empty());
@@ -4993,10 +4937,7 @@ pub mod repair_test {
         .unwrap();
 
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -5041,9 +4982,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 1).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -5120,9 +5059,7 @@ pub mod repair_test {
         create_and_enqueue_repair_op(&up, 2).await;
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -5179,10 +5116,7 @@ pub mod repair_test {
             .unwrap();
 
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -5242,10 +5176,7 @@ pub mod repair_test {
         .unwrap();
 
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 1);
 
@@ -5302,10 +5233,7 @@ pub mod repair_test {
         // empty job slots.
         create_and_enqueue_repair_op(&up, 1).await;
         let ds = up.downstairs.lock().await;
-
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -5349,9 +5277,7 @@ pub mod repair_test {
             .unwrap();
 
         let ds = up.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].work.deps().is_empty());
@@ -5456,9 +5382,7 @@ pub mod repair_test {
         assert_eq!(ds.ds_state[0], DsState::Active);
 
         // Check all three IOs again, downstairs 1 will be skipped..
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         for job in jobs.iter().take(3) {
             assert_eq!(job.state[&0], IOState::New);
@@ -5495,9 +5419,7 @@ pub mod repair_test {
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         // Check all three IOs again, downstairs 1 will be skipped..
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 7);
         for job in jobs.iter().take(7) {
@@ -5546,9 +5468,7 @@ pub mod repair_test {
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         // Check all three IOs again, all downstairs will be skipped..
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
-        let jobs: Vec<&DownstairsIO> =
-            keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         for job in jobs.iter().take(3) {
             assert_eq!(job.state[&0], IOState::Skipped);
