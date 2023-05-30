@@ -5,6 +5,7 @@
 #: target = "helios"
 #: output_rules = [
 #:	"/tmp/*.txt",
+#:	"/tmp/*.log",
 #: ]
 #: skip_clone = true
 #:
