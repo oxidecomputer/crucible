@@ -34,10 +34,20 @@ verify_file=/tmp/test_live_verify
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/release}
+cds="$BINDIR/crucible-downstairs"
 crucible_test="$BINDIR/crutest"
 dsc="$BINDIR/dsc"
-if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]]; then
-    echo "Can't find crucible-test binary at $crucible_test"
+for bin in $cds $crucible_test $dsc; do
+    if [[ ! -f "$bin" ]]; then
+        echo "Can't find crucible binary at $bin" >&2
+        exit 1
+    fi
+done
+
+# Verify there is not a downstairs already running.
+if pgrep -fl -U "$(id -u)" "$cds"; then
+    echo "Downstairs already running" >&2
+    echo Run: pkill -f -U "$(id -u)" "$cds" >&2
     exit 1
 fi
 
@@ -53,6 +63,7 @@ echo "Tail $test_log for test output"
 # Large extents, but not many of them means we are likely to try to write
 # to an extent that is being repaired.
 if ! ${dsc} create --cleanup \
+  --ds-bin "$cds" \
   --extent-count 100 \
   --extent-size 300 >> "$dsc_test_log"; then
     echo "Failed to create downstairs regions"
