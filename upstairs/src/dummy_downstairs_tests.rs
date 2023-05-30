@@ -13,6 +13,8 @@ pub(crate) mod protocol_test {
     use crate::BlockIO;
     use crate::Buffer;
     use crate::Guest;
+    use crate::IO_OUTSTANDING_MAX;
+    use crate::MAX_ACTIVE_COUNT;
     use crucible_client_types::CrucibleOpts;
     use crucible_common::Block;
     use crucible_common::RegionDefinition;
@@ -475,9 +477,10 @@ pub(crate) mod protocol_test {
         idx.map(|i| l.remove(i))
     }
 
-    /// Test that flow control kicks in at 100 jobs, and until the downstairs
-    /// responds Ok for a job, no more work is sent. Once three downstairs
-    /// responds with a read response for a certain job, then more work is sent.
+    /// Test that flow control kicks in at MAX_ACTIVE_COUNT jobs, and until the
+    /// downstairs responds Ok for a job, no more work is sent. Once three
+    /// downstairs responds with a read response for a certain job, then more
+    /// work is sent.
     #[tokio::test]
     async fn test_flow_control() {
         let harness = Arc::new(TestHarness::new().await);
@@ -489,7 +492,7 @@ pub(crate) mod protocol_test {
         let (_jh3, mut ds3_messages) =
             harness.ds3.spawn_message_receiver().await;
 
-        for _ in 0..100 {
+        for _ in 0..MAX_ACTIVE_COUNT {
             let harness = harness.clone();
 
             // We must tokio::spawn here because `read` will wait for the
@@ -500,9 +503,9 @@ pub(crate) mod protocol_test {
             });
         }
 
-        let mut job_ids = Vec::with_capacity(100);
+        let mut job_ids = Vec::with_capacity(MAX_ACTIVE_COUNT);
 
-        for _ in 0..100 {
+        for _ in 0..MAX_ACTIVE_COUNT {
             match ds1_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
                     // Record the job ids of the read requests
@@ -738,12 +741,14 @@ pub(crate) mod protocol_test {
         let (_jh3, mut ds3_messages) =
             harness.ds3.spawn_message_receiver().await;
 
-        // Send 1200 jobs. Flow control will kick in at 100 messages, so we need
-        // to be sending read responses while reads are being sent. After 1000
-        // jobs, the Upstairs will set ds1 to faulted, and send it no more work.
-        let mut job_ids = Vec::with_capacity(1200);
+        // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
+        // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
+        // while reads are being sent. After IO_OUTSTANDING_MAX jobs, the
+        // Upstairs will set ds1 to faulted, and send it no more work.
+        const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
+        let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
-        for i in 0..1200 {
+        for i in 0..NUM_JOBS {
             info!(harness.log, "sending read {}", i);
 
             {
@@ -761,7 +766,7 @@ pub(crate) mod protocol_test {
                 });
             }
 
-            if i < 100 {
+            if i < MAX_ACTIVE_COUNT {
                 // Before flow control kicks in, assert we're seeing the read
                 // requests
                 assert!(matches!(
@@ -902,7 +907,7 @@ pub(crate) mod protocol_test {
         }
 
         // Send ds1 responses for the jobs it saw
-        for (i, job_id) in job_ids.iter().enumerate().take(100) {
+        for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
             match harness
                 .ds1()
                 .await
