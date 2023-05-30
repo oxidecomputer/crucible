@@ -55,8 +55,8 @@ echo "Tail $test_log for test output"
 # Make enough extents that we can be sure to catch in while it
 # is repairing.
 if ! ${dsc} create --cleanup \
-  --extent-count 600 \
-  --extent-size 100 >> "$dsc_test_log"; then
+  --extent-count 200 \
+  --extent-size 300 >> "$dsc_test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
@@ -93,8 +93,7 @@ do
     # The state of our chosen downstairs is based on an offset
     echo "" > "$test_log"
     echo "New loop starts now $(date) faulting: $choice" >> "$test_log"
-    # This has to be long enough that faulting a downstairs will be
-    # noticed, but not so long that the test takes forever.
+    # Start sending IO.
     "$crucible_test" generic "${args[@]}" --continuous \
         -q -g "$gen" --verify-out "$verify_file" \
         --verify-in "$verify_file" \
@@ -105,16 +104,10 @@ do
 
     curl -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
 
-    sleep 5
-    if [[ $choice -eq 0 ]]; then
-        choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8}')
-    elif [[ $choice -eq 1 ]]; then
-        choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $10}')
-    else
-        choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $12}')
-    fi
+    # Wait for our downstairs to begin live_repair
+    choice_state="undefined"
     while [[ "$choice_state" != "live_repair" ]]; do
-        sleep 5
+        sleep 3
         if [[ $choice -eq 0 ]]; then
             choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8}')
         elif [[ $choice -eq 1 ]]; then
@@ -124,6 +117,10 @@ do
         fi
     done
 
+    # Let the repair do some repairing.
+    sleep 5
+
+    # Now fault the downstairs again.
     curl -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
 
     # Now wait for all downstairs to be active

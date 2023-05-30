@@ -50,9 +50,11 @@ fi
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
+# Large extents, but not many of them means we are likely to try to write
+# to an extent that is being repaired.
 if ! ${dsc} create --cleanup \
-  --extent-count 400 \
-  --extent-size 100 >> "$dsc_test_log"; then
+  --extent-count 100 \
+  --extent-size 300 >> "$dsc_test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
@@ -89,7 +91,7 @@ do
     echo "New loop starts now $(date) faulting: $choice" >> "$test_log"
     # This has to be long enough that faulting a downstairs will be
     # noticed, but not so long that the test takes forever.
-    "$crucible_test" generic "${args[@]}" -c 5200 \
+    "$crucible_test" generic "${args[@]}" --continuous \
         -q -g "$gen" --verify-out "$verify_file" \
         --verify-in "$verify_file" \
         --control 127.0.0.1:7777 \
@@ -100,6 +102,19 @@ do
     # Fault a downstairs.
     curl -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
 
+    # Give the fault time to be noticed
+    sleep 5
+
+
+	# Now wait for all downstairs to be active
+    all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
+    while [[ "${all_state}" != "active,active,active" ]]; do
+        sleep 5
+        all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
+    done
+
+	# All downstairs now active, stop crutest.
+    kill -SIGUSR1 $crutest_pid
     wait ${crutest_pid}
     result=$?
     if [[ $result -ne 0 ]]; then

@@ -14,14 +14,19 @@ echo "git status:" >> nightly-info.txt
 git status >> nightly-info.txt
 
 tar cavf out/crucible-nightly.tar.gz \
+  target/release/cmon \
+  target/release/crudd \
   target/release/crutest \
   target/release/crucible-downstairs \
   target/release/crucible-hammer \
-  target/release/cmon \
   target/release/dsc \
+  tools/crudd-speed-battery.sh \
+  tools/dtrace/* \
   tools/hammer_loop.sh \
-  tools/test_perf.sh \
+  tools/test_live_repair.sh \
+  tools/test_fail_live_repair.sh \
   tools/test_mem.sh \
+  tools/test_perf.sh \
   tools/test_reconnect.sh \
   tools/test_repair.sh \
   tools/test_restart_repair.sh \

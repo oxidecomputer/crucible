@@ -9339,20 +9339,20 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
     warn!(up.log, "up_ds_listen loop done");
 }
 
-async fn gone_too_long(up: &Arc<Upstairs>) {
+async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
     // Check outstanding IOops for each downstairs.
     // If the number is too high, then mark that downstairs as failed, scrub
     // any outstanding jobs.
     let active = up.active.lock().await;
-    let mut ds = up.downstairs.lock().await;
     let up_state = active.up_state;
-    drop(active);
-
     // If we are not active, then just exit.
     if up_state != UpState::Active {
         return;
     }
+    let mut ds = up.downstairs.lock().await;
+    drop(active);
 
+    let mut notify_guest = false;
     for cid in 0..3 {
         // Only downstairs in these states are checked.
         match ds.ds_state[cid as usize] {
@@ -9368,7 +9368,14 @@ async fn gone_too_long(up: &Arc<Upstairs>) {
                         work_count,
                         cid,
                     );
-                    ds.ds_set_faulted(cid);
+                    if ds.ds_set_faulted(cid) {
+                        notify_guest = true;
+                        info!(
+                            up.log,
+                            "[up] gone_too_long set notify [{}] for fault ",
+                            cid,
+                        );
+                    }
                     up.ds_transition_with_lock(
                         &mut ds,
                         up_state,
@@ -9378,6 +9385,17 @@ async fn gone_too_long(up: &Arc<Upstairs>) {
                 }
             }
             _ => {}
+        }
+    }
+    if notify_guest {
+        match ds_done_tx.send(0).await {
+            Ok(()) => {}
+            Err(e) => {
+                error!(
+                    up.log,
+                    "[up] gone_too_long {:?}, sending message to ds_done_tx", e
+                );
+            }
         }
     }
 }
@@ -9788,7 +9806,7 @@ async fn up_listen(
 
                 // Check to see if the number of outstanding IOs (between
                 // the upstairs and downstairs) is too many.
-                gone_too_long(up).await;
+                gone_too_long(up, dst[0].ds_done_tx.clone()).await;
             }
             _ = sleep_until(repair_check_interval), if repair_check => {
                 match check_for_repair(up, &dst).await {
@@ -9987,19 +10005,19 @@ pub async fn up_main(
         });
     }
 
+    // If requested, start the control http server on the given address:port
+    if let Some(control) = opt.control {
+        let upi = Arc::clone(&up);
+        let ds_done_tx_c = ds_done_tx.clone();
+        tokio::spawn(async move {
+            let r = control::start(&upi, control, ds_done_tx_c).await;
+            info!(upi.log, "Control HTTP task finished with {:?}", r);
+        });
+    }
     // Drop here, otherwise receivers will be kept waiting if looper quits
     drop(ds_done_tx);
     drop(ds_status_tx);
     drop(ds_reconcile_done_tx);
-
-    // If requested, start the control http server on the given address:port
-    if let Some(control) = opt.control {
-        let upi = Arc::clone(&up);
-        tokio::spawn(async move {
-            let r = control::start(&upi, control).await;
-            info!(upi.log, "Control HTTP task finished with {:?}", r);
-        });
-    }
 
     let flush_timeout = opt.flush_timeout;
     let join_handle = tokio::spawn(async move {

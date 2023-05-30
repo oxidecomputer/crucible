@@ -17,13 +17,13 @@ dtrace:::BEGIN
 tick-1s
 /show > 20/
 {
-    printf("   DS STATE 0    DS STATE 1    DS STATE 2");
-    printf("   UPW  DSW");
-    printf("  NEW0 NEW1 NEW2");
-    printf("   IP0  IP1  IP2");
-    printf("    D0   D1   D2");
-    printf("    S0   S1   S2");
-    printf("  E0 E1 E2");
+    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
+    printf("  %4s %4s", "UPW", "DSW");
+    printf("  %4s %4s %4s", "NEW0", "NEW1", "NEW2");
+    printf("  %4s %4s %4s", "IP0", "IP1", "IP2");
+    printf("  %4s %4s %4s", "D0", "D1", "D2");
+    printf("  %4s %4s %4s", "S0", "S1", "S2");
+    printf("  %2s %2s %2s", "E0", "E1", "E2");
     printf("\n");
     show = 0;
 }
@@ -34,9 +34,9 @@ crucible_upstairs*:::up-status
     /*
      * State for the three downstiars
      */
-    printf("%13s", json(copyinstr(arg1), "ok.ds_state[0]"));
-    printf(" %13s", json(copyinstr(arg1), "ok.ds_state[1]"));
-    printf(" %13s", json(copyinstr(arg1), "ok.ds_state[2]"));
+    printf("%17s", json(copyinstr(arg1), "ok.ds_state[0]"));
+    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[1]"));
+    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[2]"));
 
     /*
      * Work queue counts for Upstairs and Downstairs
