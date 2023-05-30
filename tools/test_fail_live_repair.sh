@@ -71,7 +71,7 @@ if ! ${dsc} create --cleanup \
     echo "Failed to create downstairs regions"
     exit 1
 fi
-${dsc} start >> "$dsc_test_log" 2>&1 &
+${dsc} start --ds-bin "$cds" >> "$dsc_test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
 if ! ps -p $dsc_pid > /dev/null; then
