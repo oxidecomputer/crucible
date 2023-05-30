@@ -19,6 +19,11 @@ set -o xtrace
 
 pfexec chmod +x "$input"/scripts/* || true
 
+echo "input bins dir contains:"
+ls -ltr "$input"/bins || true
+echo "input script dir contains:"
+ls -ltr "$input"/scripts || true
+
 banner unpack
 mkdir -p /var/tmp/bins
 for t in "$input/bins/"*.gz; do
@@ -29,6 +34,10 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+
+echo "BINDIR is $BINDIR"
+echo "bindir contains:"
+ls -ltr "$BINDIR" || true
 
 banner repair
 ptime -m bash "$input/scripts/test_live_repair.sh"
