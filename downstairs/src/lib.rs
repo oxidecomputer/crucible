@@ -554,7 +554,7 @@ where
                 writes: writes.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
@@ -588,7 +588,7 @@ where
                 extent_limit: *extent_limit,
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
@@ -616,7 +616,7 @@ where
                 writes: writes.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_write).await?;
             Some(*job_id)
         }
@@ -644,7 +644,7 @@ where
                 requests: requests.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_read).await?;
             Some(*job_id)
         }
@@ -673,7 +673,7 @@ where
                 extent: *extent_id,
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, ext_close).await?;
             Some(*job_id)
         }
@@ -708,7 +708,7 @@ where
                 repair_downstairs: vec![], // Unused in the downstairs
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_flush).await?;
             Some(*job_id)
         }
@@ -742,7 +742,7 @@ where
                 repair_downstairs: vec![],
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             debug!(d.log, "Received ExtentLiveRepair {}", job_id);
             d.add_work(upstairs_connection, *job_id, new_repair).await?;
             Some(*job_id)
@@ -771,7 +771,7 @@ where
                 extent: *extent_id,
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             d.add_work(upstairs_connection, *job_id, new_open).await?;
             Some(*job_id)
         }
@@ -796,7 +796,7 @@ where
                 dependencies: dependencies.to_vec(),
             };
 
-            let mut d = ad.lock().await;
+            let d = ad.lock().await;
             debug!(d.log, "Received NoOP {}", job_id);
             d.add_work(upstairs_connection, *job_id, new_open).await?;
             Some(*job_id)
@@ -1464,7 +1464,7 @@ where
                         negotiated = 4;
 
                         {
-                            let mut ds = ads.lock().await;
+                            let ds = ads.lock().await;
                             let mut work = ds.work_lock(
                                 upstairs_connection.unwrap(),
                             ).await?;
@@ -1831,7 +1831,7 @@ impl Downstairs {
      * newly active Upstairs.
      */
     async fn work_lock(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<MutexGuard<'_, Work>> {
         let upstairs_uuid = upstairs_connection.upstairs_id;
@@ -1863,7 +1863,7 @@ impl Downstairs {
     }
 
     async fn jobs(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<usize> {
         let work = self.work_lock(upstairs_connection).await?;
@@ -1871,7 +1871,7 @@ impl Downstairs {
     }
 
     async fn new_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<Vec<u64>> {
         let work = self.work_lock(upstairs_connection).await?;
@@ -1880,7 +1880,7 @@ impl Downstairs {
 
     // Add work to the Downstairs
     async fn add_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
         work: IOop,
@@ -1920,7 +1920,7 @@ impl Downstairs {
 
     #[cfg(test)]
     async fn get_job(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
     ) -> Result<DownstairsWork> {
@@ -1930,7 +1930,7 @@ impl Downstairs {
 
     // Downstairs, move a job to in_progress, if we can
     async fn in_progress(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
     ) -> Result<Option<u64>> {
@@ -2287,7 +2287,7 @@ impl Downstairs {
      * - putting the id on the completed list.
      */
     async fn complete_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: u64,
         m: Message,
@@ -2619,7 +2619,7 @@ impl Downstairs {
         }
     }
 
-    fn is_active(&mut self, connection: UpstairsConnection) -> bool {
+    fn is_active(&self, connection: UpstairsConnection) -> bool {
         let uuid = connection.upstairs_id;
         if let Some(active_upstairs) = self.active_upstairs.get(&uuid) {
             active_upstairs.upstairs_connection == connection
@@ -2628,7 +2628,7 @@ impl Downstairs {
         }
     }
 
-    fn active_upstairs(&mut self) -> Vec<UpstairsConnection> {
+    fn active_upstairs(&self) -> Vec<UpstairsConnection> {
         self.active_upstairs
             .values()
             .map(|x| x.upstairs_connection)
