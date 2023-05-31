@@ -111,7 +111,7 @@ do
     sleep 5
 
     # Fault a downstairs.
-    curl -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
+    curl -s -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
 
     # Give the fault time to be noticed
     sleep 5

@@ -40,7 +40,7 @@ echo "BINDIR is $BINDIR"
 echo "bindir contains:"
 ls -ltr "$BINDIR" || true
 
-banner repair
+banner LR
 ptime -m bash "$input/scripts/test_live_repair.sh"
 
 # Save the output files?
