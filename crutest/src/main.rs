@@ -181,7 +181,7 @@ pub struct Opt {
 
     /// How long to wait before the auto flush check fires
     #[clap(long, global = true, action)]
-    flush_timeout: Option<u32>,
+    flush_timeout: Option<f32>,
 
     /// IP:Port for the Oximeter register address, which is Nexus.
     #[clap(long, global = true, default_value = "127.0.0.1:12221", action)]

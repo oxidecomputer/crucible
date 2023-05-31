@@ -44,7 +44,7 @@ pub struct CrucibleOpts {
     pub id: Uuid,
     pub target: Vec<SocketAddr>,
     pub lossy: bool,
-    pub flush_timeout: Option<u32>,
+    pub flush_timeout: Option<f32>,
     pub key: Option<String>,
     pub cert_pem: Option<String>,
     pub key_pem: Option<String>,
