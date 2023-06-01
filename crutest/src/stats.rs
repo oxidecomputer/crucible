@@ -2,7 +2,7 @@
 use anyhow::{bail, Result};
 use dropshot::{ConfigDropshot, ConfigLogging, ConfigLoggingLevel};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
-use oximeter_producer::{Config, Server, LogConfig};
+use oximeter_producer::{Config, LogConfig, Server};
 use std::net::SocketAddr;
 use uuid::Uuid;
 

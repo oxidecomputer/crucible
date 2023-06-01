@@ -9,7 +9,7 @@ use oximeter::{
     types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
 };
-use oximeter_producer::{Config, Server, LogConfig};
+use oximeter_producer::{Config, LogConfig, Server};
 
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]

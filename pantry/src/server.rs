@@ -358,7 +358,6 @@ pub async fn run_server(
             // for metadata
             request_body_max_bytes: 1024
                 + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
-            ..Default::default()
         },
         api,
         df.clone(),
