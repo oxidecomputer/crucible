@@ -3342,7 +3342,37 @@ impl Downstairs {
      * requests for this client.
      */
     fn new_work(&mut self, client_id: u8) -> Vec<u64> {
-        self.ds_new[client_id as usize].drain(..).collect()
+        // Compute what should be in the ds_new cache, and assert that the cache
+        // is valid. This should only run during debug builds (read: CI) and
+        // should not affect release builds as this will degrade performance.
+        let computed: Vec<u64> = self
+            .ds_active
+            .values()
+            .filter_map(|job| {
+                if let Some(IOState::New) = job.state.get(&client_id) {
+                    Some(job.ds_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let cached: Vec<u64> =
+            self.ds_new[client_id as usize].drain(..).collect();
+
+        debug_assert_eq!(computed.len(), cached.len());
+        debug_assert_eq!(
+            HashSet::<&u64>::from_iter(computed.iter()),
+            HashSet::<&u64>::from_iter(cached.iter())
+        );
+
+        // Assert that the io_state_count accounting is accurate.
+        debug_assert_eq!(
+            self.io_state_count.new[client_id as usize] as usize,
+            cached.len(),
+        );
+
+        cached
     }
 
     /**
@@ -3350,7 +3380,21 @@ impl Downstairs {
      * [`new_work`], presumably due to flow control.
      */
     fn requeue_work(&mut self, client_id: u8, work: &[u64]) {
+        // Assert that the work we're requeuing is still new. This should only
+        // run during debug builds (read: CI) and should not affect release
+        // builds as this will degrade performance.
+        for job_id in work {
+            let job = self.ds_active.get_mut(job_id).unwrap();
+            debug_assert_eq!(*job.state.get(&client_id).unwrap(), IOState::New);
+        }
+
         self.ds_new[client_id as usize].extend_from_slice(work);
+
+        // Assert that the io_state_count accounting is accurate.
+        debug_assert_eq!(
+            self.io_state_count.new[client_id as usize] as usize,
+            self.ds_new[client_id as usize].len(),
+        );
     }
 
     /**
