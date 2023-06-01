@@ -69,18 +69,18 @@ res=0
 outfile="/tmp/test_dsc.txt"
 echo "" > $outfile
 
+# Region directories
 r1="/var/tmp/test_dsc_r1"
-if [[ -d ${r1} ]]; then
-    rm -rf ${r1}
-fi
 r2="/var/tmp/test_dsc_r2"
-if [[ -d ${r2} ]]; then
-    rm -rf ${r2}
-fi
 r3="/var/tmp/test_dsc_r3"
-if [[ -d ${r3} ]]; then
-    rm -rf ${r3}
-fi
+r4="/var/tmp/test_dsc_r4"
+
+for rd in $r1 $r2 $r3 $r4; do
+    if [[ -d ${rd} ]]; then
+        rm -rf ${rd}
+    fi
+done
+
 # test with three different directories
 echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
@@ -95,7 +95,7 @@ echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
     --region-dir "$r3" \
     | tee "$outfile"
 if [[ $? -ne 0 ]]; then
-    echo "Failed to create multi dir region" | tee -a "$fail_log"
+    echo "Failed to create three directory region set" | tee -a "$fail_log"
     (( res += 1 ))
 fi
 
@@ -111,6 +111,41 @@ done
 
 # Cleanup after above test
 rm -rf ${testdir} ${r1} ${r2} ${r3}
+
+# test with four different directories
+echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
+    --extent-size 5 --output-dir "$testdir" \
+    --region-count 4 \
+    --region-dir "$r1" \
+    --region-dir "$r2" \
+    --region-dir "$r3" \
+    --region-dir "$r4" | tee "$outfile"
+
+"$dsc" create --ds-bin "$downstairs" --extent-count 5 \
+    --extent-size 5 --output-dir "$testdir" \
+    --region-count 4 \
+    --region-dir "$r1" \
+    --region-dir "$r2" \
+    --region-dir "$r3" \
+    --region-dir "$r4" \
+    | tee "$outfile"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to create four directory region set" | tee -a "$fail_log"
+    (( res += 1 ))
+fi
+
+# Assuming the default port of 8810 here
+for rdirs in "$r1"/8810 "$r2"/8820 "$r3"/8830 "$r4"/8840
+do
+    if [[ ! -d "$rdirs" ]]; then
+        echo "Failed to create $rdirs region" | tee -a "$fail_log"
+        (( res += 1 ))
+
+    fi
+done
+
+# Cleanup after above test
+rm -rf ${testdir} ${r1} ${r2} ${r3} ${r4}
 
 echo "$dsc" create --ds-bin "$downstairs" --extent-count 5 \
     --extent-size 5 --output-dir "$testdir" \
