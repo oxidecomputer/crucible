@@ -2886,7 +2886,6 @@ impl Downstairs {
         assert_eq!(old_state, IOState::New);
         self.io_state_count.decr(&old_state, client_id);
         self.io_state_count.incr(&new_state, client_id);
-
         Some(job.work.clone())
     }
 
@@ -3289,7 +3288,7 @@ impl Downstairs {
             if *state == IOState::InProgress || *state == IOState::New {
                 info!(
                     self.log,
-                    "{} change {} to fault skipped", client_id, ds_id
+                    "[{}] change {} to fault skipped", client_id, ds_id
                 );
                 let old_state =
                     job.state.insert(client_id, IOState::Skipped).unwrap();
@@ -3481,9 +3480,6 @@ impl Downstairs {
 
         let ds_id = io.ds_id;
         debug!(self.log, "Enqueue repair job {}", ds_id);
-        for cid in 0..3 {
-            self.io_state_count.incr(&IOState::New, cid);
-        }
         self.ds_active.insert(ds_id, io);
     }
 
