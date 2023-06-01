@@ -9,7 +9,7 @@ use oximeter::{
     types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
 };
-use oximeter_producer::{Config, Server};
+use oximeter_producer::{Config, Server, LogConfig};
 
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
@@ -141,7 +141,6 @@ pub async fn ox_stats(
     let dropshot_config = ConfigDropshot {
         bind_address: my_address,
         request_body_max_bytes: 2048,
-        tls: None,
     };
     let logging_config = ConfigLogging::File {
         level: ConfigLoggingLevel::Error,
@@ -159,8 +158,8 @@ pub async fn ox_stats(
     let config = Config {
         server_info,
         registration_address,
-        dropshot_config,
-        logging_config,
+        dropshot: dropshot_config,
+        log: LogConfig::Config(logging_config),
     };
 
     // If the server is not responding when the downstairs starts, keep

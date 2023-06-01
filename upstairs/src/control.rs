@@ -39,7 +39,6 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
-        tls: None,
     };
 
     let log = up.log.new(o!("task" => "control".to_string()));
