@@ -17,8 +17,9 @@ dtrace:::BEGIN
 tick-1s
 /show > 20/
 {
-    printf("   DS STATE 0    DS STATE 1    DS STATE 2");
-    printf(" CONF0 CONF1 CONF2 RPAR0 RPAR1 RPAR2");
+    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
+    printf("  %5s %5s %5s %5s %5s %5s",
+        "CONF0", "CONF1", "CONF2", "RPAR0", "RPAR1", "RPAR2");
     printf("\n");
     show = 0;
 }
@@ -29,9 +30,9 @@ crucible_upstairs*:::up-status
     /*
      * State for the three downstiars
      */
-    printf("%13s", json(copyinstr(arg1), "ok.ds_state[0]"));
-    printf(" %13s", json(copyinstr(arg1), "ok.ds_state[1]"));
-    printf(" %13s", json(copyinstr(arg1), "ok.ds_state[2]"));
+    printf("%17s", json(copyinstr(arg1), "ok.ds_state[0]"));
+    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[1]"));
+    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[2]"));
 
     /*
      * Repair counts for the downstairs
@@ -40,7 +41,7 @@ crucible_upstairs*:::up-status
     printf(" %5s", json(copyinstr(arg1), "ok.ds_confirm[0]"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_confirm[1]"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_confirm[2]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_repair[0]"));
+    printf(" %5s", json(copyinstr(arg1), "ok.ds_repair[0]"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_repair[1]"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_repair[2]"));
 

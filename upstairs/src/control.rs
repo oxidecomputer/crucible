@@ -32,14 +32,17 @@ pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
  * Nexus or Propolis to send Snapshot commands. Also, publish some stats on
  * a `/info` from the Upstairs internal struct.
  */
-pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
+pub async fn start(
+    up: &Arc<Upstairs>,
+    addr: SocketAddr,
+    ds_done_tx: mpsc::Sender<u64>,
+) -> Result<(), String> {
     /*
      * Setup dropshot
      */
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
-        tls: None,
     };
 
     let log = up.log.new(o!("task" => "control".to_string()));
@@ -53,7 +56,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
      * The functions that implement our API endpoints will share this
      * context.
      */
-    let api_context = Arc::new(UpstairsInfo::new(up));
+    let api_context = Arc::new(UpstairsInfo::new(up, ds_done_tx));
 
     /*
      * Set up the server.
@@ -78,14 +81,24 @@ pub struct UpstairsInfo {
      * Upstairs structure that is used to gather all the info stats
      */
     up: Arc<Upstairs>,
+    /**
+     * Notify channel for work completed by the downstairs.
+     */
+    ds_done_tx: mpsc::Sender<u64>,
 }
 
 impl UpstairsInfo {
     /**
      * Return a new UpstairsInfo.
      */
-    pub fn new(up: &Arc<Upstairs>) -> UpstairsInfo {
-        UpstairsInfo { up: up.clone() }
+    pub fn new(
+        up: &Arc<Upstairs>,
+        ds_done_tx: mpsc::Sender<u64>,
+    ) -> UpstairsInfo {
+        UpstairsInfo {
+            up: up.clone(),
+            ds_done_tx,
+        }
     }
 }
 
@@ -226,6 +239,12 @@ async fn fault_downstairs(
      */
     let active = api_context.up.active.lock().await;
     let up_state = active.up_state;
+    if up_state != UpState::Active {
+        return Err(HttpError::for_bad_request(
+            Some(String::from("InvalidState")),
+            format!("Upstairs not active: {:?}", up_state),
+        ));
+    }
     let mut ds = api_context.up.downstairs.lock().await;
     match ds.ds_state[cid as usize] {
         DsState::Active
@@ -253,8 +272,12 @@ async fn fault_downstairs(
 
     /*
      * Move all jobs to skipped for this downstairs.
+     * If this returns true, then we have to notify tasks that
+     * a job was "completed" (aka, skipped).
      */
-    ds.ds_set_faulted(cid);
+    if ds.ds_set_faulted(cid) {
+        let _ = api_context.ds_done_tx.send(0).await;
+    }
 
     Ok(HttpResponseUpdatedNoContent())
 }

@@ -47,7 +47,6 @@ pub async fn begin(dsci: Arc<DscInfo>, addr: SocketAddr) -> Result<(), String> {
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
-        tls: None,
     };
     println!("start access at:{:?}", addr);
 
