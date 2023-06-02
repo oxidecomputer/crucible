@@ -474,15 +474,15 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
 /// Always open sqlite with journaling, and synchronous.
 /// Note: these pragma_updates are not durable
 fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
-    // By default, sqlite uses these shm files for synchronization to support
-    // DB access from multiple processes. We don't need that at all in crucible;
-    // we are only going to access the DB from the single process. So we change
-    // it to unix-excl which prevents other processes from accessing the DB, and
+    // By default, sqlite uses these shm files for synchronization to support DB
+    // access from multiple processes. We don't need that at all in crucible; we
+    // are only going to access the DB from the single process. So we change it
+    // to unix-excl which prevents other processes from accessing the DB, and
     // keeps everything in the heap, but still allows multiple connections from
     // in-process. If we ultimately decide we don't want to hold multiple
     // connections per DB (and thus, we don't want any parallelism of SQLite
-    // operations within an extent), we could change this to unix-none to forego
-    // locking altogether.
+    // operations within an extent), we could additionally set the
+    // `locking_mode` pragma to EXCLUSIVE.
     //
     // See https://www.sqlite.org/vfs.html#standard_unix_vfses for more info.
     let metadb: Connection = Connection::open_with_flags_and_vfs(
