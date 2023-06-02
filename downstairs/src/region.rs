@@ -485,14 +485,11 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
     // locking altogether.
     //
     // See https://www.sqlite.org/vfs.html#standard_unix_vfses for more info.
-    // metadb.pragma_update(None, "", "")?;
     let metadb: Connection = Connection::open_with_flags_and_vfs(
         path,
         OpenFlags::default(),
         "unix-excl",
     )?;
-
-    // let metadb = Connection::open(path)?;
 
     assert!(metadb.is_autocommit());
     metadb.pragma_update(None, "journal_mode", "WAL")?;
