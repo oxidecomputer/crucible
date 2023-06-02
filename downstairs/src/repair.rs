@@ -50,7 +50,6 @@ pub async fn repair_main(
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
-        tls: None,
     };
 
     /*

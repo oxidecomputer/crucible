@@ -387,7 +387,6 @@ pub async fn run_server(
         &dropshot::ConfigDropshot {
             bind_address,
             request_body_max_bytes: 1024 * 10,
-            ..Default::default()
         },
         api,
         df,
