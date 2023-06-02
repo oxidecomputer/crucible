@@ -140,17 +140,14 @@ for (( i = 0; i < 100; i += 1 )); do
     (( generation += 1))
 
     echo ""
-    # Stop --lossy downstairs so it can't complete all its IOs
-    if [[ $choice -eq 0 ]]; then
-        kill "$ds0_pid"
-        wait "$ds0_pid" || true
-    elif [[ $choice -eq 1 ]]; then
-        kill "$ds1_pid"
-        wait "$ds1_pid" || true
-    else
-        kill "$ds2_pid"
-        wait "$ds2_pid" || true
-    fi
+
+    # Stop everything before dump so dump can access the extent metadata
+    kill "$ds0_pid"
+    wait "$ds0_pid" || true
+    kill "$ds1_pid"
+    wait "$ds1_pid" || true
+    kill "$ds2_pid"
+    wait "$ds2_pid" || true
 
     # Did we get any mismatches?
     # We || true because dump will return non-zero when it finds
@@ -160,17 +157,13 @@ for (( i = 0; i < 100; i += 1 )); do
     echo "On loop $i"
 
     echo ""
-    # Start downstairs without lossy
-    if [[ $choice -eq 0 ]]; then
-        ${cds} run -d "${testdir}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
-        ds0_pid=$!
-    elif [[ $choice -eq 1 ]]; then
-        ${cds} run -d "${testdir}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
-        ds1_pid=$!
-    else
-        ${cds} run -d "${testdir}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
-        ds2_pid=$!
-    fi
+    # Start everything back up, no lossy
+    ${cds} run -d "${testdir}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
+    ds0_pid=$!
+    ${cds} run -d "${testdir}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
+    ds1_pid=$!
+    ${cds} run -d "${testdir}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
+    ds2_pid=$!
 
     cp "$verify_file" ${verify_file}.last
     echo "Verifying data now"
@@ -194,9 +187,25 @@ for (( i = 0; i < 100; i += 1 )); do
     set -o errexit
     (( generation += 1))
 
+    # Need to shut down the downstairs before dumping due to the use of
+    # unix-excl sqlite VFS- only one process can access the metadata at a time.
+    kill "$ds0_pid"
+    wait "$ds0_pid" || true
+    kill "$ds1_pid"
+    wait "$ds1_pid" || true
+    kill "$ds2_pid"
+    wait "$ds2_pid" || true
+
     echo "Loop: $i  Downstairs dump after verify (and repair):"
     ${cds} dump ${dump_args[@]}
 
+    # Start everything back up
+    ${cds} run -d "${testdir}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
+    ds0_pid=$!
+    ${cds} run -d "${testdir}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
+    ds1_pid=$!
+    ${cds} run -d "${testdir}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
+    ds2_pid=$!
 done
 
 duration=$SECONDS
