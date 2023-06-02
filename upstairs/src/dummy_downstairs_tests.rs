@@ -323,20 +323,34 @@ pub(crate) mod protocol_test {
 
             let jh = tokio::spawn(async move {
                 loop {
-                    match fr.lock().await.next().await.transpose().unwrap() {
-                        None => {
-                            // disconnection, bail
-                            return;
-                        }
+                    match fr.lock().await.next().await.transpose() {
+                        Ok(v) => match v {
+                            None => {
+                                // disconnection, bail
+                                return;
+                            }
 
-                        Some(Message::Ruok) => {
-                            // Respond to pings right away
-                            fw.lock().await.send(Message::Imok).await.unwrap();
-                        }
+                            Some(Message::Ruok) => {
+                                // Respond to pings right away
+                                if let Err(e) =
+                                    fw.lock().await.send(Message::Imok).await
+                                {
+                                    error!(log, "spawn_message_receiver could not send on fw due to {}", e);
+                                }
+                            }
 
-                        Some(m) => {
-                            info!(log, "received {:?}", m);
-                            tx.send(m).await.unwrap();
+                            Some(m) => {
+                                info!(log, "received {:?}", m);
+                                tx.send(m).await.unwrap();
+                            }
+                        },
+
+                        Err(e) => {
+                            error!(
+                                log,
+                                "spawn_message_receiver died due to {}", e
+                            );
+                            break;
                         }
                     }
                 }
@@ -952,7 +966,18 @@ pub(crate) mod protocol_test {
 
         // Assert the Upstairs isn't sending ds1 more work, because it is
         // Faulted
-        assert!(matches!(ds1_messages.try_recv(), Err(TryRecvError::Empty)));
+        let v = ds1_messages.try_recv();
+        match v {
+            // We're either disconnected, or the queue is empty.
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
+                // This is expected, continue on
+            }
+
+            _ => {
+                // Any other error (or success!) is unexpected
+                panic!("try_recv returned {:?}", v);
+            }
+        }
 
         // Reconnect ds1
         drop(ds1_messages);
