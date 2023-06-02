@@ -81,10 +81,11 @@ enum Action {
         output_dir: PathBuf,
 
         /// The directory where the downstairs regions will be created.
-        /// Either provide once, or three times.  One means all downstairs
+        /// Either provide once, or "N" times.  One means all downstairs
         /// share the same top level directory (each downstairs has its own
-        /// subdirectory).  Three means each downstairs will get its own
-        /// region directory.
+        /// subdirectory).  "N" means we will create "N" downstairs and each
+        /// downstairs will get its own region directory.  If using N other
+        /// than 3, you must also provide a matching "region-dir" value.
         #[clap(
             long,
             global = true,
@@ -182,10 +183,11 @@ enum Action {
         output_dir: PathBuf,
 
         /// The directory where the downstairs regions will be created.
-        /// Either provide once, or three times.  One means all downstairs
+        /// Either provide once, or "N" times.  One means all downstairs
         /// share the same top level directory (each downstairs has its own
-        /// subdirectory).  Three means each downstairs will get its own
-        /// region directory.
+        /// subdirectory).  "N" means we will create "N" downstairs and each
+        /// downstairs will get its own region directory.  If using N other
+        /// than 3, you must also provide a matching "region-dir" value.
         #[clap(
             long,
             global = true,
@@ -299,7 +301,7 @@ impl DscInfo {
         }
 
         // There should either be one region dir in the vec, or as many
-        // directories as the region_count requested..
+        // directories as the region_count.
         // If there is one directory, then the downstairs will all share it.
         // If there are more, then each downstairs will get its own
         // directory.
@@ -360,9 +362,9 @@ impl DscInfo {
         }
 
         // If we only have one region directory, then use that for all
-        // three downstairs.  If we have three, then each downstairs can
-        // have its own.
-        //
+        // downstairs.  If we have provided more than one region directory
+        // (and a matching region_count) then each downstairs will have
+        // its own region directory.
         let mut rv = Vec::new();
 
         if region_dir.len() == 1 {
@@ -1774,8 +1776,8 @@ mod test {
 
     #[tokio::test]
     async fn restart_region_four_bad() {
-        // Test a restart with four region directories when their only
-        // exist three
+        // Test a restart with four region directories when only three
+        // actually exist.
         let (ds_bin, _ds_path) = temp_file_path();
 
         let dir = tempdir().unwrap().as_ref().to_path_buf();
