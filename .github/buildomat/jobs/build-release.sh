@@ -82,21 +82,7 @@ mv out/crucible.tar.gz out/crucible-pantry.tar.gz /out/
 # and binaries needed to run the nightly test.
 # This needs the ./out directory created above
 banner nightly
-
-tar cavf out/crucible-nightly.tar.gz \
-    target/release/crutest \
-    target/release/crucible-downstairs \
-    target/release/crucible-hammer \
-    target/release/dsc \
-    target/release/crudd \
-    tools/hammer_loop.sh \
-    tools/test_perf.sh \
-    tools/test_mem.sh \
-    tools/test_reconnect.sh \
-    tools/test_repair.sh \
-    tools/test_restart_repair.sh \
-    tools/test_nightly.sh \
-    tools/crudd-speed-battery.sh
+./tools/make-nightly.sh
 
 banner copy
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
