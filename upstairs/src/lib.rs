@@ -2553,6 +2553,8 @@ async fn looper(
             }
         };
 
+        up.downstairs.lock().await.connected[up_coms.client_id as usize] += 1;
+
         /*
          * Once we have a connected downstairs, the proc task takes over and
          * handles negotiation and work processing.
@@ -2806,6 +2808,16 @@ struct Downstairs {
      * prevent more than one repair task from running at the same time.
      */
     repair_min_id: Option<u64>,
+
+    /**
+     * Count of downstairs connections
+     */
+    connected: Vec<usize>,
+
+    /**
+     * Count of downstairs replacements XXX Not yet used
+     */
+    replaced: Vec<usize>,
 }
 
 impl Downstairs {
@@ -2838,6 +2850,8 @@ impl Downstairs {
             extent_limit: vec![None; 3],
             repair_job_ids: HashMap::new(),
             repair_min_id: None,
+            connected: vec![0; 3],
+            replaced: vec![0; 3],
         }
     }
 
@@ -5031,8 +5045,9 @@ impl Upstairs {
 
     /**
      * Update the counters used by dtrace probes.
-     * This one method will update the fields of the
-     * up_status counter.
+     * This one method will update the fields of the up_status counter.  We get
+     * the downstairs lock to do this, so be mindful of performance when
+     * calling this method.
      */
     #[inline]
     async fn stat_update(&self, msg: &str) {
@@ -5045,6 +5060,8 @@ impl Upstairs {
         let ds_confirm = ds.extents_confirmed.clone();
         let ds_live_repair_completed = ds.live_repair_completed.clone();
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
+        let ds_connected = ds.connected.clone();
+        let ds_replaced = ds.replaced.clone();
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -5056,6 +5073,8 @@ impl Upstairs {
                 ds_confirm,
                 ds_live_repair_completed,
                 ds_live_repair_aborted,
+                ds_connected,
+                ds_replaced,
             };
             (msg, arg)
         });
@@ -9619,6 +9638,8 @@ pub struct Arg {
     ds_confirm: Vec<usize>,
     ds_live_repair_completed: Vec<usize>,
     ds_live_repair_aborted: Vec<usize>,
+    ds_connected: Vec<usize>,
+    ds_replaced: Vec<usize>,
 }
 
 /**
@@ -9702,7 +9723,7 @@ async fn up_listen(
 
     up.stat_update("start").await;
     let mut flush_check = deadline_secs(flush_timeout);
-    let mut show_work_interval = deadline_secs(5.0);
+    let mut stat_update_interval = deadline_secs(5.0);
     let mut repair_check_interval = deadline_secs(60.0);
     let mut repair_check = false;
     loop {
@@ -9816,18 +9837,12 @@ async fn up_listen(
                         send_work(&dst, 1, &up.log).await;
                     }
                 }
-                /*
-                 * Since this should run every time we check for
-                 * a flush, we can also use this to update the dtrace
-                 * counters with some regularity.
-                 */
-                up.stat_update("loop").await;
 
                 flush_check = deadline_secs(flush_timeout);
             }
-            _ = sleep_until(show_work_interval) => {
-                // show_all_work(up).await;
-                show_work_interval = deadline_secs(5.0);
+            _ = sleep_until(stat_update_interval) => {
+                up.stat_update("loop").await;
+                stat_update_interval = deadline_secs(5.0);
             }
         }
     }

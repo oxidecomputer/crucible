@@ -312,6 +312,45 @@ DS 0 STATE   DS 1 STATE   DS 2 STATE   UPW  DSW  NEW0 NEW1 NEW2   IP0  IP1  IP2 
     active       active       active     9 2175     1    1  576     8    8  100  2166 2166 1499     0    0    0   0  0  0
 ```
 
+## upstairs_count.d
+This is a dtrace script similar to the upstairs_info, but here we are
+printing various upstairs counters.
+If the upstairs is not yet running, add the -Z flag to dtrace so it will
+wait to find the matching probe.
+```
+pfexec dtrace -s upstairs_count.d
+```
+
+You start crucible, then run the above script.  Output should start appearing
+within a few seconds.
+
+The output has several columns.  The first three will list the state of each
+of the three downstairs.  Following that the remaining columns all indicate
+various internal counters.  The upstairs records values for these counters
+at an interval defined in the up_listen() function.
+
+The remaining columns 4-15 are all groups of three where there is a counter
+for each downstairs client.
+
+`CON` The number of times the upstairs has connected to downstairs.
+`LRC` The number of times this downstairs has completed a LiveRepair.
+`LRA` The number of times this downstiars aborted a LiveRepair.
+`REP` The number of times this downstairs was replaced. 
+
+Here is an example of how it might look:
+```
+alan@cat:crucible$ pfexec dtrace -s upstairs_count.d
+       DS STATE 0        DS STATE 1        DS STATE 2  CON0 CON1 CON2 LRC0 LRC1 LRC2 LRA0 LRA1 LRA2 REP0 REP1 REP2
+              new               new               new     1    1    1    0    0    0    0    0    0    0    0    0
+              new               new               new     1    1    0    0    0    0    0    0    0    0    0    0
+      wait_quorum       wait_quorum               new     1    1    0    0    0    0    0    0    0    0    0    0
+           repair            repair            repair     1    1    1    0    0    0    0    0    0    0    0    0
+           repair            repair            repair     1    1    1    0    0    0    0    0    0    0    0    0
+```
+## upstairs_raw.d
+This is a dtrace script that just dumps the `Arg` structure in json format.
+The output of this can be sent to other commands for additional processing.
+
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
 crucible from the guest.
