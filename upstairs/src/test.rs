@@ -1982,6 +1982,94 @@ pub(crate) mod up_test {
     }
 
     #[tokio::test]
+    async fn retire_dont_retire_everything() {
+        // Verify that a read not ACKED remains on the active queue even
+        // if a flush comes through after it.
+        let upstairs = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        upstairs.set_active().await.unwrap();
+        let mut ds = upstairs.downstairs.lock().await;
+
+        // Build our read, put it into the work queue
+        let next_id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(next_id);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+
+        // Move the work to submitted like we sent it to each downstairs
+        ds.in_progress(next_id, 0);
+        ds.in_progress(next_id, 1);
+        ds.in_progress(next_id, 2);
+
+        // Downstairs 0 now has completed this work.
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds
+            .process_ds_completion(
+                next_id,
+                0,
+                response,
+                &None,
+                UpState::Active,
+                None
+            )
+            .unwrap());
+
+        // One completion of a read means we can ACK
+        assert_eq!(ds.ackable_work().len(), 1);
+
+        // But, don't send the ack just yet.
+        // The job should be ack ready
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // A flush is required to move work to completed
+        // Create the flush then send it to all downstairs.
+        let next_id = ds.next_id();
+        let op = create_flush(
+            next_id,
+            vec![],
+            10,
+            0,
+            0,
+            None,
+            ImpactedBlocks::Empty,
+            None,
+        );
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+
+        // Send and complete the Flush at each downstairs.
+        for cid in 0..3 {
+            ds.in_progress(next_id, cid);
+            ds.process_ds_completion(
+                next_id,
+                cid,
+                Ok(vec![]),
+                &None,
+                UpState::Active,
+                None,
+            )
+            .unwrap();
+        }
+
+        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+
+        // ACK the flush and let retire_check move things along.
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        // Verify the read is still ack ready.
+        assert_eq!(ds.ackable_work().len(), 1);
+        // The the flush should now be moved to completed.
+        assert_eq!(ds.completed.len(), 1);
+        // The read should still be on the queue.
+        assert_eq!(ds.ds_active.len(), 1);
+    }
+
+    #[tokio::test]
     async fn work_delay_completion_flush_write() {
         work_delay_completion_flush(false).await;
     }
