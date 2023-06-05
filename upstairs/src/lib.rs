@@ -4502,8 +4502,12 @@ impl Downstairs {
             assert_eq!(wc.active, 0);
 
             // Retire all the jobs that happened before and including this
-            // flush.
+            // flush, with a few exceptions.  For these, we need to make
+            // a prevent_retire list and keep track of them so we can put
+            // them back on the ds_active list after we have finished
+            // processing it.
             let mut retired = Vec::new();
+            let mut prevent_retire = BTreeMap::new();
 
             loop {
                 let id = match self.ds_active.keys().next() {
@@ -4512,49 +4516,42 @@ impl Downstairs {
                     Some(id) => *id,
                 };
 
-                // Remove everything before this flush (because flushes depend
-                // on everything, and everything depends on flushes).
                 assert!(id <= ds_id);
-
-                // Assert the job is actually done, then complete it
-                let wc = self.state_count(id).unwrap();
 
                 // While we don't expect any jobs to still be in progress,
                 // there is nothing to prevent a flush ACK from getting
                 // ahead of the ACK from something that flush depends on.
-                // The downstairs should handle the dependency.
-                if wc.active != 0 {
+                // The downstairs does handle the dependency.
+                let wc = self.state_count(id).unwrap();
+                let job = self.ds_active.remove(&id).unwrap();
+                if wc.active != 0 || job.ack_status != AckStatus::Acked {
                     warn!(
                         self.log,
-                        "Leave job {} on the work queue for now", id
+                        "[rc] leave job {} on the queue when removing {} {:?}",
+                        job.ds_id,
+                        ds_id,
+                        wc,
                     );
+                    prevent_retire.insert(id, job);
                     continue;
                 }
+
+                // Assert the job is actually done, then complete it
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(&id));
+                assert_eq!(job.ack_status, AckStatus::Acked);
+                assert_eq!(job.ds_id, id);
 
-                let oj = self.ds_active.get(&id).unwrap();
-                if oj.ack_status != AckStatus::Acked {
-                    warn!(
-                        self.log,
-                        "[rc] leave job {} on the queue when removing {}",
-                        oj.ds_id,
-                        ds_id,
-                    );
-                    continue;
-                }
-                let oj = self.ds_active.remove(&id).unwrap();
-                assert_eq!(oj.ack_status, AckStatus::Acked);
-                assert_eq!(oj.ds_id, id);
-                retired.push(oj.ds_id);
+                retired.push(job.ds_id);
                 self.completed.push(id);
-                let summary = oj.io_summarize();
+                let summary = job.io_summarize();
                 self.completed_jobs.push(summary);
                 for cid in 0..3 {
-                    let old_state = oj.state.get(&cid).unwrap();
+                    let old_state = job.state.get(&cid).unwrap();
                     self.io_state_count.decr(old_state, cid);
                 }
             }
+            self.ds_active.extend(prevent_retire);
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
