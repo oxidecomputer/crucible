@@ -223,12 +223,30 @@ pub async fn join_all<'a>(
         .map(|_| ())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ReplaceResult {
-    ReplaceStarted,
-    ReplaceStartedAlready,
-    ReplacedCompletedAlready,
+    Started,
+    StartedAlready,
+    CompletedAlready,
     Missing,
+}
+impl Debug for ReplaceResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplaceResult::Started => {
+                write!(f, "Started")
+            }
+            ReplaceResult::StartedAlready => {
+                write!(f, "StartedAlready")
+            }
+            ReplaceResult::CompletedAlready => {
+                write!(f, "CompletedAlready")
+            }
+            ReplaceResult::Missing => {
+                write!(f, "Missing")
+            }
+        }
+    }
 }
 
 /// DTrace probes in the upstairs
@@ -941,8 +959,16 @@ where
 
         // Verify we are in a valid state at this point.
         match my_state {
-            DsState::New | DsState::Disconnected | DsState::Faulted => {} // Ok
-
+            DsState::New
+            | DsState::Disconnected
+            | DsState::Replaced
+            | DsState::Faulted => {
+                // These are the valid starting states for this function
+            }
+            DsState::Replacing => {
+                // This downstairs is on it's way out, exit now
+                bail!("[{}] Exit proc under replacement", up_coms.client_id);
+            }
             DsState::Offline => {
                 /*
                  * This is only applicable for a downstairs that is
@@ -1300,7 +1326,6 @@ where
                                     String::new()
                                 },
                             );
-
                             up.ds_transition(
                                 up_coms.client_id, DsState::New
                             ).await;
@@ -1461,19 +1486,23 @@ where
                                 ).await?;
 
                             }
-                            DsState::WaitActive => {
+                            DsState::WaitActive
+                            | DsState::Faulted
+                            | DsState::Replaced => {
                                 /*
                                  * Ask for the current version of all extents.
                                  */
                                 negotiated = 4;
                                 fw.send(Message::ExtentVersionsPlease).await?;
                             }
-                            DsState::Faulted => {
-                                /*
-                                 * Ask for the current version of all extents.
-                                 */
-                                negotiated = 4;
-                                fw.send(Message::ExtentVersionsPlease).await?;
+                            DsState::Replacing => {
+                                warn!(
+                                    up.log,
+                                    "[{}] exits negotiation, replacing",
+                                    up_coms.client_id
+                                );
+                                bail!("[{}] exits negotiation, replacing",
+                                up_coms.client_id);
                             }
                             bad_state => {
                                 panic!(
@@ -1491,29 +1520,43 @@ where
                         if negotiated != 3 {
                             bail!("Received LastFlushAck out of order!");
                         }
-                        let my_state = {
-                            let state = &up.downstairs.lock().await.ds_state;
-                            state[up_coms.client_id as usize]
-                        };
+                        let active = up.active.lock().await;
+                        let up_state = active.up_state;
+                        let mut ds = up.downstairs.lock().await;
+                        drop(active);
+
+                        let my_state = ds.ds_state[up_coms.client_id as usize];
+                        if my_state == DsState::Replacing {
+                            bail!(
+                                "[{}] exits negotiation, replacing",
+                                up_coms.client_id
+                            );
+                        }
+
                         assert_eq!(my_state, DsState::Offline);
                         info!(
                             up.log,
-                            "[{}] replied this last flush ID: {}",
+                            "[{}] Replied this last flush ID: {}",
                             up_coms.client_id,
                             last_flush_number,
                         );
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            up.last_flush_id(up_coms.client_id).await,
+                            ds.ds_last_flush[up_coms.client_id as usize],
                             last_flush_number
                         );
-                        up.ds_transition(
-                            up_coms.client_id, DsState::Replay
-                        ).await;
+                        up.ds_transition_with_lock(
+                            &mut ds,
+                            up_state,
+                            up_coms.client_id,
+                            DsState::Replay
+                        );
+
+                        negotiated = 5;
+                        drop(ds);
 
                         *connected = true;
-                        negotiated = 5;
                     },
                     Some(Message::ExtentVersions {
                             gen_numbers, flush_numbers, dirty_bits
@@ -1536,7 +1579,17 @@ where
                                     DsState::WaitQuorum
                                 );
                             }
-                            DsState::Faulted => {
+                            DsState::Replacing => {
+                                warn!(
+                                    up.log,
+                                    "[{}] exits negotiation, replacing",
+                                    up_coms.client_id
+                                );
+                                bail!("[{}] exits negotiation, replacing",
+                                up_coms.client_id);
+                            }
+                            DsState::Faulted
+                            | DsState::Replaced => {
                                 up.ds_transition_with_lock(
                                     &mut ds,
                                     up_state,
@@ -1576,7 +1629,6 @@ where
                         );
                         negotiated = 5;
                         drop(ds);
-                        //up.ds_state_show().await;
 
                         /*
                          * At this point, we have all we need in the upstairs
@@ -1738,6 +1790,14 @@ where
                 drop(ds);
                 do_reconcile_work(up, &mut fr, &mut fw, up_coms).await?;
             }
+            DsState::Replacing => {
+                warn!(
+                    up.log,
+                    "[{}] exits cmd_loop, this downstairs is replacing",
+                    up_coms.client_id
+                );
+                bail!("[{}] exits negotiation, replacing", up_coms.client_id);
+            }
             DsState::LiveRepairReady => {
                 drop(ds);
                 warn!(
@@ -1809,19 +1869,27 @@ where
 
                 /*
                  * We may have faulted this downstairs (after processing
-                 * this IO).  If we have, then we exit this task which will
+                 * this IO) or we may have received a request to replace this
+                 * downstairs.  If we have, then we exit this task which will
                  * tear down this connection and require the downstairs to
-                 * reconnect and go into LiveRepair mode.
+                 * reconnect and eventually go into LiveRepair mode.
                  */
-                if up_c.downstairs.lock().await.ds_state[client_id as usize]
-                    == DsState::Faulted
+                let my_state =
+                    up_c.downstairs.lock().await.ds_state[client_id as usize];
+                if my_state == DsState::Faulted
+                    || my_state == DsState::Replacing
                 {
                     warn!(
                         up_c.log,
-                        "[{}] will exit pm_task, this downstairs faulted",
-                        client_id
+                        "[{}] will exit pm_task, this downstairs {}",
+                        client_id,
+                        my_state
                     );
-                    bail!("[{}] This downstairs now faulted", client_id);
+                    bail!(
+                        "[{}] This downstairs now in {}",
+                        client_id,
+                        my_state
+                    );
                 }
 
                 if up_c.ds_deactivate(client_id).await {
@@ -2106,7 +2174,9 @@ where
                             new_session_id,
                             new_gen,
                         );
-                        up.ds_transition(up_coms.client_id, DsState::Disabled).await;
+                        up.ds_transition(
+                            up_coms.client_id, DsState::Disabled
+                        ).await;
 
                         // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
@@ -2661,8 +2731,6 @@ struct Downstairs {
     /**
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
-     * TODO: When growing to more than one region, should this become
-     * a 2d Vec? Index for region, then index for the DS?
      */
     ds_state: Vec<DsState>,
 
@@ -3423,7 +3491,10 @@ impl Downstairs {
             // better have the dependencies already set to reflect the
             // requirement that a repair IO will need to finish first.
             match current {
-                DsState::Faulted | DsState::LiveRepairReady => {
+                DsState::Faulted
+                | DsState::Replaced
+                | DsState::Replacing
+                | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;
@@ -3484,7 +3555,10 @@ impl Downstairs {
             // If a downstairs is faulted, we can move that job directly
             // to IOState::Skipped.
             match current {
-                DsState::Faulted | DsState::LiveRepairReady => {
+                DsState::Faulted
+                | DsState::Replaced
+                | DsState::Replacing
+                | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
@@ -6123,6 +6197,7 @@ impl Upstairs {
             DsState::FailedRepair => DsState::New,
             DsState::LiveRepair => DsState::Faulted,
             DsState::LiveRepairReady => DsState::Faulted,
+            DsState::Replacing => DsState::Replaced,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -6212,6 +6287,12 @@ impl Upstairs {
          * Check that this is a valid transition
          */
         match new_state {
+            DsState::Replacing => {
+                // A downstairs can be replaced at any time.
+            }
+            DsState::Replaced => {
+                assert_eq!(old_state, DsState::Replacing);
+            }
             DsState::WaitActive => {
                 if old_state == DsState::Offline {
                     if up_state == UpState::Active {
@@ -6304,7 +6385,15 @@ impl Upstairs {
                 assert_eq!(old_state, DsState::LiveRepairReady);
             }
             DsState::LiveRepairReady => {
-                assert_eq!(old_state, DsState::Faulted);
+                match old_state {
+                    DsState::Faulted | DsState::Replaced => {} // Okay
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
+                }
             }
             DsState::New => {
                 // Before new, we must have been in
@@ -7031,13 +7120,17 @@ impl Upstairs {
         }
 
         /*
+         * TODO: Verify that a new downstairs does not share the same UUID
+         * with an existing downstiars.
+         *
          * TODO(#551) Verify that `client_ddef` makes sense (valid, nonzero
          * block size, etc.)
          */
 
         /*
          * If this downstairs was previously registered, make sure this
-         * connection reports the one the old connection did.
+         * connection reports the same UUID the old connection did, unless
+         * we are replacing a downstairs.
          *
          * XXX The expected per-client UUIDs should eventually be provided
          * when the upstairs stairs. When that happens, they can be
@@ -7046,21 +7139,39 @@ impl Upstairs {
         let mut ds = self.downstairs.lock().await;
         if let Some(uuid) = ds.ds_uuid.get(&client_id) {
             if *uuid != client_ddef.uuid() {
-                panic!(
-                    "New client:{} uuid:{}  does not match existing {}",
-                    client_id,
-                    client_ddef.uuid(),
-                    uuid
-                );
+                // If we are replacing the downstairs, then a new UUID is
+                // okay.
+                if ds.ds_state[client_id as usize] == DsState::Replaced {
+                    warn!(
+                        self.log,
+                        "[{}] replace downstairs uuid:{} with {}",
+                        client_id,
+                        uuid,
+                        client_ddef.uuid(),
+                    );
+                } else {
+                    panic!(
+                        "New client:{} uuid:{}  does not match existing {}",
+                        client_id,
+                        client_ddef.uuid(),
+                        uuid,
+                    );
+                }
             } else {
                 info!(
                     self.log,
                     "Returning client:{} UUID:{} matches", client_id, uuid
                 );
             }
-        } else {
-            ds.ds_uuid.insert(client_id, client_ddef.uuid());
         }
+
+        /*
+         * If this is a new downstairs connection, insert the UUID.
+         * If this is a replacement downstairs, insert the UUID.
+         * If it is an existing UUID, we already compared and it is good,
+         * so the insert is unnecessary, but will result in the same UUID.
+         */
+        ds.ds_uuid.insert(client_id, client_ddef.uuid());
 
         let mut ddef = self.ddef.lock().await;
 
@@ -7287,11 +7398,74 @@ impl Upstairs {
 
     async fn replace_downstairs(
         &self,
-        _id: Uuid,
-        _old: SocketAddr,
-        _new: SocketAddr,
+        id: Uuid,
+        old: SocketAddr,
+        new: SocketAddr,
+        ds_done_tx: &mpsc::Sender<u64>,
     ) -> Result<ReplaceResult, CrucibleError> {
-        crucible_bail!(GenericError, "write more code!");
+        warn!(
+            self.log,
+            "{id} request to replace downstairs {old} with {new}"
+        );
+        let active = self.active.lock().await;
+        let up_state = active.up_state;
+        let mut ds = self.downstairs.lock().await;
+
+        // ZZZ
+        // Block a replacement if any (other) downstairs are in:
+        // Replacing
+        // OnlineRepairReady
+        // OnlineRepair
+        // Faulted
+        //
+        // We have to check all targets first to be sure we are not replacing
+        // an existing downstairs.
+        for (client_id, ds_target) in ds.ds_target.iter_mut().enumerate() {
+            if *ds_target == new {
+                warn!(self.log, "{id} found existing: {new} at {client_id}");
+                // We don't really know if the "old" matches what was old,
+                // as that info is gone to us now, so assume it was true.
+                match ds.ds_state[client_id] {
+                    DsState::Replacing
+                    | DsState::Replaced
+                    | DsState::LiveRepairReady
+                    | DsState::LiveRepair => {
+                        // These states indicate a replacement is in progress.
+                        return Ok(ReplaceResult::StartedAlready);
+                    }
+                    _ => {
+                        // Any other state, we assume it is done.
+                        return Ok(ReplaceResult::CompletedAlready);
+                    }
+                }
+            }
+        }
+
+        // Now that we have verified our new target does not exist anywhere
+        // else, we can search for the old.
+        for (client_id, ds_target) in ds.ds_target.iter_mut().enumerate() {
+            if *ds_target == old {
+                info!(self.log, "{id} replacing old: {old} at {client_id}");
+                *ds_target = new;
+                // If downstairs_errors, clear them.
+                // clear region_metadata?  Yes, why not?  This makes the
+                // code on the add side easier?  Is there anything that
+                // would prevent it?
+                if ds.ds_set_faulted(client_id as u8) {
+                    let _ = ds_done_tx.send(1).await;
+                }
+                self.ds_transition_with_lock(
+                    &mut ds,
+                    up_state,
+                    client_id as u8,
+                    DsState::Replacing,
+                );
+                ds.replaced[client_id] += 1;
+                return Ok(ReplaceResult::Started);
+            }
+        }
+        warn!(self.log, "{id} downstairs {old} not found");
+        Ok(ReplaceResult::Missing)
     }
 }
 
@@ -7475,6 +7649,16 @@ enum DsState {
      * Another Upstairs has connected and is now active.
      */
     Disabled,
+    /*
+     * This downstairs is being replaced, Any active task needs to clear
+     * any state and exit.
+     */
+    Replacing,
+    /*
+     * The current downstairs tasks have ended and the replacement has
+     * begun.
+     */
+    Replaced,
 }
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -7529,6 +7713,12 @@ impl std::fmt::Display for DsState {
             }
             DsState::Disabled => {
                 write!(f, "Disabled")
+            }
+            DsState::Replacing => {
+                write!(f, "Replacing")
+            }
+            DsState::Replaced => {
+                write!(f, "Replaced")
             }
         }
     }
@@ -9524,16 +9714,20 @@ async fn process_new_io(
             old,
             new,
             result,
-        } => match up.replace_downstairs(id, old, new).await {
-            Ok(v) => {
-                *result.lock().await = v;
-                req.send_ok().await;
-            }
+        } => {
+            info!(up.log, "Request to replace downstairs {old} with {new}");
 
-            Err(e) => {
-                req.send_err(e).await;
+            match up.replace_downstairs(id, old, new, &ds_done_tx).await {
+                Ok(v) => {
+                    *result.lock().await = v;
+                    req.send_ok().await;
+                }
+
+                Err(e) => {
+                    req.send_err(e).await;
+                }
             }
-        },
+        }
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             let size = match up.ddef.lock().await.get_def() {
