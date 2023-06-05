@@ -75,6 +75,10 @@ use async_trait::async_trait;
 // before we give up and mark that downstairs faulted.
 const IO_OUTSTANDING_MAX: usize = 1000;
 
+// Max number of submitted IOs between the upstairs and the downstairs, above
+// which flow control kicks in.
+const MAX_ACTIVE_COUNT: usize = 100;
+
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.
@@ -601,7 +605,7 @@ where
 
     let mut active_count = u.downstairs.lock().await.submitted_work(client_id);
     for ndx in 0..new_work.len() {
-        if active_count >= 100 {
+        if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
             u.downstairs
