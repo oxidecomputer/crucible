@@ -5,22 +5,22 @@ license = "MPL-2.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1"
-byte-unit = "4.0.19"
-clap = { version = "4.3", features = ["derive", "env", "wrap_help"] }
-csv = "1.2.1"
-dsc-client = { path = "../dsc-client" }
-dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
-rand = "0.8.5"
-rand_chacha = "0.3.1"
-schemars = { version = "0.8.12", features = [ "uuid" ] }
-serde = { version = "1", features = ["derive"] }
-statistical = "1.0.0"
-tokio = { version = "1.28.1", features = ["full"] }
+anyhow.workspace = true
+byte-unit.workspace = true
+clap.workspace = true
+csv.workspace = true
+dsc-client.workspace = true
+dropshot.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+schemars.workspace = true
+serde.workspace = true
+statistical.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-expectorate = "1.0.7"
-openapiv3 = "1.0"
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
-tempfile = "3"
-serde_json = "1"
+expectorate.workspace = true
+openapiv3.workspace = true
+openapi-lint.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
