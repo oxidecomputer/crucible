@@ -634,6 +634,12 @@
         "properties": {
           "expected_digest": {
             "$ref": "#/components/schemas/ExpectedDigest"
+          },
+          "size_to_validate": {
+            "nullable": true,
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
           }
         },
         "required": [

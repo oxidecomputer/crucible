@@ -202,16 +202,28 @@ impl PantryEntry {
     pub async fn validate(
         &self,
         expected_digest: ExpectedDigest,
+        size_to_validate: Option<usize>,
     ) -> Result<()> {
         let mut hasher = match expected_digest {
             ExpectedDigest::Sha256(_) => Sha256::new(),
         };
 
-        let total_size = self.volume.total_size().await? as usize;
+        let size_to_validate = size_to_validate
+            .unwrap_or(self.volume.total_size().await? as usize);
 
-        for chunk in (0..total_size).step_by(Self::MAX_CHUNK_SIZE) {
+        let block_size = self.volume.get_block_size().await? as usize;
+        if (size_to_validate % block_size) != 0 {
+            bail!(
+                "size to validate {} not divisible by block size {}!",
+                size_to_validate,
+                block_size,
+            );
+        }
+
+        for chunk in (0..size_to_validate).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
-            let end = std::cmp::min(start + Self::MAX_CHUNK_SIZE, total_size);
+            let end =
+                std::cmp::min(start + Self::MAX_CHUNK_SIZE, size_to_validate);
 
             let data = crucible::Buffer::new(end - start);
 
@@ -478,12 +490,14 @@ impl Pantry {
         &self,
         volume_id: String,
         expected_digest: ExpectedDigest,
+        size_to_verify: Option<usize>,
     ) -> Result<String, HttpError> {
         let entry = self.entry(volume_id).await?;
         let entry = entry.clone();
 
-        let join_handle =
-            tokio::spawn(async move { entry.validate(expected_digest).await });
+        let join_handle = tokio::spawn(async move {
+            entry.validate(expected_digest, size_to_verify).await
+        });
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
