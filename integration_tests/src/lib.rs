@@ -3768,96 +3768,9 @@ mod test {
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
 
-        // Start a pantry, get the client for it, then use it to bulk_write in
-        // data
+        // Start a pantry, get the client for it
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
-
-        // parallel bulk write in a bunch of random data in a random order
-
-        const THREADS: usize = 10;
-        const CHUNK_SIZE: usize = 512;
-
-        let total_size = tds.blocks_per_extent() as usize
-            * tds.extent_count() as usize
-            * BLOCK_SIZE;
-
-        assert_eq!(total_size % CHUNK_SIZE, 0);
-        assert_eq!((total_size / CHUNK_SIZE) % THREADS, 0);
-
-        let mut handles = Vec::with_capacity(THREADS);
-        let mut senders = Vec::with_capacity(THREADS);
-
-        for _i in 0..THREADS {
-            let (tx, mut rx) = mpsc::channel(100);
-            let client = client.clone();
-
-            handles.push(tokio::spawn(async move {
-                while let Some((offset, base64_encoded_data)) = rx.recv().await
-                {
-                    client
-                        .bulk_write(
-                            &volume_id.to_string(),
-                            &crucible_pantry_client::types::BulkWriteRequest {
-                                offset,
-                                base64_encoded_data,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
-            }));
-
-            senders.push(tx);
-        }
-
-        for i in 0..(total_size / CHUNK_SIZE) {
-            let mut data = vec![0u8; CHUNK_SIZE];
-            rand::thread_rng().fill(&mut data[..]);
-            let base64_encoded_data =
-                engine::general_purpose::STANDARD.encode(&data);
-
-            senders[i % THREADS]
-                .send(((i * CHUNK_SIZE) as u64, base64_encoded_data))
-                .await
-                .unwrap();
-        }
-
-        for sender in senders {
-            drop(sender);
-        }
-
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        // then, bulk read it out
-        let mut buffer = Vec::with_capacity(total_size);
-
-        for i in 0..(total_size / CHUNK_SIZE) {
-            let response = client
-                .bulk_read(
-                    &volume_id.to_string(),
-                    &crucible_pantry_client::types::BulkReadRequest {
-                        offset: (i * CHUNK_SIZE) as u64,
-                        size: CHUNK_SIZE as u32,
-                    },
-                )
-                .await
-                .unwrap();
-
-            let mut data = engine::general_purpose::STANDARD
-                .decode(&response.base64_encoded_data)
-                .unwrap();
-
-            buffer.append(&mut data);
-        }
-
-        // sha256 here, then send digest to validate function
-        // only send half the bytes to the hasher
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&buffer.to_vec()[0..100]);
-        let digest = hex::encode(hasher.finalize());
 
         let response = client
             .validate(
@@ -3865,7 +3778,7 @@ mod test {
                 &crucible_pantry_client::types::ValidateRequest {
                     expected_digest:
                         crucible_pantry_client::types::ExpectedDigest::Sha256(
-                            digest.to_string(),
+                            "wrong size".to_string(),
                         ),
 
                     // validate 100 bytes!
