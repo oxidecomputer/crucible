@@ -6,18 +6,18 @@ license = "MPL-2.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1"
-bytes = "1"
-clap = { version = "4.3", features = ["derive"] }
-crucible = { path = "../upstairs" }
-crucible-common = { path = "../common" }
-crucible-protocol = { path = "../protocol" }
-futures = "0.3"
-futures-core = "0.3"
-ringbuffer = "0.13"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.28.1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"]}
-toml = "0.7"
-nbd = "0.2.3"
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+crucible-common.workspace = true
+crucible-protocol.workspace = true
+crucible.workspace = true
+futures-core.workspace = true
+futures.workspace = true
+nbd.workspace = true
+ringbuffer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+toml.workspace = true
