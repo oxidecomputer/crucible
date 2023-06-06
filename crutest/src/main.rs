@@ -88,18 +88,25 @@ enum Workload {
     },
     Rand,
     Repair,
-    /// Test the downstairs replacement path.
-    /// Run IO to the upstairs, then replace a downstairs, then run
-    /// more IO and verify it all works as expected.
+    /// Test the downstairs replay path.
+    /// Top a downstairs, then run some IO, then start that downstairs back
+    /// up.  Verify all IO to all downstairs finishes.
     Replay {
         /// URL location of the running dsc server
         #[clap(long, default_value = "http://127.0.0.1:9998", action)]
         dsc: String,
     },
+    /// Test the downstairs replacement path.
+    /// Run IO to the upstairs, then replace a downstairs, then run
+    /// more IO and verify it all works as expected.
     Replace {
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
+
+        /// Number of IOs to do after replacement has started.
+        #[clap(long, default_value = "800", action)]
+        work: usize,
     },
     Span,
     Verify,
@@ -590,7 +597,7 @@ async fn main() -> Result<()> {
 
     // If we are running the replace workload, we need to know the
     // current list of targets the upstairs will be started with.
-    let full_target = if let Workload::Replace { replacement } = opt.workload {
+    let full_target = if let Workload::Replace { replacement, work: _ } = opt.workload {
         let mut full_target = opt.target.clone();
         full_target.push(replacement);
         Some(full_target)
@@ -968,7 +975,7 @@ async fn main() -> Result<()> {
             replay_workload(&guest, &mut wtq, &mut region_info, dsc_client)
                 .await?;
         }
-        Workload::Replace { replacement: _ } => {
+        Workload::Replace { replacement: _, work } => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
                 if opt.continuous {
@@ -982,7 +989,7 @@ async fn main() -> Result<()> {
 
             // This should already be setup for us.
             let full_target = full_target.unwrap();
-            replace_workload(&guest, &mut wtq, &mut region_info, full_target)
+            replace_workload(&guest, &mut wtq, &mut region_info, full_target, work)
                 .await?;
         }
         Workload::Span => {
@@ -1661,11 +1668,12 @@ async fn replace_workload(
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     full_targets: Vec<SocketAddr>,
+    work: usize,
 ) -> Result<()> {
     assert!(full_targets.len() == 4);
 
     let mut preload_wtq = WhenToQuit::Count { count: 100 };
-    let mut replace_wtq = WhenToQuit::Count { count: 800 };
+    let mut replace_wtq = WhenToQuit::Count { count: work };
 
     let mut c = 1;
     let mut old_ds = 0;
