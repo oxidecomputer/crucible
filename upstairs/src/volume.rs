@@ -812,9 +812,9 @@ impl BlockIO for Volume {
         for subvol in &self.sub_volumes {
             let result = subvol.replace_downstairs(id, old, new).await?;
             match result {
-                ReplaceResult::ReplaceStarted
-                | ReplaceResult::ReplaceStartedAlready
-                | ReplaceResult::ReplacedCompletedAlready => {
+                ReplaceResult::Started
+                | ReplaceResult::StartedAlready
+                | ReplaceResult::CompletedAlready => {
                     // found the subvolume, so stop!
                     return Ok(result);
                 }

@@ -301,7 +301,7 @@ impl DscInfo {
         }
 
         // There should either be one region dir in the vec, or as many
-        // directories as the region_count.
+        // directories as the region_count requested..
         // If there is one directory, then the downstairs will all share it.
         // If there are more, then each downstairs will get its own
         // directory.
@@ -917,7 +917,7 @@ struct MonitorInfo {
 
 /// State of a downstairs.
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema)]
-enum DownstairsState {
+pub enum DownstairsState {
     Stopped,
     Stopping,
     Starting,

@@ -138,6 +138,9 @@ pub enum CrucibleError {
 
     #[error("Property not available: {0}")]
     PropertyNotAvailable(String),
+
+    #[error("Invalid downstairs replace {0}")]
+    ReplaceRequestInvalid(String),
 }
 
 impl From<std::io::Error> for CrucibleError {

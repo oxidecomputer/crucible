@@ -26,6 +26,7 @@ pub use stats::*;
 
 use crucible::*;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
+use dsc_client::{types::DownstairsState, Client};
 
 /*
  * The various tests this program supports.
@@ -87,6 +88,26 @@ enum Workload {
     },
     Rand,
     Repair,
+    /// Test the downstairs replay path.
+    /// Top a downstairs, then run some IO, then start that downstairs back
+    /// up.  Verify all IO to all downstairs finishes.
+    Replay {
+        /// URL location of the running dsc server
+        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
+        dsc: String,
+    },
+    /// Test the downstairs replacement path.
+    /// Run IO to the upstairs, then replace a downstairs, then run
+    /// more IO and verify it all works as expected.
+    Replace {
+        /// The address:port of a running downstairs for replacement
+        #[clap(long, action)]
+        replacement: SocketAddr,
+
+        /// Number of IOs to do after replacement has started.
+        #[clap(long, default_value = "800", action)]
+        work: usize,
+    },
     Span,
     Verify,
     Version,
@@ -100,8 +121,8 @@ pub struct Opt {
     #[clap(long, global = true, action, conflicts_with = "count")]
     continuous: bool,
 
-    ///  For tests that support it, pass this count value for the number
-    ///  of loops the test should do.
+    /// For tests that support it, pass this count value for the number
+    /// of loops the test should do.
     #[clap(short, long, global = true, action, default_value = "0")]
     count: usize,
 
@@ -117,12 +138,12 @@ pub struct Opt {
     #[clap(subcommand)]
     workload: Workload,
 
-    ///  This allows the Upstairs to run in a mode where it will not
-    ///  always submit new work to downstairs when it first receives
-    ///  it.  This is for testing dependencies and should not be
-    ///  used in production.  Passing args like this to the upstairs
-    ///  may not be the best way to test, but until we have something
-    ///  better... XXX
+    /// This allows the Upstairs to run in a mode where it will not
+    /// always submit new work to downstairs when it first receives
+    /// it.  This is for testing dependencies and should not be
+    /// used in production.  Passing args like this to the upstairs
+    /// may not be the best way to test, but until we have something
+    /// better... XXX
     #[clap(long, global = true, action)]
     lossy: bool,
 
@@ -574,6 +595,20 @@ async fn main() -> Result<()> {
         bail!("Initial verify requires verify_in file");
     }
 
+    // If we are running the replace workload, we need to know the
+    // current list of targets the upstairs will be started with.
+    let full_target = if let Workload::Replace {
+        replacement,
+        work: _,
+    } = opt.workload
+    {
+        let mut full_target = opt.target.clone();
+        full_target.push(replacement);
+        Some(full_target)
+    } else {
+        None
+    };
+
     let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
 
     let crucible_opts = CrucibleOpts {
@@ -664,6 +699,18 @@ async fn main() -> Result<()> {
     println!("Wait for a query_work_queue command to finish before sending IO");
     guest.query_work_queue().await?;
 
+    loop {
+        match guest.query_is_active().await {
+            Ok(true) => {
+                break;
+            }
+            _ => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                println!("Waiting for upstairs to be active");
+            }
+        }
+    }
+
     /*
      * Build the region info struct that all the tests will use.
      * This includes importing and verifying from a write log, if requested.
@@ -674,7 +721,7 @@ async fn main() -> Result<()> {
     };
 
     /*
-     * Now that we have the region info from the Upstaris, apply any
+     * Now that we have the region info from the Upstairs, apply any
      * info from the verify file, and verify it matches what we expect
      * if we are expecting anything.
      */
@@ -915,6 +962,48 @@ async fn main() -> Result<()> {
                 println!("Wrote out file {:?}", cp);
             }
             return Ok(());
+        }
+        Workload::Replay { dsc } => {
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else if opt.count == 0 {
+                    WhenToQuit::Count { count: 1 }
+                } else {
+                    WhenToQuit::Count { count: opt.count }
+                }
+            };
+
+            let dsc_client = Client::new(&dsc);
+            replay_workload(&guest, &mut wtq, &mut region_info, dsc_client)
+                .await?;
+        }
+        Workload::Replace {
+            replacement: _,
+            work,
+        } => {
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else if opt.count == 0 {
+                    WhenToQuit::Count { count: 1 }
+                } else {
+                    WhenToQuit::Count { count: opt.count }
+                }
+            };
+
+            // This should already be setup for us.
+            let full_target = full_target.unwrap();
+            replace_workload(
+                &guest,
+                &mut wtq,
+                &mut region_info,
+                full_target,
+                work,
+            )
+            .await?;
         }
         Workload::Span => {
             println!("Span test");
@@ -1507,6 +1596,170 @@ async fn generic_workload(
     Ok(())
 }
 
+// Make use of dsc to stop and start a downstairs while sending IO.  This
+// should trigger the replay code path.  The IO sent to the downstairs should
+// be below the threshold of gone_too_long() so we don't end up faulting the
+// downstairs and doing a live repair
+async fn replay_workload(
+    guest: &Arc<Guest>,
+    wtq: &mut WhenToQuit,
+    ri: &mut RegionInfo,
+    dsc_client: Client,
+) -> Result<()> {
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut generic_wtq = WhenToQuit::Count { count: 100 };
+
+    let mut c = 1;
+    loop {
+        // Pick a DS at random
+        let stopped_ds = rng.gen_range(0..3);
+        dsc_client.dsc_stop(stopped_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(stopped_ds).await.unwrap();
+            let state = res.into_inner();
+            println!("after stop state got back: {:?}", state);
+            if state == DownstairsState::Exit {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        generic_workload(guest, &mut generic_wtq, ri).await?;
+
+        let res = dsc_client.dsc_start(stopped_ds).await;
+        println!("Replay: started 0, returned:{:?}", res);
+
+        // Wait for all IO to finish before we continue
+        loop {
+            let wc = guest.show_work().await?;
+            println!(
+                "CLIENT: Up:{} ds:{} act:{}",
+                wc.up_count, wc.ds_count, wc.active_count
+            );
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+                println!("Replay: All jobs finished, all DS active.");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        c += 1;
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(guest, ri, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    println!("Test replay has completed");
+    Ok(())
+}
+
+// Test the replacement of a downstairs.
+// Send a little IO, send in a request to replace a downstairs, then send a
+// bunch more IO.  Wait for all IO to finish (on all three downstairs) before
+// we continue.
+async fn replace_workload(
+    guest: &Arc<Guest>,
+    wtq: &mut WhenToQuit,
+    ri: &mut RegionInfo,
+    full_targets: Vec<SocketAddr>,
+    work: usize,
+) -> Result<()> {
+    assert!(full_targets.len() == 4);
+
+    let mut preload_wtq = WhenToQuit::Count { count: 100 };
+    let mut replace_wtq = WhenToQuit::Count { count: work };
+
+    let mut c = 1;
+    let mut old_ds = 0;
+    let mut new_ds = 3;
+    loop {
+        println!("[{c}] Replace loop starts");
+        generic_workload(guest, &mut preload_wtq, ri).await?;
+
+        println!(
+            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+            full_targets[old_ds], full_targets[new_ds],
+        );
+        let res = guest
+            .replace_downstairs(
+                Uuid::new_v4(),
+                full_targets[old_ds],
+                full_targets[new_ds],
+            )
+            .await;
+
+        match res {
+            Ok(ReplaceResult::Started) => {}
+            x => {
+                bail!("[{c}] Failed replace: {:?}", x);
+            }
+        }
+        old_ds = (old_ds + 1) % 4;
+        new_ds = (new_ds + 1) % 4;
+
+        generic_workload(guest, &mut replace_wtq, ri).await?;
+
+        // Wait for all IO to settle down before we continue
+        loop {
+            let wc = guest.show_work().await?;
+            println!(
+                "[{c}] Replace: Up:{} ds:{} act:{}",
+                wc.up_count, wc.ds_count, wc.active_count
+            );
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+                println!("[{c}] Replace: All jobs finished, all DS active.");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        c += 1;
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(guest, ri, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    println!("Test replace has completed");
+    Ok(())
+}
 /*
  * Do a few writes to random offsets then exit as soon as they finish.
  * We are trying to leave extents "dirty" so we want to exit before the

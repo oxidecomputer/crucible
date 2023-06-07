@@ -160,6 +160,14 @@ enum CliCommand {
         #[clap(long, short, default_value = "1", action)]
         len: usize,
     },
+    Replace {
+        /// Replace a downstairs old (current) SocketAddr.
+        #[clap(long, short, action)]
+        old: SocketAddr,
+        /// Replace a downstairs new SocketAddr.
+        #[clap(long, short, action)]
+        new: SocketAddr,
+    },
     /// Issue a random read
     Rr,
     /// Issue a random write
@@ -517,6 +525,9 @@ async fn cmd_to_msg(
         CliCommand::Read { offset, len } => {
             fw.send(CliMessage::Read(offset, len)).await?;
         }
+        CliCommand::Replace { old, new } => {
+            fw.send(CliMessage::Replace(old, new)).await?;
+        }
         CliCommand::Rr => {
             fw.send(CliMessage::RandRead).await?;
         }
@@ -563,6 +574,14 @@ async fn cmd_to_msg(
         Some(CliMessage::ReadResponse(offset, resp)) => match resp {
             Ok(data) => {
                 println!("[{}] Data: {:?}", offset, data);
+            }
+            Err(e) => {
+                println!("ERROR: {:?}", e);
+            }
+        },
+        Some(CliMessage::ReplaceResult(resp)) => match resp {
+            Ok(msg) => {
+                println!("Replace returns: {:?}", msg);
             }
             Err(e) => {
                 println!("ERROR: {:?}", e);
@@ -931,6 +950,10 @@ async fn process_cli_command(
                 let res = cli_read(guest, ri, offset, len).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
+        }
+        CliMessage::Replace(old, new) => {
+            let res = guest.replace_downstairs(Uuid::new_v4(), old, new).await;
+            fw.send(CliMessage::ReplaceResult(res)).await
         }
         CliMessage::ShowWork => match guest.show_work().await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,

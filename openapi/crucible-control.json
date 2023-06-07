@@ -179,7 +179,9 @@
           "offline",
           "replay",
           "deactivated",
-          "disabled"
+          "disabled",
+          "replacing",
+          "replaced"
         ]
       },
       "Error": {

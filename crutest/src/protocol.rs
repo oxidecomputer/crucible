@@ -43,6 +43,8 @@ pub enum CliMessage {
     RandRead,
     ReadResponse(usize, Result<Vec<u8>, CrucibleError>),
     RandWrite,
+    Replace(SocketAddr, SocketAddr),
+    ReplaceResult(Result<ReplaceResult, CrucibleError>),
     // Show the work queues
     ShowWork,
     // Run the Verify test.
@@ -258,6 +260,15 @@ mod tests {
     #[test]
     fn rt_read() -> Result<()> {
         let input = CliMessage::Read(32, 22);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_replace() -> Result<()> {
+        let d0: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let d1: SocketAddr = "127.0.0.1:5332".parse().unwrap();
+        let input = CliMessage::Replace(d0, d1);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
