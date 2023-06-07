@@ -2186,6 +2186,7 @@ mod test {
                 Bytes::from(random_buffer.clone()),
             )
             .await?;
+
         // Create a new downstairs, then replace one of our current
         // downstairs with that new one.
         let new_downstairs = test_downstairs_set.new_downstairs().await?;
@@ -2201,22 +2202,41 @@ mod test {
 
         assert_eq!(res, ReplaceResult::Started);
 
-        // Read back what we wrote.  We don't have the visibility into
-        // if the replacement has completed from the volume layer though.
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        {
-            let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
+        // We can use the result from calling replace_downstairs to
+        // intuit status on progress of the replacement.
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            match volume
+                .replace_downstairs(
+                    test_downstairs_set.opts().id,
+                    test_downstairs_set.downstairs1_address().await,
+                    new_downstairs.address().await,
                 )
-                .await?;
-
-            let buffer_vec = buffer.as_vec().await;
-
-            assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+                .await
+                .unwrap()
+            {
+                ReplaceResult::StartedAlready => {
+                    println!("Waiting for replacement to finish");
+                }
+                ReplaceResult::CompletedAlready => {
+                    println!("Downstairs replacement completed");
+                    break;
+                }
+                x => {
+                    panic!("Bad result from replace_downstairs: {:?}", x);
+                }
+            }
         }
+
+        // Read back what we wrote.
+        let buffer = Buffer::new(volume.total_size().await? as usize);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        let buffer_vec = buffer.as_vec().await;
+        assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+
         Ok(())
     }
 
@@ -2358,7 +2378,8 @@ mod test {
     #[tokio::test]
     async fn integration_test_volume_replace_active() -> Result<()> {
         // Attempt to replace a downstairs with one of our other
-        // active downstairs.
+        // active downstairs.  This should return error as its is not
+        // a legal replacement.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
@@ -2381,16 +2402,26 @@ mod test {
         volume.activate().await?;
 
         // Replace a downstairs with another active downstairs.
-        let res = volume
+        // Expect an error back from this
+        volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
                 test_downstairs_set.downstairs1_address().await,
                 test_downstairs_set.downstairs2_address().await,
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(res, ReplaceResult::CompletedAlready);
+        // Replace a downstairs with another active downstairs.
+        // Same test as before, but with different order.
+        volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs2_address().await,
+                test_downstairs_set.downstairs1_address().await,
+            )
+            .await
+            .unwrap_err();
         Ok(())
     }
 
@@ -2447,8 +2478,8 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_guest_replace_downstairs() -> Result<()> {
-        // Test using the guest layer to verify a new region is
-        // what we expect, and a write and read work as expected
+        // Test using the guest layer to verify we can replace
+        // a downstairs
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
@@ -2550,6 +2581,53 @@ mod test {
             write_result.err().unwrap(),
             CrucibleError::ModifyingReadOnlyRegion
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_replace_many_downstairs() -> Result<()> {
+        // Test using the guest layer to verify we can replace one
+        // downstairs, but not another while the replace is active.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+        let log = csl();
+        let _jh = up_main(opts, 1, None, gc, None, Some(log.clone())).await?;
+
+        guest.activate().await?;
+
+        // Create new downstairs
+        let new_downstairs = tds.new_downstairs().await?;
+        let another_new_downstairs = tds.new_downstairs().await?;
+
+        // Replace a downstairs.
+        let res = guest
+            .replace_downstairs(
+                tds.opts().id,
+                tds.downstairs1_address().await,
+                new_downstairs.address().await,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res, ReplaceResult::Started);
+
+        // Replace a second downstairs before our first has finished.
+        // This should return error.
+        guest
+            .replace_downstairs(
+                tds.opts().id,
+                tds.downstairs2_address().await,
+                another_new_downstairs.address().await,
+            )
+            .await
+            .unwrap_err();
 
         Ok(())
     }

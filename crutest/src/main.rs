@@ -597,7 +597,11 @@ async fn main() -> Result<()> {
 
     // If we are running the replace workload, we need to know the
     // current list of targets the upstairs will be started with.
-    let full_target = if let Workload::Replace { replacement, work: _ } = opt.workload {
+    let full_target = if let Workload::Replace {
+        replacement,
+        work: _,
+    } = opt.workload
+    {
         let mut full_target = opt.target.clone();
         full_target.push(replacement);
         Some(full_target)
@@ -975,7 +979,10 @@ async fn main() -> Result<()> {
             replay_workload(&guest, &mut wtq, &mut region_info, dsc_client)
                 .await?;
         }
-        Workload::Replace { replacement: _, work } => {
+        Workload::Replace {
+            replacement: _,
+            work,
+        } => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
                 if opt.continuous {
@@ -989,8 +996,14 @@ async fn main() -> Result<()> {
 
             // This should already be setup for us.
             let full_target = full_target.unwrap();
-            replace_workload(&guest, &mut wtq, &mut region_info, full_target, work)
-                .await?;
+            replace_workload(
+                &guest,
+                &mut wtq,
+                &mut region_info,
+                full_target,
+                work,
+            )
+            .await?;
         }
         Workload::Span => {
             println!("Span test");

@@ -7411,61 +7411,107 @@ impl Upstairs {
         let up_state = active.up_state;
         let mut ds = self.downstairs.lock().await;
 
-        // ZZZ
-        // Block a replacement if any (other) downstairs are in:
-        // Replacing
-        // OnlineRepairReady
-        // OnlineRepair
-        // Faulted
-        //
-        // We have to check all targets first to be sure we are not replacing
-        // an existing downstairs.
+        // We check all targets first to not only find our current target,
+        // but to be sure our new target is not an already active target
+        // for a different downstairs.
+        let mut new_client_id: Option<usize> = None;
+        let mut old_client_id: Option<usize> = None;
         for (client_id, ds_target) in ds.ds_target.iter_mut().enumerate() {
             if *ds_target == new {
-                warn!(self.log, "{id} found existing: {new} at {client_id}");
-                // We don't really know if the "old" matches what was old,
-                // as that info is gone to us now, so assume it was true.
-                match ds.ds_state[client_id] {
-                    DsState::Replacing
-                    | DsState::Replaced
-                    | DsState::LiveRepairReady
-                    | DsState::LiveRepair => {
-                        // These states indicate a replacement is in progress.
-                        return Ok(ReplaceResult::StartedAlready);
-                    }
-                    _ => {
-                        // Any other state, we assume it is done.
-                        return Ok(ReplaceResult::CompletedAlready);
-                    }
+                new_client_id = Some(client_id);
+                info!(self.log, "{id} found new target: {new} at {client_id}");
+            }
+            if *ds_target == old {
+                old_client_id = Some(client_id);
+                info!(self.log, "{id} found old target: {old} at {client_id}");
+            }
+        }
+
+        if new_client_id.is_some() {
+            // Our new downstairs already exists.
+            if old_client_id.is_some() {
+                // New target is present, but old is present too, so this is not
+                // a valid replacement request.
+                crucible_bail!(
+                    ReplaceRequestInvalid,
+                    "Both old {} and {} targets are in use",
+                    old,
+                    new,
+                );
+            }
+
+            // We don't really know if the "old" matches what was old,
+            // as that info is gone to us now, so assume it was true.
+            match ds.ds_state[new_client_id.unwrap()] {
+                DsState::Replacing
+                | DsState::Replaced
+                | DsState::LiveRepairReady
+                | DsState::LiveRepair => {
+                    // These states indicate a replacement is in progress.
+                    return Ok(ReplaceResult::StartedAlready);
+                }
+                _ => {
+                    // Any other state, we assume it is done.
+                    return Ok(ReplaceResult::CompletedAlready);
                 }
             }
         }
 
-        // Now that we have verified our new target does not exist anywhere
-        // else, we can search for the old.
-        for (client_id, ds_target) in ds.ds_target.iter_mut().enumerate() {
-            if *ds_target == old {
-                info!(self.log, "{id} replacing old: {old} at {client_id}");
-                *ds_target = new;
-                // If downstairs_errors, clear them.
-                // clear region_metadata?  Yes, why not?  This makes the
-                // code on the add side easier?  Is there anything that
-                // would prevent it?
-                if ds.ds_set_faulted(client_id as u8) {
-                    let _ = ds_done_tx.send(1).await;
+        // We put the check for the old downstairs after checking for the
+        // new because we want to be able to check if a replacement has
+        // already happened and return status for that first.
+        if old_client_id.is_none() {
+            warn!(self.log, "{id} downstairs {old} not found");
+            return Ok(ReplaceResult::Missing);
+        }
+        let old_client_id: usize = old_client_id.unwrap();
+
+        // Check for and Block a replacement if any (other) downstairs are
+        // in any of these states as we don't want to take more than one
+        // downstairs offline at the same time.
+        for client_id in 0..3 {
+            if client_id == old_client_id {
+                continue;
+            }
+            match ds.ds_state[client_id] {
+                DsState::Replacing
+                | DsState::Replaced
+                | DsState::LiveRepairReady
+                | DsState::LiveRepair => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Replace {old} failed, downstairs {client_id} is {:?}",
+                        ds.ds_state[client_id]
+                    );
                 }
-                self.ds_transition_with_lock(
-                    &mut ds,
-                    up_state,
-                    client_id as u8,
-                    DsState::Replacing,
-                );
-                ds.replaced[client_id] += 1;
-                return Ok(ReplaceResult::Started);
+                _ => {}
             }
         }
-        warn!(self.log, "{id} downstairs {old} not found");
-        Ok(ReplaceResult::Missing)
+
+        // Now we have found our old downstairs, verified the new is not in use
+        // elsewhere, verified no other downstairs are in a bad state, we can
+        // move forward with the replacement.
+
+        info!(self.log, "{id} replacing old: {old} at {old_client_id}");
+        ds.ds_target[old_client_id] = new;
+
+        // If downstairs_errors, clear them.
+        // clear region_metadata?  Yes, why not?  This makes the
+        // code on the add side easier?  Is there anything that
+        // would prevent it?
+        if ds.ds_set_faulted(old_client_id as u8) {
+            let _ = ds_done_tx.send(1).await;
+        }
+        ds.region_metadata.remove(&(old_client_id as u8));
+        self.ds_transition_with_lock(
+            &mut ds,
+            up_state,
+            old_client_id as u8,
+            DsState::Replacing,
+        );
+        ds.replaced[old_client_id] += 1;
+
+        Ok(ReplaceResult::Started)
     }
 }
 
@@ -9334,8 +9380,10 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
+        println!("Send replace message somewhere");
         self.send(sw).await.wait().await?;
 
+        println!("wait for replace message somewhere");
         let result = data.lock().await;
         Ok(*result)
     }
