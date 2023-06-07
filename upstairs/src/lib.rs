@@ -9762,18 +9762,16 @@ async fn process_new_io(
             old,
             new,
             result,
-        } => {
-            match up.replace_downstairs(id, old, new, &ds_done_tx).await {
-                Ok(v) => {
-                    *result.lock().await = v;
-                    req.send_ok().await;
-                }
-
-                Err(e) => {
-                    req.send_err(e).await;
-                }
+        } => match up.replace_downstairs(id, old, new, &ds_done_tx).await {
+            Ok(v) => {
+                *result.lock().await = v;
+                req.send_ok().await;
             }
-        }
+
+            Err(e) => {
+                req.send_err(e).await;
+            }
+        },
         // Query ops
         BlockOp::QueryBlockSize { data } => {
             let size = match up.ddef.lock().await.get_def() {
