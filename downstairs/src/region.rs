@@ -1,6 +1,7 @@
 // Copyright 2023 Oxide Computer Company
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
 use std::io::{BufReader, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
@@ -473,7 +474,55 @@ pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
 
 /// Always open sqlite with journaling, and synchronous.
 /// Note: these pragma_updates are not durable
-fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
+fn open_sqlite_connection<P: AsRef<Path>>(
+    path: &P,
+    read_only: bool,
+) -> Result<Connection> {
+    // If we're opening a read-only extent, we need to
+    // Per http://www.sqlite.org/draft/wal.html#readonly , opening a DB on a
+    // read-only filesystem only works under one of three conditions:
+    // - The -shm and -wal files already exists and are readable
+    // - There is write permission on the directory containing the database so
+    //   that the -shm and -wal files can be created.
+    // - The database connection is opened using the immutable query parameter.
+    //
+    // When we use the unix-excl VFS, there are no -shm files, so condition one
+    // will never be met. Condition two will never be met either if the FS is
+    // read-only. Frankly, I don't understand why condition two is enforced
+    // for the unix-excl mode, since it doesn't use shm files, and uses an OS
+    // file lock instead (not a write operation). But that's the reality we live
+    // in right now.
+    //
+    // Anyways, that leaves condition three, setting the immutable parameter.
+    //
+    // Per http://www.sqlite.org/draft/uri.html#uriimmutable,
+    //
+    // > The immutable query parameter is a boolean that signals to SQLite that
+    // > the underlying database file is held on read-only media and cannot be
+    // > modified, even by another process with elevated privileges. SQLite
+    // > always opens immutable database files read-only and it skips all file
+    // > locking and change detection on immutable database files. If this query
+    // > parameter (or the SQLITE_IOCAP_IMMUTABLE bit in xDeviceCharacteristics)
+    // > asserts that a database file is immutable and that file changes anyhow,
+    // > then SQLite might return incorrect query results and/or SQLITE_CORRUPT
+    // > errors.
+    //
+    // Something not great here is that it *skips all file locking*. So if we
+    // were to open an extent in immutable mode on a RW filesystem, another
+    // instance of crucible could then open the extent in RW mode. This would
+    // not result in data corruption, but could result in the read-only instance
+    // getting an incorrect view of the data as the RW-instance changes things
+    // out from under it. This should never happen! But maybe we should build
+    // in additional region-level locking to make sure this never happens. TODO
+    let path = if read_only {
+        let mut path_str = OsString::from("file:");
+        path_str.push(path.as_ref().as_os_str());
+        path_str.push("?immutable=1");
+        PathBuf::from(path_str)
+    } else {
+        path.as_ref().to_owned()
+    };
+
     // By default, sqlite uses these shm files for synchronization to support DB
     // access from multiple processes. We don't need that at all in crucible; we
     // are only going to access the DB from the single process. So we change it
@@ -485,11 +534,9 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
     // `locking_mode` pragma to EXCLUSIVE.
     //
     // See https://www.sqlite.org/vfs.html#standard_unix_vfses for more info.
-    let metadb: Connection = Connection::open_with_flags_and_vfs(
-        path,
-        OpenFlags::default(),
-        "unix-excl",
-    )?;
+    let flags = OpenFlags::default();
+    let metadb =
+        Connection::open_with_flags_and_vfs(&path, flags, "unix-excl")?;
 
     assert!(metadb.is_autocommit());
     metadb.pragma_update(None, "journal_mode", "WAL")?;
@@ -609,7 +656,7 @@ impl Extent {
          */
         path.set_extension("db");
         let metadb =
-            match open_sqlite_connection(&path) {
+            match open_sqlite_connection(&path, read_only) {
                 Err(e) => {
                     error!(
                     log,
@@ -712,12 +759,12 @@ impl Extent {
         let metadb = if Path::new(&seed).exists() {
             std::fs::copy(&seed, &path)?;
 
-            open_sqlite_connection(&path)?
+            open_sqlite_connection(&path, false)?
         } else {
             /*
              * Create the metadata db
              */
-            let metadb = open_sqlite_connection(&path)?;
+            let metadb = open_sqlite_connection(&path, false)?;
 
             /*
              * Create tables and insert base data
@@ -794,7 +841,7 @@ impl Extent {
             // Save it as DB seed
             std::fs::copy(&path, &seed)?;
 
-            open_sqlite_connection(&path)?
+            open_sqlite_connection(&path, false)?
         };
 
         /*
