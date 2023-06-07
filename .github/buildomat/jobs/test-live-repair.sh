@@ -40,8 +40,16 @@ echo "BINDIR is $BINDIR"
 echo "bindir contains:"
 ls -ltr "$BINDIR" || true
 
+banner StartDSC
+$input/bins/dsc start --create --cleanup > /tmp/dsc.log 2>&1 &
+dsc_pid=$?
+
 banner LR
-echo "This test is skipped till Alan fixes it"
-# ptime -m bash "$input/scripts/test_live_repair.sh"
+ptime -m "$input"/bin/crutest replay -t 127.0.0.1:8810 \
+ -t 127.0.0.1:8820 -t 127.0.0.1:8830 -g 1 -c 40 -q | tee /tmp/crutest-replay.log
+
+banner StopDSC
+$input/bins/dsc cmd shutdown
+wait "$dsc_pid"
 
 # Save the output files?
