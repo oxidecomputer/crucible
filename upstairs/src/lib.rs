@@ -9763,8 +9763,6 @@ async fn process_new_io(
             new,
             result,
         } => {
-            info!(up.log, "Request to replace downstairs {old} with {new}");
-
             match up.replace_downstairs(id, old, new, &ds_done_tx).await {
                 Ok(v) => {
                     *result.lock().await = v;
