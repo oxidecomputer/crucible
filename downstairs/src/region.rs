@@ -755,8 +755,11 @@ impl Extent {
             // until we call flush and remove context rows where the integrity
             // hash does not match what was actually flushed to disk.
 
-            // in WITHOUT ROWID mode, SQLite arranges the tables on-disk ordered by the
-            // primary key. since we're always doing operations on contiguous ranges of blocks, this is great for us. The only catch is that you can actually see worse performance with large rows (not a problem for us).
+            // in WITHOUT ROWID mode, SQLite arranges the tables on-disk ordered
+            // by the primary key. since we're always doing operations on
+            // contiguous ranges of blocks, this is great for us. The only catch
+            // is that you can actually see worse performance with large rows
+            // (not a problem for us).
             //
             // From https://www.sqlite.org/withoutrowid.html:
             // > WITHOUT ROWID tables work best when individual rows are not too
@@ -766,14 +769,14 @@ impl Extent {
             // > not contain more than about 50 bytes each for a 1KiB page size
             // > or about 200 bytes each for 4KiB page size.
             //
-            // The default SQLite page size is 4KiB, per https://sqlite.org/pgszchng2016.html
+            // The default SQLite page size is 4KiB, per
+            // https://sqlite.org/pgszchng2016.html
             //
             // The primary key is also a uniqueness constraint. Because the
             // on_disk_hash is a hash of the data AFTER encryption, we only need
             // (block, on_disk_hash). A duplicate write with a different
             // encryption context necessarily results in a different on disk
-            // hash. Likewise for a write with a different nonce, or a different
-            // nonce.
+            // hash.
             metadb.execute(
                 "CREATE TABLE block_context (
                     block INTEGER,
