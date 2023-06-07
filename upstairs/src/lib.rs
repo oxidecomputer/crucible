@@ -7491,14 +7491,9 @@ impl Upstairs {
         // Now we have found our old downstairs, verified the new is not in use
         // elsewhere, verified no other downstairs are in a bad state, we can
         // move forward with the replacement.
-
         info!(self.log, "{id} replacing old: {old} at {old_client_id}");
         ds.ds_target[old_client_id] = new;
 
-        // If downstairs_errors, clear them.
-        // clear region_metadata?  Yes, why not?  This makes the
-        // code on the add side easier?  Is there anything that
-        // would prevent it?
         if ds.ds_set_faulted(old_client_id as u8) {
             let _ = ds_done_tx.send(1).await;
         }
