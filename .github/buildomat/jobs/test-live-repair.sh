@@ -41,12 +41,14 @@ echo "bindir contains:"
 ls -ltr "$BINDIR" || true
 
 banner StartDSC
-$input/bins/dsc start --create --cleanup > /tmp/dsc.log 2>&1 &
+$BINDIR/dsc start --downstairs-bin "$BINDIR" \
+  --create --cleanup > /tmp/dsc.log 2>&1 &
 dsc_pid=$?
 
 banner LR
-ptime -m "$input"/bin/crutest replay -t 127.0.0.1:8810 \
- -t 127.0.0.1:8820 -t 127.0.0.1:8830 -g 1 -c 40 -q | tee /tmp/crutest-replay.log
+ptime -m "$BINDIR"/crutest replay \
+  -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 \
+  -g 1 -c 40 -q | tee /tmp/crutest-replay.log
 
 banner StopDSC
 $input/bins/dsc cmd shutdown
