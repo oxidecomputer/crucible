@@ -46,23 +46,24 @@ $BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup
 
 banner StartDS
 $BINDIR/dsc start --ds-bin "$BINDIR"/crucible-downstairs --create --cleanup >> /tmp/dsc.log 2>&1 &
-dsc_pid=$?
 
 # This gives dsc time to fail, as it is known to happen.  If we don't check,
 # then the later test will just hang forever waiting for downstairs that
 # will never show up.
 sleep 5
-echo After 5 seconds, dsc_pid is $dsc_pid
+dsc_pid=$(pgrep dsc);
 
 if [[ "$dsc_pid" -eq 0 ]]; then
     echo "dsc_pid is invalid, exit"
+    cat /tmp/dsc.log || true
     exit 1
 fi
 
-if ps -p $dsc_pid; then
+if ps -p "$dsc_pid"; then
     echo "Found dsc running, continue tests"
 else
     echo "dsc failed"
+    cat /tmp/dsc.log || true
     exit 1
 fi
 
