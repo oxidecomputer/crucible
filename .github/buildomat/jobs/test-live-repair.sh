@@ -42,7 +42,7 @@ ls -ltr "$BINDIR" || true
 
 banner CreateDS
 echo $BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup
-$BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup > /tmp/dsc.log 2>&1
+$BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup
 
 banner StartDS
 $BINDIR/dsc start --ds-bin "$BINDIR"/crucible-downstairs --create --cleanup >> /tmp/dsc.log 2>&1 &
@@ -52,7 +52,12 @@ dsc_pid=$?
 # then the later test will just hang forever waiting for downstairs that
 # will never show up.
 sleep 5
-echo dsc_pid is $dsc_pid
+echo After 5 seconds, dsc_pid is $dsc_pid
+
+if [[ "$dsc_pid" -eq 0 ]]; then
+    echo "dsc_pid is invalid, exit"
+    exit 1
+fi
 
 if ps -p $dsc_pid; then
     echo "Found dsc running, continue tests"
