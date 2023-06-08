@@ -1574,7 +1574,7 @@ impl Region {
          * We are expecting to find a region config file and extent files.
          * If we do not, then report error and exit.
          */
-        let def = match read_json(&cp) {
+        let def: crucible_common::RegionDefinition = match read_json(&cp) {
             Ok(def) => def,
             Err(e) => bail!("Error {:?} opening region config {:?}", e, cp),
         };
@@ -1582,6 +1582,31 @@ impl Region {
         if verbose {
             info!(log, "Opened existing region file {:?}", cp);
         }
+
+        if def.database_read_version() != crucible_common::DATABASE_READ_VERSION
+        {
+            bail!(
+                "Database read version mismatch, expected {}, got {}",
+                crucible_common::DATABASE_READ_VERSION,
+                def.database_read_version(),
+            );
+        }
+        info!(log, "Database read version {}", def.database_read_version());
+
+        if def.database_write_version()
+            != crucible_common::DATABASE_WRITE_VERSION
+        {
+            bail!(
+                "Database write version mismatch, expected {}, got {}",
+                crucible_common::DATABASE_WRITE_VERSION,
+                def.database_write_version(),
+            );
+        }
+        info!(
+            log,
+            "Database write version {}",
+            def.database_write_version()
+        );
 
         /*
          * Open every extent that presently exists.
@@ -2565,6 +2590,108 @@ mod test {
             .set_extent_size(Block::new(10, block_size.trailing_zeros()));
         region_options.set_uuid(test_uuid());
         region_options
+    }
+
+    #[tokio::test]
+    async fn region_create_drop_open() -> Result<()> {
+        // Create a region, make three extents.
+        // Drop the region, then open it.
+        let dir = tempdir()?;
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).await?;
+        region.extend(3).await?;
+
+        drop(region);
+
+        let _region =
+            Region::open(&dir, new_region_options(), true, false, &log).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn region_bad_database_read_version_low() -> Result<()> {
+        // Create a region where the read database version is down rev.
+        let dir = tempdir()?;
+        let cp = config_path(dir.as_ref());
+        assert!(!Path::new(&cp).exists());
+        mkdir_for_file(&cp)?;
+
+        let def = RegionDefinition::test_default(0, DATABASE_WRITE_VERSION);
+        write_json(&cp, &def, false)?;
+
+        // Verify that the open returns an error
+        Region::open(&dir, new_region_options(), true, false, &csl())
+            .await
+            .unwrap_err();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn region_bad_database_write_version_low() -> Result<()> {
+        // Create a region where the write database version is downrev.
+        let dir = tempdir()?;
+        let cp = config_path(dir.as_ref());
+        assert!(!Path::new(&cp).exists());
+
+        mkdir_for_file(&cp)?;
+
+        let def = RegionDefinition::test_default(DATABASE_READ_VERSION, 0);
+        write_json(&cp, &def, false)?;
+
+        // Verify that the open returns an error
+        Region::open(&dir, new_region_options(), true, false, &csl())
+            .await
+            .unwrap_err();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn region_bad_database_read_version_high() -> Result<()> {
+        // Create a region where the read database version is too high.
+        let dir = tempdir()?;
+        let cp = config_path(dir.as_ref());
+        assert!(!Path::new(&cp).exists());
+        mkdir_for_file(&cp)?;
+
+        let def = RegionDefinition::test_default(
+            DATABASE_READ_VERSION + 1,
+            DATABASE_WRITE_VERSION,
+        );
+        write_json(&cp, &def, false)?;
+
+        // Verify that the open returns an error
+        Region::open(&dir, new_region_options(), true, false, &csl())
+            .await
+            .unwrap_err();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn region_bad_database_write_version_high() -> Result<()> {
+        // Create a region where the write database version is too high.
+        let dir = tempdir()?;
+        let cp = config_path(dir.as_ref());
+        assert!(!Path::new(&cp).exists());
+
+        mkdir_for_file(&cp)?;
+
+        let def = RegionDefinition::test_default(
+            DATABASE_READ_VERSION,
+            DATABASE_WRITE_VERSION + 1,
+        );
+        write_json(&cp, &def, false)?;
+
+        // Verify that the open returns an error
+        Region::open(&dir, new_region_options(), true, false, &csl())
+            .await
+            .unwrap_err();
+
+        Ok(())
     }
 
     #[tokio::test]

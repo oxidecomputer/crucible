@@ -36,6 +36,20 @@ pub const MIN_BLOCK_SIZE: usize = (1 << MIN_SHIFT) as usize;
 pub const MAX_BLOCK_SIZE: usize = (1 << MAX_SHIFT) as usize;
 pub const MAX_EXTENT_FILE_SIZE: u64 = (1 << 29) as u64; // 512 MiB
 
+/**
+ * Crucible Downstairs database format version.
+ * This should be updated whenever changes are made to the extent metadata
+ * database format.
+ *
+ * Read Version history
+ * 1: Initial version
+ *
+ * Write Version history
+ * 1: Initial version
+ */
+pub const DATABASE_READ_VERSION: usize = 1;
+pub const DATABASE_WRITE_VERSION: usize = 1;
+
 impl Block {
     pub fn new(value: u64, shift: u32) -> Block {
         // are you sure you need blocks that small?
@@ -130,6 +144,16 @@ pub struct RegionDefinition {
      * region data will be encrypted
      */
     encrypted: bool,
+
+    /**
+     * The database version format for reading an extent database file.
+     */
+    database_read_version: usize,
+
+    /**
+     * The database version format for writing an extent database file.
+     */
+    database_write_version: usize,
 }
 
 impl RegionDefinition {
@@ -141,7 +165,17 @@ impl RegionDefinition {
             extent_count: 0,
             uuid: opts.uuid,
             encrypted: opts.encrypted,
+            database_read_version: DATABASE_READ_VERSION,
+            database_write_version: DATABASE_WRITE_VERSION,
         })
+    }
+
+    pub fn database_read_version(&self) -> usize {
+        self.database_read_version
+    }
+
+    pub fn database_write_version(&self) -> usize {
+        self.database_write_version
     }
 
     pub fn block_size(&self) -> u64 {
@@ -209,14 +243,30 @@ impl RegionDefinition {
  * Default for Upstairs to use before it receives the actual values
  * from the downstairs.  XXX I think I can better do this with an Option.
  */
-impl Default for RegionDefinition {
-    fn default() -> RegionDefinition {
+impl RegionDefinition {
+    pub fn default() -> RegionDefinition {
         RegionDefinition {
             block_size: 0,
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
             encrypted: false,
+            database_read_version: DATABASE_READ_VERSION,
+            database_write_version: DATABASE_WRITE_VERSION,
+        }
+    }
+    pub fn test_default(
+        database_read_version: usize,
+        database_write_version: usize,
+    ) -> RegionDefinition {
+        RegionDefinition {
+            block_size: 0,
+            extent_size: Block::new(0, 9),
+            extent_count: 0,
+            uuid: Uuid::nil(),
+            encrypted: false,
+            database_read_version,
+            database_write_version,
         }
     }
 }
