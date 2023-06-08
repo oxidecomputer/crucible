@@ -70,7 +70,7 @@ fi
 banner LR
 ptime -m "$BINDIR"/crutest replay \
   -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 \
-  -g 1 -c 40 -q | tee /tmp/crutest-replay.log
+  -g 1 -c 60 -q > /tmp/crutest-replay.log 2>&1
 
 banner StopDSC
 $BINDIR/dsc cmd shutdown

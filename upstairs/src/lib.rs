@@ -9576,8 +9576,8 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
                     warn!(
                         up.log,
                         "[up] downstairs {} failed, too many outstanding jobs {}",
-                        work_count,
                         cid,
+                        work_count,
                     );
                     if ds.ds_set_faulted(cid) {
                         notify_guest = true;
