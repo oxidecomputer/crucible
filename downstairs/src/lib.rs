@@ -864,19 +864,16 @@ where
             extent_id,
         } => {
             let msg = {
-                let mut d = ad.lock().await;
+                let d = ad.lock().await;
                 debug!(d.log, "{} Close extent {}", repair_id, extent_id);
-                match d.region.extents.get_mut(*extent_id) {
-                    Some(ext) => {
-                        let (_, _, _) = ext.close().await?;
-                        Message::RepairAckId {
-                            repair_id: *repair_id,
-                        }
-                    }
-                    None => Message::ExtentError {
+                match d.region.close_extent(*extent_id).await {
+                    Ok(_) => Message::RepairAckId {
+                        repair_id: *repair_id,
+                    },
+                    Err(error) => Message::ExtentError {
                         repair_id: *repair_id,
                         extent_id: *extent_id,
-                        error: CrucibleError::InvalidExtent,
+                        error,
                     },
                 }
             };
@@ -892,7 +889,7 @@ where
             dest_clients,
         } => {
             let msg = {
-                let mut d = ad.lock().await;
+                let d = ad.lock().await;
                 debug!(
                     d.log,
                     "{} Repair extent {} source:[{}] {:?} dest:{:?}",
@@ -926,7 +923,7 @@ where
             extent_id,
         } => {
             let msg = {
-                let mut d = ad.lock().await;
+                let d = ad.lock().await;
                 debug!(d.log, "{} Reopen extent {}", repair_id, extent_id);
                 match d.region.reopen_extent(*extent_id).await {
                     Ok(()) => Message::RepairAckId {
@@ -1766,7 +1763,7 @@ pub struct ActiveUpstairs {
  */
 #[derive(Debug)]
 pub struct Downstairs {
-    pub region: Region,
+    pub region: Arc<Region>,
     lossy: bool,        // Test flag, enables pauses and skipped jobs
     read_errors: bool,  // Test flag
     write_errors: bool, // Test flag
@@ -1798,7 +1795,7 @@ impl Downstairs {
             ))),
         };
         Downstairs {
-            region,
+            region: Arc::new(region),
             lossy,
             read_errors,
             write_errors,
@@ -2132,10 +2129,8 @@ impl Downstairs {
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
-                } else if let Some(ext) = self.region.extents.get_mut(*extent) {
-                    ext.close().await
                 } else {
-                    Err(CrucibleError::InvalidExtent)
+                    self.region.close_extent(*extent).await
                 };
                 debug!(
                     self.log,
@@ -2179,17 +2174,10 @@ impl Downstairs {
                         .await
                     {
                         Err(f_res) => Err(f_res),
-                        Ok(_) => {
-                            if let Some(ext) =
-                                self.region.extents.get_mut(*extent)
-                            {
-                                ext.close().await
-                            } else {
-                                Err(CrucibleError::InvalidExtent)
-                            }
-                        }
+                        Ok(_) => self.region.close_extent(*extent).await,
                     }
                 };
+
                 debug!(
                     self.log,
                     "FlushClose:{} extent {} deps:{:?} res:{} f:{} g:{}",
@@ -5975,7 +5963,7 @@ mod test {
 
         let ads = create_test_downstairs(bs, es, ec, &dir).await?;
 
-        let _ = start_downstairs(
+        let _jh = start_downstairs(
             ads,
             "127.0.0.1".parse().unwrap(),
             None,

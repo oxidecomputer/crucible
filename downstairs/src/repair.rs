@@ -77,14 +77,7 @@ pub async fn repair_main(
             .start();
     let local_addr = server.local_addr();
 
-    tokio::spawn(async move {
-        /*
-         * Wait for the server to stop.  Note that there's not any code to
-         * shut down this server, so we should never get past this
-         * point.
-         */
-        server.await
-    });
+    tokio::spawn(server);
 
     Ok(local_addr)
 }
@@ -337,8 +330,7 @@ mod test {
             Region::create(&dir, new_region_options(), csl()).await?;
         region.extend(3).await?;
 
-        let ext_one = &mut region.extents[1];
-        ext_one.close().await?;
+        region.close_extent(1).await.unwrap();
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, 1);

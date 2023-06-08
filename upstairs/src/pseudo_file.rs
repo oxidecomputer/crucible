@@ -264,7 +264,7 @@ impl<T: BlockIO> Seek for CruciblePseudoFile<T> {
     }
 
     fn stream_position(&mut self) -> IOResult<u64> {
-        self.seek(SeekFrom::Current(0))
+        Ok(self.offset)
     }
 }
 

@@ -59,6 +59,11 @@ pub async fn dump_region(
          * directory index and the value is the ExtentMeta for that region.
          */
         for e in &region.extents {
+            let e = e.lock().await;
+            let e = match &*e {
+                region::ExtentState::Opened(extent) => extent,
+                region::ExtentState::Closed => panic!("dump on closed extent!"),
+            };
             let en = e.number();
 
             /*
@@ -90,7 +95,8 @@ pub async fn dump_region(
                     continue;
                 }
             }
-            let inner = e.inner().await;
+
+            let inner = e.inner.lock().await;
 
             /*
              * Create the ExtentMeta struct for this directory's extent

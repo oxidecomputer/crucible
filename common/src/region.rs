@@ -256,6 +256,7 @@ impl Default for RegionDefinition {
         }
     }
 }
+
 impl RegionDefinition {
     pub fn test_default(
         database_read_version: usize,

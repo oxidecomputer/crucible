@@ -8490,6 +8490,7 @@ async fn test_buffer_len_after_clone() {
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
     assert_eq!(data.len(), READ_SIZE);
 
+    #[allow(clippy::redundant_clone)]
     let new_buffer = data.clone();
     assert_eq!(new_buffer.len(), READ_SIZE);
     assert_eq!(data.len(), READ_SIZE);

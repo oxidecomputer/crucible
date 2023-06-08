@@ -373,7 +373,7 @@ pub async fn run_server(
     let local_addr = server.local_addr();
     info!(log, "listen IP: {:?}", local_addr);
 
-    let join_handle = tokio::spawn(async move { server.await });
+    let join_handle = tokio::spawn(server);
 
     Ok((local_addr, join_handle))
 }

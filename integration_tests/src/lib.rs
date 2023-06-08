@@ -2589,7 +2589,6 @@ mod test {
     async fn integration_test_guest_replace_many_downstairs() -> Result<()> {
         // Test using the guest layer to verify we can replace one
         // downstairs, but not another while the replace is active.
-        const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::small(false).await?;
@@ -3232,8 +3231,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_import_from_url_ovmf_bad_digest() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
 
@@ -3387,8 +3384,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_snapshot() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::small(false).await.unwrap();
 
@@ -3704,8 +3699,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_bulk_read() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
@@ -3788,8 +3781,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_bulk_read_max_chunk_size() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::big(false).await.unwrap();
@@ -4104,8 +4095,6 @@ mod test {
     // Test validating a non-block size amount fails
     #[tokio::test]
     async fn test_pantry_validate_fail() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
