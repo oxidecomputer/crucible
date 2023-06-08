@@ -73,7 +73,9 @@ ptime -m "$BINDIR"/crutest replay \
   -g 1 -c 40 -q | tee /tmp/crutest-replay.log
 
 banner StopDSC
-$input/bins/dsc cmd shutdown
+$BINDIR/dsc cmd shutdown
+
+banner WaitStop
 wait "$dsc_pid"
 
 # Save the output files?
