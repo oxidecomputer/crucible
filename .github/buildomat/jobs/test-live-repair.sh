@@ -41,10 +41,21 @@ echo "bindir contains:"
 ls -ltr "$BINDIR" || true
 
 banner StartDSC
+echo $BINDIR/dsc create --downstairs-bin "$BINDIR"/crucible-downstairs --cleanup
+$BINDIR/dsc create --downstairs-bin "$BINDIR"/crucible-downstairs --cleanup
+echo "dsc try 1 done"
+sleep 1
+echo "Try again"
+
 $BINDIR/dsc start --downstairs-bin "$BINDIR"/crucible-downstairs --create --cleanup > /tmp/dsc.log 2>&1 &
 dsc_pid=$?
 
+sleep 5
+ls -l $BINDIR/dsc
+
+
 echo dsc_pid is $dsc_pid
+ls -l /tmp
 cat /tmp/dsc.log
 
 if ps -p $dsc_pid; then
