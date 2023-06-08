@@ -25,7 +25,7 @@ ls -ltr "$input"/bins || true
 echo "input script dir contains:"
 ls -ltr "$input"/scripts || true
 
-banner unpack
+banner Unpack
 mkdir -p /var/tmp/bins
 for t in "$input/bins/"*.gz; do
 	b=$(basename "$t")
@@ -54,7 +54,7 @@ sleep 5
 dsc_pid=$(pgrep dsc);
 
 if [[ "$dsc_pid" -eq 0 ]]; then
-    echo "dsc_pid is invalid, exit"
+    echo "dsc_pid is zero, which is bad, exit"
     cat /tmp/dsc.log || true
     exit 1
 fi
