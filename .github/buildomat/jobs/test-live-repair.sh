@@ -40,26 +40,22 @@ echo "BINDIR is $BINDIR"
 echo "bindir contains:"
 ls -ltr "$BINDIR" || true
 
-banner StartDSC
-echo $BINDIR/dsc create --downstairs-bin "$BINDIR"/crucible-downstairs --cleanup
-$BINDIR/dsc create --downstairs-bin "$BINDIR"/crucible-downstairs --cleanup
-echo "dsc try 1 done"
-sleep 1
-echo "Try again"
+banner CreateDS
+echo $BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup
+$BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup > /tmp/dsc.log 2>&1
 
-$BINDIR/dsc start --downstairs-bin "$BINDIR"/crucible-downstairs --create --cleanup > /tmp/dsc.log 2>&1 &
+banner StartDS
+$BINDIR/dsc start --ds-bin "$BINDIR"/crucible-downstairs --create --cleanup >> /tmp/dsc.log 2>&1 &
 dsc_pid=$?
 
+# This gives dsc time to fail, as it is known to happen.  If we don't check,
+# then the later test will just hang forever waiting for downstairs that
+# will never show up.
 sleep 5
-ls -l $BINDIR/dsc
-
-
 echo dsc_pid is $dsc_pid
-ls -l /tmp
-cat /tmp/dsc.log
 
 if ps -p $dsc_pid; then
-    echo "Found dsc"
+    echo "Found dsc running, continue tests"
 else
     echo "dsc failed"
     exit 1
