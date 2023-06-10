@@ -819,7 +819,7 @@ async fn process_cli_command(
                 .await
             } else {
                 let mut wtq = WhenToQuit::Count { count };
-                match generic_workload(guest, &mut wtq, ri).await {
+                match generic_workload(guest, &mut wtq, ri, false).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("{}", e);
