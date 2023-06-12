@@ -100,6 +100,11 @@ enum Workload {
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
     Replace {
+        /// Before each replacement, do a fill of the region so
+        /// the replace will have to copy the entire region..
+        #[clap(long, action)]
+        fill: bool,
+
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
@@ -602,6 +607,7 @@ async fn main() -> Result<()> {
     // If we are running the replace workload, we need to know the
     // current list of targets the upstairs will be started with.
     let full_target = if let Workload::Replace {
+        fill: _,
         replacement,
         work: _,
     } = opt.workload
@@ -985,6 +991,7 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Workload::Replace {
+            fill,
             replacement: _,
             work,
         } => {
@@ -1007,6 +1014,7 @@ async fn main() -> Result<()> {
                 &mut region_info,
                 full_target,
                 work,
+                fill,
             )
             .await?;
         }
@@ -1438,6 +1446,42 @@ async fn fill_workload(
 }
 
 /*
+ * Do a single random write to every extent, results in every extent being
+ * touched without having to write to every block.
+ */
+async fn fill_sparse_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+) -> Result<()> {
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    // Figure out how many extents we have
+    let extents = ri.total_blocks / (ri.extent_size.value as usize);
+    let extent_size = ri.extent_size.value as usize;
+
+    // Do one write to each extent.
+    for extent in 0..extent_size {
+        let mut block_index: usize = extent * extent_size;
+        let random_offset: usize = rng.gen_range(0..extent_size);
+        block_index += random_offset;
+
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+        ri.write_log.update_wc(block_index);
+
+        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
+        let data = Bytes::from(vec);
+
+        println!("[{extent}/{extents}] Write to block {}", block_index);
+        guest.write(offset, data).await?;
+    }
+
+    guest.flush(None).await?;
+    Ok(())
+}
+
+/*
  * Generic workload.  Do a random R/W/F, but wait for the operation to be
  * ACK'd before sending the next.  Limit the size of the IO to 10 blocks.
  * Read data is verified.
@@ -1699,6 +1743,7 @@ async fn replace_workload(
     ri: &mut RegionInfo,
     full_targets: Vec<SocketAddr>,
     work: usize,
+    fill: bool,
 ) -> Result<()> {
     assert!(full_targets.len() == 4);
 
@@ -1710,6 +1755,9 @@ async fn replace_workload(
     let mut new_ds = 3;
     loop {
         println!("[{c}] Replace loop starts");
+        if fill {
+            fill_sparse_workload(guest, ri).await?;
+        }
         generic_workload(guest, &mut preload_wtq, ri, false).await?;
 
         println!(

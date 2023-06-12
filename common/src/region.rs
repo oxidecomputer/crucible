@@ -241,10 +241,10 @@ impl RegionDefinition {
 
 /**
  * Default for Upstairs to use before it receives the actual values
- * from the downstairs.  XXX I think I can better do this with an Option.
+ * from the downstairs.
  */
-impl RegionDefinition {
-    pub fn default() -> RegionDefinition {
+impl Default for RegionDefinition {
+    fn default() -> RegionDefinition {
         RegionDefinition {
             block_size: 0,
             extent_size: Block::new(0, 9),
@@ -255,6 +255,8 @@ impl RegionDefinition {
             database_write_version: DATABASE_WRITE_VERSION,
         }
     }
+}
+impl RegionDefinition {
     pub fn test_default(
         database_read_version: usize,
         database_write_version: usize,
