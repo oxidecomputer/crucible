@@ -225,7 +225,7 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => panic!("wrong packet"),
+                x => panic!("wrong packet {:?}", x),
             }
 
             let packet = self
@@ -1002,6 +1002,7 @@ pub(crate) mod protocol_test {
         let ds1 = ds1.close();
         let ds1 = ds1.into_connected_downstairs().await;
 
+        info!(harness.log, "now we call negotiate start");
         ds1.negotiate_start().await;
         ds1.negotiate_step_extent_versions_please().await;
 
