@@ -73,7 +73,7 @@ use async_trait::async_trait;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
-const IO_OUTSTANDING_MAX: usize = 3000;
+const IO_OUTSTANDING_MAX: usize = 1000;
 
 // Max number of submitted IOs between the upstairs and the downstairs, above
 // which flow control kicks in.

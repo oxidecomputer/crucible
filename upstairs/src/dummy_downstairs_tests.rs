@@ -763,7 +763,7 @@ pub(crate) mod protocol_test {
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
-            info!(harness.log, "sending read {}", i);
+            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
 
             {
                 let harness = harness.clone();
@@ -849,12 +849,13 @@ pub(crate) mod protocol_test {
                 .await
                 .unwrap();
         }
+        info!(harness.log, "All sending read is over");
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
         // flush_timeout set to five minutes, we shouldn't see anything else
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
-
+)
         // Flush to clean out skipped jobs
         {
             let jh = {
@@ -919,6 +920,7 @@ pub(crate) mod protocol_test {
             // Wait for the flush to come back
             jh.await.unwrap();
         }
+        info!(harness.log, "flush was sent too, and acked");
 
         // Send ds1 responses for the jobs it saw
         for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
@@ -963,6 +965,7 @@ pub(crate) mod protocol_test {
                 }
             }
         }
+        info!(harness.log, "past this point");
 
         // Assert the Upstairs isn't sending ds1 more work, because it is
         // Faulted
@@ -979,6 +982,7 @@ pub(crate) mod protocol_test {
             }
         }
 
+        info!(harness.log, "reconnect ds 1");
         // Reconnect ds1
         drop(ds1_messages);
         jh1.abort();
@@ -1043,6 +1047,7 @@ pub(crate) mod protocol_test {
                 }
             };
 
+            info!(harness.log, "watching extent limit");
             // Extent limit is Some(eid), where eid is the current loop
             // iteration. It marks the extent at and below are clear to receive
             // IO. Issue some single extent reads and writes to make sure that
