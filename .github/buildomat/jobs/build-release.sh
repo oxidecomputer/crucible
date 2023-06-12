@@ -51,6 +51,9 @@ rustc --version
 banner rbuild
 ptime -m cargo build --verbose --release --all-features
 
+banner lrfirst
+ptime -m cargo test test_successful_live_repair --verbose
+
 banner rtest
 ptime -m cargo test --verbose
 

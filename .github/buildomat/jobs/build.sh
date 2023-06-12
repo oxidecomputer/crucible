@@ -36,6 +36,9 @@ ls -l /work/scripts
 echo in_work_bins
 ls -l /work/bins
 
-banner test
+banner testf
+ptime -m cargo test test_successful_live_repair --verbose
+
+banner testA
 ptime -m cargo test --verbose
 
