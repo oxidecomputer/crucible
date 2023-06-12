@@ -156,102 +156,123 @@ pub(crate) mod protocol_test {
         }
 
         pub async fn negotiate_start(&self) {
-            let packet = self
-                .fr
-                .lock()
-                .await
-                .next()
-                .await
-                .transpose()
-                .unwrap()
-                .unwrap();
-            match &packet {
-                Message::HereIAm {
-                    version,
-                    upstairs_id: _,
-                    session_id: _,
-                    gen: _,
-                    read_only: _,
-                    encrypted: _,
-                    alternate_versions: _,
-                } => {
-                    info!(self.inner.log, "negotiate packet {:?}", packet);
+            loop {
+                let packet = self
+                    .fr
+                    .lock()
+                    .await
+                    .next()
+                    .await
+                    .transpose()
+                    .unwrap()
+                    .unwrap();
+                match &packet {
+                    Message::HereIAm {
+                        version,
+                        upstairs_id: _,
+                        session_id: _,
+                        gen: _,
+                        read_only: _,
+                        encrypted: _,
+                        alternate_versions: _,
+                    } => {
+                        info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                    self.fw
-                        .lock()
-                        .await
-                        .send(Message::YesItsMe {
-                            version: *version,
-                            repair_addr: self.inner.repair_addr,
-                        })
-                        .await
-                        .unwrap();
+                        self.fw
+                            .lock()
+                            .await
+                            .send(Message::YesItsMe {
+                                version: *version,
+                                repair_addr: self.inner.repair_addr,
+                            })
+                            .await
+                            .unwrap();
+                        break;
+                    }
+
+                    Message::Ruok => {
+                        // A ping snuck in, ignore it
+                        continue;
+                    }
+                    x => panic!("wrong packet {:?}", x),
                 }
-
-                _ => panic!("wrong packet"),
             }
 
-            let packet = self
-                .fr
-                .lock()
-                .await
-                .next()
-                .await
-                .transpose()
-                .unwrap()
-                .unwrap();
-            match &packet {
-                Message::PromoteToActive {
-                    upstairs_id,
-                    session_id,
-                    gen,
-                } => {
-                    assert!(*gen == 1);
+            loop {
+                let packet = self
+                    .fr
+                    .lock()
+                    .await
+                    .next()
+                    .await
+                    .transpose()
+                    .unwrap()
+                    .unwrap();
+                match &packet {
+                    Message::PromoteToActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    } => {
+                        assert!(*gen == 1);
 
-                    info!(self.inner.log, "negotiate packet {:?}", packet);
+                        info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                    // Record the session id the upstairs sent us
-                    *self.upstairs_session_id.lock().await = Some(*session_id);
+                        // Record the session id the upstairs sent us
+                        *self.upstairs_session_id.lock().await =
+                            Some(*session_id);
 
-                    self.fw
-                        .lock()
-                        .await
-                        .send(Message::YouAreNowActive {
-                            upstairs_id: *upstairs_id,
-                            session_id: *session_id,
-                            gen: *gen,
-                        })
-                        .await
-                        .unwrap();
+                        self.fw
+                            .lock()
+                            .await
+                            .send(Message::YouAreNowActive {
+                                upstairs_id: *upstairs_id,
+                                session_id: *session_id,
+                                gen: *gen,
+                            })
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                    Message::Ruok => {
+                        // A ping snuck in, ignore it
+                        continue;
+                    }
+
+                    x => panic!("wrong packet {:?}", x),
                 }
-
-                x => panic!("wrong packet {:?}", x),
             }
 
-            let packet = self
-                .fr
-                .lock()
-                .await
-                .next()
-                .await
-                .transpose()
-                .unwrap()
-                .unwrap();
-            match &packet {
-                Message::RegionInfoPlease => {
-                    info!(self.inner.log, "negotiate packet {:?}", packet);
+            loop {
+                let packet = self
+                    .fr
+                    .lock()
+                    .await
+                    .next()
+                    .await
+                    .transpose()
+                    .unwrap()
+                    .unwrap();
+                match &packet {
+                    Message::RegionInfoPlease => {
+                        info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                    self.fw
-                        .lock()
-                        .await
-                        .send(Message::RegionInfo {
-                            region_def: self.inner.get_region_definition(),
-                        })
-                        .await
-                        .unwrap();
+                        self.fw
+                            .lock()
+                            .await
+                            .send(Message::RegionInfo {
+                                region_def: self.inner.get_region_definition(),
+                            })
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                    Message::Ruok => {
+                        continue;
+                    }
+
+                    x => panic!("wrong packet: {:?}", x),
                 }
-
-                _ => panic!("wrong packet"),
             }
         }
 
