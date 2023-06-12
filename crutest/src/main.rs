@@ -1452,11 +1452,12 @@ async fn fill_sparse_workload(
 
     // Figure out how many extents we have
     let extents = ri.total_blocks / (ri.extent_size.value as usize);
+    let extent_size = ri.extent_size.value as usize;
 
     // Do one write to each extent.
-    for extent in 0..extents {
-        let mut block_index = extent * (ri.extent_size.value as usize);
-        let random_offset = rng.gen_range(0..100);
+    for extent in 0..extent_size {
+        let mut block_index: usize = extent * extent_size;
+        let random_offset: usize = rng.gen_range(0..extent_size);
         block_index += random_offset;
 
         let offset =
