@@ -156,123 +156,102 @@ pub(crate) mod protocol_test {
         }
 
         pub async fn negotiate_start(&self) {
-            loop {
-                let packet = self
-                    .fr
-                    .lock()
-                    .await
-                    .next()
-                    .await
-                    .transpose()
-                    .unwrap()
-                    .unwrap();
-                match &packet {
-                    Message::HereIAm {
-                        version,
-                        upstairs_id: _,
-                        session_id: _,
-                        gen: _,
-                        read_only: _,
-                        encrypted: _,
-                        alternate_versions: _,
-                    } => {
-                        info!(self.inner.log, "negotiate packet {:?}", packet);
+            let packet = self
+                .fr
+                .lock()
+                .await
+                .next()
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap();
+            match &packet {
+                Message::HereIAm {
+                    version,
+                    upstairs_id: _,
+                    session_id: _,
+                    gen: _,
+                    read_only: _,
+                    encrypted: _,
+                    alternate_versions: _,
+                } => {
+                    info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                        self.fw
-                            .lock()
-                            .await
-                            .send(Message::YesItsMe {
-                                version: *version,
-                                repair_addr: self.inner.repair_addr,
-                            })
-                            .await
-                            .unwrap();
-                        break;
-                    }
-
-                    Message::Ruok => {
-                        // A ping snuck in, ignore it
-                        continue;
-                    }
-                    x => panic!("wrong packet {:?}", x),
+                    self.fw
+                        .lock()
+                        .await
+                        .send(Message::YesItsMe {
+                            version: *version,
+                            repair_addr: self.inner.repair_addr,
+                        })
+                        .await
+                        .unwrap();
                 }
+
+                _ => panic!("wrong packet"),
             }
 
-            loop {
-                let packet = self
-                    .fr
-                    .lock()
-                    .await
-                    .next()
-                    .await
-                    .transpose()
-                    .unwrap()
-                    .unwrap();
-                match &packet {
-                    Message::PromoteToActive {
-                        upstairs_id,
-                        session_id,
-                        gen,
-                    } => {
-                        assert!(*gen == 1);
+            let packet = self
+                .fr
+                .lock()
+                .await
+                .next()
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap();
+            match &packet {
+                Message::PromoteToActive {
+                    upstairs_id,
+                    session_id,
+                    gen,
+                } => {
+                    assert!(*gen == 1);
 
-                        info!(self.inner.log, "negotiate packet {:?}", packet);
+                    info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                        // Record the session id the upstairs sent us
-                        *self.upstairs_session_id.lock().await =
-                            Some(*session_id);
+                    // Record the session id the upstairs sent us
+                    *self.upstairs_session_id.lock().await = Some(*session_id);
 
-                        self.fw
-                            .lock()
-                            .await
-                            .send(Message::YouAreNowActive {
-                                upstairs_id: *upstairs_id,
-                                session_id: *session_id,
-                                gen: *gen,
-                            })
-                            .await
-                            .unwrap();
-                        break;
-                    }
-                    Message::Ruok => {
-                        // A ping snuck in, ignore it
-                        continue;
-                    }
-
-                    x => panic!("wrong packet {:?}", x),
+                    self.fw
+                        .lock()
+                        .await
+                        .send(Message::YouAreNowActive {
+                            upstairs_id: *upstairs_id,
+                            session_id: *session_id,
+                            gen: *gen,
+                        })
+                        .await
+                        .unwrap();
                 }
+
+                _ => panic!("wrong packet"),
             }
 
-            loop {
-                let packet = self
-                    .fr
-                    .lock()
-                    .await
-                    .next()
-                    .await
-                    .transpose()
-                    .unwrap()
-                    .unwrap();
-                match &packet {
-                    Message::RegionInfoPlease => {
-                        info!(self.inner.log, "negotiate packet {:?}", packet);
+            let packet = self
+                .fr
+                .lock()
+                .await
+                .next()
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap();
+            match &packet {
+                Message::RegionInfoPlease => {
+                    info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                        self.fw
-                            .lock()
-                            .await
-                            .send(Message::RegionInfo {
-                                region_def: self.inner.get_region_definition(),
-                            })
-                            .await
-                            .unwrap();
-                        break;
-                    }
-                    Message::Ruok => {
-                        continue;
-                    }
-
-                    x => panic!("wrong packet: {:?}", x),
+                    self.fw
+                        .lock()
+                        .await
+                        .send(Message::RegionInfo {
+                            region_def: self.inner.get_region_definition(),
+                        })
+                        .await
+                        .unwrap();
                 }
+
+                _ => panic!("wrong packet"),
             }
         }
 
@@ -784,7 +763,7 @@ pub(crate) mod protocol_test {
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
-            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
+            info!(harness.log, "sending read {}", i);
 
             {
                 let harness = harness.clone();
@@ -811,21 +790,10 @@ pub(crate) mod protocol_test {
             } else {
                 // After flow control kicks in, we shouldn't see any more
                 // messages
-                match ds1_messages.try_recv() {
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {}
-                    x => {
-                        info!(
-                            harness.log,
-                            "Read {i} should return EMPTY, but we got:{:?}", x
-                        );
-
-                        panic!(
-                            "Read {i} should return EMPTY, but we got:{:?}",
-                            x
-                        );
-                    }
-                }
+                assert!(matches!(
+                    ds1_messages.try_recv(),
+                    Err(TryRecvError::Empty)
+                ));
             }
 
             match ds2_messages.recv().await.unwrap() {
@@ -881,7 +849,6 @@ pub(crate) mod protocol_test {
                 .await
                 .unwrap();
         }
-        info!(harness.log, "All sending read is over");
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
         // flush_timeout set to five minutes, we shouldn't see anything else
@@ -952,7 +919,6 @@ pub(crate) mod protocol_test {
             // Wait for the flush to come back
             jh.await.unwrap();
         }
-        info!(harness.log, "flush was sent too, and acked");
 
         // Send ds1 responses for the jobs it saw
         for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
@@ -997,7 +963,6 @@ pub(crate) mod protocol_test {
                 }
             }
         }
-        info!(harness.log, "past this point");
 
         // Assert the Upstairs isn't sending ds1 more work, because it is
         // Faulted
@@ -1014,7 +979,6 @@ pub(crate) mod protocol_test {
             }
         }
 
-        info!(harness.log, "reconnect ds 1");
         // Reconnect ds1
         drop(ds1_messages);
         jh1.abort();
@@ -1023,7 +987,6 @@ pub(crate) mod protocol_test {
         let ds1 = ds1.close();
         let ds1 = ds1.into_connected_downstairs().await;
 
-        info!(harness.log, "now we call negotiate start");
         ds1.negotiate_start().await;
         ds1.negotiate_step_extent_versions_please().await;
 
@@ -1080,7 +1043,6 @@ pub(crate) mod protocol_test {
                 }
             };
 
-            info!(harness.log, "watching extent limit");
             // Extent limit is Some(eid), where eid is the current loop
             // iteration. It marks the extent at and below are clear to receive
             // IO. Issue some single extent reads and writes to make sure that
