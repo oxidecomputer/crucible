@@ -855,7 +855,7 @@ pub(crate) mod protocol_test {
         // flush_timeout set to five minutes, we shouldn't see anything else
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
-)
+
         // Flush to clean out skipped jobs
         {
             let jh = {
