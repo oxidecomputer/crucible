@@ -792,6 +792,7 @@ pub(crate) mod protocol_test {
                 // messages
                 match ds1_messages.try_recv() {
                     Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
                     x => {
                         info!(
                             harness.log,
