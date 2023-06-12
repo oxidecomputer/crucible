@@ -20,8 +20,6 @@ rustc --version
 banner build
 ptime -m cargo build --verbose
 
-ptime -m cargo test test_successful_live_repair --verbose
-
 banner output
 mkdir -p /work/bins
 for t in crucible-downstairs crucible-hammer crutest dsc; do
