@@ -156,48 +156,42 @@ pub(crate) mod protocol_test {
         }
 
         pub async fn negotiate_start(&self) {
-            loop {
-                let packet = self
-                    .fr
-                    .lock()
-                    .await
-                    .next()
-                    .await
-                    .transpose()
-                    .unwrap()
-                    .unwrap();
-                match &packet {
-                    Message::HereIAm {
-                        version,
-                        upstairs_id: _,
-                        session_id: _,
-                        gen: _,
-                        read_only: _,
-                        encrypted: _,
-                        alternate_versions: _,
-                    } => {
-                        info!(self.inner.log, "negotiate packet {:?}", packet);
+            let packet = self
+                .fr
+                .lock()
+                .await
+                .next()
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap();
+            match &packet {
+                Message::HereIAm {
+                    version,
+                    upstairs_id: _,
+                    session_id: _,
+                    gen: _,
+                    read_only: _,
+                    encrypted: _,
+                    alternate_versions: _,
+                } => {
+                    info!(self.inner.log, "negotiate packet {:?}", packet);
 
-                        self.fw
-                            .lock()
-                            .await
-                            .send(Message::YesItsMe {
-                                version: *version,
-                                repair_addr: self.inner.repair_addr,
-                            })
-                            .await
-                            .unwrap();
-                        break;
-                    }
-
-                    Message::Ruok => {
-                        // A ping snuck in, ignore it
-                        continue;
-                    }
-                    x => panic!("wrong packet {:?}", x),
+                    self.fw
+                        .lock()
+                        .await
+                        .send(Message::YesItsMe {
+                            version: *version,
+                            repair_addr: self.inner.repair_addr,
+                        })
+                        .await
+                        .unwrap();
                 }
+                x => panic!("wrong packet {:?}", x),
             }
 
+            // We loop here as a way of ignoring ping (Ruok) packets while
+            // we wait for the PromoteToActive message.
             loop {
                 let packet = self
                     .fr
