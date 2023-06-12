@@ -1,5 +1,43 @@
 # Oxide DTrace Crucible scripts
 
+## downstairs_count.d
+A DTrace script to show IOs coming and going on a downstairs as well as the
+work task geting new work, performing the work and completing the work.  This
+script takes the PID of a downstairs process to track and prints IO counts
+and task work counts at a 4 second interval.
+
+The columns show counts in the last 4 seconds of:
+F>  Flush coming in from the upstairs
+F<  Flush completed message being sent back to the upstairs.
+W>  Write coming in from the upstairs
+W<  Write completed message being sent back to the upstairs.
+R>  Read coming in from the upstairs
+R<  Read completed message being sent back to the upstairs.
+WS  An IO has been submitted to the work task in the downstairs
+WIP An IO is taken off the work queue by the downstairs work task.
+WD  An IO is completed by the downstairs work task.
+
+Here is some sample output:
+```
+alan@atrium:dsdrop$ pfexec dtrace -Z -s ./tools/dtrace/downstairs_count.d 56784
+  F>   F<   W>   W<    R>    R<    WS   WIP    WD
+  47   47  135  135   204   204   386   386   386
+  39   39  130  131   193   193   362   362   363
+  42   41  141  141   176   176   359   359   358
+  40   40  120  120   155   155   315   315   315
+   6    6   11   11    22    22    39    39    39
+   4    4    8    8    10    10    22    22    22
+   4    4   10   10     6     6    20    20    20
+   5    5   10   10    13    12    28    27    27
+  25   25   78   78   118   119   221   222   222
+  31   32  149  148   183   183   363   363   363
+  38   38  121  122   209   209   368   368   369
+  39   39  138  137   160   160   337   337   336
+  29   28  138  139   148   148   315   315   315
+  42   42  149  149   178   178   369   369   369
+  34   34  156  156   172   172   362   362   362
+```
+
 ## perf-upstairs-rw.d
 A DTrace script to track writes and flushes through the upstairs.
 The shows the time in three parts:

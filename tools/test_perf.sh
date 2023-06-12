@@ -161,8 +161,8 @@ fi
 echo "Perf test begins at $(date)" > "$outfile"
 
 #            ES   EC
-perf_round  65536  3200
-perf_round 131072  1600
+perf_round 16384  640
+perf_round 16384 1280
 
 # Print out a nice summary of all the perf results.  This depends
 # on the header and client perf output matching specific strings.
