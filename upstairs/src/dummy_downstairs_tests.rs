@@ -790,10 +790,14 @@ pub(crate) mod protocol_test {
             } else {
                 // After flow control kicks in, we shouldn't see any more
                 // messages
-                assert!(matches!(
-                    ds1_messages.try_recv(),
-                    Err(TryRecvError::Empty)
-                ));
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {},
+                    x => {
+                        info!(harness.log, "Read {i} should return EMPTY, but we got:{:?}", x);
+
+                        panic!("Read {i} should return EMPTY, but we got:{:?}", x);
+                    }
+                }
             }
 
             match ds2_messages.recv().await.unwrap() {
