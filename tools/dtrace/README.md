@@ -1,6 +1,6 @@
 # Oxide DTrace Crucible scripts
 
-## downstairs_copunt.d
+## downstairs_count.d
 A DTrace script to show IOs coming and going on a downstairs as well as the
 work task geting new work, performing the work and completing the work.  This
 script takes the PID of a downstairs process to track and prints IO counts
