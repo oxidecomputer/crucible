@@ -791,11 +791,17 @@ pub(crate) mod protocol_test {
                 // After flow control kicks in, we shouldn't see any more
                 // messages
                 match ds1_messages.try_recv() {
-                    Err(TryRecvError::Empty) => {},
+                    Err(TryRecvError::Empty) => {}
                     x => {
-                        info!(harness.log, "Read {i} should return EMPTY, but we got:{:?}", x);
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
 
-                        panic!("Read {i} should return EMPTY, but we got:{:?}", x);
+                        panic!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
                     }
                 }
             }
