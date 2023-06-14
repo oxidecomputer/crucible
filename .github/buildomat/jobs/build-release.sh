@@ -49,9 +49,12 @@ cargo --version
 rustc --version
 
 banner rbuild
-ptime -m cargo build --verbose --release --all-features
+ptime -m cargo build --verbose --release --all-features > /tmp/buildout.txt
 
 banner LRtest
+ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
+
+banner 2LRtest
 ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
 
 banner rtest
