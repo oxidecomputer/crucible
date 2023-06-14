@@ -17,18 +17,9 @@ set -o xtrace
 cargo --version
 rustc --version
 
-banner alanbuild
-ptime -m cargo build --verbose > /tmp/buildout.txt 2>&1
+banner build
+ptime -m cargo build --verbose
 
-sleep 4
-banner LRtest
-ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
-
-sleep 4
-banner 2LRtest
-ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
-
-sleep 4
 banner output
 
 mkdir -p /work/bins
@@ -48,4 +39,3 @@ ls -l /work/bins
 
 banner test
 ptime -m cargo test --verbose
-

@@ -18,9 +18,6 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
-banner SKIP
-exit 0
-
 banner unpack
 mkdir -p /var/tmp/bins
 for t in "$input/rbins/"*.gz; do

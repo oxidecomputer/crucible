@@ -18,9 +18,6 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
-banner SKIP
-exit 0
-
 pfexec chmod +x "$input"/scripts/* || true
 
 echo "input bins dir contains:"
