@@ -48,15 +48,18 @@ set -o xtrace
 cargo --version
 rustc --version
 
-banner rbuild
-ptime -m cargo build --verbose --release --all-features > /tmp/buildout.txt
+banner alan-rbuild
+ptime -m cargo build --verbose --release --all-features > /tmp/buildout.txt 2>&1
 
+sleep 4
 banner LRtest
 ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
 
+sleep 4
 banner 2LRtest
 ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
 
+sleep 4
 banner rtest
 ptime -m cargo test --verbose
 
