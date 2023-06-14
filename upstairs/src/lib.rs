@@ -9564,40 +9564,72 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
     drop(active);
 
     let mut notify_guest = false;
-    for cid in 0..3 {
+    let mut live_work = vec![None, None, None];
+
+    for cid in 0u8..3 {
         // Only downstairs in these states are checked.
         match ds.ds_state[cid as usize] {
             DsState::Active
             | DsState::LiveRepair
             | DsState::Offline
             | DsState::Replay => {
-                let work_count = ds.total_live_work(cid);
-                if work_count > IO_OUTSTANDING_MAX {
-                    warn!(
-                        up.log,
-                        "[up] downstairs {} failed, too many outstanding jobs {}",
-                        work_count,
-                        cid,
-                    );
-                    if ds.ds_set_faulted(cid) {
-                        notify_guest = true;
-                        info!(
-                            up.log,
-                            "[up] gone_too_long set notify [{}] for fault ",
-                            cid,
-                        );
-                    }
-                    up.ds_transition_with_lock(
-                        &mut ds,
-                        up_state,
-                        cid,
-                        DsState::Faulted,
-                    );
-                }
+                live_work[cid as usize] = Some(ds.total_live_work(cid));
             }
             _ => {}
         }
     }
+
+    'outer: for cid in 0u8..3 {
+        if let Some(cid_live_work) = live_work[cid as usize] {
+            // Compare against other non-None downstairs
+            for other_cid in 0u8..3 {
+                if cid == other_cid {
+                    continue;
+                }
+
+                if let Some(other_cid_live_work) = live_work[other_cid as usize]
+                {
+                    // Compare relative amounts: is this downstairs relatively
+                    // slower than another?
+                    // XXX this amount needs tuning! or this idea needs to be
+                    // scrapped for another, like "this downstairs is X seconds out
+                    // of date".
+                    if cid_live_work
+                        > (other_cid_live_work + IO_OUTSTANDING_MAX)
+                    {
+                        warn!(
+                            up.log,
+                            "[up] downstairs {} failed, too many outstanding jobs {} compared to downstairs {} ({})",
+                            cid,
+                            cid_live_work,
+                            other_cid,
+                            other_cid_live_work,
+                        );
+
+                        if ds.ds_set_faulted(cid) {
+                            notify_guest = true;
+                            info!(
+                                up.log,
+                                "[up] gone_too_long set notify [{}] for fault ",
+                                cid,
+                            );
+                        }
+
+                        up.ds_transition_with_lock(
+                            &mut ds,
+                            up_state,
+                            cid,
+                            DsState::Faulted,
+                        );
+
+                        // Here, do not attempt to compare any more. Break out.
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
     if notify_guest {
         match ds_done_tx.send(0).await {
             Ok(()) => {}
