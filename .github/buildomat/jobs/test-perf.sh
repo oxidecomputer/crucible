@@ -20,6 +20,7 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
+echo "skip" > /tmp/perfout.txt
 banner SKIP
 exit 0
 
