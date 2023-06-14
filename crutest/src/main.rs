@@ -103,7 +103,7 @@ enum Workload {
         /// Before each replacement, do a fill of the region so
         /// the replace will have to copy the entire region..
         #[clap(long, action)]
-        fill: bool,
+        fast_fill: bool,
 
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
@@ -607,7 +607,7 @@ async fn main() -> Result<()> {
     // If we are running the replace workload, we need to know the
     // current list of targets the upstairs will be started with.
     let full_target = if let Workload::Replace {
-        fill: _,
+        fast_fill: _,
         replacement,
         work: _,
     } = opt.workload
@@ -882,6 +882,9 @@ async fn main() -> Result<()> {
             read_loops,
             write_loops,
         } => {
+            // Pathetic.  This tiny wait is just so all my output from the
+            // test will be after all the upstairs messages have finised.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             println!("Perf test");
             let ops = {
                 if opt.count == 0 {
@@ -991,7 +994,7 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Workload::Replace {
-            fill,
+            fast_fill,
             replacement: _,
             work,
         } => {
@@ -1014,7 +1017,7 @@ async fn main() -> Result<()> {
                 &mut region_info,
                 full_target,
                 work,
-                fill,
+                fast_fill,
             )
             .await?;
         }
@@ -1460,7 +1463,7 @@ async fn fill_sparse_workload(
     let extent_size = ri.extent_size.value as usize;
 
     // Do one write to each extent.
-    for extent in 0..extent_size {
+    for extent in 0..extents {
         let mut block_index: usize = extent * extent_size;
         let random_offset: usize = rng.gen_range(0..extent_size);
         block_index += random_offset;
