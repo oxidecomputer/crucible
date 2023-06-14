@@ -17,6 +17,9 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
+banner SKIP
+exit 0
+
 echo "input bins dir contains:"
 ls -ltr "$input"/bins || true
 

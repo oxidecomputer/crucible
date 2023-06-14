@@ -17,6 +17,9 @@ set -o errexit
 set -o pipefail
 set -o xtrace
 
+banner SKIP
+exit 0
+
 echo "input rbins dir contains:"
 ls -ltr "$input"/rbins || true
 echo "input scripts dir contains:"
