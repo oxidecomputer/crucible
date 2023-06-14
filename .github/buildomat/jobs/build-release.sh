@@ -51,6 +51,9 @@ rustc --version
 banner rbuild
 ptime -m cargo build --verbose --release --all-features
 
+banner LRtest
+ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
+
 banner rtest
 ptime -m cargo test --verbose
 

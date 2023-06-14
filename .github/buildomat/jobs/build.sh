@@ -20,7 +20,11 @@ rustc --version
 banner build
 ptime -m cargo build --verbose
 
+banner LRtest
+ptime -m cargo test -p crucible --lib test_successful_live_repair --verbose -- --nocapture
+
 banner output
+
 mkdir -p /work/bins
 for t in crucible-downstairs crucible-hammer crutest dsc; do
 	gzip < "target/debug/$t" > "/work/bins/$t.gz"
