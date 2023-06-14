@@ -21,6 +21,7 @@ set -o pipefail
 set -o xtrace
 
 echo "skip" > /tmp/perfout.txt
+echo "skip" > /tmp/perfout.csv
 banner SKIP
 exit 0
 
