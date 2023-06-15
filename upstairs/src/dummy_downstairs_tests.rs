@@ -759,7 +759,7 @@ pub(crate) mod protocol_test {
     /// letting it reconnect, live repair occurs. Check that each extent is
     /// repaired with the correct source, and that extent limits are honoured if
     /// additional IO comes through.
-    // #[tokio::test]
+    #[tokio::test]
     async fn test_successful_live_repair() {
         let harness = Arc::new(TestHarness::new().await);
 
