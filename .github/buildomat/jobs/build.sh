@@ -21,6 +21,7 @@ banner build
 ptime -m cargo build --verbose
 
 banner output
+
 mkdir -p /work/bins
 for t in crucible-downstairs crucible-hammer crutest dsc; do
 	gzip < "target/debug/$t" > "/work/bins/$t.gz"
@@ -38,4 +39,3 @@ ls -l /work/bins
 
 banner test
 ptime -m cargo test --verbose
-
