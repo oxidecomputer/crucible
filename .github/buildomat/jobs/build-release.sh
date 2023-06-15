@@ -8,6 +8,7 @@
 #:	"/out/*",
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
+#:	"/tmp/core*",
 #: ]
 #:
 #: [[publish]]
@@ -47,6 +48,14 @@ set -o xtrace
 
 cargo --version
 rustc --version
+
+banner cores
+pfexec coreadm -i /tmp/core.%f.%p
+pfexec coreadm -g /tmp/core.%f.%p
+pfecec coreadm -e global
+pfecec coreadm -e log
+pfecec coreadm -e proc-setid
+pfecec coreadm -e global-setid
 
 banner rbuild
 ptime -m cargo build --verbose --release --all-features

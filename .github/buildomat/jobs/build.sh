@@ -7,6 +7,7 @@
 #: output_rules = [
 #:	"/work/bins/*",
 #:	"/work/scripts/*",
+#:	"/tmp/core*",
 #: ]
 #:
 
@@ -16,6 +17,14 @@ set -o xtrace
 
 cargo --version
 rustc --version
+
+banner cores
+pfexec coreadm -i /tmp/core.%f.%p
+pfexec coreadm -g /tmp/core.%f.%p
+coreadm -e global
+coreadm -e log
+coreadm -e proc-setid
+coreadm -e global-setid
 
 banner build
 ptime -m cargo build --verbose

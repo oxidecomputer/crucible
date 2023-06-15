@@ -511,7 +511,7 @@ pub(crate) mod protocol_test {
     /// downstairs responds with a read response for a certain job, then more
     /// work is sent.
     #[tokio::test]
-    async fn _test_flow_control() {
+    async fn test_flow_control() {
         let harness = Arc::new(TestHarness::new().await);
 
         let (_jh1, mut ds1_messages) =
@@ -759,10 +759,8 @@ pub(crate) mod protocol_test {
     /// letting it reconnect, live repair occurs. Check that each extent is
     /// repaired with the correct source, and that extent limits are honoured if
     /// additional IO comes through.
-    /// XXX Turning this test off until we can figure out why it fails, but
-    /// only in buildomat.
     // #[tokio::test]
-    async fn _test_successful_live_repair() {
+    async fn test_successful_live_repair() {
         let harness = Arc::new(TestHarness::new().await);
 
         let (jh1, mut ds1_messages) =
