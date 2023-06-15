@@ -800,7 +800,10 @@ pub(crate) mod protocol_test {
             if i < MAX_ACTIVE_COUNT {
                 // Before flow control kicks in, assert we're seeing the read
                 // requests
-                info!(harness.log, "ZZZ sending read {}/{NUM_JOBS} before fc", i);
+                info!(
+                    harness.log,
+                    "ZZZ sending read {}/{NUM_JOBS} before fc", i
+                );
                 assert!(matches!(
                     ds1_messages.recv().await.unwrap(),
                     Message::ReadRequest { .. },
@@ -808,7 +811,10 @@ pub(crate) mod protocol_test {
             } else {
                 // After flow control kicks in, we shouldn't see any more
                 // messages
-                info!(harness.log, "ZZZ sending read {}/{NUM_JOBS} after fc", i);
+                info!(
+                    harness.log,
+                    "ZZZ sending read {}/{NUM_JOBS} after fc", i
+                );
                 match ds1_messages.try_recv() {
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {}
