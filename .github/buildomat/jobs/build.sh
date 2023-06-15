@@ -21,10 +21,10 @@ rustc --version
 banner cores
 pfexec coreadm -i /tmp/core.%f.%p
 pfexec coreadm -g /tmp/core.%f.%p
-coreadm -e global
-coreadm -e log
-coreadm -e proc-setid
-coreadm -e global-setid
+pfexec coreadm -e global
+pfexec coreadm -e log
+pfexec coreadm -e proc-setid
+pfexec coreadm -e global-setid
 
 banner build
 ptime -m cargo build --verbose

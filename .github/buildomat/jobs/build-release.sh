@@ -52,10 +52,10 @@ rustc --version
 banner cores
 pfexec coreadm -i /tmp/core.%f.%p
 pfexec coreadm -g /tmp/core.%f.%p
-pfecec coreadm -e global
-pfecec coreadm -e log
-pfecec coreadm -e proc-setid
-pfecec coreadm -e global-setid
+pfexec coreadm -e global
+pfexec coreadm -e log
+pfexec coreadm -e proc-setid
+pfexec coreadm -e global-setid
 
 banner rbuild
 ptime -m cargo build --verbose --release --all-features
