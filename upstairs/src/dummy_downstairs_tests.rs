@@ -802,7 +802,7 @@ pub(crate) mod protocol_test {
                 // requests
                 info!(
                     harness.log,
-                    "ZZZ sending read {}/{NUM_JOBS} before fc", i
+                    "ZZZ verify read receive {}/{NUM_JOBS} before fc", i
                 );
                 assert!(matches!(
                     ds1_messages.recv().await.unwrap(),
@@ -813,7 +813,7 @@ pub(crate) mod protocol_test {
                 // messages
                 info!(
                     harness.log,
-                    "ZZZ sending read {}/{NUM_JOBS} after fc", i
+                    "ZZZ checking try_recv {}/{NUM_JOBS} after fc", i
                 );
                 match ds1_messages.try_recv() {
                     Err(TryRecvError::Empty) => {}
@@ -823,6 +823,7 @@ pub(crate) mod protocol_test {
                             harness.log,
                             "Read {i} should return EMPTY, but we got:{:?}", x
                         );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
 
                         panic!(
                             "Read {i} should return EMPTY, but we got:{:?}",
@@ -899,7 +900,7 @@ pub(crate) mod protocol_test {
         info!(harness.log, "ZZZ tslr jobs are sent");
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-        // flush_timeout set to five minutes, we shouldn't see anything else
+        // XXX flush_timeout set to five minutes, we shouldn't see anything else
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
 
