@@ -800,6 +800,7 @@ pub(crate) mod protocol_test {
             if i < MAX_ACTIVE_COUNT {
                 // Before flow control kicks in, assert we're seeing the read
                 // requests
+                info!(harness.log, "ZZZ sending read {}/{NUM_JOBS} before fc", i);
                 assert!(matches!(
                     ds1_messages.recv().await.unwrap(),
                     Message::ReadRequest { .. },
@@ -807,6 +808,7 @@ pub(crate) mod protocol_test {
             } else {
                 // After flow control kicks in, we shouldn't see any more
                 // messages
+                info!(harness.log, "ZZZ sending read {}/{NUM_JOBS} after fc", i);
                 match ds1_messages.try_recv() {
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {}
@@ -824,6 +826,9 @@ pub(crate) mod protocol_test {
                 }
             }
 
+            if i > IO_OUTSTANDING_MAX - 10 {
+                info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} near fc", i);
+            }
             match ds2_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
                     // Record the job ids of the read requests
@@ -837,6 +842,10 @@ pub(crate) mod protocol_test {
                 ds3_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
+
+            if i > IO_OUTSTANDING_MAX - 10 {
+                info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} one", i);
+            }
 
             // Respond with read responses for downstairs 2 and 3
             harness
@@ -876,6 +885,10 @@ pub(crate) mod protocol_test {
                 })
                 .await
                 .unwrap();
+
+            if i > IO_OUTSTANDING_MAX - 10 {
+                info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} endloop", i);
+            }
         }
         info!(harness.log, "ZZZ tslr jobs are sent");
 
