@@ -511,7 +511,7 @@ pub(crate) mod protocol_test {
     /// downstairs responds with a read response for a certain job, then more
     /// work is sent.
     #[tokio::test]
-    async fn test_flow_control() {
+    async fn _test_flow_control() {
         let harness = Arc::new(TestHarness::new().await);
 
         let (_jh1, mut ds1_messages) =
