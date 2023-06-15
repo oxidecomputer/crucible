@@ -397,7 +397,7 @@ pub(crate) mod protocol_test {
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
                 target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
-                flush_timeout: Some(600.0),
+                flush_timeout: Some(4600.0),
 
                 ..Default::default()
             };
