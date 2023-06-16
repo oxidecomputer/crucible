@@ -1,7 +1,7 @@
 // Copyright 2022 Oxide Computer Company
 use anyhow::{bail, Result};
 use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HandlerTaskMode
+    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HandlerTaskMode,
 };
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use oximeter_producer::{Config, LogConfig, Server};
