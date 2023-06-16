@@ -73,11 +73,7 @@ use async_trait::async_trait;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
-const IO_OUTSTANDING_MAX: usize = 1000;
-
-// Max number of submitted IOs between the upstairs and the downstairs, above
-// which flow control kicks in.
-const MAX_ACTIVE_COUNT: usize = 100;
+const IO_OUTSTANDING_MAX: usize = 5000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -574,10 +570,10 @@ async fn process_message(
  * of new work that it needs to do. It will then iterate through those
  * work items and send them over the wire to this tasks waiting downstairs.
  *
- * V1 flow control, if we have more than X (where X = 100 for now, as we
- * don't know the best value yet, XXX) jobs submitted that we don't have
- * ACKs for, then stop sending more work and let the receive side catch up.
- * We return true if we have more work to do, false if we are all caught up.
+ * V2 flow control, if we have more than X (where X = MAX_ACTIVE_COUNT) for
+ * jobs submitted that we don't have ACKs for, then stop sending more work
+ * and let the receive side catch up.  We return true if we have more work
+ * to do, false if we are all caught up.
  */
 #[instrument(skip(fw))]
 async fn io_send<WT>(
@@ -626,10 +622,10 @@ where
         if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
-            u.downstairs
-                .lock()
-                .await
-                .requeue_work(client_id, &new_work[ndx..]);
+            let mut ds = u.downstairs.lock().await;
+            ds.requeue_work(client_id, &new_work[ndx..]);
+            ds.flow_control[client_id as usize] += 1;
+            drop(ds);
             return Ok(true);
         }
 
@@ -1839,7 +1835,8 @@ where
      * a result of a message we sent).  This channel is how this task
      * communicates that there is a message to handle.
      */
-    let (pm_task_tx, mut pm_task_rx) = mpsc::channel::<Message>(100);
+    let (pm_task_tx, mut pm_task_rx) =
+        mpsc::channel::<Message>(MAX_ACTIVE_COUNT + 50);
 
     info!(up.log, "[{}] Starts cmd_loop", up_coms.client_id);
     let pm_task = {
@@ -2887,9 +2884,14 @@ struct Downstairs {
     connected: Vec<usize>,
 
     /**
-     * Count of downstairs replacements XXX Not yet used
+     * Count of downstairs replacements
      */
     replaced: Vec<usize>,
+
+    /**
+     * Count of times a downstairs has had flow control turned on
+     */
+    flow_control: Vec<usize>,
 }
 
 impl Downstairs {
@@ -2924,6 +2926,7 @@ impl Downstairs {
             repair_min_id: None,
             connected: vec![0; 3],
             replaced: vec![0; 3],
+            flow_control: vec![0; 3],
         }
     }
 
@@ -2960,7 +2963,16 @@ impl Downstairs {
      * has no work to do, so return None.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let job = self.ds_active.get_mut(&ds_id).unwrap();
+        let job = match self.ds_active.get_mut(&ds_id) {
+            Some(job) => job,
+            None => {
+                // This job, that we thought was good, is not.  As we don't
+                // keep the lock when gathering job IDs to work on, it is
+                // possible to have a out of date work list.
+                warn!(self.log, "[{client_id}] Job {ds_id} not on active list");
+                return None;
+            }
+        };
 
         // If current state is Skipped, then we have nothing to do here.
         if job.state[&client_id] == IOState::Skipped {
@@ -5137,6 +5149,9 @@ impl Upstairs {
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
         let ds_connected = ds.connected.clone();
         let ds_replaced = ds.replaced.clone();
+        let ds_flow_control = ds.flow_control.clone();
+        let ds_extents_repaired = ds.extents_repaired.clone();
+        let ds_extents_confirmed = ds.extents_confirmed.clone();
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -5150,6 +5165,9 @@ impl Upstairs {
                 ds_live_repair_aborted,
                 ds_connected,
                 ds_replaced,
+                ds_flow_control,
+                ds_extents_repaired,
+                ds_extents_confirmed,
             };
             (msg, arg)
         });
@@ -9436,7 +9454,7 @@ async fn send_work(t: &[Target], val: u64, log: &Logger) {
     for (client_id, d_client) in t.iter().enumerate() {
         let res = d_client.ds_work_tx.try_send(val);
         if let Err(e) = res {
-            warn!(
+            debug!(
                 log,
                 "{:?} Failed to notify client {} of work {}", e, client_id, val,
             );
@@ -9906,6 +9924,9 @@ pub struct Arg {
     ds_live_repair_aborted: Vec<usize>,
     ds_connected: Vec<usize>,
     ds_replaced: Vec<usize>,
+    ds_flow_control: Vec<usize>,
+    ds_extents_repaired: Vec<usize>,
+    ds_extents_confirmed: Vec<usize>,
 }
 
 /**
@@ -9989,7 +10010,7 @@ async fn up_listen(
 
     up.stat_update("start").await;
     let mut flush_check = deadline_secs(flush_timeout);
-    let mut stat_update_interval = deadline_secs(5.0);
+    let mut stat_update_interval = deadline_secs(1.0);
     let mut repair_check_interval = deadline_secs(60.0);
     let mut repair_check = false;
     loop {
@@ -10108,7 +10129,7 @@ async fn up_listen(
             }
             _ = sleep_until(stat_update_interval) => {
                 up.stat_update("loop").await;
-                stat_update_interval = deadline_secs(5.0);
+                stat_update_interval = deadline_secs(1.0);
             }
         }
     }
@@ -10166,7 +10187,7 @@ pub async fn up_main(
      * Use this channel to indicate in the upstairs that all downstairs
      * operations for a specific request have completed.
      */
-    let (ds_done_tx, ds_done_rx) = mpsc::channel(500); // XXX 500?
+    let (ds_done_tx, ds_done_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
 
     /*
      * spawn a task to listen for ds completed work which will then
