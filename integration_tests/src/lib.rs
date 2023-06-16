@@ -2491,7 +2491,6 @@ mod test {
         let log = csl();
         let _jh = up_main(opts, 1, None, gc, None, Some(log.clone())).await?;
 
-        info!(log, "ZZZ it_guest_pantry_replace_downstairs starts");
         guest.activate().await?;
 
         // Write data in
@@ -2551,7 +2550,6 @@ mod test {
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
-        info!(log, "ZZZ it_guest_pantry_replace_downstairs ends");
         Ok(())
     }
 
@@ -3240,7 +3238,6 @@ mod test {
     async fn test_pantry_import_from_url_ovmf_bad_digest() {
         const BLOCK_SIZE: usize = 512;
 
-        println!("ZZZ pantry_import_from_Url bd start");
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
 
@@ -3282,7 +3279,6 @@ mod test {
         assert!(!result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
-        println!("ZZZ pantry_import_from_Url bd end");
     }
 
     #[tokio::test]
@@ -3420,16 +3416,20 @@ mod test {
     #[tokio::test]
     async fn test_pantry_bulk_write() {
         const BLOCK_SIZE: usize = 512;
+        let plog = csl();
+        info!(plog, "ZZZ pantry_bulk_write start");
 
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
+        info!(plog, "ZZZ pantry_bulk_write got going");
         // Start a pantry, get the client for it, then use it to bulk_write in data
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
+        info!(plog, "ZZZ pantry_bulk_write send some writes");
         for i in 0..10 {
             client
                 .bulk_write(
@@ -3444,10 +3444,12 @@ mod test {
                 .unwrap();
         }
 
+        info!(plog, "ZZZ pantry_bulk_write detatch");
         client.detach(&volume_id.to_string()).await.unwrap();
 
         // Attach, validate bulk write worked
 
+        info!(plog, "ZZZ pantry_bulk_write detatch done");
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
                 id: volume_id,
@@ -3464,6 +3466,7 @@ mod test {
         let volume = Volume::construct(vcr, None).await.unwrap();
         volume.activate().await.unwrap();
 
+        info!(plog, "ZZZ pantry_bulk_write volume activated");
         let buffer = Buffer::new(5120);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
@@ -3472,17 +3475,18 @@ mod test {
 
         let buffer_data = &*buffer.as_vec().await;
 
+        info!(plog, "ZZZ pantry_bulk_write check buffer");
         for i in 0..10 {
             let start = i * 512;
             let end = (i + 1) * 512;
             assert_eq!(vec![i as u8; 512], buffer_data[start..end]);
         }
+        println!("ZZZ pantry_bulk_write end");
     }
 
     #[tokio::test]
     async fn test_pantry_bulk_write_max_chunk_size() {
         const BLOCK_SIZE: usize = 512;
-        println!("ZZZ pantry_bulk_write_max_chunk start");
 
         // Spin off three downstairs, build our Crucible struct.
 
@@ -3539,7 +3543,6 @@ mod test {
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
             *buffer.as_vec().await
         );
-        println!("ZZZ pantry_bulk_write_max_chunk end");
     }
 
     #[tokio::test]
@@ -3631,7 +3634,6 @@ mod test {
         .await
         .unwrap();
 
-        info!(log, "ZZZ it_test_pantry_scrub starts");
         let client =
             CruciblePantryClient::new(&format!("http://{}", pantry_addr));
 
@@ -3711,7 +3713,6 @@ mod test {
             .unwrap();
 
         assert_eq!(data, *buffer.as_vec().await);
-        info!(log, "ZZZ it_test_pantry_scrub ends");
     }
 
     #[tokio::test]
@@ -3804,7 +3805,6 @@ mod test {
     async fn test_pantry_bulk_read_max_chunk_size() {
         const BLOCK_SIZE: usize = 512;
 
-        println!("ZZZ pantry_bulk_read_max_chunk_size start");
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::big(false).await.unwrap();
@@ -3854,7 +3854,6 @@ mod test {
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
-        println!("ZZZ pantry_bulk_read_max_chunk_size end");
     }
 
     #[tokio::test]
