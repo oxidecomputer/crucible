@@ -41,8 +41,14 @@ echo "bindir contains:"
 ls -ltr "$BINDIR" || true
 
 banner CreateDS
-echo $BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup
-$BINDIR/dsc create --ds-bin "$BINDIR"/crucible-downstairs --cleanup
+echo $BINDIR/dsc create \
+  --ds-bin "$BINDIR"/crucible-downstairs \
+  --region-count 4 \
+  --cleanup
+$BINDIR/dsc create \
+  --ds-bin "$BINDIR"/crucible-downstairs \
+  --region-count 4 \
+  --cleanup
 
 banner StartDS
 $BINDIR/dsc start --ds-bin "$BINDIR"/crucible-downstairs --create --cleanup >> /tmp/dsc.log 2>&1 &
@@ -68,9 +74,10 @@ else
 fi
 
 banner LR
-ptime -m "$BINDIR"/crutest replay \
+ptime -m "$BINDIR"/crutest replace \
   -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 \
-  -g 1 -c 60 -q > /tmp/crutest-replay.log
+  --replacement 127.0.0.1:8840 \
+  -g 1 -c 10 -q > /tmp/crutest-replace.log
 
 banner StopDSC
 $BINDIR/dsc cmd shutdown
