@@ -45,7 +45,6 @@ pub(crate) mod protocol_test {
     use tokio_util::codec::FramedWrite;
     use uuid::Uuid;
 
-
     pub struct Downstairs {
         log: Logger,
         listener: TcpListener,
@@ -381,20 +380,19 @@ pub(crate) mod protocol_test {
     }
 
     fn local_csl(name: &str) -> slog::Logger {
+        let log_path = format!("/tmp/{}.log", name);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_path)
+            .unwrap();
 
-       let log_path = format!("/tmp/{}.log", name);
-       let file = OpenOptions::new()
-	  .create(true)
-	  .write(true)
-	  .truncate(true)
-	  .open(log_path)
-	  .unwrap();
+        let decorator = slog_term::PlainDecorator::new(file);
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
 
-	let decorator = slog_term::PlainDecorator::new(file);
-	let drain = slog_term::FullFormat::new(decorator).build().fuse();
-	let drain = slog_async::Async::new(drain).build().fuse();
-
-	slog::Logger::root(drain, o!())
+        slog::Logger::root(drain, o!())
     }
 
     pub struct TestHarness {
@@ -783,7 +781,8 @@ pub(crate) mod protocol_test {
     /// additional IO comes through.
     #[tokio::test]
     async fn test_successful_live_repair() {
-        let harness = Arc::new(TestHarness::new("test_successful_live_repair").await);
+        let harness =
+            Arc::new(TestHarness::new("test_successful_live_repair").await);
 
         info!(harness.log, "ZZZ tslr starts");
         let (jh1, mut ds1_messages) =
