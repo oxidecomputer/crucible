@@ -9,6 +9,7 @@
 #:	"/work/rbins/*",
 #:	"/work/scripts/*",
 #:	"/tmp/core*",
+#:	"/tmp/*.log",
 #: ]
 #:
 #: [[publish]]

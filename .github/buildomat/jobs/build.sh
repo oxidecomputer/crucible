@@ -8,6 +8,7 @@
 #:	"/work/bins/*",
 #:	"/work/scripts/*",
 #:	"/tmp/core*",
+#:	"/tmp/*.log",
 #: ]
 #:
 
