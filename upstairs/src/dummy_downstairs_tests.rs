@@ -784,7 +784,7 @@ pub(crate) mod protocol_test {
         let harness =
             Arc::new(TestHarness::new("test_successful_live_repair").await);
 
-        info!(harness.log, "ZZZ tslr starts");
+        info!(harness.log, "ZZZ TSLR starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
