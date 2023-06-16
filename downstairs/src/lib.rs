@@ -383,10 +383,17 @@ pub mod cdt {
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
+    fn submit__el__close__start(_: u64) {}
+    fn submit__el__flush__close__start(_: u64) {}
+    fn submit__el__repair__start(_: u64) {}
+    fn submit__el__reopen__start(_: u64) {}
+    fn submit__el__noop__start(_: u64) {}
+    fn work__start(_: u64) {}
     fn os__read__start(_: u64) {}
     fn os__writeunwritten__start(_: u64) {}
     fn os__write__start(_: u64) {}
     fn os__flush__start(_: u64) {}
+    fn work__process(_: u64) {}
     fn os__read__done(_: u64) {}
     fn os__writeunwritten__done(_: u64) {}
     fn os__write__done(_: u64) {}
@@ -480,6 +487,12 @@ pub mod cdt {
 
     fn extent__context__truncate__start(n_deletions: u64) {}
     fn extent__context__truncate__done() {}
+    fn submit__el__close__done(_: u64) {}
+    fn submit__el__flush__close__done(_: u64) {}
+    fn submit__el__repair__done(_: u64) {}
+    fn submit__el__reopen__done(_: u64) {}
+    fn submit__el__noop__done(_: u64) {}
+    fn work__done(_: u64) {}
 }
 
 // Check if a Message is valid on this downstairs or not.
@@ -667,6 +680,7 @@ where
                 return Ok(());
             }
 
+            cdt::submit__el__close__start!(|| *job_id);
             // TODO: Add dtrace probes
             let ext_close = IOop::ExtentClose {
                 dependencies: dependencies.to_vec(),
@@ -697,7 +711,7 @@ where
                 return Ok(());
             }
 
-            // TODO: Add dtrace probes
+            cdt::submit__el__flush__close__start!(|| *job_id);
             // Do both the flush, and then the close
             let new_flush = IOop::ExtentFlushClose {
                 dependencies: dependencies.to_vec(),
@@ -732,7 +746,7 @@ where
                 return Ok(());
             }
 
-            // TODO: Add dtrace probes
+            cdt::submit__el__repair__start!(|| *job_id);
             // Do both the flush, and then the close
             let new_repair = IOop::ExtentLiveRepair {
                 dependencies: dependencies.to_vec(),
@@ -764,8 +778,8 @@ where
             {
                 return Ok(());
             }
-            // TODO: add dtrace stat
 
+            cdt::submit__el__reopen__start!(|| *job_id);
             let new_open = IOop::ExtentLiveReopen {
                 dependencies: dependencies.to_vec(),
                 extent: *extent_id,
@@ -791,7 +805,7 @@ where
             {
                 return Ok(());
             }
-            // TODO: Create new dtrace stat
+            cdt::submit__el__noop__start!(|| *job_id);
             let new_open = IOop::ExtentLiveNoOp {
                 dependencies: dependencies.to_vec(),
             };
@@ -936,6 +950,7 @@ where
      * If we added work, tell the work task to get busy.
      */
     if let Some(new_ds_id) = new_ds_id {
+        cdt::work__start!(|| new_ds_id);
         job_channel_tx.lock().await.send(new_ds_id).await?;
     }
 
@@ -1006,6 +1021,7 @@ where
                 .await?;
 
             if let Some(job_id) = job_id {
+                cdt::work__process!(|| job_id);
                 let m = ads
                     .lock()
                     .await
@@ -1036,6 +1052,7 @@ where
                         .await
                         .complete_work(upstairs_connection, job_id, m)
                         .await?;
+                    cdt::work__done!(|| job_id);
                 }
 
                 // Now, if the message requires an abort, we handle
@@ -1555,8 +1572,9 @@ where
     // Create the log for this task to use.
     let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
 
-    // XXX flow control size to double what Upstairs has for upper limit?
-    let (_job_channel_tx, job_channel_rx) = channel(200);
+    // Give our work queue a little more space than we expect the upstairs
+    // to ever send us.
+    let (_job_channel_tx, job_channel_rx) = channel(MAX_ACTIVE_COUNT + 50);
     let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
 
     /*
@@ -1588,7 +1606,8 @@ where
         })
     };
 
-    let (message_channel_tx, mut message_channel_rx) = channel(200);
+    let (message_channel_tx, mut message_channel_rx) =
+        channel(MAX_ACTIVE_COUNT + 50);
     let pf_task = {
         let mut adc = ads.clone();
         let tx = job_channel_tx.clone();
@@ -2345,7 +2364,21 @@ impl Downstairs {
                 cdt::submit__read__done!(|| ds_id);
                 self.dss.add_read().await;
             }
-            // TODO: Add the dtrace and metrics for ExtentLive.
+            Message::ExtentLiveClose { .. } => {
+                cdt::submit__el__close__done!(|| ds_id);
+            }
+            Message::ExtentLiveFlushClose { .. } => {
+                cdt::submit__el__flush__close__done!(|| ds_id);
+            }
+            Message::ExtentLiveRepair { .. } => {
+                cdt::submit__el__repair__done!(|| ds_id);
+            }
+            Message::ExtentLiveReopen { .. } => {
+                cdt::submit__el__reopen__done!(|| ds_id);
+            }
+            Message::ExtentLiveNoOp { .. } => {
+                cdt::submit__el__noop__done!(|| ds_id);
+            }
             _ => (),
         }
 

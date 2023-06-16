@@ -15,13 +15,18 @@ use tempfile::NamedTempFile;
 
 mod region;
 pub use region::{
-    Block, RegionDefinition, RegionOptions, MAX_BLOCK_SIZE, MAX_SHIFT,
-    MIN_BLOCK_SIZE, MIN_SHIFT,
+    Block, RegionDefinition, RegionOptions, DATABASE_READ_VERSION,
+    DATABASE_WRITE_VERSION, MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE,
+    MIN_SHIFT,
 };
 
 pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
+
+// Max number of submitted IOs between the upstairs and the downstairs, above
+// which flow control kicks in.
+pub const MAX_ACTIVE_COUNT: usize = 600;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(

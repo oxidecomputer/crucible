@@ -100,6 +100,11 @@ enum Workload {
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
     Replace {
+        /// Before each replacement, do a fill of the region so
+        /// the replace will have to copy the entire region..
+        #[clap(long, action)]
+        fast_fill: bool,
+
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
@@ -146,6 +151,10 @@ pub struct Opt {
     /// better... XXX
     #[clap(long, global = true, action)]
     lossy: bool,
+
+    /// Don't print out IOs as we do them.
+    #[clap(long, global = true, action)]
+    quiet: bool,
 
     ///  quit after all crucible work queues are empty.
     #[clap(short, global = true, long, action, conflicts_with = "stable")]
@@ -598,6 +607,7 @@ async fn main() -> Result<()> {
     // If we are running the replace workload, we need to know the
     // current list of targets the upstairs will be started with.
     let full_target = if let Workload::Replace {
+        fast_fill: _,
         replacement,
         work: _,
     } = opt.workload
@@ -857,7 +867,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            generic_workload(&guest, &mut wtq, &mut region_info).await?;
+            generic_workload(&guest, &mut wtq, &mut region_info, opt.quiet)
+                .await?;
         }
 
         Workload::One => {
@@ -871,6 +882,9 @@ async fn main() -> Result<()> {
             read_loops,
             write_loops,
         } => {
+            // Pathetic.  This tiny wait is just so all my output from the
+            // test will be after all the upstairs messages have finised.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             println!("Perf test");
             let ops = {
                 if opt.count == 0 {
@@ -980,6 +994,7 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Workload::Replace {
+            fast_fill,
             replacement: _,
             work,
         } => {
@@ -1002,6 +1017,7 @@ async fn main() -> Result<()> {
                 &mut region_info,
                 full_target,
                 work,
+                fast_fill,
             )
             .await?;
         }
@@ -1433,6 +1449,42 @@ async fn fill_workload(
 }
 
 /*
+ * Do a single random write to every extent, results in every extent being
+ * touched without having to write to every block.
+ */
+async fn fill_sparse_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+) -> Result<()> {
+    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+
+    // Figure out how many extents we have
+    let extents = ri.total_blocks / (ri.extent_size.value as usize);
+    let extent_size = ri.extent_size.value as usize;
+
+    // Do one write to each extent.
+    for extent in 0..extents {
+        let mut block_index: usize = extent * extent_size;
+        let random_offset: usize = rng.gen_range(0..extent_size);
+        block_index += random_offset;
+
+        let offset =
+            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+
+        ri.write_log.update_wc(block_index);
+
+        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
+        let data = Bytes::from(vec);
+
+        println!("[{extent}/{extents}] Write to block {}", block_index);
+        guest.write(offset, data).await?;
+    }
+
+    guest.flush(None).await?;
+    Ok(())
+}
+
+/*
  * Generic workload.  Do a random R/W/F, but wait for the operation to be
  * ACK'd before sending the next.  Limit the size of the IO to 10 blocks.
  * Read data is verified.
@@ -1441,6 +1493,7 @@ async fn generic_workload(
     guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
+    quiet: bool,
 ) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
@@ -1459,17 +1512,19 @@ async fn generic_workload(
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            match wtq {
-                WhenToQuit::Count { count } => {
-                    println!(
-                        "{:>0width$}/{:>0width$} Flush",
-                        c,
-                        count,
-                        width = count_width,
-                    );
-                }
-                WhenToQuit::Signal { .. } => {
-                    println!("{:>0width$} Flush", c, width = count_width);
+            if !quiet {
+                match wtq {
+                    WhenToQuit::Count { count } => {
+                        println!(
+                            "{:>0width$}/{:>0width$} Flush",
+                            c,
+                            count,
+                            width = count_width,
+                        );
+                    }
+                    WhenToQuit::Signal { .. } => {
+                        println!("{:>0width$} Flush", c, width = count_width);
+                    }
                 }
             }
             guest.flush(None).await?;
@@ -1499,58 +1554,67 @@ async fn generic_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
                 let data = Bytes::from(vec);
 
-                match wtq {
-                    WhenToQuit::Count { count } => {
-                        print!(
-                            "{:>0width$}/{:>0width$}",
-                            c,
-                            count,
-                            width = count_width,
-                        );
-                    }
-                    WhenToQuit::Signal { .. } => {
-                        print!("{:>0width$}", c, width = count_width);
+                if !quiet {
+                    match wtq {
+                        WhenToQuit::Count { count } => {
+                            print!(
+                                "{:>0width$}/{:>0width$}",
+                                c,
+                                count,
+                                width = count_width,
+                            );
+                        }
+                        WhenToQuit::Signal { .. } => {
+                            print!("{:>0width$}", c, width = count_width);
+                        }
                     }
                 }
-                print!(
-                    " Write block {:>bw$}  len {:>sw$}  data:",
-                    offset.value,
-                    data.len(),
-                    bw = block_width,
-                    sw = size_width,
-                );
 
                 assert_eq!(data[1], ri.write_log.get_seed(block_index));
-                for i in 0..size {
-                    print!(" {:>3}", ri.write_log.get_seed(block_index + i));
+                if !quiet {
+                    print!(
+                        " Write block {:>bw$}  len {:>sw$}  data:",
+                        offset.value,
+                        data.len(),
+                        bw = block_width,
+                        sw = size_width,
+                    );
+                    for i in 0..size {
+                        print!(
+                            " {:>3}",
+                            ri.write_log.get_seed(block_index + i)
+                        );
+                    }
+                    println!();
                 }
-                println!();
                 guest.write(offset, data).await?;
             } else {
                 // Read (+ verify)
                 let length: usize = size * ri.block_size as usize;
                 let vec: Vec<u8> = vec![255; length];
                 let data = crucible::Buffer::from_vec(vec);
-                match wtq {
-                    WhenToQuit::Count { count } => {
-                        print!(
-                            "{:>0width$}/{:>0width$}",
-                            c,
-                            count,
-                            width = count_width,
-                        );
+                if !quiet {
+                    match wtq {
+                        WhenToQuit::Count { count } => {
+                            print!(
+                                "{:>0width$}/{:>0width$}",
+                                c,
+                                count,
+                                width = count_width,
+                            );
+                        }
+                        WhenToQuit::Signal { .. } => {
+                            print!("{:>0width$}", c, width = count_width);
+                        }
                     }
-                    WhenToQuit::Signal { .. } => {
-                        print!("{:>0width$}", c, width = count_width);
-                    }
+                    println!(
+                        " Read  block {:>bw$}  len {:>sw$}",
+                        offset.value,
+                        data.len(),
+                        bw = block_width,
+                        sw = size_width,
+                    );
                 }
-                println!(
-                    " Read  block {:>bw$}  len {:>sw$}",
-                    offset.value,
-                    data.len(),
-                    bw = block_width,
-                    sw = size_width,
-                );
                 guest.read(offset, data.clone()).await?;
 
                 let dl = data.as_vec().await.to_vec();
@@ -1624,7 +1688,7 @@ async fn replay_workload(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        generic_workload(guest, &mut generic_wtq, ri).await?;
+        generic_workload(guest, &mut generic_wtq, ri, false).await?;
 
         let res = dsc_client.dsc_start(stopped_ds).await;
         println!("Replay: started 0, returned:{:?}", res);
@@ -1682,6 +1746,7 @@ async fn replace_workload(
     ri: &mut RegionInfo,
     full_targets: Vec<SocketAddr>,
     work: usize,
+    fill: bool,
 ) -> Result<()> {
     assert!(full_targets.len() == 4);
 
@@ -1693,7 +1758,10 @@ async fn replace_workload(
     let mut new_ds = 3;
     loop {
         println!("[{c}] Replace loop starts");
-        generic_workload(guest, &mut preload_wtq, ri).await?;
+        if fill {
+            fill_sparse_workload(guest, ri).await?;
+        }
+        generic_workload(guest, &mut preload_wtq, ri, false).await?;
 
         println!(
             "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
@@ -1716,7 +1784,7 @@ async fn replace_workload(
         old_ds = (old_ds + 1) % 4;
         new_ds = (new_ds + 1) % 4;
 
-        generic_workload(guest, &mut replace_wtq, ri).await?;
+        generic_workload(guest, &mut replace_wtq, ri, false).await?;
 
         // Wait for all IO to settle down before we continue
         loop {
@@ -2206,7 +2274,7 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut wtq = WhenToQuit::Count { count: 20 };
-        generic_workload(guest, &mut wtq, ri).await?;
+        generic_workload(guest, &mut wtq, ri, false).await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
             c,
@@ -2255,7 +2323,7 @@ async fn deactivate_workload(
     }
     println!("One final");
     let mut wtq = WhenToQuit::Count { count: 20 };
-    generic_workload(guest, &mut wtq, ri).await?;
+    generic_workload(guest, &mut wtq, ri, false).await?;
 
     println!("final verify");
     if let Err(e) = verify_volume(guest, ri, false).await {
