@@ -32,6 +32,10 @@ pub struct Extent {
     block_size: u64,
     extent_size: Block,
     iov_max: usize,
+
+    /// Inner contains information about the actual extent file that holds the
+    /// data, the metadata (stored in the database) about that extent, and the
+    /// set of dirty blocks that have been written to since last flush.
     pub inner: Mutex<Inner>,
 }
 
