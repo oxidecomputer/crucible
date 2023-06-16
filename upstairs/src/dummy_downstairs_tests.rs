@@ -834,7 +834,10 @@ pub(crate) mod protocol_test {
             }
 
             if i > IO_OUTSTANDING_MAX - 10 {
-                info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} near fc", i);
+                info!(
+                    harness.log,
+                    "ZZZ handling job {}/{NUM_JOBS} near fc for d2", i
+                );
             }
             match ds2_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
@@ -842,13 +845,35 @@ pub(crate) mod protocol_test {
                     job_ids.push(job_id);
                 }
 
-                _ => panic!("saw non read request!"),
+                x => {
+                    info!(
+                        harness.log,
+                        "ds2_messages.recv() should be read, but we got:{:?}",
+                        x
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    panic!("ds2 saw non read request!");
+                }
             }
 
-            assert!(matches!(
-                ds3_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
+            if i > IO_OUTSTANDING_MAX - 10 {
+                info!(
+                    harness.log,
+                    "ZZZ handling job {}/{NUM_JOBS} near fc for d3", i
+                );
+            }
+            match ds3_messages.recv().await.unwrap() {
+                Message::ReadRequest { job_id, .. } => {}
+                x => {
+                    info!(
+                        harness.log,
+                        "ds3_messages.recv() should be read, but we got:{:?}",
+                        x
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    panic!("ds3 saw non read request!");
+                }
+            }
 
             if i > IO_OUTSTANDING_MAX - 10 {
                 info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} one", i);
