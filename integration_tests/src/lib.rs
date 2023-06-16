@@ -2491,6 +2491,7 @@ mod test {
         let log = csl();
         let _jh = up_main(opts, 1, None, gc, None, Some(log.clone())).await?;
 
+        info!(log, "ZZZ it_guest_pantry_replace_downstairs starts");
         guest.activate().await?;
 
         // Write data in
@@ -2550,6 +2551,7 @@ mod test {
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
+        info!(log, "ZZZ it_guest_pantry_replace_downstairs ends");
         Ok(())
     }
 
@@ -3086,6 +3088,7 @@ mod test {
         .await
         .unwrap();
 
+        info!(log, "ZZZ it_get_pantry_and_client_for_tds called");
         // Create a Volume out of it, and attach a CruciblePantryClient
 
         let volume_id = Uuid::new_v4();
@@ -3127,6 +3130,7 @@ mod test {
             .await
             .unwrap();
 
+        info!(log, "ZZZ it_get_pantry_and_client_for_tds returns");
         (pantry, volume_id, client)
     }
 
@@ -3134,6 +3138,7 @@ mod test {
     async fn test_pantry_import_from_url_ovmf() {
         const BLOCK_SIZE: usize = 512;
 
+        println!("ZZZ pantry_import_from_Url start");
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
@@ -3228,12 +3233,14 @@ mod test {
             );
             eprintln!("{} {} ok", start, end);
         }
+        println!("ZZZ pantry_import_from_Url end");
     }
 
     #[tokio::test]
     async fn test_pantry_import_from_url_ovmf_bad_digest() {
         const BLOCK_SIZE: usize = 512;
 
+        println!("ZZZ pantry_import_from_Url bd start");
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
 
@@ -3275,6 +3282,7 @@ mod test {
         assert!(!result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        println!("ZZZ pantry_import_from_Url bd end");
     }
 
     #[tokio::test]
@@ -3474,6 +3482,7 @@ mod test {
     #[tokio::test]
     async fn test_pantry_bulk_write_max_chunk_size() {
         const BLOCK_SIZE: usize = 512;
+        println!("ZZZ pantry_bulk_write_max_chunk start");
 
         // Spin off three downstairs, build our Crucible struct.
 
@@ -3530,6 +3539,7 @@ mod test {
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
             *buffer.as_vec().await
         );
+        println!("ZZZ pantry_bulk_write_max_chunk end");
     }
 
     #[tokio::test]
@@ -3621,6 +3631,7 @@ mod test {
         .await
         .unwrap();
 
+        info!(log, "ZZZ it_test_pantry_scrub starts");
         let client =
             CruciblePantryClient::new(&format!("http://{}", pantry_addr));
 
@@ -3700,12 +3711,14 @@ mod test {
             .unwrap();
 
         assert_eq!(data, *buffer.as_vec().await);
+        info!(log, "ZZZ it_test_pantry_scrub ends");
     }
 
     #[tokio::test]
     async fn test_pantry_bulk_read() {
         const BLOCK_SIZE: usize = 512;
 
+        println!("ZZZ pantry_bulk_read start");
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
@@ -3784,12 +3797,14 @@ mod test {
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        println!("ZZZ pantry_bulk_read end");
     }
 
     #[tokio::test]
     async fn test_pantry_bulk_read_max_chunk_size() {
         const BLOCK_SIZE: usize = 512;
 
+        println!("ZZZ pantry_bulk_read_max_chunk_size start");
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::big(false).await.unwrap();
@@ -3839,6 +3854,7 @@ mod test {
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        println!("ZZZ pantry_bulk_read_max_chunk_size end");
     }
 
     #[tokio::test]

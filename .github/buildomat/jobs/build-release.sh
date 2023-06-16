@@ -59,7 +59,7 @@ pfexec coreadm -e proc-setid
 pfexec coreadm -e global-setid
 
 banner rbuild
-ptime -m cargo build --verbose --release --all-features
+ptime -m cargo build --verbose --release --all-features > /tmp/buildout.txt
 
 banner rtest
 ptime -m cargo test --verbose

@@ -533,6 +533,7 @@ pub(crate) mod protocol_test {
     #[tokio::test]
     async fn test_flow_control() {
         let harness = Arc::new(TestHarness::new("test_flow_control").await);
+        info!(harness.log, "ZZZ test_flow_control start");
 
         let (_jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
@@ -703,6 +704,7 @@ pub(crate) mod protocol_test {
             ds3_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
+        info!(harness.log, "ZZZ test_flow_control end");
     }
 
     /// Test that replay occurs after a downstairs disconnects and reconnects
@@ -710,6 +712,7 @@ pub(crate) mod protocol_test {
     async fn test_replay_occurs() {
         let harness = Arc::new(TestHarness::new("test_replay_occurs").await);
 
+        info!(harness.log, "ZZZ test_replay_occurs starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
@@ -773,6 +776,7 @@ pub(crate) mod protocol_test {
         }
 
         assert_eq!(ds1_message, ds1_message_second_time.unwrap());
+        info!(harness.log, "ZZZ test_replay_occurs ends");
     }
 
     /// Test that after giving up on a downstairs, setting it to faulted, and
