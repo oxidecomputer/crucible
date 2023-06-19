@@ -2485,8 +2485,32 @@ mod test {
 
         assert_eq!(res, ReplaceResult::Started);
 
-        eprintln!("Wait for some repair work to proceed");
-        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            match volume
+                .replace_downstairs(
+                    test_downstairs_set.opts().id,
+                    test_downstairs_set.downstairs1_address().await,
+                    new_downstairs.address().await,
+                )
+                .await
+                .unwrap()
+            {
+                ReplaceResult::StartedAlready => {
+                    eprintln!(
+                        "Waited for some repair work, proceeding with test"
+                    );
+                    break;
+                }
+                ReplaceResult::CompletedAlready => {
+                    // This test is invalid if the repair completed already
+                    panic!("Downstairs replacement completed");
+                }
+                x => {
+                    panic!("Bad result from replace_downstairs: {:?}", x);
+                }
+            }
+        }
 
         // A new Upstairs arrives, with a newer gen number, and the updated
         // target list
