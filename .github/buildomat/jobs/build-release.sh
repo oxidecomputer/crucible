@@ -62,7 +62,7 @@ banner rbuild
 ptime -m cargo build --verbose --release --all-features
 
 banner rtest
-ptime -m cargo test --verbose --jobs 2 -- --test-threads=2
+ptime -m cargo test --verbose --jobs 1 -- --test-threads=1
 
 banner output
 mkdir -p /work/rbins
