@@ -48,4 +48,4 @@ echo in_work_bins
 ls -l /work/bins
 
 banner test
-ptime -m cargo test --verbose --jobs 5 -- --test-threads=5
+ptime -m cargo test --verbose --jobs 2 -- --test-threads=2
