@@ -51,7 +51,9 @@ $BINDIR/dsc create \
   --cleanup
 
 banner StartDS
-$BINDIR/dsc start --ds-bin "$BINDIR"/crucible-downstairs --create --cleanup >> /tmp/dsc.log 2>&1 &
+$BINDIR/dsc start \
+  --ds-bin "$BINDIR"/crucible-downstairs \
+  --region-count 4 >> /tmp/dsc.log 2>&1 &
 
 # This gives dsc time to fail, as it is known to happen.  If we don't check,
 # then the later test will just hang forever waiting for downstairs that
