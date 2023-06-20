@@ -4,6 +4,7 @@ use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
 use dropshot::ConfigLogging;
 use dropshot::ConfigLoggingLevel;
+use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
 use dropshot::HttpServerStarter;
 use dropshot::Path;
@@ -47,6 +48,7 @@ pub async fn begin(dsci: Arc<DscInfo>, addr: SocketAddr) -> Result<(), String> {
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
+        default_handler_task_mode: HandlerTaskMode::Detached,
     };
     println!("start access at:{:?}", addr);
 
