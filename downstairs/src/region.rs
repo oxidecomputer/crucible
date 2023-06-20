@@ -1,4 +1,5 @@
 // Copyright 2023 Oxide Computer Company
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
@@ -1517,6 +1518,61 @@ pub struct Region {
 }
 
 impl Region {
+    /// Set the number of open files resource limit to the max
+    pub fn set_max_open_files_rlimit(log: &Logger) -> Result<()> {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
+            bail!(
+                "libc::getrlimit failed with {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        match rlim.rlim_cur.cmp(&rlim.rlim_max) {
+            std::cmp::Ordering::Less => {
+                info!(
+                    log,
+                    "raising number of open files limit to from {} to {}",
+                    rlim.rlim_cur,
+                    rlim.rlim_max,
+                );
+
+                rlim.rlim_cur = rlim.rlim_max;
+
+                if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) } != 0 {
+                    bail!(
+                        "libc::setrlimit failed with {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+
+            Ordering::Equal => {
+                info!(
+                    log,
+                    "current number of open files limit {} is already the maximum",
+                    rlim.rlim_cur,
+                );
+            }
+
+            Ordering::Greater => {
+                // wat
+                warn!(
+                    log,
+                    "current number of open files limit {} is already ABOVE THE MAXIMUM {}?",
+                    rlim.rlim_cur,
+                    rlim.rlim_max,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /**
      * Create a new region based on the given RegionOptions
      */
@@ -1526,6 +1582,8 @@ impl Region {
         log: Logger,
     ) -> Result<Region> {
         options.validate()?;
+
+        Self::set_max_open_files_rlimit(&log)?;
 
         let cp = config_path(dir.as_ref());
         /*
@@ -1568,6 +1626,8 @@ impl Region {
         log: &Logger,
     ) -> Result<Region> {
         options.validate()?;
+
+        Self::set_max_open_files_rlimit(log)?;
 
         let cp = config_path(dir.as_ref());
         /*
