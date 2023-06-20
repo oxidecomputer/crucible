@@ -397,7 +397,7 @@ pub(crate) mod protocol_test {
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
                 target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
-                flush_timeout: Some(600.0),
+                flush_timeout: Some(86400.0),
 
                 ..Default::default()
             };
@@ -510,8 +510,8 @@ pub(crate) mod protocol_test {
     /// downstairs responds Ok for a job, no more work is sent. Once three
     /// downstairs responds with a read response for a certain job, then more
     /// work is sent.
-    //#[tokio::test]
-    async fn _test_flow_control() {
+    #[tokio::test]
+    async fn test_flow_control() {
         let harness = Arc::new(TestHarness::new().await);
 
         let (_jh1, mut ds1_messages) =
@@ -556,7 +556,7 @@ pub(crate) mod protocol_test {
         }
 
         // Confirm that's all the Upstairs sent us - with the flush_timeout set
-        // to five minutes, we shouldn't see anything else
+        // to 24 hours, we shouldn't see anything else
 
         assert!(matches!(ds1_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
@@ -761,8 +761,8 @@ pub(crate) mod protocol_test {
     /// additional IO comes through.
     /// XXX Turning this test off until we can figure out why it fails, but
     /// only in buildomat.
-    // #[tokio::test]
-    async fn _test_successful_live_repair() {
+    #[tokio::test]
+    async fn test_successful_live_repair() {
         let harness = Arc::new(TestHarness::new().await);
 
         let (jh1, mut ds1_messages) =
@@ -879,7 +879,7 @@ pub(crate) mod protocol_test {
         }
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-        // flush_timeout set to five minutes, we shouldn't see anything else
+        // flush_timeout set to 24 hours, we shouldn't see anything else
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
 

@@ -3,6 +3,7 @@ use super::*;
 
 use dropshot::{
     ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+    HandlerTaskMode,
 };
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use oximeter::{
@@ -141,6 +142,7 @@ pub async fn ox_stats(
     let dropshot_config = ConfigDropshot {
         bind_address: my_address,
         request_body_max_bytes: 2048,
+        default_handler_task_mode: HandlerTaskMode::Detached,
     };
     let logging_config = ConfigLogging::File {
         level: ConfigLoggingLevel::Error,

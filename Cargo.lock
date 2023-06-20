@@ -76,6 +76,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-tzdata"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e999941b234f3131b00bc13c22d06e8c5ff726d1b6318ac7eb276997bbb4fef0"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,6 +215,12 @@ dependencies = [
  "quote",
  "syn 2.0.18",
 ]
+
+[[package]]
+name = "atomic-waker"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1181e1e0d1fce796a03db1ae795d67167da795f9cf4a39c37589e85ef57f26d3"
 
 [[package]]
 name = "atty"
@@ -417,13 +429,13 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "chrono"
-version = "0.4.24"
+version = "0.4.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e3c5919066adf22df73762e50cffcde3a758f2a848b113b586d1f86728b673b"
+checksum = "ec837a71355b28f6556dbd569b37b3f363091c0bd4b2e735674521b4c5fd9bc5"
 dependencies = [
+ "android-tzdata",
  "iana-time-zone",
  "js-sys",
- "num-integer",
  "num-traits",
  "serde",
  "time 0.1.44",
@@ -693,7 +705,7 @@ dependencies = [
  "toml",
  "tracing",
  "usdt",
- "uuid 1.3.3",
+ "uuid",
  "version_check",
 ]
 
@@ -720,7 +732,7 @@ dependencies = [
  "slog",
  "subprocess",
  "tokio",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -745,7 +757,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -770,7 +782,7 @@ dependencies = [
  "tokio-rustls 0.23.4",
  "toml",
  "twox-hash",
- "uuid 1.3.3",
+ "uuid",
  "vergen",
 ]
 
@@ -839,7 +851,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "usdt",
- "uuid 1.3.3",
+ "uuid",
  "version_check",
 ]
 
@@ -858,7 +870,7 @@ dependencies = [
  "tokio",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -888,7 +900,7 @@ dependencies = [
  "slog-term",
  "tempfile",
  "tokio",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -949,7 +961,7 @@ dependencies = [
  "slog",
  "subprocess",
  "tokio",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -964,7 +976,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -978,7 +990,7 @@ dependencies = [
  "num_enum",
  "serde",
  "tokio-util 0.7.3",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -1047,7 +1059,7 @@ dependencies = [
  "tokio",
  "tokio-util 0.7.3",
  "toml",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -1138,6 +1150,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "debug-ignore"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffe7ed1d93f4553003e20b629abe9085e1e81b1429520f897f8f8860bc6dfc21"
+
+[[package]]
 name = "digest"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1211,7 +1229,7 @@ dependencies = [
 [[package]]
 name = "dropshot"
 version = "0.9.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#4be76343647319bd95efd63b081670c872afd427"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#fc0ffd522a78f9296f855bdf4c2703f900dfe99e"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1219,6 +1237,7 @@ dependencies = [
  "bytes",
  "camino",
  "chrono",
+ "debug-ignore",
  "dropshot_endpoint",
  "form_urlencoded",
  "futures",
@@ -1247,14 +1266,15 @@ dependencies = [
  "tokio-rustls 0.24.0",
  "toml",
  "usdt",
- "uuid 1.3.3",
+ "uuid",
  "version_check",
+ "waitgroup",
 ]
 
 [[package]]
 name = "dropshot_endpoint"
 version = "0.9.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#4be76343647319bd95efd63b081670c872afd427"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#fc0ffd522a78f9296f855bdf4c2703f900dfe99e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2141,7 +2161,7 @@ dependencies = [
  "rand 0.8.5",
  "statistical",
  "tokio",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -2272,7 +2292,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -2489,7 +2509,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "toml",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -2756,7 +2776,7 @@ dependencies = [
  "schemars",
  "serde",
  "thiserror",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -2786,7 +2806,7 @@ dependencies = [
  "slog-dtrace",
  "thiserror",
  "tokio",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -2857,9 +2877,9 @@ checksum = "9f746c4065a8fa3fe23974dd82f15431cc8d40779821001404d10d2e79ca7d79"
 
 [[package]]
 name = "percent-encoding"
-version = "2.2.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "478c572c3d73181ff3c2539045f6eb99e5491218eae919370993b890cdbdd98e"
+checksum = "9b2a4787296e9989611394c33f193f676704af1686e70b8f8033ab5ba9a35a94"
 
 [[package]]
 name = "pest"
@@ -3036,7 +3056,7 @@ dependencies = [
  "chrono",
  "fallible-iterator",
  "postgres-protocol",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -3057,9 +3077,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.59"
+version = "1.0.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aeca18b86b413c660b781aa319e4e2648a3e6f9eadc9b47e9038e6fe9f3451b"
+checksum = "dec2b086b7a862cf4de201096214fa870344cf922b2b30c167badb3af3195406"
 dependencies = [
  "unicode-ident",
 ]
@@ -3679,8 +3699,7 @@ dependencies = [
  "schemars_derive",
  "serde",
  "serde_json",
- "uuid 0.8.2",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -3751,18 +3770,18 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.163"
+version = "1.0.164"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2113ab51b87a539ae008b5c6c02dc020ffa39afd2d83cffcb3f4eb2722cebec2"
+checksum = "9e8c8cf938e98f769bc164923b06dce91cea1751522f46f8466461af04c9027d"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.163"
+version = "1.0.164"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c805777e3930c8883389c602315a24224bcc738b63905ef87cd1420353ea93e"
+checksum = "d9735b638ccc51c28bf6914d90a2e9725b377144fc612c49a611fddd1b631d68"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4123,7 +4142,7 @@ dependencies = [
  "slog",
  "thiserror",
  "tokio",
- "uuid 1.3.3",
+ "uuid",
 ]
 
 [[package]]
@@ -4926,12 +4945,6 @@ checksum = "711b9620af191e0cdc7468a8d14e709c3dcdb115b36f838e601583af800a370a"
 
 [[package]]
 name = "uuid"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
-
-[[package]]
-name = "uuid"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "345444e32442451b267fc254ae85a209c64be56d2890e601a0c37ff0c3c5ecd2"
@@ -4999,6 +5012,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f200f5b12eb75f8c1ed65abd4b2db8a6e1b138a20de009dacee265a2498f3f6"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "waitgroup"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1f50000a783467e6c0200f9d10642f4bc424e39efc1b770203e88b488f79292"
+dependencies = [
+ "atomic-waker",
 ]
 
 [[package]]
