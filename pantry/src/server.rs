@@ -281,7 +281,7 @@ struct ValidateRequest {
 
     // Size to validate in bytes, starting from offset 0. If not specified, the
     // total volume size is used.
-    pub size_to_validate: Option<usize>,
+    pub size_to_validate: Option<u64>,
 }
 
 #[derive(Serialize, JsonSchema)]

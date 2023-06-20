@@ -56,11 +56,11 @@ impl PantryEntry {
             .ok_or("no content length!")
             .map_err(|e| anyhow!(e))?;
 
-        let request_total_size = usize::from_str(content_length.to_str()?)?;
+        let request_total_size = u64::from_str(content_length.to_str()?)?;
 
         // check volume size
         let volume_total_size = self.volume.total_size().await?;
-        if request_total_size > volume_total_size as usize {
+        if request_total_size > volume_total_size {
             bail!(
                 "volume size {} smaller than size {} at url {}",
                 volume_total_size,
@@ -82,8 +82,10 @@ impl PantryEntry {
         let volume_block_size = self.volume.get_block_size().await?;
         for chunk in (0..request_total_size).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
-            let end =
-                std::cmp::min(start + Self::MAX_CHUNK_SIZE, request_total_size);
+            let end = std::cmp::min(
+                start + Self::MAX_CHUNK_SIZE as u64,
+                request_total_size,
+            );
 
             let response = client
                 .get(&url)
@@ -100,7 +102,7 @@ impl PantryEntry {
                 .ok_or("no content length!")
                 .map_err(|e| anyhow!(e))?;
 
-            let content_length = usize::from_str(content_length.to_str()?)?;
+            let content_length = u64::from_str(content_length.to_str()?)?;
 
             if content_length != (end - start) {
                 // the remote web server didn't honour the RANGE header!
@@ -112,8 +114,8 @@ impl PantryEntry {
                 );
             }
 
-            assert!(content_length <= Self::MAX_CHUNK_SIZE);
-            assert!(content_length % volume_block_size as usize == 0);
+            assert!(content_length <= Self::MAX_CHUNK_SIZE as u64);
+            assert!(content_length % volume_block_size == 0);
 
             let bytes = response.bytes().await?;
 
@@ -121,9 +123,7 @@ impl PantryEntry {
                 hasher.update(&bytes);
             }
 
-            self.volume
-                .write_to_byte_offset(start as u64, bytes)
-                .await?;
+            self.volume.write_to_byte_offset(start, bytes).await?;
         }
 
         // flush
@@ -202,16 +202,16 @@ impl PantryEntry {
     pub async fn validate(
         &self,
         expected_digest: ExpectedDigest,
-        size_to_validate: Option<usize>,
+        size_to_validate: Option<u64>,
     ) -> Result<()> {
         let mut hasher = match expected_digest {
             ExpectedDigest::Sha256(_) => Sha256::new(),
         };
 
-        let size_to_validate = size_to_validate
-            .unwrap_or(self.volume.total_size().await? as usize);
+        let size_to_validate =
+            size_to_validate.unwrap_or(self.volume.total_size().await?);
 
-        let block_size = self.volume.get_block_size().await? as usize;
+        let block_size = self.volume.get_block_size().await?;
         if (size_to_validate % block_size) != 0 {
             bail!(
                 "size to validate {} not divisible by block size {}!",
@@ -222,13 +222,15 @@ impl PantryEntry {
 
         for chunk in (0..size_to_validate).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
-            let end =
-                std::cmp::min(start + Self::MAX_CHUNK_SIZE, size_to_validate);
+            let end = std::cmp::min(
+                start + Self::MAX_CHUNK_SIZE as u64,
+                size_to_validate,
+            );
 
-            let data = crucible::Buffer::new(end - start);
+            let data = crucible::Buffer::new((end - start) as usize);
 
             self.volume
-                .read_from_byte_offset(start as u64, data.clone())
+                .read_from_byte_offset(start, data.clone())
                 .await?;
 
             hasher.update(&*data.as_vec().await);
@@ -490,7 +492,7 @@ impl Pantry {
         &self,
         volume_id: String,
         expected_digest: ExpectedDigest,
-        size_to_verify: Option<usize>,
+        size_to_verify: Option<u64>,
     ) -> Result<String, HttpError> {
         let entry = self.entry(volume_id).await?;
         let entry = entry.clone();
