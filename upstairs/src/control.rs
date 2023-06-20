@@ -2,6 +2,7 @@
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
+use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
 use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
@@ -43,6 +44,7 @@ pub async fn start(
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
+        default_handler_task_mode: HandlerTaskMode::Detached,
     };
 
     let log = up.log.new(o!("task" => "control".to_string()));

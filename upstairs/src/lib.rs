@@ -8623,7 +8623,7 @@ impl BlockOp {
      * limits.  Though, if too many volumes are created with scrubbers
      * running, we may have to revisit that.
      */
-    pub async fn iops(&self, iop_sz: usize) -> Option<usize> {
+    pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
             BlockOp::Read { offset: _, data } => {
                 Some(ceiling_div!(data.len(), iop_sz))
@@ -8644,7 +8644,7 @@ impl BlockOp {
     }
 
     // Return the total size of this BlockOp
-    pub async fn sz(&self) -> Option<usize> {
+    pub fn sz(&self) -> Option<usize> {
         match self {
             BlockOp::Read { offset: _, data } => Some(data.len()),
             BlockOp::Write { offset: _, data } => Some(data.len()),
@@ -8661,25 +8661,25 @@ async fn test_return_iops() {
         offset: Block::new_512(1),
         data: Buffer::new(1),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 1);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(8000),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 1);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(16000),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 1);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(16001),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 2);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }
 
 /*
@@ -9084,11 +9084,29 @@ impl Guest {
 
     /*
      * Consume one request off queue if it is under the IOP limit and the BW
-     * limit.
+     * limit. This function must be cancel safe (due to it being used in a
+     * `tokio::select!` arm) so it is split into two parts: the first async part
+     * grabs all the necessary tokio Mutexes, and the second sync part does the
+     * actual work with the mutex guards.
      */
     async fn consume_req(&self) -> Option<BlockReq> {
         let mut reqs = self.reqs.lock().await;
+        let mut bw_tokens = self.bw_tokens.lock().await;
+        let mut iop_tokens = self.iop_tokens.lock().await;
 
+        self.consume_req_locked(&mut reqs, &mut bw_tokens, &mut iop_tokens)
+
+        // IMPORTANT: there must be no await points after `consume_req_locked`
+        // has popped a BlockReq off the VecDeque! The function could be
+        // cancelled and would **drop** that BlockReq as a result.
+    }
+
+    fn consume_req_locked(
+        &self,
+        reqs: &mut VecDeque<BlockReq>,
+        bw_tokens: &mut usize,
+        iop_tokens: &mut usize,
+    ) -> Option<BlockReq> {
         // TODO exposing queue depth here would be a good metric for disk
         // contention
 
@@ -9103,7 +9121,7 @@ impl Guest {
         let iop_limit_applies =
             self.iop_limit.is_some() && req_ref.op.consumes_iops();
         let bw_limit_applies =
-            self.bw_limit.is_some() && req_ref.op.sz().await.is_some();
+            self.bw_limit.is_some() && req_ref.op.sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return Some(reqs.pop_front().unwrap());
@@ -9115,10 +9133,6 @@ impl Guest {
         let mut bw_check_ok = true;
         let mut iop_check_ok = true;
 
-        // XXX if recv ever is called from multiple threads, token locks must be
-        // taken for the whole of the procedure, not multiple times in the below
-        // if blocks!
-
         // When checking tokens vs the limit, do not check by checking if adding
         // the block request's values to the applicable limit: this would create
         // a scenario where a large IO enough would stall the pipeline (see
@@ -9126,21 +9140,17 @@ impl Guest {
         // reached.
 
         if let Some(bw_limit) = self.bw_limit {
-            if req_ref.op.sz().await.is_some() {
-                let bw_tokens = self.bw_tokens.lock().await;
-                if *bw_tokens >= bw_limit {
-                    bw_check_ok = false;
-                }
+            if req_ref.op.sz().is_some() && *bw_tokens >= bw_limit {
+                bw_check_ok = false;
             }
         }
 
         if let Some(iop_limit) = self.iop_limit {
             let bytes_per_iops = self.bytes_per_iop.unwrap();
-            if req_ref.op.iops(bytes_per_iops).await.is_some() {
-                let iop_tokens = self.iop_tokens.lock().await;
-                if *iop_tokens >= iop_limit {
-                    iop_check_ok = false;
-                }
+            if req_ref.op.iops(bytes_per_iops).is_some()
+                && *iop_tokens >= iop_limit
+            {
+                iop_check_ok = false;
             }
         }
 
@@ -9148,16 +9158,14 @@ impl Guest {
         // block req
         if bw_check_ok && iop_check_ok {
             if self.bw_limit.is_some() {
-                if let Some(sz) = req_ref.op.sz().await {
-                    let mut bw_tokens = self.bw_tokens.lock().await;
+                if let Some(sz) = req_ref.op.sz() {
                     *bw_tokens += sz;
                 }
             }
 
             if self.iop_limit.is_some() {
                 let bytes_per_iops = self.bytes_per_iop.unwrap();
-                if let Some(req_iops) = req_ref.op.iops(bytes_per_iops).await {
-                    let mut iop_tokens = self.iop_tokens.lock().await;
+                if let Some(req_iops) = req_ref.op.iops(bytes_per_iops) {
                     *iop_tokens += req_iops;
                 }
             }
@@ -9594,8 +9602,8 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
                     warn!(
                         up.log,
                         "[up] downstairs {} failed, too many outstanding jobs {}",
-                        work_count,
                         cid,
+                        work_count,
                     );
                     if ds.ds_set_faulted(cid) {
                         notify_guest = true;

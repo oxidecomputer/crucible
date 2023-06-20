@@ -417,8 +417,7 @@ pub(crate) mod protocol_test {
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
                 target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
-                flush_timeout: Some(4600.0),
-
+                flush_timeout: Some(86400.0),
                 ..Default::default()
             };
 
@@ -577,7 +576,7 @@ pub(crate) mod protocol_test {
         }
 
         // Confirm that's all the Upstairs sent us - with the flush_timeout set
-        // to five minutes, we shouldn't see anything else
+        // to 24 hours, we shouldn't see anything else
 
         assert!(matches!(ds1_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
@@ -950,7 +949,7 @@ pub(crate) mod protocol_test {
         info!(harness.log, "ZZZ tslr jobs are sent");
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-        // XXX flush_timeout set to five minutes, we shouldn't see anything else
+        // flush_timeout set to 24 hours, we shouldn't see anything else
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
 

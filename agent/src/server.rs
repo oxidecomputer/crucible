@@ -3,7 +3,7 @@ use super::datafile::DataFile;
 use super::model;
 use anyhow::{anyhow, Result};
 use dropshot::{
-    endpoint, HttpError, HttpResponseDeleted, HttpResponseOk,
+    endpoint, HandlerTaskMode, HttpError, HttpResponseDeleted, HttpResponseOk,
     Path as TypedPath, RequestContext, TypedBody,
 };
 use schemars::JsonSchema;
@@ -387,6 +387,7 @@ pub async fn run_server(
         &dropshot::ConfigDropshot {
             bind_address,
             request_body_max_bytes: 1024 * 10,
+            default_handler_task_mode: HandlerTaskMode::Detached,
         },
         api,
         df,

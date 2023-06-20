@@ -7,7 +7,7 @@
 #: output_rules = [
 #:	"/work/bins/*",
 #:	"/work/scripts/*",
-#:	"/tmp/core*",
+#:	"/tmp/core.*",
 #:	"/tmp/*.log",
 #: ]
 #:

@@ -70,7 +70,7 @@ impl BlockReqWaiter {
     }
 
     #[allow(dead_code)]
-    pub async fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
+    pub fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
         match self.recv.try_recv() {
             Ok(v) => Some(v),
             Err(e) => match e {
