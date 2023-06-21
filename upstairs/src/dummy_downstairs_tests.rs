@@ -703,7 +703,7 @@ pub(crate) mod protocol_test {
             ds3_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
-        info!(harness.log, "ZZZ test_flow_control end");
+        info!(harness.log, "ZZZ test_flow_control done");
     }
 
     /// Test that replay occurs after a downstairs disconnects and reconnects
