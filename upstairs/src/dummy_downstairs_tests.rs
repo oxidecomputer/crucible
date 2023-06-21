@@ -933,7 +933,6 @@ pub(crate) mod protocol_test {
                 })
                 .await
                 .unwrap();
-
         }
         info!(harness.log, "ZZZ tslr jobs are sent");
 
