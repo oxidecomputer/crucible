@@ -4151,7 +4151,7 @@ mod test {
                         ),
 
                     // validate half the volume
-                    size_to_validate: Some(total_size as u32 / 2),
+                    size_to_validate: Some(total_size as u64 / 2),
                 },
             )
             .await

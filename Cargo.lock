@@ -526,6 +526,7 @@ dependencies = [
  "clearscreen",
  "crucible",
  "crucible-control-client",
+ "serde_json",
  "tokio",
 ]
 
