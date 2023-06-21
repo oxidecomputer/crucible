@@ -711,7 +711,7 @@ pub(crate) mod protocol_test {
     async fn test_replay_occurs() {
         let harness = Arc::new(TestHarness::new("test_replay_occurs").await);
 
-        info!(harness.log, "ZZZ test_replay_occurs starts");
+        info!(harness.log, "test_replay_occurs starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
@@ -775,7 +775,7 @@ pub(crate) mod protocol_test {
         }
 
         assert_eq!(ds1_message, ds1_message_second_time.unwrap());
-        info!(harness.log, "ZZZ test_replay_occurs ends");
+        info!(harness.log, "test_replay_occurs ends");
     }
 
     /// Test that after giving up on a downstairs, setting it to faulted, and
@@ -787,7 +787,7 @@ pub(crate) mod protocol_test {
         let harness =
             Arc::new(TestHarness::new("test_successful_live_repair").await);
 
-        info!(harness.log, "ZZZ TSLR starts");
+        info!(harness.log, "TSLR starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
@@ -802,7 +802,7 @@ pub(crate) mod protocol_test {
         const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
-        info!(harness.log, "ZZZ tslr send some jobs");
+        info!(harness.log, "tslr send some jobs");
         for i in 0..NUM_JOBS {
             info!(harness.log, "sending read {}/{NUM_JOBS}", i);
 
@@ -824,10 +824,6 @@ pub(crate) mod protocol_test {
             if i < MAX_ACTIVE_COUNT {
                 // Before flow control kicks in, assert we're seeing the read
                 // requests
-                info!(
-                    harness.log,
-                    "ZZZ verify read receive {}/{NUM_JOBS} before fc", i
-                );
                 assert!(matches!(
                     ds1_messages.recv().await.unwrap(),
                     Message::ReadRequest { .. },
@@ -835,10 +831,6 @@ pub(crate) mod protocol_test {
             } else {
                 // After flow control kicks in, we shouldn't see any more
                 // messages
-                info!(
-                    harness.log,
-                    "ZZZ checking try_recv {}/{NUM_JOBS} after fc", i
-                );
                 match ds1_messages.try_recv() {
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {}
@@ -942,9 +934,6 @@ pub(crate) mod protocol_test {
                 .await
                 .unwrap();
 
-            if i > IO_OUTSTANDING_MAX - 10 {
-                info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} endloop", i);
-            }
         }
         info!(harness.log, "ZZZ tslr jobs are sent");
 
