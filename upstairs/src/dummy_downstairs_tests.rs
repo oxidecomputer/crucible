@@ -887,7 +887,7 @@ pub(crate) mod protocol_test {
                 );
             }
             match ds3_messages.recv().await.unwrap() {
-                Message::ReadRequest { job_id, .. } => {}
+                Message::ReadRequest { .. } => {}
                 x => {
                     info!(
                         harness.log,
