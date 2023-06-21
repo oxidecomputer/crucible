@@ -3171,6 +3171,7 @@ mod test {
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
+        info!(log, "ZZZ pantry_import_from_url_ovmf after tds");
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
         let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
 
@@ -3200,6 +3201,7 @@ mod test {
         {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
+        info!(log, "ZZZ pantry_import_from_url_ovmf after some import_url");
 
         let result = client.job_result_ok(&response.job_id).await.unwrap();
         assert!(result.job_result_ok);
@@ -3257,7 +3259,7 @@ mod test {
             );
             eprintln!("{} {} ok", start, end);
         }
-        println!("ZZZ pantry_import_from_Url end");
+        info!(log, "ZZZ pantry_import_from_url_ovmf end");
     }
 
     #[tokio::test]
