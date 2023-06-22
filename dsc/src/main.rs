@@ -534,8 +534,7 @@ impl DscInfo {
         let rd = rs.region_dir[ds_id].clone();
         let port = rs.port_base + (ds_id as u32 * rs.port_step);
         let full_region_dir = port_to_region(rd, port)?;
-        println!("remove_dir_all of {:?}", full_region_dir);
-        std::fs::remove_dir_all(&full_region_dir)?;
+        std::fs::remove_dir_all(full_region_dir)?;
         Ok(())
     }
 

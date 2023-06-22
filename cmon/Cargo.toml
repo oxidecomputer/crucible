@@ -9,4 +9,5 @@ clap.workspace = true
 clearscreen.workspace = true
 crucible.workspace = true
 crucible-control-client.workspace = true
+serde_json.workspace = true
 tokio.workspace = true

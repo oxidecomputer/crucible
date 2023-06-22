@@ -5143,8 +5143,8 @@ impl Upstairs {
         let ds_state = self.ds_state_copy().await;
         let ds = self.downstairs.lock().await;
         let ds_io_count = ds.io_state_count;
-        let ds_repair = ds.extents_repaired.clone();
-        let ds_confirm = ds.extents_confirmed.clone();
+        let ds_reconciled = ds.reconcile_repaired.clone();
+        let ds_reconcile_needed = ds.reconcile_repair_needed.clone();
         let ds_live_repair_completed = ds.live_repair_completed.clone();
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
         let ds_connected = ds.connected.clone();
@@ -5159,8 +5159,8 @@ impl Upstairs {
                 ds_count,
                 ds_state,
                 ds_io_count,
-                ds_repair,
-                ds_confirm,
+                ds_reconciled,
+                ds_reconcile_needed,
                 ds_live_repair_completed,
                 ds_live_repair_aborted,
                 ds_connected,
@@ -7629,7 +7629,7 @@ impl FlushInfo {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum DsState {
+pub enum DsState {
     /*
      * New connection
      */
@@ -8304,13 +8304,13 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize)]
-struct IOStateCount {
-    new: [u32; 3],
-    in_progress: [u32; 3],
-    done: [u32; 3],
-    skipped: [u32; 3],
-    error: [u32; 3],
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct IOStateCount {
+    pub new: [u32; 3],
+    pub in_progress: [u32; 3],
+    pub done: [u32; 3],
+    pub skipped: [u32; 3],
+    pub error: [u32; 3],
 }
 
 impl IOStateCount {
@@ -9515,7 +9515,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
      * work.
      */
     while ds_done_rx.recv().await.is_some() {
-        debug!(up.log, "up_listen was notified");
+        debug!(up.log, "up_ds_listen was notified");
         /*
          * XXX Do we need to hold the lock while we process all the
          * completed jobs?  We should be continuing to send message over
@@ -9536,7 +9536,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
         let mut gw = up.guest.guest_work.lock().await;
         for ds_id_done in ack_list.iter() {
             let mut ds = up.downstairs.lock().await;
-            debug!(up.log, "up_listen process {}", ds_id_done);
+            debug!(up.log, "up_ds_listen process {}", ds_id_done);
 
             let done = ds.ds_active.get_mut(ds_id_done).unwrap();
             /*
@@ -9570,7 +9570,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
         }
         debug!(
             up.log,
-            "up_listen checked {} jobs, back to waiting", jobs_checked
+            "up_ds_listen checked {} jobs, back to waiting", jobs_checked
         );
     }
     warn!(up.log, "up_ds_listen loop done");
@@ -9888,21 +9888,21 @@ async fn process_new_io(
 /**
  * Stat counters struct used by DTrace
  */
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Arg {
-    up_count: u32,
-    ds_count: u32,
-    ds_state: Vec<DsState>,
-    ds_io_count: IOStateCount,
-    ds_repair: Vec<usize>,
-    ds_confirm: Vec<usize>,
-    ds_live_repair_completed: Vec<usize>,
-    ds_live_repair_aborted: Vec<usize>,
-    ds_connected: Vec<usize>,
-    ds_replaced: Vec<usize>,
-    ds_flow_control: Vec<usize>,
-    ds_extents_repaired: Vec<usize>,
-    ds_extents_confirmed: Vec<usize>,
+    pub up_count: u32,
+    pub ds_count: u32,
+    pub ds_state: Vec<DsState>,
+    pub ds_io_count: IOStateCount,
+    pub ds_reconciled: usize,
+    pub ds_reconcile_needed: usize,
+    pub ds_live_repair_completed: Vec<usize>,
+    pub ds_live_repair_aborted: Vec<usize>,
+    pub ds_connected: Vec<usize>,
+    pub ds_replaced: Vec<usize>,
+    pub ds_flow_control: Vec<usize>,
+    pub ds_extents_repaired: Vec<usize>,
+    pub ds_extents_confirmed: Vec<usize>,
 }
 
 /**
