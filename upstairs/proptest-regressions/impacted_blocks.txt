@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b0180a9c53047e868f53ba06087baac4a57195b36d8a7361e1dc8fde55f01d6b # shrinks to input = _ExtentFromOffsetPanicsWhenNumBlocksOutsideRegionArgs { first_block: 31072609678208356, n_blocks: 18415671464031343260, ddef: RegionDefinition { block_size: 512, extent_size: Block { value: 23965161273, shift: 9 }, extent_count: 538296746, uuid: 00000000-0000-0000-0000-000000000000, encrypted: false, database_read_version: 1, database_write_version: 1 } }

@@ -1,4 +1,5 @@
 // Copyright 2023 Oxide Computer Company
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
@@ -1517,6 +1518,91 @@ pub struct Region {
 }
 
 impl Region {
+    /// Set the number of open files resource limit to the max. Use the provided
+    /// RegionDefinition to check that this Downstairs can open all the files it
+    /// needs.
+    pub fn set_max_open_files_rlimit(
+        log: &Logger,
+        def: &RegionDefinition,
+    ) -> Result<()> {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
+            bail!(
+                "libc::getrlimit failed with {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        let number_of_files_limit = match rlim.rlim_cur.cmp(&rlim.rlim_max) {
+            std::cmp::Ordering::Less => {
+                info!(
+                    log,
+                    "raising number of open files limit to from {} to {}",
+                    rlim.rlim_cur,
+                    rlim.rlim_max,
+                );
+
+                rlim.rlim_cur = rlim.rlim_max;
+
+                if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) } != 0 {
+                    bail!(
+                        "libc::setrlimit failed with {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+
+                rlim.rlim_max
+            }
+
+            Ordering::Equal => {
+                info!(
+                    log,
+                    "current number of open files limit {} is already the maximum",
+                    rlim.rlim_cur,
+                );
+
+                rlim.rlim_cur
+            }
+
+            Ordering::Greater => {
+                // wat
+                warn!(
+                    log,
+                    "current number of open files limit {} is already ABOVE THE MAXIMUM {}?",
+                    rlim.rlim_cur,
+                    rlim.rlim_max,
+                );
+
+                rlim.rlim_cur
+            }
+        };
+
+        // The downstairs needs to open (at minimum) the extent file, the sqlite
+        // database, the write-ahead lock, and the sqlite shared memory file for
+        // each extent in the region, plus:
+        //
+        // - the seed database (db + shm + wal)
+        // - region.json
+        // - stdin, stdout, and stderr
+        // - the listen and repair sockets (arbitrarily saying two sockets per
+        //   server)
+        // - optionally, the stat connection to oximeter
+        // - optionally, a control interface
+        //
+        // If the downstairs cannot open this many files, error here.
+        let required_number_of_files = def.extent_count() as u64 * 4 + 13;
+
+        if number_of_files_limit < required_number_of_files {
+            bail!("this downstairs cannot open all required files!");
+        }
+
+        Ok(())
+    }
+
     /**
      * Create a new region based on the given RegionOptions
      */
@@ -1526,6 +1612,10 @@ impl Region {
         log: Logger,
     ) -> Result<Region> {
         options.validate()?;
+
+        let def = RegionDefinition::from_options(&options).unwrap();
+
+        Self::set_max_open_files_rlimit(&log, &def)?;
 
         let cp = config_path(dir.as_ref());
         /*
@@ -1537,7 +1627,6 @@ impl Region {
         }
         mkdir_for_file(&cp)?;
 
-        let def = RegionDefinition::from_options(&options).unwrap();
         write_json(&cp, &def, false)?;
         info!(log, "Created new region file {:?}", cp);
 
@@ -1570,6 +1659,7 @@ impl Region {
         options.validate()?;
 
         let cp = config_path(dir.as_ref());
+
         /*
          * We are expecting to find a region config file and extent files.
          * If we do not, then report error and exit.
@@ -1578,6 +1668,8 @@ impl Region {
             Ok(def) => def,
             Err(e) => bail!("Error {:?} opening region config {:?}", e, cp),
         };
+
+        Self::set_max_open_files_rlimit(log, &def)?;
 
         if verbose {
             info!(log, "Opened existing region file {:?}", cp);

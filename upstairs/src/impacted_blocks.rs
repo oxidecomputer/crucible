@@ -279,10 +279,11 @@ pub fn extent_from_offset(
     // Second, the offset is actually within the region
     assert!(offset.value < ddef.extent_count() as u64 * extent_size);
 
-    // Third, the last block is also within the region
+    // Third, the last block is also within the region. These are widened to
+    // u128 in order to catch the case where first_block + n_blocks == u64::MAX.
     assert!(
-        offset.value + num_blocks.value
-            <= ddef.extent_count() as u64 * extent_size
+        offset.value as u128 + num_blocks.value as u128
+            <= ddef.extent_count() as u128 * extent_size as u128
     );
 
     let fst = ImpactedAddr {
