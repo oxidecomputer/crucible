@@ -485,6 +485,57 @@ pub enum Message {
      */
     Unknown(u32, BytesMut),
 }
+
+impl Message {
+    /// Return true if this message contains an Error result
+    pub fn err(&self) -> bool {
+        match self {
+            Message::HereIAm { .. } => false,
+            Message::YesItsMe { .. } => false,
+            Message::VersionMismatch { .. } => false,
+            Message::ReadOnlyMismatch { .. } => false,
+            Message::EncryptedMismatch { .. } => false,
+            Message::PromoteToActive { .. } => false,
+            Message::YouAreNowActive { .. } => false,
+            Message::YouAreNoLongerActive { .. } => false,
+            Message::UuidMismatch { .. } => false,
+            Message::Ruok { .. } => false,
+            Message::Imok { .. } => false,
+            Message::ExtentClose { .. } => false,
+            Message::ExtentReopen { .. } => false,
+            Message::ExtentFlush { .. } => false,
+            Message::ExtentRepair { .. } => false,
+            Message::RepairAckId { .. } => false,
+            Message::RegionInfoPlease { .. } => false,
+            Message::RegionInfo { .. } => false,
+            Message::ExtentVersionsPlease { .. } => false,
+            Message::ExtentVersions { .. } => false,
+            Message::LastFlush { .. } => false,
+            Message::LastFlushAck { .. } => false,
+            Message::Write { .. } => false,
+            Message::ExtentLiveClose { .. } => false,
+            Message::ExtentLiveFlushClose { .. } => false,
+            Message::ExtentLiveRepair { .. } => false,
+            Message::ExtentLiveReopen { .. } => false,
+            Message::ExtentLiveNoOp { .. } => false,
+            Message::Flush { .. } => false,
+            Message::ReadRequest { .. } => false,
+            Message::WriteUnwritten { .. } => false,
+            Message::Unknown(..) => false,
+
+            Message::ExtentError { .. } => true,
+
+            Message::ExtentLiveCloseAck { result, .. } => result.is_err(),
+            Message::ExtentLiveRepairAckId { result, .. } => result.is_err(),
+            Message::ExtentLiveAckId { result, .. } => result.is_err(),
+            Message::WriteAck { result, .. } => result.is_err(),
+            Message::FlushAck { result, .. } => result.is_err(),
+            Message::ReadResponse { responses, .. } => responses.is_err(),
+            Message::WriteUnwrittenAck { result, .. } => result.is_err(),
+        }
+    }
+}
+
 /*
  * If you just added or changed the Message enum above, you must also
  * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you

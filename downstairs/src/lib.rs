@@ -1039,20 +1039,35 @@ where
                 let mut abort_needed = false;
                 if let Some(m) = m {
                     abort_needed = check_message_for_abort(&m);
-                    ads.lock()
-                        .await
-                        .complete_work_stat(upstairs_connection, &m, job_id)
-                        .await?;
-                    // Notify the upstairs before completing work
-                    let mut fw = fw.lock().await;
-                    fw.send(&m).await?;
-                    drop(fw);
 
-                    ads.lock()
-                        .await
-                        .complete_work(upstairs_connection, job_id, m)
-                        .await?;
-                    cdt::work__done!(|| job_id);
+                    if m.err() {
+                        // If the job errored, do not consider it completed.
+                        // Reset it to New so it can be retried.
+                        ads.lock()
+                            .await
+                            .reset_job_new(upstairs_connection, *new_id)
+                            .await?;
+                    } else {
+                        // The job completed successfully, so inform the
+                        // Upstairs
+
+                        ads.lock()
+                            .await
+                            .complete_work_stat(upstairs_connection, &m, job_id)
+                            .await?;
+
+                        // Notify the upstairs before completing work
+                        let mut fw = fw.lock().await;
+                        fw.send(&m).await?;
+                        drop(fw);
+
+                        ads.lock()
+                            .await
+                            .complete_work(upstairs_connection, job_id, m)
+                            .await?;
+
+                        cdt::work__done!(|| job_id);
+                    }
                 }
 
                 // Now, if the message requires an abort, we handle
@@ -2297,6 +2312,17 @@ impl Downstairs {
         }
     }
 
+    /// Reset the job to New so it can be retried
+    async fn reset_job_new(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+        job_id: u64,
+    ) -> Result<()> {
+        let mut work = self.work_lock(upstairs_connection).await?;
+        work.reset_job_new(job_id);
+        Ok(())
+    }
+
     /*
      * Complete work by:
      *
@@ -2953,6 +2979,23 @@ impl Work {
                  */
                 None
             }
+        }
+    }
+
+    /// Reset the job to New so it can be retried
+    fn reset_job_new(&mut self, job_id: u64) {
+        if let Some(job) = self.active.get_mut(&job_id) {
+            assert_eq!(job_id, job.ds_id);
+            job.state = WorkState::New;
+        } else {
+            /*
+             * This branch occurs when another Upstairs has promoted itself to
+             * active, causing active work to be cleared (in promote_to_active).
+             *
+             * If this has happened, work.completed and work.last_flush have
+             * also been reset. Do nothing here, especially since the Upstairs
+             * has already been notified.
+             */
         }
     }
 }
