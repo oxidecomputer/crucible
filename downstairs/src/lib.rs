@@ -3156,7 +3156,10 @@ pub async fn start_downstairs(
         ds.repair_address = Some(repair_listener);
         ds.repair_server = Some(server);
     }
-    info!(log, "Repair is running Using repair address: {:?}", repair_listener);
+    info!(
+        log,
+        "Repair is running Using repair address: {:?}", repair_listener
+    );
 
     // Optionally require SSL connections
     let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
