@@ -36,6 +36,7 @@ pub mod repair;
 mod stats;
 
 use region::Region;
+use repair::FileServerContext;
 
 pub use admin::run_dropshot;
 pub use dump::dump_region;
@@ -1766,7 +1767,6 @@ pub struct ActiveUpstairs {
  * This includes the extents and their status as well as the
  * downstairs work queue.
  */
-#[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
     lossy: bool,        // Test flag, enables pauses and skipped jobs
@@ -1780,6 +1780,7 @@ pub struct Downstairs {
     pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
     log: Logger,
+    repair_server: Option<dropshot::HttpServer<Arc<FileServerContext>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1812,6 +1813,7 @@ impl Downstairs {
             address: None,
             repair_address: None,
             log,
+            repair_server: None,
         }
     }
 
@@ -3137,7 +3139,7 @@ pub async fn start_downstairs(
     let dss = d.clone();
     let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
 
-    let repair_listener =
+    let server =
         match repair::repair_main(&dss, repair_address, &repair_log).await {
             Err(e) => {
                 // TODO tear down other things if repair server can't be
@@ -3145,14 +3147,16 @@ pub async fn start_downstairs(
                 bail!("got {:?} from repair main", e);
             }
 
-            Ok(socket_addr) => socket_addr,
+            Ok(server) => server,
         };
 
+    let repair_listener = server.local_addr();
     {
         let mut ds = d.lock().await;
         ds.repair_address = Some(repair_listener);
+        ds.repair_server = Some(server);
     }
-    info!(log, "Using repair address: {:?}", repair_listener);
+    info!(log, "Repair is running Using repair address: {:?}", repair_listener);
 
     // Optionally require SSL connections
     let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
@@ -5387,9 +5391,7 @@ mod test {
         let tx2 = Arc::new(tx2);
 
         let mut ds = ads.lock().await;
-        println!("ds1: {:?}", ds);
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
-        println!("\nds2: {:?}\n", ds);
 
         assert_eq!(ds.active_upstairs().len(), 1);
         assert!(matches!(rx1.try_recv().err().unwrap(), TryRecvError::Empty));

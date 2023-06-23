@@ -44,7 +44,7 @@ pub async fn repair_main(
     ds: &Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
     log: &Logger,
-) -> Result<SocketAddr, String> {
+) -> Result<dropshot::HttpServer<Arc<FileServerContext>>, String> {
     /*
      * We must specify a configuration with a bind address.
      */
@@ -69,7 +69,7 @@ pub async fn repair_main(
 
     let context = FileServerContext { region_dir };
 
-    info!(log, "Repair listens on {}", addr);
+    info!(log, "Repair will listen on {}", addr);
     /*
      * Set up the server.
      */
@@ -77,18 +77,8 @@ pub async fn repair_main(
         HttpServerStarter::new(&config_dropshot, api, context.into(), log)
             .map_err(|error| format!("failed to create server: {}", error))?
             .start();
-    let local_addr = server.local_addr();
 
-    tokio::spawn(async move {
-        /*
-         * Wait for the server to stop.  Note that there's not any code to
-         * shut down this server, so we should never get past this
-         * point.
-         */
-        server.await
-    });
-
-    Ok(local_addr)
+    Ok(server)
 }
 
 #[derive(Deserialize, JsonSchema)]
