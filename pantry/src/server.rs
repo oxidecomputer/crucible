@@ -5,7 +5,6 @@ use super::pantry::Pantry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
 use base64::{engine, Engine};
 use dropshot::endpoint;
 use dropshot::HandlerTaskMode;
@@ -353,8 +352,8 @@ pub async fn run_server(
     log: &Logger,
     bind_address: SocketAddr,
     df: &Arc<Pantry>,
-) -> Result<(SocketAddr, tokio::task::JoinHandle<Result<(), String>>)> {
-    let api = make_api().map_err(|e| anyhow!(e))?;
+) -> Result<dropshot::HttpServer<Arc<Pantry>>, String> {
+    let api = make_api()?;
 
     let server = dropshot::HttpServerStarter::new(
         &dropshot::ConfigDropshot {
@@ -369,13 +368,10 @@ pub async fn run_server(
         df.clone(),
         &log.new(o!("component" => "dropshot")),
     )
-    .map_err(|e| anyhow!("creating server: {:?}", e))?
+    .map_err(|e| format!("creating server: {:?}", e))?
     .start();
 
-    let local_addr = server.local_addr();
-    info!(log, "listen IP: {:?}", local_addr);
+    info!(log, "pantry will listen at IP: {:?}", server.local_addr());
 
-    let join_handle = tokio::spawn(async move { server.await });
-
-    Ok((local_addr, join_handle))
+    Ok(server)
 }

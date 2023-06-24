@@ -1,6 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -47,10 +47,22 @@ async fn main() -> Result<()> {
         Args::Run { listen } => {
             let (log, pantry) = initialize_pantry().await?;
 
-            let (_, join_handle) =
-                server::run_server(&log, listen, &pantry).await?;
-
-            join_handle.await?.map_err(|e| anyhow!(e))
+            let server = server::run_server(&log, listen, &pantry).await;
+            match server {
+                Ok(server) => {
+                    slog::warn!(
+                        log,
+                        "pantry Server started at {:?}",
+                        server.local_addr()
+                    );
+                    let _ = server.await;
+                    slog::error!(log, "pantry server shutdown");
+                    Ok(())
+                }
+                Err(e) => {
+                    bail!("Failed to start server: {:?}", e)
+                }
+            }
         }
     }
 }

@@ -3091,7 +3091,12 @@ mod test {
     async fn get_pantry_and_client_for_tds(
         tds: &TestDownstairsSet,
         my_log: &Logger,
-    ) -> (Arc<Pantry>, Uuid, CruciblePantryClient) {
+    ) -> (
+        Arc<Pantry>,
+        Uuid,
+        CruciblePantryClient,
+        dropshot::HttpServer<Arc<Pantry>>,
+    ) {
         const BLOCK_SIZE: usize = 512;
 
         info!(my_log, "get_pantry_and_client_for_tds starts");
@@ -3106,7 +3111,7 @@ mod test {
         };
 
         info!(my_log, "get_pantry_and_client_for_tds run_server");
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+        let server = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
             &pantry,
@@ -3134,10 +3139,16 @@ mod test {
                 read_only_parent: None,
             };
 
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+        let client = CruciblePantryClient::new(&format!(
+            "http://{}",
+            server.local_addr()
+        ));
 
-        info!(my_log, "get_pantry_and_client_for_tds call attach");
+        info!(
+            my_log,
+            "get_pantry_and_client_for_tds call attach to {}",
+            server.local_addr()
+        );
         // Create a Volume out of it, and attach a CruciblePantryClient
         client
             .attach(
@@ -3159,7 +3170,7 @@ mod test {
             .unwrap();
 
         info!(my_log, "get_pantry_and_client_for_tds done");
-        (pantry, volume_id, client)
+        (pantry, volume_id, client, server)
     }
 
     #[tokio::test]
@@ -3180,7 +3191,7 @@ mod test {
         let opts = tds.opts();
 
         // Start a pantry, and get the client for it
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         info!(log, "ZZZ pantry_import_from_url_ovmf after tds");
@@ -3295,7 +3306,7 @@ mod test {
         };
 
         // Start a pantry, and get the client for it
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
@@ -3398,7 +3409,7 @@ mod test {
         }
 
         // Start a pantry, and get the client for it, then use it to import img.raw
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         let response = client
@@ -3454,7 +3465,7 @@ mod test {
         let tds = TestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to snapshot
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         client
@@ -3483,7 +3494,7 @@ mod test {
 
         info!(log, "ZZZ pantry_bulk_write got past tds");
         // Start a pantry, get the client for it, then use it to bulk_write in data
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         info!(log, "ZZZ pantry_bulk_write send some writes");
@@ -3552,7 +3563,7 @@ mod test {
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         let base64_encoded_data = engine::general_purpose::STANDARD.encode(
@@ -3684,7 +3695,7 @@ mod test {
         // Start the pantry, then use it to scrub
 
         let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
-        let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
+        let server = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
             &pantry,
@@ -3692,8 +3703,10 @@ mod test {
         .await
         .unwrap();
 
-        let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+        let client = CruciblePantryClient::new(&format!(
+            "http://{}",
+            server.local_addr()
+        ));
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
@@ -3774,11 +3787,11 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pantry_bulk_read() {
+    async fn test_pantry_bulk_read_regular() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let log = local_csl("test_pantry_bulk_read");
-        info!(log, "ZZZ pantry_bulk_read start");
+        let log = local_csl("test_pantry_bulk_read_regular");
+        info!(log, "ZZZ pantry_bulk_read_regular start");
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = match TestDownstairsSet::small(false).await {
@@ -3792,14 +3805,16 @@ mod test {
 
         // Start a pantry, get the client for it, then use it to bulk_write then
         // bulk_read in data
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         info!(log, "ZZZ pantry_bulk_read got tds");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        info!(log, "ZZZ pantry_bulk_read after delay, now try write");
         // first, bulk_write some data in
 
         for i in 0..10 {
-            client
+            match client
                 .bulk_write(
                     &volume_id.to_string(),
                     &crucible_pantry_client::types::BulkWriteRequest {
@@ -3809,7 +3824,18 @@ mod test {
                     },
                 )
                 .await
-                .unwrap();
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    slog::error!(log, "Write on i {i} fails {:?}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10))
+                        .await;
+                    panic!(
+                        "Downstairs write fails on pantry bulk read: {:?}",
+                        e
+                    );
+                }
+            }
         }
 
         info!(log, "ZZZ pantry_bulk_read did writes");
@@ -3870,10 +3896,11 @@ mod test {
         info!(log, "ZZZ pantry_bulk_read last setp");
         client.detach(&volume_id.to_string()).await.unwrap();
         info!(log, "ZZZ pantry_bulk_read end");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_pantry_bulk_read_max_chunk_size() {
+    async fn test_pantry_bulk_read_max_chunk_size() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_bulk_read_max_cs");
         info!(log, "bulk_read_max_chunk_size starts");
@@ -3884,7 +3911,7 @@ mod test {
         info!(log, "bulk_read_max_chunk_size made downstairs");
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         // bulk write in a bunch of data
@@ -3930,7 +3957,8 @@ mod test {
 
         info!(log, "bulk_read_max_chunk_size first almost done");
         client.detach(&volume_id.to_string()).await.unwrap();
-        info!(log, "bulk_read_max_chunk_size first almost done");
+        info!(log, "bulk_read_max_chunk_size first is done");
+        Ok(())
     }
 
     #[tokio::test]
@@ -3944,7 +3972,7 @@ mod test {
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         // parallel bulk write in a bunch of random data in a random order
@@ -4075,7 +4103,7 @@ mod test {
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         // parallel bulk write in a bunch of random data in a random order
@@ -4206,7 +4234,7 @@ mod test {
         let tds = TestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it
-        let (_pantry, volume_id, client) =
+        let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
         let response = client
