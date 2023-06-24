@@ -48,4 +48,4 @@ echo in_work_bins
 ls -l /work/bins
 
 banner test
-ptime -m cargo test --verbose -- --nocapture > /tmp/fulltest-out.log 2>&1
+ptime -m cargo test --verbose -- --nocapture
