@@ -28,7 +28,7 @@ pfexec coreadm -e proc-setid
 pfexec coreadm -e global-setid
 
 banner build
-ptime -m cargo build --verbose > /tmp/buildout.txt
+ptime -m cargo build --verbose > /tmp/buildout.txt 2>&1
 
 banner output
 
@@ -48,4 +48,4 @@ echo in_work_bins
 ls -l /work/bins
 
 banner test
-ptime -m cargo test --verbose > /tmp/fulltest-out.log
+ptime -m cargo test --verbose -- --nocapture > /tmp/fulltest-out.log 2>&1
