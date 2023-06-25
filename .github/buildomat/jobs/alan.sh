@@ -26,10 +26,12 @@ pfexec coreadm -e proc-setid
 pfexec coreadm -e global-setid
 
 banner build
-ptime -m cargo build --all-targets --verbose > /tmp/buildout.txt 2>&1
+ptime -m cargo build --release --all-targets --verbose > /tmp/buildout.txt 2>&1
 
 for i in {0..40}; do
+    date
     banner "$i"
     ptime -m cargo test --verbose -- --nocapture > /tmp/testout.log 2>&1
+    rm /tmp/test*log
 done
 banner finished
