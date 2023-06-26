@@ -137,7 +137,8 @@ mod test {
         pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
             TestDownstairsSet::new_with_flag(
                 read_only,
-                false,
+                5, // blocks per extent
+                2, // extent count
                 false,
             ).await
         }
@@ -146,16 +147,20 @@ mod test {
         pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
             TestDownstairsSet::new_with_flag(
                 read_only,
-                true,
+                // 512 * 188 * 512 = 49283072b
+                512, // blocks per extent
+                188, // extent count
                 false,
             ).await
         }
 
-        /// Spin off three downstairs, with a 50 MB region
+        /// Spin off three problematic downstairs, with a 10 MB region
         pub async fn problem() -> Result<TestDownstairsSet> {
             TestDownstairsSet::new_with_flag(
                 false, // read only
-                true, // big
+                // 512 * 40 * 512 = 10485760b
+                512, // blocks per extent
+                40, // extent count
                 true, // problematic
             ).await
         }
@@ -163,12 +168,10 @@ mod test {
         /// Spin off three downstairs
         pub async fn new_with_flag(
             read_only: bool,
-            big: bool,
+            blocks_per_extent: u64,
+            extent_count: u32,
             problematic: bool,
         ) -> Result<TestDownstairsSet> {
-            let (blocks_per_extent, extent_count) =
-                if big { (512, 188) } else { (5, 2) };
-
             let downstairs1 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 true,
