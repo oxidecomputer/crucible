@@ -24,12 +24,13 @@ _exit_trap() {
 
     set +o errexit
     set -o xtrace
+    sleep 5
     banner evidence
 
 	CORES=$(ls /tmp/core*)
 	for c in $CORES; do
 	    echo "Stack for Core file $c"
-        pstack "$c"
+        pfexec pstack "$c"
     done
 
     exit $status

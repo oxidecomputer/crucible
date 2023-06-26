@@ -3585,7 +3585,13 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = match TestDownstairsSet::small(false).await {
+            Ok(tds) => tds,
+            Err(e) => {
+                info!(log, "Can't create TDS small: {:?}", e);
+                bail!("Can't create TDS small: {:?}", e);
+            }
+        };
         let opts = tds.opts();
 
         info!(log, "ZZZ pantry_bulk_write got past tds");
@@ -3669,7 +3675,13 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = match TestDownstairsSet::big(false).await {
+            Ok(tds) => tds,
+            Err(e) => {
+                info!(log, "Can't create TDS small: {:?}", e);
+                bail!("Can't create TDS small: {:?}", e);
+            }
+        };
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
@@ -4038,7 +4050,13 @@ mod test {
         info!(log, "bulk_read_max_chunk_size starts");
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = match TestDownstairsSet::big(false).await {
+            Ok(tds) => tds,
+            Err(e) => {
+                info!(log, "Can't create TDS small: {:?}", e);
+                bail!("Can't create TDS small: {:?}", e);
+            }
+        };
 
         info!(log, "bulk_read_max_chunk_size made downstairs");
         // Start a pantry, get the client for it, then use it to bulk_write in
@@ -4107,7 +4125,13 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = match TestDownstairsSet::small(false).await {
+            Ok(tds) => tds,
+            Err(e) => {
+                info!(log, "Can't create TDS small: {:?}", e);
+                bail!("Can't create TDS small: {:?}", e);
+            }
+        };
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -4246,7 +4270,13 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = match TestDownstairsSet::small(false).await {
+            Ok(tds) => tds,
+            Err(e) => {
+                info!(log, "Can't create TDS small: {:?}", e);
+                bail!("Can't create TDS small: {:?}", e);
+            }
+        };
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -4386,7 +4416,13 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = match TestDownstairsSet::small(false).await {
+            Ok(tds) => tds,
+            Err(e) => {
+                info!(log, "Can't create TDS small: {:?}", e);
+                bail!("Can't create TDS small: {:?}", e);
+            }
+        };
 
         // Start a pantry, get the client for it
         let (_pantry, volume_id, client, _pantry_server) =
