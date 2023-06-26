@@ -2793,12 +2793,14 @@ impl Work {
 
     /**
      * If the requested job is still new, and the dependencies are all met,
-     * return the job ID and the upstairs UUID, moving the state of the
-     * job as InProgress.
+     * return the job ID and the upstairs UUID, moving the state of the job as
+     * InProgress. If the dependencies are not met, move the state to DepWait.
      *
-     * If this job is not new, then just return none.  This can be okay as
-     * we build or work list with the new_work fn above, but we drop and
-     * re-aquire the Work mutex and things can change.
+     * If this job is not new, then just return none. This can be okay as we
+     * build or work list with the new_work fn above, but we drop and re-aquire
+     * the Work mutex and things can change.
+     *
+     * If the job is InProgress, return itself.
      */
     fn in_progress(
         &mut self,
@@ -2933,6 +2935,10 @@ impl Work {
                  */
                 job.state = WorkState::InProgress;
 
+                Some((job.ds_id, job.upstairs_connection))
+            } else if job.state == WorkState::InProgress {
+                // A previous call of this function put this job in progress, so
+                // return idempotently.
                 Some((job.ds_id, job.upstairs_connection))
             } else {
                 /*
