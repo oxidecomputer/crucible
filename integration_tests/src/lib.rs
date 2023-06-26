@@ -2479,11 +2479,14 @@ mod test {
         for _ in 0..3 {
             let chunks: Vec<(usize, Vec<u8>)> = (0..total_size)
                 .step_by(CHUNK_SIZE)
-                .map(|i| (i, {
-                    let mut random_buffer = vec![0u8; CHUNK_SIZE];
-                    rand::thread_rng().fill(&mut random_buffer[..]);
-                    random_buffer
-                }))
+                .map(|i| (
+                    i / 512, // block offset!
+                    {
+                        let mut random_buffer = vec![0u8; CHUNK_SIZE];
+                        rand::thread_rng().fill(&mut random_buffer[..]);
+                        random_buffer
+                    }
+                ))
                 .collect();
 
             for (i, random_buffer) in chunks.iter() {
