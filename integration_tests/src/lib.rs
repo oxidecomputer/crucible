@@ -3322,7 +3322,7 @@ mod test {
             Err(e) => {
                 info!(log, "ZZZ import_from_bad_url_ovmf Create downstairs fails with {:?}", e);
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                panic!(
+                bail!(
                     "Downstairs create fails on bad_import_from_url_ovmf: {:?}",
                     e
                 );
@@ -3376,16 +3376,28 @@ mod test {
             log,
             "ZZZ pantry_import_from_bad_url_ovmf wait for job to finish"
         );
-        while !client
-            .is_job_finished(&response.job_id)
-            .await
-            .unwrap()
-            .job_is_finished
-        {
+        loop {
+            let job = match client.is_job_finished(&response.job_id).await {
+                Ok(job) => job,
+                Err(e) => {
+                    info!(log, "Client call failed: {:?}", e);
+                    bail!("Client call failed: {:?}", e);
+                }
+            };
+            if job.job_is_finished {
+                break;
+            }
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
-        let result = client.job_result_ok(&response.job_id).await.unwrap();
+        let result = match client.job_result_ok(&response.job_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                info!(log, "Job result not ok: {:?}", e);
+                bail!("Job result not ok: {:?}", e)
+            }
+        };
+
         assert!(!result.job_result_ok);
 
         info!(log, "ZZZ pantry_import_from_bad_url_ovmf almost done");

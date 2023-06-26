@@ -43,6 +43,27 @@
 #: from_output = "/out/crucible-pantry.sha256.txt"
 #:
 
+#
+# If we fail, try to collect some debugging information
+#
+_exit_trap() {
+    local status=$?
+    [[ $status -eq 0 ]] && exit 0
+
+    set +o errexit
+    set -o xtrace
+    banner evidence
+
+	CORES=$(ls /tmp/core*)
+	for c in $CORES; do
+	    echo "Stack for Core file $c"
+        pstack "$c"
+    done
+
+    exit $status
+}
+trap _exit_trap EXIT
+
 set -o errexit
 set -o pipefail
 set -o xtrace
