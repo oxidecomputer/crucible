@@ -3195,7 +3195,10 @@ mod test {
         let tds = match TestDownstairsSet::big(false).await {
             Ok(tds) => tds,
             Err(e) => {
-                info!(log, "import_from_url_ovmf Create downstairs fails with {:?}", e);
+                info!(
+                    log,
+                    "import_from_url_ovmf Create downstairs fails with {:?}", e
+                );
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 panic!("Downstairs create fails on pifuo: {:?}", e);
             }
