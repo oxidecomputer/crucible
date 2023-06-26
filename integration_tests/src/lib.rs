@@ -3091,12 +3091,12 @@ mod test {
     async fn get_pantry_and_client_for_tds(
         tds: &TestDownstairsSet,
         my_log: &Logger,
-    ) -> (
+    ) -> Result<(
         Arc<Pantry>,
         Uuid,
         CruciblePantryClient,
         dropshot::HttpServer<Arc<Pantry>>,
-    ) {
+    )> {
         const BLOCK_SIZE: usize = 512;
 
         info!(my_log, "get_pantry_and_client_for_tds starts");
@@ -3149,8 +3149,9 @@ mod test {
             "get_pantry_and_client_for_tds call attach to {}",
             server.local_addr()
         );
+
         // Create a Volume out of it, and attach a CruciblePantryClient
-        client
+        match client
             .attach(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::AttachRequest {
@@ -3160,21 +3161,32 @@ mod test {
                     // crucible::VolumeConstructionRequest, but they are the
                     // same thing! take a trip through JSON
                     // to get to the right type
-                    volume_construction_request: serde_json::from_str(
+                    volume_construction_request: match serde_json::from_str(
                         &serde_json::to_string(&vcr).unwrap(),
-                    )
-                    .unwrap(),
+                    ) {
+                        Ok(ar) => ar,
+                        Err(e) => {
+                            info!(my_log, "Failed in VCR with {:?}", e);
+                            bail!("Failed in VCR with {:?}", e)
+                        }
+                    },
                 },
             )
             .await
-            .unwrap();
+        {
+            Ok(_) => {}
+            Err(e) => {
+                info!(my_log, "Failed client attach with {:?}", e);
+                bail!("Failed in client attach with {:?}", e);
+            }
+        }
 
         info!(my_log, "get_pantry_and_client_for_tds done");
-        (pantry, volume_id, client, server)
+        Ok((pantry, volume_id, client, server))
     }
 
     #[tokio::test]
-    async fn test_pantry_import_from_url_ovmf() {
+    async fn test_pantry_import_from_url_ovmf() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         let log = local_csl("test_pantry_import_from_url_ovmf");
@@ -3192,7 +3204,14 @@ mod test {
 
         // Start a pantry, and get the client for it
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         info!(log, "ZZZ pantry_import_from_url_ovmf after tds");
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
@@ -3287,6 +3306,7 @@ mod test {
             eprintln!("{} {} ok", start, end);
         }
         info!(log, "ZZZ pantry_import_from_url_ovmf end");
+        Ok(())
     }
 
     #[tokio::test]
@@ -3311,7 +3331,14 @@ mod test {
 
         // Start a pantry, and get the client for it
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
 
@@ -3432,7 +3459,14 @@ mod test {
         info!(log, "ZZZ pantry_import_from_local_server get pantry");
         // Start a pantry, and get the client for it, then use it to import img.raw
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         let response = match client
             .import_from_url(
@@ -3491,7 +3525,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pantry_snapshot() {
+    async fn test_pantry_snapshot() -> Result<()> {
         let log = local_csl("test_pantry_import_from_local_server");
         const BLOCK_SIZE: usize = 512;
 
@@ -3500,7 +3534,14 @@ mod test {
 
         // Start a pantry, get the client for it, then use it to snapshot
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         client
             .snapshot(
@@ -3513,6 +3554,7 @@ mod test {
             .unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
     #[tokio::test]
@@ -3529,7 +3571,14 @@ mod test {
         info!(log, "ZZZ pantry_bulk_write got past tds");
         // Start a pantry, get the client for it, then use it to bulk_write in data
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         info!(log, "ZZZ pantry_bulk_write send some writes");
         for i in 0..10 {
@@ -3593,7 +3642,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pantry_bulk_write_max_chunk_size() {
+    async fn test_pantry_bulk_write_max_chunk_size() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_bulk_write_max_chunk_size");
         println!("ZZZ pantry_bulk_write_max_chunk_size start");
@@ -3605,7 +3654,14 @@ mod test {
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         let base64_encoded_data = engine::general_purpose::STANDARD.encode(
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
@@ -3656,6 +3712,7 @@ mod test {
             *buffer.as_vec().await
         );
         println!("ZZZ pantry_bulk_write_max_chunk_size done");
+        Ok(())
     }
 
     #[tokio::test]
@@ -3850,7 +3907,14 @@ mod test {
         // Start a pantry, get the client for it, then use it to bulk_write then
         // bulk_read in data
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         info!(log, "ZZZ pantry_bulk_read got tds");
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -3872,9 +3936,7 @@ mod test {
                 Ok(_) => {}
                 Err(e) => {
                     slog::error!(log, "Write on i {i} fails {:?}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10))
-                        .await;
-                    panic!(
+                    bail!(
                         "Downstairs write fails on pantry bulk read: {:?}",
                         e
                     );
@@ -3906,7 +3968,7 @@ mod test {
         info!(log, "ZZZ pantry_bulk_read did reads");
         // perform one giant bulk_read
 
-        let data = client
+        let data = match client
             .bulk_read(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::BulkReadRequest {
@@ -3915,7 +3977,13 @@ mod test {
                 },
             )
             .await
-            .unwrap();
+        {
+            Ok(d) => d,
+            Err(e) => {
+                info!(log, "Bulk read failed: {:?}", e);
+                bail!("Bulk read failed: {:?}", e)
+            }
+        };
 
         info!(log, "ZZZ pantry_bulk_read did bulk read now verify");
         assert_eq!(
@@ -3956,7 +4024,14 @@ mod test {
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         // bulk write in a bunch of data
 
@@ -4006,7 +4081,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pantry_validate() {
+    async fn test_pantry_validate() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_validate");
 
@@ -4017,7 +4092,14 @@ mod test {
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         // parallel bulk write in a bunch of random data in a random order
 
@@ -4133,11 +4215,12 @@ mod test {
         assert!(response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
     // Test validating a subset of the beginning of the volume
     #[tokio::test]
-    async fn test_pantry_validate_subset() {
+    async fn test_pantry_validate_subset() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_valid_sub");
 
@@ -4148,7 +4231,14 @@ mod test {
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         // parallel bulk write in a bunch of random data in a random order
 
@@ -4265,11 +4355,12 @@ mod test {
         assert!(response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
     // Test validating a non-block size amount fails
     #[tokio::test]
-    async fn test_pantry_validate_fail() {
+    async fn test_pantry_validate_fail() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_validate_fail");
 
@@ -4279,7 +4370,14 @@ mod test {
 
         // Start a pantry, get the client for it
         let (_pantry, volume_id, client, _pantry_server) =
-            get_pantry_and_client_for_tds(&tds, &log).await;
+            match get_pantry_and_client_for_tds(&tds, &log).await {
+                Ok((_pantry, volume_id, client, _pantry_server)) => {
+                    (_pantry, volume_id, client, _pantry_server)
+                }
+                Err(e) => {
+                    bail!("Pantry TDS fails: {:?}", e);
+                }
+            };
 
         let response = client
             .validate(
@@ -4310,5 +4408,6 @@ mod test {
         assert!(!response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 }
