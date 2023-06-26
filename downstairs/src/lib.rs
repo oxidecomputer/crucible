@@ -972,6 +972,7 @@ where
     while job_channel_rx.recv().await.is_some() {
         // Add a little time to completion for this operation.
         if ads.lock().await.lossy && random() && random() {
+            info!(ads.lock().await.log, "[lossy] sleeping 1 second");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
@@ -1009,6 +1010,8 @@ where
             for new_id in new_work.drain(..) {
                 if ads.lock().await.lossy && random() && random() {
                     // Skip a job that needs to be done. Sometimes
+                    info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
+                    repeat_work.push(new_id);
                     continue;
                 }
 
