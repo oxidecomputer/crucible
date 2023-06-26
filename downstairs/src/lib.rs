@@ -984,7 +984,7 @@ where
          * Build ourselves a list of all the jobs on the work hashmap that
          * are New or DepWait.
          */
-        let mut new_work = {
+        let mut new_work: Vec<u64> = {
             if let Ok(new_work) =
                 ads.lock().await.new_work(upstairs_connection).await
             {
@@ -1003,79 +1003,82 @@ where
          */
         new_work.sort_unstable();
 
-        for new_id in new_work.iter() {
-            if ads.lock().await.lossy && random() && random() {
-                // Skip a job that needs to be done. Sometimes
-                continue;
-            }
+        while !new_work.is_empty() {
+            let mut repeat_work = Vec::with_capacity(new_work.len());
 
-            /*
-             * If this job is still new, take it and go to work. The
-             * in_progress method will only return a job if all
-             * dependencies are met.
-             */
-            let job_id = ads
-                .lock()
-                .await
-                .in_progress(upstairs_connection, *new_id)
-                .await?;
+            for new_id in new_work.drain(..) {
+                if ads.lock().await.lossy && random() && random() {
+                    // Skip a job that needs to be done. Sometimes
+                    continue;
+                }
 
-            if let Some(job_id) = job_id {
-                cdt::work__process!(|| job_id);
-                let m = ads
+                /*
+                 * If this job is still new, take it and go to work. The
+                 * in_progress method will only return a job if all
+                 * dependencies are met.
+                 */
+                let job_id = ads
                     .lock()
                     .await
-                    .do_work(upstairs_connection, job_id)
+                    .in_progress(upstairs_connection, new_id)
                     .await?;
 
-                // If this is a repair job, and that repair failed, we
-                // can do no more work on this downstairs and should
-                // force everything to come down before more work arrives.
-                //
-                // However, we can respond to the upstairs with the failed
-                // result, and let the upstairs take action that will
-                // allow it to abort the repair and continue working in
-                // some degraded state.
-                let mut abort_needed = false;
-                if let Some(m) = m {
-                    abort_needed = check_message_for_abort(&m);
+                if let Some(job_id) = job_id {
+                    cdt::work__process!(|| job_id);
+                    let m = ads
+                        .lock()
+                        .await
+                        .do_work(upstairs_connection, job_id)
+                        .await?;
 
-                    if m.err() {
-                        // If the job errored, do not consider it completed.
-                        // Reset it to New so it can be retried.
-                        ads.lock()
-                            .await
-                            .reset_job_new(upstairs_connection, *new_id)
-                            .await?;
-                    } else {
-                        // The job completed successfully, so inform the
-                        // Upstairs
+                    // If this is a repair job, and that repair failed, we
+                    // can do no more work on this downstairs and should
+                    // force everything to come down before more work arrives.
+                    //
+                    // However, we can respond to the upstairs with the failed
+                    // result, and let the upstairs take action that will
+                    // allow it to abort the repair and continue working in
+                    // some degraded state.
+                    let mut abort_needed = false;
+                    if let Some(m) = m {
+                        abort_needed = check_message_for_abort(&m);
 
-                        ads.lock()
-                            .await
-                            .complete_work_stat(upstairs_connection, &m, job_id)
-                            .await?;
+                        if m.err() {
+                            // If the job errored, do not consider it completed.
+                            // Retry it.
+                            repeat_work.push(new_id);
+                        } else {
+                            // The job completed successfully, so inform the
+                            // Upstairs
 
-                        // Notify the upstairs before completing work
-                        let mut fw = fw.lock().await;
-                        fw.send(&m).await?;
-                        drop(fw);
+                            ads.lock()
+                                .await
+                                .complete_work_stat(upstairs_connection, &m, job_id)
+                                .await?;
 
-                        ads.lock()
-                            .await
-                            .complete_work(upstairs_connection, job_id, m)
-                            .await?;
+                            // Notify the upstairs before completing work
+                            let mut fw = fw.lock().await;
+                            fw.send(&m).await?;
+                            drop(fw);
 
-                        cdt::work__done!(|| job_id);
+                            ads.lock()
+                                .await
+                                .complete_work(upstairs_connection, job_id, m)
+                                .await?;
+
+                            cdt::work__done!(|| job_id);
+                        }
+                    }
+
+                    // Now, if the message requires an abort, we handle
+                    // that now by exiting this task with error.
+                    if abort_needed {
+                        bail!("Repair has failed, exiting task");
                     }
                 }
-
-                // Now, if the message requires an abort, we handle
-                // that now by exiting this task with error.
-                if abort_needed {
-                    bail!("Repair has failed, exiting task");
-                }
             }
+
+            new_work = repeat_work;
         }
     }
 
@@ -2312,17 +2315,6 @@ impl Downstairs {
         }
     }
 
-    /// Reset the job to New so it can be retried
-    async fn reset_job_new(
-        &mut self,
-        upstairs_connection: UpstairsConnection,
-        job_id: u64,
-    ) -> Result<()> {
-        let mut work = self.work_lock(upstairs_connection).await?;
-        work.reset_job_new(job_id);
-        Ok(())
-    }
-
     /*
      * Complete work by:
      *
@@ -2979,23 +2971,6 @@ impl Work {
                  */
                 None
             }
-        }
-    }
-
-    /// Reset the job to New so it can be retried
-    fn reset_job_new(&mut self, job_id: u64) {
-        if let Some(job) = self.active.get_mut(&job_id) {
-            assert_eq!(job_id, job.ds_id);
-            job.state = WorkState::New;
-        } else {
-            /*
-             * This branch occurs when another Upstairs has promoted itself to
-             * active, causing active work to be cleared (in promote_to_active).
-             *
-             * If this has happened, work.completed and work.last_flush have
-             * also been reset. Do nothing here, especially since the Upstairs
-             * has already been notified.
-             */
         }
     }
 }
