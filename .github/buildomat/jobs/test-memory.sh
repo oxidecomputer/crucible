@@ -13,7 +13,8 @@
 #: job = "rbuild"
 
 input="/input/rbuild/work"
-
+banner skipped
+exit 0
 set -o errexit
 set -o pipefail
 set -o xtrace

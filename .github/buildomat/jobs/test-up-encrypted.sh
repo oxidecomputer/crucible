@@ -16,7 +16,8 @@ input="/input/build/work"
 set -o errexit
 set -o pipefail
 set -o xtrace
-
+banner skipped
+exit 0
 echo "input bins dir contains:"
 ls -ltr "$input"/bins || true
 

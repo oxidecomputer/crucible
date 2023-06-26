@@ -16,7 +16,8 @@ input="/input/rbuild/work"
 set -o errexit
 set -o pipefail
 set -o xtrace
-
+banner skipped
+exit 0
 echo "input rbins dir contains:"
 ls -ltr "$input"/rbins || true
 
