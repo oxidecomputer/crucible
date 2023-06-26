@@ -3229,8 +3229,10 @@ mod test {
         let result = client.job_result_ok(&response.job_id).await.unwrap();
         assert!(result.job_result_ok);
 
+        info!(log, "ZZZ pantry_import_from_url_ovmf verified");
         client.detach(&volume_id.to_string()).await.unwrap();
 
+        info!(log, "ZZZ pantry_import_from_url_ovmf detatched");
         // read the data to verify import
 
         let dur = std::time::Duration::from_secs(25);
@@ -3249,6 +3251,7 @@ mod test {
             .await
             .unwrap();
 
+        info!(log, "ZZZ pantry_import_from_url_ovmf make vcr");
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
                 id: volume_id,
@@ -3265,6 +3268,7 @@ mod test {
         let volume = Volume::construct(vcr, None).await.unwrap();
         volume.activate().await.unwrap();
 
+        info!(log, "ZZZ pantry_import_from_url_ovmf read");
         let buffer = Buffer::new(bytes.len());
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
@@ -3286,7 +3290,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pantry_import_from_url_ovmf_bad_digest() {
+    async fn test_pantry_import_from_url_ovmf_bad_digest() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
@@ -3315,7 +3319,8 @@ mod test {
         let sha256_digest =
             "00000000000000000000000000000000000000000000000000000000f5b32221";
 
-        let response = client
+        info!(log, "ZZZ pantry_import_from_bad_url_ovmf calling import");
+        let response = match client
             .import_from_url(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::ImportFromUrlRequest {
@@ -3328,8 +3333,22 @@ mod test {
                 },
             )
             .await
-            .unwrap();
+        {
+            Ok(response) => response,
+            Err(e) => {
+                slog::error!(
+                    log,
+                    "ZZZ pantry_import_from_bad_url_ovmf fails {:?}",
+                    e
+                );
+                bail!("pantry_import_from_bad_url_ovmf fails: {:?}", e);
+            }
+        };
 
+        info!(
+            log,
+            "ZZZ pantry_import_from_bad_url_ovmf wait for job to finish"
+        );
         while !client
             .is_job_finished(&response.job_id)
             .await
@@ -3345,11 +3364,13 @@ mod test {
         info!(log, "ZZZ pantry_import_from_bad_url_ovmf almost done");
         client.detach(&volume_id.to_string()).await.unwrap();
         info!(log, "ZZZ pantry_import_from_bad_url_ovmf end");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_pantry_import_from_local_server() {
+    async fn test_pantry_import_from_local_server() -> Result<()> {
         let log = local_csl("test_pantry_import_from_local_server");
+        info!(log, "ZZZ pantry_import_from_local_server start");
         const BLOCK_SIZE: usize = 512;
 
         let server = Server::run();
@@ -3408,11 +3429,12 @@ mod test {
             drop(volume);
         }
 
+        info!(log, "ZZZ pantry_import_from_local_server get pantry");
         // Start a pantry, and get the client for it, then use it to import img.raw
         let (_pantry, volume_id, client, _pantry_server) =
             get_pantry_and_client_for_tds(&tds, &log).await;
 
-        let response = client
+        let response = match client
             .import_from_url(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::ImportFromUrlRequest {
@@ -3421,7 +3443,17 @@ mod test {
                 },
             )
             .await
-            .unwrap();
+        {
+            Ok(response) => response,
+            Err(e) => {
+                slog::error!(
+                    log,
+                    "ZZZ pantry_import_from_bad_url_ovmf fails {:?}",
+                    e
+                );
+                bail!("pantry_import_from_bad_url_ovmf fails: {:?}", e);
+            }
+        };
 
         // Test not polling here
         let result = client.job_result_ok(&response.job_id).await.unwrap();
@@ -3454,6 +3486,8 @@ mod test {
             .unwrap();
 
         assert_eq!(vec![0x55; 5120], *buffer.as_vec().await);
+        info!(log, "ZZZ pantry_import_from_local_server end");
+        Ok(())
     }
 
     #[tokio::test]
@@ -3482,7 +3516,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_pantry_bulk_write() {
+    async fn test_pantry_bulk_write() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_bulk_write");
         info!(log, "ZZZ pantry_bulk_write start");
@@ -3547,15 +3581,22 @@ mod test {
         for i in 0..10 {
             let start = i * 512;
             let end = (i + 1) * 512;
+            if vec![i as u8; 512] != buffer_data[start..end] {
+                info!(log, "pantry_bulk_write failed buffer compare [{i}]",);
+                println!("pantry_bulk_write failed buffer compare [{i}]",);
+                bail!("pantry_bulk_write test failed compare");
+            }
             assert_eq!(vec![i as u8; 512], buffer_data[start..end]);
         }
         println!("ZZZ pantry_bulk_write end");
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_pantry_bulk_write_max_chunk_size() {
         const BLOCK_SIZE: usize = 512;
         let log = local_csl("test_pantry_bulk_write_max_chunk_size");
+        println!("ZZZ pantry_bulk_write_max_chunk_size start");
 
         // Spin off three downstairs, build our Crucible struct.
 
@@ -3585,6 +3626,7 @@ mod test {
 
         // Attach, validate bulk write worked
 
+        println!("ZZZ pantry_bulk_write_max_chunk_size middle");
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {
                 id: volume_id,
@@ -3608,10 +3650,12 @@ mod test {
             .await
             .unwrap();
 
+        println!("ZZZ pantry_bulk_write_max_chunk_size final compare");
         assert_eq!(
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
             *buffer.as_vec().await
         );
+        println!("ZZZ pantry_bulk_write_max_chunk_size done");
     }
 
     #[tokio::test]
