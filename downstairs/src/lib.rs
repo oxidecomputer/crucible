@@ -2988,8 +2988,8 @@ impl Work {
 }
 
 /*
- * We may not need Done or Error.  At the moment all we actually look
- * at is New or InProgress.
+ * XXX We may not need Done. At the moment all we actually look at is New or
+ * InProgress.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
@@ -2998,7 +2998,6 @@ pub enum WorkState {
     DepWait,
     InProgress,
     Done,
-    Error,
 }
 
 impl fmt::Display for WorkState {
@@ -3015,9 +3014,6 @@ impl fmt::Display for WorkState {
             }
             WorkState::Done => {
                 write!(f, "Done")
-            }
-            WorkState::Error => {
-                write!(f, " Err")
             }
         }
     }
