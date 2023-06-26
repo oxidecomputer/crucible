@@ -497,6 +497,17 @@ async fn process_message(
                 None,
             )
         }
+        Message::ErrorReport {
+            upstairs_id: _,
+            session_id: _,
+            job_id,
+            error,
+        } => {
+            // XXX currently, this error report goes nowhere except to the log.
+            // The Upstairs should track this for each Downstairs.
+            error!(u.log, "[{}] job id {} saw error {:?}", client_id, job_id, error);
+            return Ok(());
+        }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
          * I don't think there is anything else we can do.

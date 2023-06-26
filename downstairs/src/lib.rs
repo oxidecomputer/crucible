@@ -1043,7 +1043,16 @@ where
                     if let Some(m) = m {
                         abort_needed = check_message_for_abort(&m);
 
-                        if m.err() {
+                        if let Some(error) = m.err() {
+                            let mut fw = fw.lock().await;
+                            fw.send(&Message::ErrorReport {
+                                upstairs_id: upstairs_connection.upstairs_id,
+                                session_id: upstairs_connection.session_id,
+                                job_id: new_id,
+                                error: error.clone(),
+                            }).await?;
+                            drop(fw);
+
                             // If the job errored, do not consider it completed.
                             // Retry it.
                             repeat_work.push(new_id);
