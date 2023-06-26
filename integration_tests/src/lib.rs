@@ -3190,12 +3190,12 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let log = local_csl("test_pantry_import_from_url_ovmf");
-        info!(log, "ZZZ pantry_import_from_url_ovmf start");
+        info!(log, "pantry_import_from_url_ovmf start");
         // Spin off three downstairs, build our Crucible struct.
         let tds = match TestDownstairsSet::big(false).await {
             Ok(tds) => tds,
             Err(e) => {
-                info!(log, "ZZZ import_from_url_ovmf Create downstairs fails with {:?}", e);
+                info!(log, "import_from_url_ovmf Create downstairs fails with {:?}", e);
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 panic!("Downstairs create fails on pifuo: {:?}", e);
             }
@@ -3213,7 +3213,7 @@ mod test {
                 }
             };
 
-        info!(log, "ZZZ pantry_import_from_url_ovmf after tds");
+        info!(log, "pantry_import_from_url_ovmf after tds");
         let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
         let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
 
@@ -3243,9 +3243,14 @@ mod test {
         {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
-        info!(log, "ZZZ pantry_import_from_url_ovmf after some import_url");
+        info!(log, "pantry_import_from_url_ovmf after some import_url");
 
-        let result = client.job_result_ok(&response.job_id).await.unwrap();
+        let result = match client.job_result_ok(&response.job_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                bail!("pantry_import job result unwrap failed: {:?}", e);
+            }
+        };
         assert!(result.job_result_ok);
 
         info!(log, "ZZZ pantry_import_from_url_ovmf verified");
