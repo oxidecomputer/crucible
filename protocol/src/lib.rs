@@ -160,7 +160,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 3;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 4;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -493,6 +493,12 @@ pub enum Message {
     Unknown(u32, BytesMut),
 }
 
+/*
+ * If you just added or changed the Message enum above, you must also
+ * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
+ * forget.
+ */
+
 impl Message {
     /// Return true if this message contains an Error result
     pub fn err(&self) -> Option<&CrucibleError> {
@@ -543,12 +549,6 @@ impl Message {
         }
     }
 }
-
-/*
- * If you just added or changed the Message enum above, you must also
- * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
- * forget.
- */
 
 #[derive(Debug)]
 pub struct CrucibleEncoder {}
