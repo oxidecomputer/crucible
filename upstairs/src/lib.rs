@@ -505,7 +505,10 @@ async fn process_message(
         } => {
             // XXX currently, this error report goes nowhere except to the log.
             // The Upstairs should track this for each Downstairs.
-            error!(u.log, "[{}] job id {} saw error {:?}", client_id, job_id, error);
+            error!(
+                u.log,
+                "[{}] job id {} saw error {:?}", client_id, job_id, error
+            );
             return Ok(());
         }
         /*
@@ -5154,8 +5157,8 @@ impl Upstairs {
         let ds_state = self.ds_state_copy().await;
         let ds = self.downstairs.lock().await;
         let ds_io_count = ds.io_state_count;
-        let ds_reconciled = ds.reconcile_repaired.clone();
-        let ds_reconcile_needed = ds.reconcile_repair_needed.clone();
+        let ds_reconciled = ds.reconcile_repaired;
+        let ds_reconcile_needed = ds.reconcile_repair_needed;
         let ds_live_repair_completed = ds.live_repair_completed.clone();
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
         let ds_connected = ds.connected.clone();

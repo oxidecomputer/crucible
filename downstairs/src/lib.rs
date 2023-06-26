@@ -1053,7 +1053,8 @@ where
                                 session_id: upstairs_connection.session_id,
                                 job_id: new_id,
                                 error: error.clone(),
-                            }).await?;
+                            })
+                            .await?;
                             drop(fw);
 
                             // If the job errored, do not consider it completed.
@@ -1065,7 +1066,11 @@ where
 
                             ads.lock()
                                 .await
-                                .complete_work_stat(upstairs_connection, &m, job_id)
+                                .complete_work_stat(
+                                    upstairs_connection,
+                                    &m,
+                                    job_id,
+                                )
                                 .await?;
 
                             // Notify the upstairs before completing work

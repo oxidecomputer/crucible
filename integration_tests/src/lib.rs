@@ -135,34 +135,44 @@ mod test {
     impl TestDownstairsSet {
         /// Spin off three downstairs, with a 5120b region
         pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
+            // 5 * 2 * 512 = 5120b
+            let blocks_per_extent = 5;
+            let extent_count = 2;
             TestDownstairsSet::new_with_flag(
                 read_only,
-                5, // blocks per extent
-                2, // extent count
+                blocks_per_extent,
+                extent_count,
                 false,
-            ).await
+            )
+            .await
         }
 
         /// Spin off three downstairs, with a 50 MB region
         pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
+            // 512 * 188 * 512 = 49283072b ~= 50MB
+            let blocks_per_extent = 512;
+            let extent_count = 188;
             TestDownstairsSet::new_with_flag(
                 read_only,
-                // 512 * 188 * 512 = 49283072b
-                512, // blocks per extent
-                188, // extent count
+                blocks_per_extent,
+                extent_count,
                 false,
-            ).await
+            )
+            .await
         }
 
         /// Spin off three problematic downstairs, with a 10 MB region
         pub async fn problem() -> Result<TestDownstairsSet> {
+            // 512 * 40 * 512 = 10485760b = 10MB
+            let blocks_per_extent = 512;
+            let extent_count = 188;
             TestDownstairsSet::new_with_flag(
                 false, // read only
-                // 512 * 40 * 512 = 10485760b
-                512, // blocks per extent
-                40, // extent count
+                blocks_per_extent,
+                extent_count,
                 true, // problematic
-            ).await
+            )
+            .await
         }
 
         /// Spin off three downstairs
@@ -2477,19 +2487,21 @@ mod test {
 
         // Write three times, read three times, for a total of 150M
         let total_size = volume.total_size().await? as usize;
-        const CHUNK_SIZE: usize = 1*1024*1024;
+        const CHUNK_SIZE: usize = 1048576; // 1M
 
         for _ in 0..3 {
             let chunks: Vec<(usize, Vec<u8>)> = (0..total_size)
                 .step_by(CHUNK_SIZE)
-                .map(|i| (
-                    i / 512, // block offset!
-                    {
-                        let mut random_buffer = vec![0u8; CHUNK_SIZE];
-                        rand::thread_rng().fill(&mut random_buffer[..]);
-                        random_buffer
-                    }
-                ))
+                .map(|i| {
+                    (
+                        i / 512, // block offset!
+                        {
+                            let mut random_buffer = vec![0u8; CHUNK_SIZE];
+                            rand::thread_rng().fill(&mut random_buffer[..]);
+                            random_buffer
+                        },
+                    )
+                })
                 .collect();
 
             for (i, random_buffer) in chunks.iter() {
@@ -2504,7 +2516,10 @@ mod test {
             for (i, random_buffer) in chunks {
                 let buffer = Buffer::new(CHUNK_SIZE);
                 volume
-                    .read(Block::new(i as u64, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+                    .read(
+                        Block::new(i as u64, BLOCK_SIZE.trailing_zeros()),
+                        buffer.clone(),
+                    )
                     .await?;
 
                 assert_eq!(random_buffer, *buffer.as_vec().await);

@@ -140,6 +140,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Added ErrorReport
+    V4 = 4,
+
     /// Added ExtentLiveRepairAckId for LiveRepair
     V3 = 3,
 
@@ -151,7 +154,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V3
+        Self::V4
     }
 }
 
@@ -536,11 +539,13 @@ impl Message {
             Message::WriteUnwritten { .. } => None,
             Message::Unknown(..) => None,
 
-            Message::ExtentError { error, .. } => Some(&error),
-            Message::ErrorReport { error, .. } => Some(&error),
+            Message::ExtentError { error, .. } => Some(error),
+            Message::ErrorReport { error, .. } => Some(error),
 
             Message::ExtentLiveCloseAck { result, .. } => result.as_ref().err(),
-            Message::ExtentLiveRepairAckId { result, .. } => result.as_ref().err(),
+            Message::ExtentLiveRepairAckId { result, .. } => {
+                result.as_ref().err()
+            }
             Message::ExtentLiveAckId { result, .. } => result.as_ref().err(),
             Message::WriteAck { result, .. } => result.as_ref().err(),
             Message::FlushAck { result, .. } => result.as_ref().err(),
