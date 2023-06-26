@@ -2557,4 +2557,69 @@ mod test {
 
         Ok(())
     }
+
+    /// Confirm that an out-of-bounds read or write will return an error
+    #[tokio::test]
+    async fn test_out_of_bounds() {
+        const BLOCK_SIZE: u64 = 512;
+
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+
+        let volume = Volume {
+            uuid: Uuid::new_v4(),
+            sub_volumes: vec![SubVolume {
+                lba_range: Range {
+                    start: 0,
+                    end: parent.total_size().await.unwrap() / BLOCK_SIZE,
+                },
+                block_io: parent.clone(),
+            }],
+            read_only_parent: None,
+            scrub_point: Arc::new(AtomicU64::new(0)),
+            block_size: BLOCK_SIZE,
+            count: Arc::new(AtomicU32::new(0)),
+        };
+
+        volume.activate().await.unwrap();
+
+        let out_of_bounds = volume.total_size().await.unwrap() * BLOCK_SIZE;
+
+        let buffer = Buffer::new(BLOCK_SIZE as usize);
+        let res = volume
+            .read(
+                Block::new(
+                    out_of_bounds / BLOCK_SIZE,
+                    BLOCK_SIZE.trailing_zeros(),
+                ),
+                buffer,
+            )
+            .await;
+
+        assert!(matches!(res, Err(CrucibleError::OffsetInvalid)));
+
+        let res = volume
+            .write(
+                Block::new(
+                    out_of_bounds / BLOCK_SIZE,
+                    BLOCK_SIZE.trailing_zeros(),
+                ),
+                Bytes::from(vec![128; 2048]),
+            )
+            .await;
+
+        assert!(matches!(res, Err(CrucibleError::OffsetInvalid)));
+
+        let res = volume
+            .write_unwritten(
+                Block::new(
+                    out_of_bounds / BLOCK_SIZE,
+                    BLOCK_SIZE.trailing_zeros(),
+                ),
+                Bytes::from(vec![128; 2048]),
+            )
+            .await;
+
+        assert!(matches!(res, Err(CrucibleError::OffsetInvalid)));
+    }
 }
