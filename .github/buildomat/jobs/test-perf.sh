@@ -16,6 +16,7 @@
 
 input="/input/rbuild/work"
 banner skipped
+touch /tmp/perf.skipped.csv
 exit 0
 set -o errexit
 set -o pipefail
