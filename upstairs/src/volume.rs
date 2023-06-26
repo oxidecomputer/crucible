@@ -470,6 +470,10 @@ impl Volume {
             data.len() as u64 / self.block_size,
         );
 
+        if affected_sub_volumes.is_empty() {
+            crucible_bail!(OffsetInvalid);
+        }
+
         // TODO parallel dispatch!
         let mut data_index = 0;
         for (coverage, sub_volume) in affected_sub_volumes {
@@ -614,6 +618,10 @@ impl BlockIO for Volume {
             offset.value,
             data.len() as u64 / self.block_size,
         );
+
+        if affected_sub_volumes.is_empty() {
+            crucible_bail!(OffsetInvalid);
+        }
 
         // TODO parallel dispatch!
         let mut data_index = 0;
