@@ -532,7 +532,7 @@ pub(crate) mod protocol_test {
     #[tokio::test]
     async fn test_flow_control() {
         let harness = Arc::new(TestHarness::new("test_flow_control").await);
-        info!(harness.log, "ZZZ test_flow_control start");
+        info!(harness.log, "test_flow_control start");
 
         let (_jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
@@ -703,7 +703,7 @@ pub(crate) mod protocol_test {
             ds3_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
-        info!(harness.log, "ZZZ test_flow_control done");
+        info!(harness.log, "test_flow_control done");
     }
 
     /// Test that replay occurs after a downstairs disconnects and reconnects
@@ -802,10 +802,7 @@ pub(crate) mod protocol_test {
         const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
-        info!(harness.log, "tslr send some jobs");
         for i in 0..NUM_JOBS {
-            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
-
             {
                 let harness = harness.clone();
 
@@ -835,12 +832,6 @@ pub(crate) mod protocol_test {
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {}
                     x => {
-                        info!(
-                            harness.log,
-                            "Read {i} should return EMPTY, but we got:{:?}", x
-                        );
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-
                         panic!(
                             "Read {i} should return EMPTY, but we got:{:?}",
                             x
@@ -856,12 +847,6 @@ pub(crate) mod protocol_test {
                 }
 
                 x => {
-                    info!(
-                        harness.log,
-                        "ds2_messages.recv() should be read, but we got:{:?}",
-                        x
-                    );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                     panic!("ds2 saw non read request!");
                 }
             }
@@ -869,12 +854,6 @@ pub(crate) mod protocol_test {
             match ds3_messages.recv().await.unwrap() {
                 Message::ReadRequest { .. } => {}
                 x => {
-                    info!(
-                        harness.log,
-                        "ds3_messages.recv() should be read, but we got:{:?}",
-                        x
-                    );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                     panic!("ds3 saw non read request!");
                 }
             }
@@ -1011,13 +990,7 @@ pub(crate) mod protocol_test {
                 })
                 .await
             {
-                Ok(()) => {
-                    info!(
-                        harness.log,
-                        "sent read response for job {} = {}", i, job_id,
-                    );
-                }
-
+                Ok(()) => {}
                 Err(e) => {
                     // We should be able to send a few, but at some point
                     // the Upstairs will disconnect us.
