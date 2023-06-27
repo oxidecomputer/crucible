@@ -813,6 +813,7 @@ pub(crate) mod protocol_test {
                             harness.log,
                             "Read {i} should return EMPTY, but we got:{:?}", x
                         );
+
                         panic!(
                             "Read {i} should return EMPTY, but we got:{:?}",
                             x
@@ -973,6 +974,7 @@ pub(crate) mod protocol_test {
                         "sent read response for job {} = {}", i, job_id,
                     );
                 }
+
                 Err(e) => {
                     // We should be able to send a few, but at some point
                     // the Upstairs will disconnect us.

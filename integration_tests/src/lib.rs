@@ -30,7 +30,7 @@ mod test {
         Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
-    fn local_csl(name: &str) -> slog::Logger {
+    fn _local_csl(name: &str) -> slog::Logger {
         let log_path = format!("/tmp/{}.log", name);
         let file = OpenOptions::new()
             .create(true)
@@ -3189,7 +3189,8 @@ mod test {
     async fn test_pantry_import_from_url_ovmf() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let log = local_csl("test_pantry_import_from_url_ovmf");
+        //let log = local_csl("test_pantry_import_from_url_ovmf");
+        let log = csl();
         info!(log, "pantry_import_from_url_ovmf start");
         // Spin off three downstairs, build our Crucible struct.
         let tds = match TestDownstairsSet::big(false).await {
@@ -3322,7 +3323,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let log = local_csl("test_pantry_import_bad_from_url_ovmf");
+        // let log = local_csl("test_pantry_import_bad_from_url_ovmf");
+        let log = csl();
         info!(log, "pantry_import_from_bad_url_ovmf start");
         // Spin off three downstairs, build our Crucible struct.
         let tds = match TestDownstairsSet::big(false).await {
@@ -3416,7 +3418,8 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_import_from_local_server() -> Result<()> {
-        let log = local_csl("test_pantry_import_from_local_server");
+        // let log = local_csl("test_pantry_import_from_local_server");
+        let log = csl();
         info!(log, "pantry_import_from_local_server start");
         const BLOCK_SIZE: usize = 512;
 
@@ -3546,7 +3549,8 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_snapshot() -> Result<()> {
-        let log = local_csl("test_pantry_import_from_local_server");
+        // let log = local_csl("test_pantry_import_from_local_server");
+        let log = csl();
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
@@ -3580,7 +3584,8 @@ mod test {
     #[tokio::test]
     async fn test_pantry_bulk_write() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
-        let log = local_csl("test_pantry_bulk_write");
+        // let log = local_csl("test_pantry_bulk_write");
+        let log = csl();
         info!(log, "pantry_bulk_write start");
 
         // Spin off three downstairs, build our Crucible struct.
@@ -3671,7 +3676,8 @@ mod test {
     #[tokio::test]
     async fn test_pantry_bulk_write_max_chunk_size() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
-        let log = local_csl("test_pantry_bulk_write_max_chunk_size");
+        // let log = local_csl("test_pantry_bulk_write_max_chunk_size");
+        let log = csl();
         println!("pantry_bulk_write_max_chunk_size start");
 
         // Spin off three downstairs, build our Crucible struct.
@@ -3924,7 +3930,8 @@ mod test {
     async fn test_pantry_bulk_read_regular() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let log = local_csl("test_pantry_bulk_read_regular");
+        // let log = local_csl("test_pantry_bulk_read_regular");
+        let log = csl();
         info!(log, "pantry_bulk_read_regular start");
         // Spin off three downstairs, build our Crucible struct.
 
@@ -4047,7 +4054,8 @@ mod test {
     #[tokio::test]
     async fn test_pantry_bulk_read_max_chunk_size() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
-        let log = local_csl("test_pantry_bulk_read_max_cs");
+        // let log = local_csl("test_pantry_bulk_read_max_cs");
+        let log = csl();
         info!(log, "bulk_read_max_chunk_size starts");
         // Spin off three downstairs, build our Crucible struct.
 
@@ -4122,7 +4130,8 @@ mod test {
     #[tokio::test]
     async fn test_pantry_validate() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
-        let log = local_csl("test_pantry_validate");
+        // let log = local_csl("test_pantry_validate");
+        let log = csl();
 
         // Spin off three downstairs, build our Crucible struct.
 
@@ -4267,7 +4276,8 @@ mod test {
     #[tokio::test]
     async fn test_pantry_validate_subset() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
-        let log = local_csl("test_pantry_valid_sub");
+        // let log = local_csl("test_pantry_valid_sub");
+        let log = csl();
 
         // Spin off three downstairs, build our Crucible struct.
 
@@ -4413,7 +4423,8 @@ mod test {
     #[tokio::test]
     async fn test_pantry_validate_fail() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
-        let log = local_csl("test_pantry_validate_fail");
+        // let log = local_csl("test_pantry_validate_fail");
+        let log = csl();
 
         // Spin off three downstairs, build our Crucible struct.
 
