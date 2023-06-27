@@ -830,10 +830,10 @@ pub(crate) mod protocol_test {
                 _ => panic!("saw non read request!"),
             }
 
-            match ds3_messages.recv().await.unwrap() {
-                Message::ReadRequest { .. } => {}
-                _ => panic!("ds3 saw non read request!"),
-            }
+            assert!(matches!(
+                ds3_messages.recv().await.unwrap(),
+                Message::ReadRequest { .. },
+            ));
 
             // Respond with read responses for downstairs 2 and 3
             harness
