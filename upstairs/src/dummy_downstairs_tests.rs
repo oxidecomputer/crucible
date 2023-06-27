@@ -7,7 +7,7 @@ pub(crate) mod protocol_test {
     use std::sync::Arc;
     use std::time::Duration;
 
-    // use crate::test::up_test::csl;
+    use crate::test::up_test::csl;
     use crate::up_main;
     use crate::BlockContext;
     use crate::BlockIO;
@@ -379,22 +379,6 @@ pub(crate) mod protocol_test {
         }
     }
 
-    fn local_csl(name: &str) -> slog::Logger {
-        let log_path = format!("/tmp/{}.log", name);
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(log_path)
-            .unwrap();
-
-        let decorator = slog_term::PlainDecorator::new(file);
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-
-        slog::Logger::root(drain, o!())
-    }
-
     pub struct TestHarness {
         log: Logger,
         ds1: Mutex<Option<Arc<ConnectedDownstairs>>>,
@@ -405,8 +389,8 @@ pub(crate) mod protocol_test {
     }
 
     impl TestHarness {
-        pub async fn new(name: &str) -> TestHarness {
-            let log = local_csl(name);
+        pub async fn new() -> TestHarness {
+            let log = csl();
 
             let ds1 = Downstairs::new(log.new(o!("downstairs" => 1))).await;
             let ds2 = Downstairs::new(log.new(o!("downstairs" => 2))).await;
@@ -531,7 +515,7 @@ pub(crate) mod protocol_test {
     /// work is sent.
     #[tokio::test]
     async fn test_flow_control() {
-        let harness = Arc::new(TestHarness::new("test_flow_control").await);
+        let harness = Arc::new(TestHarness::new().await);
         info!(harness.log, "test_flow_control start");
 
         let (_jh1, mut ds1_messages) =
@@ -709,7 +693,7 @@ pub(crate) mod protocol_test {
     /// Test that replay occurs after a downstairs disconnects and reconnects
     #[tokio::test]
     async fn test_replay_occurs() {
-        let harness = Arc::new(TestHarness::new("test_replay_occurs").await);
+        let harness = Arc::new(TestHarness::new().await);
 
         info!(harness.log, "test_replay_occurs starts");
         let (jh1, mut ds1_messages) =
@@ -784,8 +768,7 @@ pub(crate) mod protocol_test {
     /// additional IO comes through.
     #[tokio::test]
     async fn test_successful_live_repair() {
-        let harness =
-            Arc::new(TestHarness::new("test_successful_live_repair").await);
+        let harness = Arc::new(TestHarness::new().await);
 
         info!(harness.log, "test_successful_live_repair starts");
         let (jh1, mut ds1_messages) =
@@ -846,16 +829,12 @@ pub(crate) mod protocol_test {
                     job_ids.push(job_id);
                 }
 
-                x => {
-                    panic!("ds2 saw non read request!");
-                }
+                _ => panic!("ds2 saw non read request!"),
             }
 
             match ds3_messages.recv().await.unwrap() {
                 Message::ReadRequest { .. } => {}
-                x => {
-                    panic!("ds3 saw non read request!");
-                }
+                _ => panic!("ds3 saw non read request!"),
             }
 
             // Respond with read responses for downstairs 2 and 3
