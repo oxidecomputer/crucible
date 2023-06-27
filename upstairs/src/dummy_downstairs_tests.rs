@@ -787,7 +787,7 @@ pub(crate) mod protocol_test {
         let harness =
             Arc::new(TestHarness::new("test_successful_live_repair").await);
 
-        info!(harness.log, "TSLR starts");
+        info!(harness.log, "test_successful_live_repair starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
@@ -849,12 +849,6 @@ pub(crate) mod protocol_test {
                 }
             }
 
-            if i > IO_OUTSTANDING_MAX - 10 {
-                info!(
-                    harness.log,
-                    "ZZZ handling job {}/{NUM_JOBS} near fc for d2", i
-                );
-            }
             match ds2_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
                     // Record the job ids of the read requests
@@ -872,12 +866,6 @@ pub(crate) mod protocol_test {
                 }
             }
 
-            if i > IO_OUTSTANDING_MAX - 10 {
-                info!(
-                    harness.log,
-                    "ZZZ handling job {}/{NUM_JOBS} near fc for d3", i
-                );
-            }
             match ds3_messages.recv().await.unwrap() {
                 Message::ReadRequest { .. } => {}
                 x => {
@@ -889,10 +877,6 @@ pub(crate) mod protocol_test {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     panic!("ds3 saw non read request!");
                 }
-            }
-
-            if i > IO_OUTSTANDING_MAX - 10 {
-                info!(harness.log, "ZZZ handling job {}/{NUM_JOBS} one", i);
             }
 
             // Respond with read responses for downstairs 2 and 3
@@ -934,14 +918,12 @@ pub(crate) mod protocol_test {
                 .await
                 .unwrap();
         }
-        info!(harness.log, "ZZZ tslr jobs are sent");
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
         // flush_timeout set to 24 hours, we shouldn't see anything else
         assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
 
-        info!(harness.log, "ZZZ tslr send flush");
         // Flush to clean out skipped jobs
         {
             let jh = {
@@ -1007,7 +989,6 @@ pub(crate) mod protocol_test {
             jh.await.unwrap();
         }
 
-        info!(harness.log, "ZZZ tslr send responses");
         // Send ds1 responses for the jobs it saw
         for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
             match harness
@@ -1052,7 +1033,6 @@ pub(crate) mod protocol_test {
             }
         }
 
-        info!(harness.log, "ZZZ tslr send responses are sent");
         // Assert the Upstairs isn't sending ds1 more work, because it is
         // Faulted
         let v = ds1_messages.try_recv();
@@ -1068,7 +1048,6 @@ pub(crate) mod protocol_test {
             }
         }
 
-        info!(harness.log, "ZZZ tslr drop and abort and reconnect");
         // Reconnect ds1
         drop(ds1_messages);
         jh1.abort();
@@ -1077,13 +1056,11 @@ pub(crate) mod protocol_test {
         let ds1 = ds1.close();
         let ds1 = ds1.into_connected_downstairs().await;
 
-        info!(harness.log, "ZZZ tslr restart");
         ds1.negotiate_start().await;
         ds1.negotiate_step_extent_versions_please().await;
 
         let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
 
-        info!(harness.log, "ZZZ tslr restart bhayy");
         // The Upstairs will start sending LiveRepair related work, which may be
         // out of order. Buffer some here.
 
@@ -1091,7 +1068,6 @@ pub(crate) mod protocol_test {
         let mut ds2_buffered_messages = vec![];
         let mut ds3_buffered_messages = vec![];
 
-        info!(harness.log, "ZZZ tslr do repair stuff now, lots here");
         for eid in 0..10 {
             // The Upstairs first sends the close and reopen jobs
             for _ in 0..2 {
@@ -1725,7 +1701,6 @@ pub(crate) mod protocol_test {
                 harness.ds3.fw.lock().await.send(m).await.unwrap();
             }
         }
-        info!(harness.log, "ZZZ tslr  repair stuff done");
 
         // Expect the live repair to send a final flush
         {
@@ -1806,8 +1781,6 @@ pub(crate) mod protocol_test {
                 .unwrap();
         }
 
-        info!(harness.log, "ZZZ tslr another read");
-
         // Try another read
         {
             {
@@ -1842,6 +1815,6 @@ pub(crate) mod protocol_test {
                 Message::ReadRequest { .. },
             ));
         }
-        info!(harness.log, "ZZZ tslr all done");
+        info!(harness.log, "test_successful_live_repair done");
     }
 }
