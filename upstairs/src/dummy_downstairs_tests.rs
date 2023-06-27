@@ -31,10 +31,6 @@ pub(crate) mod protocol_test {
     use slog::info;
     use slog::o;
     use slog::Logger;
-
-    use slog::Drain;
-    use std::fs::OpenOptions;
-
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
@@ -402,6 +398,7 @@ pub(crate) mod protocol_test {
                 id: Uuid::new_v4(),
                 target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
                 flush_timeout: Some(86400.0),
+
                 ..Default::default()
             };
 
@@ -516,7 +513,6 @@ pub(crate) mod protocol_test {
     #[tokio::test]
     async fn test_flow_control() {
         let harness = Arc::new(TestHarness::new().await);
-        info!(harness.log, "test_flow_control start");
 
         let (_jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
@@ -687,7 +683,6 @@ pub(crate) mod protocol_test {
             ds3_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
-        info!(harness.log, "test_flow_control done");
     }
 
     /// Test that replay occurs after a downstairs disconnects and reconnects
@@ -695,7 +690,6 @@ pub(crate) mod protocol_test {
     async fn test_replay_occurs() {
         let harness = Arc::new(TestHarness::new().await);
 
-        info!(harness.log, "test_replay_occurs starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
@@ -759,7 +753,6 @@ pub(crate) mod protocol_test {
         }
 
         assert_eq!(ds1_message, ds1_message_second_time.unwrap());
-        info!(harness.log, "test_replay_occurs ends");
     }
 
     /// Test that after giving up on a downstairs, setting it to faulted, and
@@ -770,7 +763,6 @@ pub(crate) mod protocol_test {
     async fn test_successful_live_repair() {
         let harness = Arc::new(TestHarness::new().await);
 
-        info!(harness.log, "test_successful_live_repair starts");
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
         let (_jh2, mut ds2_messages) =
@@ -786,6 +778,8 @@ pub(crate) mod protocol_test {
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
+            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
+
             {
                 let harness = harness.clone();
 
@@ -815,6 +809,10 @@ pub(crate) mod protocol_test {
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => {}
                     x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
                         panic!(
                             "Read {i} should return EMPTY, but we got:{:?}",
                             x
@@ -829,7 +827,7 @@ pub(crate) mod protocol_test {
                     job_ids.push(job_id);
                 }
 
-                _ => panic!("ds2 saw non read request!"),
+                _ => panic!("saw non read request!"),
             }
 
             match ds3_messages.recv().await.unwrap() {
@@ -969,7 +967,12 @@ pub(crate) mod protocol_test {
                 })
                 .await
             {
-                Ok(()) => {}
+                Ok(()) => {
+                    info!(
+                        harness.log,
+                        "sent read response for job {} = {}", i, job_id,
+                    );
+                }
                 Err(e) => {
                     // We should be able to send a few, but at some point
                     // the Upstairs will disconnect us.
@@ -1767,6 +1770,5 @@ pub(crate) mod protocol_test {
                 Message::ReadRequest { .. },
             ));
         }
-        info!(harness.log, "test_successful_live_repair done");
     }
 }
