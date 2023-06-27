@@ -3313,7 +3313,7 @@ mod test {
             );
             eprintln!("{} {} ok", start, end);
         }
-        info!(log, "ZZZ pantry_import_from_url_ovmf end");
+        info!(log, "pantry_import_from_url_ovmf end");
         Ok(())
     }
 
@@ -3328,7 +3328,7 @@ mod test {
         let tds = match TestDownstairsSet::big(false).await {
             Ok(tds) => tds,
             Err(e) => {
-                info!(log, "ZZZ import_from_bad_url_ovmf Create downstairs fails with {:?}", e);
+                info!(log, "import_from_bad_url_ovmf Create downstairs fails with {:?}", e);
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 bail!(
                     "Downstairs create fails on bad_import_from_url_ovmf: {:?}",
