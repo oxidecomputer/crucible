@@ -3256,10 +3256,10 @@ mod test {
         };
         assert!(result.job_result_ok);
 
-        info!(log, "ZZZ pantry_import_from_url_ovmf verified");
+        info!(log, "pantry_import_from_url_ovmf verified");
         client.detach(&volume_id.to_string()).await.unwrap();
 
-        info!(log, "ZZZ pantry_import_from_url_ovmf detatched");
+        info!(log, "pantry_import_from_url_ovmf detatched");
         // read the data to verify import
 
         let dur = std::time::Duration::from_secs(25);
