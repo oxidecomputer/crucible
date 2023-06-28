@@ -94,13 +94,22 @@ impl PantryEntry {
         url: String,
         expected_digest: Option<ExpectedDigest>,
     ) -> Result<()> {
-        // validate the URL can be reached, and grab the content length
-        let dur = std::time::Duration::from_secs(5);
+        // Construct a reqwest client that
+        //
+        // 1) times out after 5 seconds if a connection can't be made
+        // 2) times out if the connection + chunk download takes over 60 seconds
+        //
+        // Now, `MAX_CHUNK_SIZE / 60s ~= 8.5kb/s`. If the connection you're downloading from is
+        // that slow, then the pantry won't work, sorry!
+        let connect_timeout = std::time::Duration::from_secs(5);
+        let total_timeout =
+            std::time::Duration::from_secs(60) + connect_timeout;
         let client = reqwest::ClientBuilder::new()
-            .connect_timeout(dur)
-            .timeout(dur)
+            .connect_timeout(connect_timeout)
+            .timeout(total_timeout)
             .build()?;
 
+        // Validate the URL can be reached, and grab the content length
         let response = retry_until_known_result(&self.log, {
             let client = client.clone();
             let url = url.clone();
