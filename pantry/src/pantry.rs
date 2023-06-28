@@ -1,6 +1,7 @@
 // Copyright 2022 Oxide Computer Company
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use slog::error;
 use slog::info;
+use slog::o;
 use slog::Logger;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -25,8 +27,45 @@ use crucible::VolumeConstructionRequest;
 use crate::server::ExpectedDigest;
 
 pub struct PantryEntry {
+    log: Logger,
     volume: Volume,
     volume_construction_request: VolumeConstructionRequest,
+}
+
+/// Retry a request in the face of network weather
+async fn retry_until_known_result<F, Fut>(
+    log: &Logger,
+    mut func: F,
+) -> Result<reqwest::Response, reqwest::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    loop {
+        let result = func().await;
+        match result {
+            Ok(v) => break Ok(v),
+            Err(e) => {
+                if e.is_timeout() {
+                    info!(log, "request failed due to timeout, sleeping");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else if matches!(
+                    e.status(),
+                    Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+                        | Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
+                ) {
+                    info!(
+                        log,
+                        "request failed with status {}, sleeping",
+                        e.status().unwrap()
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    break Err(e);
+                }
+            }
+        }
+    }
 }
 
 impl PantryEntry {
@@ -44,7 +83,12 @@ impl PantryEntry {
             .timeout(dur)
             .build()?;
 
-        let response = client.head(&url).send().await?;
+        let response = retry_until_known_result(&self.log, {
+            let client = client.clone();
+            let url = url.clone();
+            move || client.head(&url).send()
+        })
+        .await?;
 
         if !response.status().is_success() {
             bail!("querying url returned: {}", response.status());
@@ -87,14 +131,20 @@ impl PantryEntry {
                 request_total_size,
             );
 
-            let response = client
-                .get(&url)
-                .header(
-                    reqwest::header::RANGE,
-                    format!("bytes={}-{}", start, end - 1),
-                )
-                .send()
-                .await?;
+            let response = retry_until_known_result(&self.log, {
+                let client = client.clone();
+                let url = url.clone();
+                move || {
+                    client
+                        .get(&url)
+                        .header(
+                            reqwest::header::RANGE,
+                            format!("bytes={}-{}", start, end - 1),
+                        )
+                        .send()
+                }
+            })
+            .await?;
 
             let content_length = response
                 .headers()
@@ -338,6 +388,7 @@ impl Pantry {
         entries.insert(
             volume_id.clone(),
             Arc::new(PantryEntry {
+                log: self.log.new(o!("volume" => volume_id.clone())),
                 volume,
                 volume_construction_request,
             }),
@@ -398,7 +449,13 @@ impl Pantry {
                 let result = join_handle.await.map_err(|e| {
                     HttpError::for_internal_error(e.to_string())
                 })?;
+
                 jobs.remove(&job_id);
+
+                if let Err(e) = &result {
+                    error!(self.log, "job {} failed with {}", job_id, e);
+                }
+
                 Ok(result)
             }
 
