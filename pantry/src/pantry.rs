@@ -41,13 +41,20 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {
-    loop {
+    let mut last_error = None;
+
+    // Retry for a maximum of 60 times
+    for _ in 0..60 {
         let result = func().await;
         match result {
-            Ok(v) => break Ok(v),
+            Ok(v) => {
+                return Ok(v);
+            }
+
             Err(e) => {
                 if e.is_timeout() {
                     info!(log, "request failed due to timeout, sleeping");
+                    last_error = Some(e);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 } else if matches!(
                     e.status(),
@@ -59,11 +66,22 @@ where
                         "request failed with status {}, sleeping",
                         e.status().unwrap()
                     );
+                    last_error = Some(e);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 } else {
-                    break Err(e);
+                    return Err(e);
                 }
             }
+        }
+    }
+
+    error!(log, "gave up after 60 retries");
+
+    match last_error {
+        Some(e) => Err(e),
+
+        None => {
+            panic!("60 retries but last_error was not set?");
         }
     }
 }
