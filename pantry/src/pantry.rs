@@ -96,12 +96,12 @@ impl PantryEntry {
     ) -> Result<()> {
         // Construct a reqwest client that
         //
-        // 1) times out after 5 seconds if a connection can't be made
+        // 1) times out after 10 seconds if a connection can't be made
         // 2) times out if the connection + chunk download takes over 60 seconds
         //
         // Now, `MAX_CHUNK_SIZE / 60s ~= 8.5kb/s`. If the connection you're downloading from is
         // that slow, then the pantry won't work, sorry!
-        let connect_timeout = std::time::Duration::from_secs(5);
+        let connect_timeout = std::time::Duration::from_secs(10);
         let total_timeout =
             std::time::Duration::from_secs(60) + connect_timeout;
         let client = reqwest::ClientBuilder::new()
