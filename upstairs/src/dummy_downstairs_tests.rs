@@ -265,6 +265,7 @@ pub(crate) mod protocol_test {
                         {
                             error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
                         }
+                        info!(self.inner.log, "responded to ping");
 
                         continue;
                     }
@@ -306,6 +307,7 @@ pub(crate) mod protocol_test {
                         {
                             error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
                         }
+                        info!(self.inner.log, "responded to ping");
 
                         continue;
                     }
@@ -409,6 +411,7 @@ pub(crate) mod protocol_test {
                                 {
                                     error!(log, "spawn_message_receiver could not send on fw due to {}", e);
                                 }
+                                info!(log, "responded to ping");
                             }
 
                             Some(m) => {
