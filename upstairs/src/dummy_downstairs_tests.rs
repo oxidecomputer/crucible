@@ -263,7 +263,7 @@ pub(crate) mod protocol_test {
                         if let Err(e) =
                             self.fw.lock().await.send(Message::Imok).await
                         {
-                            error!(log, "negotiate_start could not send on fw due to {}", e);
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
                         }
 
                         continue;
@@ -304,7 +304,7 @@ pub(crate) mod protocol_test {
                         if let Err(e) =
                             self.fw.lock().await.send(Message::Imok).await
                         {
-                            error!(log, "negotiate_start could not send on fw due to {}", e);
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
                         }
 
                         continue;
