@@ -2342,14 +2342,25 @@ impl Region {
             join_handles.push(jh);
         }
 
-        // Wait for all flushes to finish
+        // Wait for all flushes to finish - wait until after
+        // cdt::os__flush__done to check the results and bail out.
+        let mut results = Vec::with_capacity(extent_count);
         for join_handle in join_handles {
-            join_handle
-                .await
-                .map_err(|e| CrucibleError::GenericError(e.to_string()))??;
+            results.push(
+                join_handle
+                    .await
+                    .map_err(|e| CrucibleError::GenericError(e.to_string())),
+            );
         }
 
         cdt::os__flush__done!(|| job_id);
+
+        for result in results {
+            // If any extent flush failed, then return that as an error. Because
+            // the results were all collected above, each extent flush has
+            // completed at this point.
+            result??;
+        }
 
         // snapshots currently only work with ZFS
         if cfg!(feature = "zfs_snapshot") {
