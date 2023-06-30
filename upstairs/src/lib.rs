@@ -3391,22 +3391,21 @@ impl Downstairs {
             "[{client_id}] client skip {} in process jobs because fault",
             self.ds_active.len(),
         );
+
         let mut notify_guest = false;
         let mut retire_check = vec![];
+        let mut number_jobs_skipped = 0;
 
         for (ds_id, job) in self.ds_active.iter_mut() {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
-                info!(
-                    self.log,
-                    "[{}] change {} to fault skipped", client_id, ds_id
-                );
                 let old_state =
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
+                number_jobs_skipped += 1;
 
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
@@ -3435,6 +3434,11 @@ impl Downstairs {
                 }
             }
         }
+
+        info!(
+            self.log,
+            "[{}] changed {} to fault skipped", client_id, number_jobs_skipped
+        );
 
         for ds_id in retire_check {
             self.retire_check(ds_id);
