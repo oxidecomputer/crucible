@@ -73,11 +73,7 @@ use async_trait::async_trait;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
-const IO_OUTSTANDING_MAX: usize = 1000;
-
-// Max number of submitted IOs between the upstairs and the downstairs, above
-// which flow control kicks in.
-const MAX_ACTIVE_COUNT: usize = 100;
+const IO_OUTSTANDING_MAX: usize = 5000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -574,10 +570,10 @@ async fn process_message(
  * of new work that it needs to do. It will then iterate through those
  * work items and send them over the wire to this tasks waiting downstairs.
  *
- * V1 flow control, if we have more than X (where X = 100 for now, as we
- * don't know the best value yet, XXX) jobs submitted that we don't have
- * ACKs for, then stop sending more work and let the receive side catch up.
- * We return true if we have more work to do, false if we are all caught up.
+ * V2 flow control, if we have more than X (where X = MAX_ACTIVE_COUNT) for
+ * jobs submitted that we don't have ACKs for, then stop sending more work
+ * and let the receive side catch up.  We return true if we have more work
+ * to do, false if we are all caught up.
  */
 #[instrument(skip(fw))]
 async fn io_send<WT>(
@@ -626,10 +622,10 @@ where
         if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
-            u.downstairs
-                .lock()
-                .await
-                .requeue_work(client_id, &new_work[ndx..]);
+            let mut ds = u.downstairs.lock().await;
+            ds.requeue_work(client_id, &new_work[ndx..]);
+            ds.flow_control[client_id as usize] += 1;
+            drop(ds);
             return Ok(true);
         }
 
@@ -1839,7 +1835,8 @@ where
      * a result of a message we sent).  This channel is how this task
      * communicates that there is a message to handle.
      */
-    let (pm_task_tx, mut pm_task_rx) = mpsc::channel::<Message>(100);
+    let (pm_task_tx, mut pm_task_rx) =
+        mpsc::channel::<Message>(MAX_ACTIVE_COUNT + 50);
 
     info!(up.log, "[{}] Starts cmd_loop", up_coms.client_id);
     let pm_task = {
@@ -2887,9 +2884,14 @@ struct Downstairs {
     connected: Vec<usize>,
 
     /**
-     * Count of downstairs replacements XXX Not yet used
+     * Count of downstairs replacements
      */
     replaced: Vec<usize>,
+
+    /**
+     * Count of times a downstairs has had flow control turned on
+     */
+    flow_control: Vec<usize>,
 }
 
 impl Downstairs {
@@ -2924,6 +2926,7 @@ impl Downstairs {
             repair_min_id: None,
             connected: vec![0; 3],
             replaced: vec![0; 3],
+            flow_control: vec![0; 3],
         }
     }
 
@@ -2960,7 +2963,16 @@ impl Downstairs {
      * has no work to do, so return None.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let job = self.ds_active.get_mut(&ds_id).unwrap();
+        let job = match self.ds_active.get_mut(&ds_id) {
+            Some(job) => job,
+            None => {
+                // This job, that we thought was good, is not.  As we don't
+                // keep the lock when gathering job IDs to work on, it is
+                // possible to have a out of date work list.
+                warn!(self.log, "[{client_id}] Job {ds_id} not on active list");
+                return None;
+            }
+        };
 
         // If current state is Skipped, then we have nothing to do here.
         if job.state[&client_id] == IOState::Skipped {
@@ -5131,12 +5143,15 @@ impl Upstairs {
         let ds_state = self.ds_state_copy().await;
         let ds = self.downstairs.lock().await;
         let ds_io_count = ds.io_state_count;
-        let ds_repair = ds.extents_repaired.clone();
-        let ds_confirm = ds.extents_confirmed.clone();
+        let ds_reconciled = ds.reconcile_repaired.clone();
+        let ds_reconcile_needed = ds.reconcile_repair_needed.clone();
         let ds_live_repair_completed = ds.live_repair_completed.clone();
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
         let ds_connected = ds.connected.clone();
         let ds_replaced = ds.replaced.clone();
+        let ds_flow_control = ds.flow_control.clone();
+        let ds_extents_repaired = ds.extents_repaired.clone();
+        let ds_extents_confirmed = ds.extents_confirmed.clone();
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -5144,12 +5159,15 @@ impl Upstairs {
                 ds_count,
                 ds_state,
                 ds_io_count,
-                ds_repair,
-                ds_confirm,
+                ds_reconciled,
+                ds_reconcile_needed,
                 ds_live_repair_completed,
                 ds_live_repair_aborted,
                 ds_connected,
                 ds_replaced,
+                ds_flow_control,
+                ds_extents_repaired,
+                ds_extents_confirmed,
             };
             (msg, arg)
         });
@@ -7611,7 +7629,7 @@ impl FlushInfo {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum DsState {
+pub enum DsState {
     /*
      * New connection
      */
@@ -8286,13 +8304,13 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize)]
-struct IOStateCount {
-    new: [u32; 3],
-    in_progress: [u32; 3],
-    done: [u32; 3],
-    skipped: [u32; 3],
-    error: [u32; 3],
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct IOStateCount {
+    pub new: [u32; 3],
+    pub in_progress: [u32; 3],
+    pub done: [u32; 3],
+    pub skipped: [u32; 3],
+    pub error: [u32; 3],
 }
 
 impl IOStateCount {
@@ -8606,7 +8624,7 @@ impl BlockOp {
      * limits.  Though, if too many volumes are created with scrubbers
      * running, we may have to revisit that.
      */
-    pub async fn iops(&self, iop_sz: usize) -> Option<usize> {
+    pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
             BlockOp::Read { offset: _, data } => {
                 Some(ceiling_div!(data.len(), iop_sz))
@@ -8627,7 +8645,7 @@ impl BlockOp {
     }
 
     // Return the total size of this BlockOp
-    pub async fn sz(&self) -> Option<usize> {
+    pub fn sz(&self) -> Option<usize> {
         match self {
             BlockOp::Read { offset: _, data } => Some(data.len()),
             BlockOp::Write { offset: _, data } => Some(data.len()),
@@ -8644,25 +8662,25 @@ async fn test_return_iops() {
         offset: Block::new_512(1),
         data: Buffer::new(1),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 1);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(8000),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 1);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(16000),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 1);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(16001),
     };
-    assert_eq!(op.iops(IOP_SZ).await.unwrap(), 2);
+    assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }
 
 /*
@@ -9067,11 +9085,29 @@ impl Guest {
 
     /*
      * Consume one request off queue if it is under the IOP limit and the BW
-     * limit.
+     * limit. This function must be cancel safe (due to it being used in a
+     * `tokio::select!` arm) so it is split into two parts: the first async part
+     * grabs all the necessary tokio Mutexes, and the second sync part does the
+     * actual work with the mutex guards.
      */
     async fn consume_req(&self) -> Option<BlockReq> {
         let mut reqs = self.reqs.lock().await;
+        let mut bw_tokens = self.bw_tokens.lock().await;
+        let mut iop_tokens = self.iop_tokens.lock().await;
 
+        self.consume_req_locked(&mut reqs, &mut bw_tokens, &mut iop_tokens)
+
+        // IMPORTANT: there must be no await points after `consume_req_locked`
+        // has popped a BlockReq off the VecDeque! The function could be
+        // cancelled and would **drop** that BlockReq as a result.
+    }
+
+    fn consume_req_locked(
+        &self,
+        reqs: &mut VecDeque<BlockReq>,
+        bw_tokens: &mut usize,
+        iop_tokens: &mut usize,
+    ) -> Option<BlockReq> {
         // TODO exposing queue depth here would be a good metric for disk
         // contention
 
@@ -9086,7 +9122,7 @@ impl Guest {
         let iop_limit_applies =
             self.iop_limit.is_some() && req_ref.op.consumes_iops();
         let bw_limit_applies =
-            self.bw_limit.is_some() && req_ref.op.sz().await.is_some();
+            self.bw_limit.is_some() && req_ref.op.sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return Some(reqs.pop_front().unwrap());
@@ -9098,10 +9134,6 @@ impl Guest {
         let mut bw_check_ok = true;
         let mut iop_check_ok = true;
 
-        // XXX if recv ever is called from multiple threads, token locks must be
-        // taken for the whole of the procedure, not multiple times in the below
-        // if blocks!
-
         // When checking tokens vs the limit, do not check by checking if adding
         // the block request's values to the applicable limit: this would create
         // a scenario where a large IO enough would stall the pipeline (see
@@ -9109,21 +9141,17 @@ impl Guest {
         // reached.
 
         if let Some(bw_limit) = self.bw_limit {
-            if req_ref.op.sz().await.is_some() {
-                let bw_tokens = self.bw_tokens.lock().await;
-                if *bw_tokens >= bw_limit {
-                    bw_check_ok = false;
-                }
+            if req_ref.op.sz().is_some() && *bw_tokens >= bw_limit {
+                bw_check_ok = false;
             }
         }
 
         if let Some(iop_limit) = self.iop_limit {
             let bytes_per_iops = self.bytes_per_iop.unwrap();
-            if req_ref.op.iops(bytes_per_iops).await.is_some() {
-                let iop_tokens = self.iop_tokens.lock().await;
-                if *iop_tokens >= iop_limit {
-                    iop_check_ok = false;
-                }
+            if req_ref.op.iops(bytes_per_iops).is_some()
+                && *iop_tokens >= iop_limit
+            {
+                iop_check_ok = false;
             }
         }
 
@@ -9131,16 +9159,14 @@ impl Guest {
         // block req
         if bw_check_ok && iop_check_ok {
             if self.bw_limit.is_some() {
-                if let Some(sz) = req_ref.op.sz().await {
-                    let mut bw_tokens = self.bw_tokens.lock().await;
+                if let Some(sz) = req_ref.op.sz() {
                     *bw_tokens += sz;
                 }
             }
 
             if self.iop_limit.is_some() {
                 let bytes_per_iops = self.bytes_per_iop.unwrap();
-                if let Some(req_iops) = req_ref.op.iops(bytes_per_iops).await {
-                    let mut iop_tokens = self.iop_tokens.lock().await;
+                if let Some(req_iops) = req_ref.op.iops(bytes_per_iops) {
                     *iop_tokens += req_iops;
                 }
             }
@@ -9437,7 +9463,7 @@ async fn send_work(t: &[Target], val: u64, log: &Logger) {
     for (client_id, d_client) in t.iter().enumerate() {
         let res = d_client.ds_work_tx.try_send(val);
         if let Err(e) = res {
-            warn!(
+            debug!(
                 log,
                 "{:?} Failed to notify client {} of work {}", e, client_id, val,
             );
@@ -9490,7 +9516,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
      * work.
      */
     while ds_done_rx.recv().await.is_some() {
-        debug!(up.log, "up_listen was notified");
+        debug!(up.log, "up_ds_listen was notified");
         /*
          * XXX Do we need to hold the lock while we process all the
          * completed jobs?  We should be continuing to send message over
@@ -9511,7 +9537,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
         let mut gw = up.guest.guest_work.lock().await;
         for ds_id_done in ack_list.iter() {
             let mut ds = up.downstairs.lock().await;
-            debug!(up.log, "up_listen process {}", ds_id_done);
+            debug!(up.log, "up_ds_listen process {}", ds_id_done);
 
             let done = ds.ds_active.get_mut(ds_id_done).unwrap();
             /*
@@ -9545,7 +9571,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
         }
         debug!(
             up.log,
-            "up_listen checked {} jobs, back to waiting", jobs_checked
+            "up_ds_listen checked {} jobs, back to waiting", jobs_checked
         );
     }
     warn!(up.log, "up_ds_listen loop done");
@@ -9577,8 +9603,8 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
                     warn!(
                         up.log,
                         "[up] downstairs {} failed, too many outstanding jobs {}",
-                        work_count,
                         cid,
+                        work_count,
                     );
                     if ds.ds_set_faulted(cid) {
                         notify_guest = true;
@@ -9863,18 +9889,21 @@ async fn process_new_io(
 /**
  * Stat counters struct used by DTrace
  */
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Arg {
-    up_count: u32,
-    ds_count: u32,
-    ds_state: Vec<DsState>,
-    ds_io_count: IOStateCount,
-    ds_repair: Vec<usize>,
-    ds_confirm: Vec<usize>,
-    ds_live_repair_completed: Vec<usize>,
-    ds_live_repair_aborted: Vec<usize>,
-    ds_connected: Vec<usize>,
-    ds_replaced: Vec<usize>,
+    pub up_count: u32,
+    pub ds_count: u32,
+    pub ds_state: Vec<DsState>,
+    pub ds_io_count: IOStateCount,
+    pub ds_reconciled: usize,
+    pub ds_reconcile_needed: usize,
+    pub ds_live_repair_completed: Vec<usize>,
+    pub ds_live_repair_aborted: Vec<usize>,
+    pub ds_connected: Vec<usize>,
+    pub ds_replaced: Vec<usize>,
+    pub ds_flow_control: Vec<usize>,
+    pub ds_extents_repaired: Vec<usize>,
+    pub ds_extents_confirmed: Vec<usize>,
 }
 
 /**
@@ -9958,7 +9987,7 @@ async fn up_listen(
 
     up.stat_update("start").await;
     let mut flush_check = deadline_secs(flush_timeout);
-    let mut stat_update_interval = deadline_secs(5.0);
+    let mut stat_update_interval = deadline_secs(1.0);
     let mut repair_check_interval = deadline_secs(60.0);
     let mut repair_check = false;
     loop {
@@ -10077,7 +10106,7 @@ async fn up_listen(
             }
             _ = sleep_until(stat_update_interval) => {
                 up.stat_update("loop").await;
-                stat_update_interval = deadline_secs(5.0);
+                stat_update_interval = deadline_secs(1.0);
             }
         }
     }
@@ -10135,7 +10164,7 @@ pub async fn up_main(
      * Use this channel to indicate in the upstairs that all downstairs
      * operations for a specific request have completed.
      */
-    let (ds_done_tx, ds_done_rx) = mpsc::channel(500); // XXX 500?
+    let (ds_done_tx, ds_done_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
 
     /*
      * spawn a task to listen for ds completed work which will then

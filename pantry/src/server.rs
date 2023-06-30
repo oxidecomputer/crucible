@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use base64::{engine, Engine};
 use dropshot::endpoint;
+use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
 use dropshot::HttpResponseDeleted;
 use dropshot::HttpResponseOk;
@@ -281,7 +282,7 @@ struct ValidateRequest {
 
     // Size to validate in bytes, starting from offset 0. If not specified, the
     // total volume size is used.
-    pub size_to_validate: Option<usize>,
+    pub size_to_validate: Option<u64>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -362,6 +363,7 @@ pub async fn run_server(
             // for metadata
             request_body_max_bytes: 1024
                 + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
+            default_handler_task_mode: HandlerTaskMode::Detached,
         },
         api,
         df.clone(),

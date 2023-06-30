@@ -1569,8 +1569,9 @@ where
     // Create the log for this task to use.
     let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
 
-    // XXX flow control size to double what Upstairs has for upper limit?
-    let (_job_channel_tx, job_channel_rx) = channel(200);
+    // Give our work queue a little more space than we expect the upstairs
+    // to ever send us.
+    let (_job_channel_tx, job_channel_rx) = channel(MAX_ACTIVE_COUNT + 50);
     let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
 
     /*
@@ -1602,7 +1603,8 @@ where
         })
     };
 
-    let (message_channel_tx, mut message_channel_rx) = channel(200);
+    let (message_channel_tx, mut message_channel_rx) =
+        channel(MAX_ACTIVE_COUNT + 50);
     let pf_task = {
         let mut adc = ads.clone();
         let tx = job_channel_tx.clone();

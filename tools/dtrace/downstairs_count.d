@@ -87,7 +87,7 @@ tick-1s
     show = 0;
 }
 
-tick-2s
+tick-1s
 {
     printa("%@4u %@4u %@4u %@4u %@5u %@5u %@5u %@5u %@5u",
         @sf_start, @sf_done, @sw_start, @sw_done, @sr_start, @sr_done,

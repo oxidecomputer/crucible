@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
+use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
 use dropshot::HttpResponseOk;
 use dropshot::HttpServerStarter;
@@ -50,6 +51,7 @@ pub async fn repair_main(
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
         request_body_max_bytes: 1024,
+        default_handler_task_mode: HandlerTaskMode::Detached,
     };
 
     /*

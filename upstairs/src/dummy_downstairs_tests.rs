@@ -23,6 +23,8 @@ pub(crate) mod protocol_test {
     use crucible_protocol::CrucibleEncoder;
     use crucible_protocol::Message;
 
+    use anyhow::bail;
+    use anyhow::Result;
     use bytes::Bytes;
     use bytes::BytesMut;
     use futures::SinkExt;
@@ -40,6 +42,30 @@ pub(crate) mod protocol_test {
     use tokio_util::codec::FramedRead;
     use tokio_util::codec::FramedWrite;
     use uuid::Uuid;
+
+    macro_rules! bail_assert {
+        ($cond:expr) => {
+            if !($cond) {
+                bail!(concat!("failed at ", file!(), ":", line!()));
+            }
+        };
+    }
+
+    macro_rules! bail_assert_eq {
+        ($left:expr, $right:expr) => {
+            let lv = $left;
+            let rv = $right;
+            if lv != rv {
+                bail!(format!(
+                    "{:?} != {:?} at {}:{}",
+                    lv,
+                    rv,
+                    file!(),
+                    line!(),
+                ));
+            }
+        };
+    }
 
     pub struct Downstairs {
         log: Logger,
@@ -155,7 +181,7 @@ pub(crate) mod protocol_test {
             self.inner
         }
 
-        pub async fn negotiate_start(&self) {
+        pub async fn negotiate_start(&self) -> Result<()> {
             let packet = self
                 .fr
                 .lock()
@@ -165,6 +191,7 @@ pub(crate) mod protocol_test {
                 .transpose()
                 .unwrap()
                 .unwrap();
+
             match &packet {
                 Message::HereIAm {
                     version,
@@ -187,7 +214,8 @@ pub(crate) mod protocol_test {
                         .await
                         .unwrap();
                 }
-                x => panic!("wrong packet {:?}", x),
+
+                x => bail!("wrong packet {:?}", x),
             }
 
             // We loop here as a way of ignoring ping (Ruok) packets while
@@ -202,13 +230,14 @@ pub(crate) mod protocol_test {
                     .transpose()
                     .unwrap()
                     .unwrap();
+
                 match &packet {
                     Message::PromoteToActive {
                         upstairs_id,
                         session_id,
                         gen,
                     } => {
-                        assert!(*gen == 1);
+                        bail_assert!(*gen == 1);
 
                         info!(self.inner.log, "negotiate packet {:?}", packet);
 
@@ -228,12 +257,20 @@ pub(crate) mod protocol_test {
                             .unwrap();
                         break;
                     }
+
                     Message::Ruok => {
-                        // A ping snuck in, ignore it
+                        // Respond to pings right away
+                        if let Err(e) =
+                            self.fw.lock().await.send(Message::Imok).await
+                        {
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
+                        }
+                        info!(self.inner.log, "responded to ping");
+
                         continue;
                     }
 
-                    x => panic!("wrong packet {:?}", x),
+                    x => bail!("wrong packet {:?}", x),
                 }
             }
 
@@ -247,6 +284,7 @@ pub(crate) mod protocol_test {
                     .transpose()
                     .unwrap()
                     .unwrap();
+
                 match &packet {
                     Message::RegionInfoPlease => {
                         info!(self.inner.log, "negotiate packet {:?}", packet);
@@ -259,18 +297,29 @@ pub(crate) mod protocol_test {
                             })
                             .await
                             .unwrap();
-                        break;
+                        break Ok(());
                     }
+
                     Message::Ruok => {
+                        // Respond to pings right away
+                        if let Err(e) =
+                            self.fw.lock().await.send(Message::Imok).await
+                        {
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
+                        }
+                        info!(self.inner.log, "responded to ping");
+
                         continue;
                     }
 
-                    x => panic!("wrong packet: {:?}", x),
+                    x => bail!("wrong packet: {:?}", x),
                 }
             }
         }
 
-        pub async fn negotiate_step_extent_versions_please(&self) {
+        pub async fn negotiate_step_extent_versions_please(
+            &self,
+        ) -> Result<()> {
             let packet = self
                 .fr
                 .lock()
@@ -280,6 +329,7 @@ pub(crate) mod protocol_test {
                 .transpose()
                 .unwrap()
                 .unwrap();
+
             match &packet {
                 Message::ExtentVersionsPlease => {
                     info!(self.inner.log, "negotiate packet {:?}", packet);
@@ -296,11 +346,16 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => panic!("wrong packet"),
+                _ => bail!("wrong packet"),
             }
+
+            Ok(())
         }
 
-        pub async fn negotiate_step_last_flush(&self, last_flush_number: u64) {
+        pub async fn negotiate_step_last_flush(
+            &self,
+            last_flush_number: u64,
+        ) -> Result<()> {
             let packet = self
                 .fr
                 .lock()
@@ -310,6 +365,7 @@ pub(crate) mod protocol_test {
                 .transpose()
                 .unwrap()
                 .unwrap();
+
             match &packet {
                 Message::LastFlush { .. } => {
                     info!(self.inner.log, "negotiate packet {:?}", packet);
@@ -322,8 +378,10 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => panic!("wrong packet"),
+                _ => bail!("wrong packet"),
             }
+
+            Ok(())
         }
 
         // Spawn a task to pull messages off the framed reader and put into a
@@ -342,6 +400,7 @@ pub(crate) mod protocol_test {
                         Ok(v) => match v {
                             None => {
                                 // disconnection, bail
+                                error!(log, "spawn_message_receiver saw disconnect, bailing");
                                 return;
                             }
 
@@ -352,6 +411,7 @@ pub(crate) mod protocol_test {
                                 {
                                     error!(log, "spawn_message_receiver could not send on fw due to {}", e);
                                 }
+                                info!(log, "responded to ping");
                             }
 
                             Some(m) => {
@@ -385,7 +445,7 @@ pub(crate) mod protocol_test {
     }
 
     impl TestHarness {
-        pub async fn new() -> TestHarness {
+        pub async fn new() -> Result<TestHarness> {
             let log = csl();
 
             let ds1 = Downstairs::new(log.new(o!("downstairs" => 1))).await;
@@ -397,7 +457,7 @@ pub(crate) mod protocol_test {
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
                 target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
-                flush_timeout: Some(600.0),
+                flush_timeout: Some(86400.0),
 
                 ..Default::default()
             };
@@ -417,38 +477,42 @@ pub(crate) mod protocol_test {
             let ds2 = Arc::new(ds2.into_connected_downstairs().await);
             let ds3 = Arc::new(ds3.into_connected_downstairs().await);
 
-            let mut handles = vec![];
+            let mut handles: Vec<JoinHandle<Result<()>>> = vec![];
 
             {
                 let guest = guest.clone();
                 handles.push(tokio::spawn(async move {
-                    guest.activate().await.unwrap();
+                    guest.activate().await?;
+                    Ok(())
                 }));
             }
             {
                 let ds1 = ds1.clone();
                 handles.push(tokio::spawn(async move {
-                    ds1.negotiate_start().await;
-                    ds1.negotiate_step_extent_versions_please().await;
+                    ds1.negotiate_start().await?;
+                    ds1.negotiate_step_extent_versions_please().await?;
+                    Ok(())
                 }));
             }
             {
                 let ds2 = ds2.clone();
                 handles.push(tokio::spawn(async move {
-                    ds2.negotiate_start().await;
-                    ds2.negotiate_step_extent_versions_please().await;
+                    ds2.negotiate_start().await?;
+                    ds2.negotiate_step_extent_versions_please().await?;
+                    Ok(())
                 }));
             }
             {
                 let ds3 = ds3.clone();
                 handles.push(tokio::spawn(async move {
-                    ds3.negotiate_start().await;
-                    ds3.negotiate_step_extent_versions_please().await;
+                    ds3.negotiate_start().await?;
+                    ds3.negotiate_step_extent_versions_please().await?;
+                    Ok(())
                 }));
             }
 
             for handle in handles {
-                handle.await.unwrap();
+                handle.await.unwrap()?;
             }
 
             for _ in 0..10 {
@@ -459,16 +523,16 @@ pub(crate) mod protocol_test {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
 
-            assert!(guest.query_is_active().await.unwrap());
+            bail_assert!(guest.query_is_active().await.unwrap());
 
-            TestHarness {
+            Ok(TestHarness {
                 log,
                 ds1: Mutex::new(Some(ds1)),
                 ds2,
                 ds3,
                 _join_handle: join_handle,
                 guest,
-            }
+            })
         }
 
         pub async fn ds1(&self) -> Arc<ConnectedDownstairs> {
@@ -511,8 +575,8 @@ pub(crate) mod protocol_test {
     /// downstairs responds with a read response for a certain job, then more
     /// work is sent.
     #[tokio::test]
-    async fn test_flow_control() {
-        let harness = Arc::new(TestHarness::new().await);
+    async fn test_flow_control() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
 
         let (_jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
@@ -541,26 +605,35 @@ pub(crate) mod protocol_test {
                     job_ids.push(job_id);
                 }
 
-                _ => panic!("saw non read request!"),
+                _ => bail!("saw non read request!"),
             }
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds2_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds3_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
         }
 
         // Confirm that's all the Upstairs sent us - with the flush_timeout set
-        // to five minutes, we shouldn't see anything else
+        // to 24 hours, we shouldn't see anything else
 
-        assert!(matches!(ds1_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
+        bail_assert!(matches!(
+            ds1_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
 
         // Performing any guest reads will not send them to the downstairs
 
@@ -573,9 +646,18 @@ pub(crate) mod protocol_test {
             });
         }
 
-        assert!(matches!(ds1_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
+        bail_assert!(matches!(
+            ds1_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
 
         // Once the downstairs respond with a ReadRequest for a job, then more
         // work will be sent downstairs
@@ -665,30 +747,41 @@ pub(crate) mod protocol_test {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        assert!(matches!(ds1_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
+        bail_assert!(matches!(
+            ds1_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
 
-        assert!(matches!(
+        bail_assert!(matches!(
             ds1_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
 
-        assert!(matches!(
+        bail_assert!(matches!(
             ds2_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
 
-        assert!(matches!(
+        bail_assert!(matches!(
             ds3_final_read_request.unwrap(),
             Message::ReadRequest { .. },
         ));
+
+        Ok(())
     }
 
     /// Test that replay occurs after a downstairs disconnects and reconnects
     #[tokio::test]
-    async fn test_replay_occurs() {
-        let harness = Arc::new(TestHarness::new().await);
+    async fn test_replay_occurs() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
 
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
@@ -712,14 +805,14 @@ pub(crate) mod protocol_test {
         // Confirm all downstairs receive said read
         let ds1_message = ds1_messages.recv().await.unwrap();
 
-        assert!(matches!(ds1_message, Message::ReadRequest { .. }));
+        bail_assert!(matches!(ds1_message, Message::ReadRequest { .. }));
 
-        assert!(matches!(
+        bail_assert!(matches!(
             ds2_messages.recv().await.unwrap(),
             Message::ReadRequest { .. },
         ));
 
-        assert!(matches!(
+        bail_assert!(matches!(
             ds3_messages.recv().await.unwrap(),
             Message::ReadRequest { .. },
         ));
@@ -734,8 +827,8 @@ pub(crate) mod protocol_test {
         let ds1 = ds1.close();
         let ds1 = ds1.into_connected_downstairs().await;
 
-        ds1.negotiate_start().await;
-        ds1.negotiate_step_last_flush(0).await;
+        ds1.negotiate_start().await?;
+        ds1.negotiate_step_last_flush(0).await?;
 
         let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
 
@@ -752,7 +845,9 @@ pub(crate) mod protocol_test {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        assert_eq!(ds1_message, ds1_message_second_time.unwrap());
+        bail_assert_eq!(ds1_message, ds1_message_second_time.unwrap());
+
+        Ok(())
     }
 
     /// Test that after giving up on a downstairs, setting it to faulted, and
@@ -760,8 +855,8 @@ pub(crate) mod protocol_test {
     /// repaired with the correct source, and that extent limits are honoured if
     /// additional IO comes through.
     #[tokio::test]
-    async fn test_successful_live_repair() {
-        let harness = Arc::new(TestHarness::new().await);
+    async fn test_successful_live_repair() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
 
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver().await;
@@ -798,7 +893,7 @@ pub(crate) mod protocol_test {
             if i < MAX_ACTIVE_COUNT {
                 // Before flow control kicks in, assert we're seeing the read
                 // requests
-                assert!(matches!(
+                bail_assert!(matches!(
                     ds1_messages.recv().await.unwrap(),
                     Message::ReadRequest { .. },
                 ));
@@ -814,7 +909,7 @@ pub(crate) mod protocol_test {
                             "Read {i} should return EMPTY, but we got:{:?}", x
                         );
 
-                        panic!(
+                        bail!(
                             "Read {i} should return EMPTY, but we got:{:?}",
                             x
                         );
@@ -828,10 +923,10 @@ pub(crate) mod protocol_test {
                     job_ids.push(job_id);
                 }
 
-                _ => panic!("saw non read request!"),
+                _ => bail!("saw non read request!"),
             }
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds3_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
@@ -877,9 +972,15 @@ pub(crate) mod protocol_test {
         }
 
         // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-        // flush_timeout set to five minutes, we shouldn't see anything else
-        assert!(matches!(ds2_messages.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(ds3_messages.try_recv(), Err(TryRecvError::Empty)));
+        // flush_timeout set to 24 hours, we shouldn't see anything else
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
 
         // Flush to clean out skipped jobs
         {
@@ -896,10 +997,10 @@ pub(crate) mod protocol_test {
             let flush_job_id = match ds2_messages.recv().await.unwrap() {
                 Message::Flush { job_id, .. } => job_id,
 
-                _ => panic!("saw non flush ack!"),
+                _ => bail!("saw non flush ack!"),
             };
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds3_messages.recv().await.unwrap(),
                 Message::Flush { .. },
             ));
@@ -1001,7 +1102,7 @@ pub(crate) mod protocol_test {
 
             _ => {
                 // Any other error (or success!) is unexpected
-                panic!("try_recv returned {:?}", v);
+                bail!("try_recv returned {:?}", v);
             }
         }
 
@@ -1013,8 +1114,8 @@ pub(crate) mod protocol_test {
         let ds1 = ds1.close();
         let ds1 = ds1.into_connected_downstairs().await;
 
-        ds1.negotiate_start().await;
-        ds1.negotiate_step_extent_versions_please().await;
+        ds1.negotiate_start().await?;
+        ds1.negotiate_step_extent_versions_please().await?;
 
         let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
 
@@ -1033,23 +1134,23 @@ pub(crate) mod protocol_test {
                 ds3_buffered_messages.push(ds3_messages.recv().await.unwrap());
             }
 
-            assert!(ds1_buffered_messages
+            bail_assert!(ds1_buffered_messages
                 .iter()
                 .any(|m| matches!(m, Message::ExtentLiveClose { .. })));
-            assert!(ds2_buffered_messages
+            bail_assert!(ds2_buffered_messages
                 .iter()
                 .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
-            assert!(ds3_buffered_messages
+            bail_assert!(ds3_buffered_messages
                 .iter()
                 .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
 
-            assert!(ds1_buffered_messages
+            bail_assert!(ds1_buffered_messages
                 .iter()
                 .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
-            assert!(ds2_buffered_messages
+            bail_assert!(ds2_buffered_messages
                 .iter()
                 .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
-            assert!(ds3_buffered_messages
+            bail_assert!(ds3_buffered_messages
                 .iter()
                 .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
 
@@ -1065,7 +1166,7 @@ pub(crate) mod protocol_test {
                         job_id
                     }
 
-                    _ => panic!("ds1_buffered_messages[m] not Message::ExtentLiveReopen"),
+                    _ => bail!("ds1_buffered_messages[m] not Message::ExtentLiveReopen"),
                 }
             };
 
@@ -1110,7 +1211,9 @@ pub(crate) mod protocol_test {
                             ..
                         } => {
                             if io_eid == eid {
-                                assert!(dependencies.contains(&reopen_job_id));
+                                bail_assert!(
+                                    dependencies.contains(&reopen_job_id)
+                                );
                             }
 
                             responses[0].push(Message::ReadResponse {
@@ -1121,12 +1224,12 @@ pub(crate) mod protocol_test {
                             });
                         }
 
-                        _ => panic!("saw {:?}", m1),
+                        _ => bail!("saw {:?}", m1),
                     }
                 } else {
                     // All IO above this is skipped for the downstairs under
                     // repair.
-                    assert!(matches!(
+                    bail_assert!(matches!(
                         ds1_messages.try_recv(),
                         Err(TryRecvError::Empty)
                     ));
@@ -1144,7 +1247,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&reopen_job_id));
                         }
 
                         responses[1].push(Message::ReadResponse {
@@ -1155,7 +1258,7 @@ pub(crate) mod protocol_test {
                         });
                     }
 
-                    _ => panic!("saw {:?}", m2),
+                    _ => bail!("saw {:?}", m2),
                 }
 
                 match &m3 {
@@ -1167,7 +1270,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&reopen_job_id));
                         }
 
                         responses[2].push(Message::ReadResponse {
@@ -1178,7 +1281,7 @@ pub(crate) mod protocol_test {
                         });
                     }
 
-                    _ => panic!("saw {:?}", m3),
+                    _ => bail!("saw {:?}", m3),
                 }
 
                 // write
@@ -1209,7 +1312,9 @@ pub(crate) mod protocol_test {
                             ..
                         } => {
                             if io_eid == eid {
-                                assert!(dependencies.contains(&reopen_job_id));
+                                bail_assert!(
+                                    dependencies.contains(&reopen_job_id)
+                                );
                             }
 
                             responses[0].push(Message::WriteAck {
@@ -1220,12 +1325,12 @@ pub(crate) mod protocol_test {
                             });
                         }
 
-                        _ => panic!("saw {:?}", m1),
+                        _ => bail!("saw {:?}", m1),
                     }
                 } else {
                     // All IO above this is skipped for the downstairs under
                     // repair.
-                    assert!(matches!(
+                    bail_assert!(matches!(
                         ds1_messages.try_recv(),
                         Err(TryRecvError::Empty)
                     ));
@@ -1243,7 +1348,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&reopen_job_id));
                         }
 
                         responses[1].push(Message::WriteAck {
@@ -1254,7 +1359,7 @@ pub(crate) mod protocol_test {
                         });
                     }
 
-                    _ => panic!("saw {:?}", m2),
+                    _ => bail!("saw {:?}", m2),
                 }
 
                 match &m3 {
@@ -1266,7 +1371,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&reopen_job_id));
                         }
 
                         responses[2].push(Message::WriteAck {
@@ -1277,7 +1382,7 @@ pub(crate) mod protocol_test {
                         });
                     }
 
-                    _ => panic!("saw {:?}", m3),
+                    _ => bail!("saw {:?}", m3),
                 }
             }
 
@@ -1304,7 +1409,7 @@ pub(crate) mod protocol_test {
                     extent_id,
                     ..
                 } => {
-                    assert!(*extent_id == eid);
+                    bail_assert!(*extent_id == eid);
 
                     // ds1 didn't get the flush, it was set to faulted
                     let gen = 1;
@@ -1324,7 +1429,7 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => panic!("saw {:?}", m1),
+                _ => bail!("saw {:?}", m1),
             }
 
             match &m2 {
@@ -1335,7 +1440,7 @@ pub(crate) mod protocol_test {
                     extent_id,
                     ..
                 } => {
-                    assert!(*extent_id == eid);
+                    bail_assert!(*extent_id == eid);
 
                     // ds2 and ds3 did get a flush
                     let gen = 0;
@@ -1357,7 +1462,7 @@ pub(crate) mod protocol_test {
                         .unwrap()
                 }
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             match &m3 {
@@ -1368,7 +1473,7 @@ pub(crate) mod protocol_test {
                     extent_id,
                     ..
                 } => {
-                    assert!(*extent_id == eid);
+                    bail_assert!(*extent_id == eid);
 
                     // ds2 and ds3 did get a flush
                     let gen = 0;
@@ -1390,7 +1495,7 @@ pub(crate) mod protocol_test {
                         .unwrap()
                 }
 
-                _ => panic!("saw {:?}", m3),
+                _ => bail!("saw {:?}", m3),
             }
 
             // Based on those gen, flush, and dirty values, ds1 should get the
@@ -1410,8 +1515,8 @@ pub(crate) mod protocol_test {
                     source_client_id,
                     ..
                 } => {
-                    assert!(*source_client_id != 0);
-                    assert!(*extent_id == eid);
+                    bail_assert!(*source_client_id != 0);
+                    bail_assert!(*extent_id == eid);
 
                     ds1.fw
                         .lock()
@@ -1426,7 +1531,7 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => panic!("saw {:?}", m3),
+                _ => bail!("saw {:?}", m3),
             }
 
             match &m2 {
@@ -1449,7 +1554,7 @@ pub(crate) mod protocol_test {
                     .await
                     .unwrap(),
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             match &m3 {
@@ -1472,7 +1577,7 @@ pub(crate) mod protocol_test {
                     .await
                     .unwrap(),
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             // Now, all downstairs will see ExtentLiveNoop
@@ -1500,7 +1605,7 @@ pub(crate) mod protocol_test {
                     .await
                     .unwrap(),
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             match &m2 {
@@ -1523,7 +1628,7 @@ pub(crate) mod protocol_test {
                     .await
                     .unwrap(),
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             match &m3 {
@@ -1546,7 +1651,7 @@ pub(crate) mod protocol_test {
                     .await
                     .unwrap(),
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             // Finally, processing the ExtentLiveNoOp above means that the
@@ -1573,7 +1678,7 @@ pub(crate) mod protocol_test {
                     extent_id,
                     ..
                 } => {
-                    assert!(*extent_id == eid);
+                    bail_assert!(*extent_id == eid);
 
                     ds1.fw
                         .lock()
@@ -1588,7 +1693,7 @@ pub(crate) mod protocol_test {
                         .unwrap()
                 }
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             match &m2 {
@@ -1599,7 +1704,7 @@ pub(crate) mod protocol_test {
                     extent_id,
                     ..
                 } => {
-                    assert!(*extent_id == eid);
+                    bail_assert!(*extent_id == eid);
 
                     harness
                         .ds2
@@ -1616,7 +1721,7 @@ pub(crate) mod protocol_test {
                         .unwrap()
                 }
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             match &m3 {
@@ -1627,7 +1732,7 @@ pub(crate) mod protocol_test {
                     extent_id,
                     ..
                 } => {
-                    assert!(*extent_id == eid);
+                    bail_assert!(*extent_id == eid);
 
                     harness
                         .ds3
@@ -1644,7 +1749,7 @@ pub(crate) mod protocol_test {
                         .unwrap()
                 }
 
-                _ => panic!("saw {:?}", m2),
+                _ => bail!("saw {:?}", m2),
             }
 
             // After those are done, send out the read and write job responses
@@ -1668,10 +1773,10 @@ pub(crate) mod protocol_test {
                     ..
                 } => job_id,
 
-                _ => panic!("saw non flush!"),
+                _ => bail!("saw non flush!"),
             };
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds2_messages.recv().await.unwrap(),
                 Message::Flush {
                     flush_number: 12,
@@ -1679,7 +1784,7 @@ pub(crate) mod protocol_test {
                 },
             ));
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds3_messages.recv().await.unwrap(),
                 Message::Flush {
                     flush_number: 12,
@@ -1757,20 +1862,22 @@ pub(crate) mod protocol_test {
 
             // All downstairs should see it
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds1_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds2_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
 
-            assert!(matches!(
+            bail_assert!(matches!(
                 ds3_messages.recv().await.unwrap(),
                 Message::ReadRequest { .. },
             ));
         }
+
+        Ok(())
     }
 }
