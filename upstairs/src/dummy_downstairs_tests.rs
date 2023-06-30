@@ -191,6 +191,7 @@ pub(crate) mod protocol_test {
                 .transpose()
                 .unwrap()
                 .unwrap();
+
             match &packet {
                 Message::HereIAm {
                     version,
@@ -213,6 +214,7 @@ pub(crate) mod protocol_test {
                         .await
                         .unwrap();
                 }
+
                 x => bail!("wrong packet {:?}", x),
             }
 
@@ -228,6 +230,7 @@ pub(crate) mod protocol_test {
                     .transpose()
                     .unwrap()
                     .unwrap();
+
                 match &packet {
                     Message::PromoteToActive {
                         upstairs_id,
@@ -254,8 +257,16 @@ pub(crate) mod protocol_test {
                             .unwrap();
                         break;
                     }
+
                     Message::Ruok => {
-                        // A ping snuck in, ignore it
+                        // Respond to pings right away
+                        if let Err(e) =
+                            self.fw.lock().await.send(Message::Imok).await
+                        {
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
+                        }
+                        info!(self.inner.log, "responded to ping");
+
                         continue;
                     }
 
@@ -273,6 +284,7 @@ pub(crate) mod protocol_test {
                     .transpose()
                     .unwrap()
                     .unwrap();
+
                 match &packet {
                     Message::RegionInfoPlease => {
                         info!(self.inner.log, "negotiate packet {:?}", packet);
@@ -287,7 +299,16 @@ pub(crate) mod protocol_test {
                             .unwrap();
                         break Ok(());
                     }
+
                     Message::Ruok => {
+                        // Respond to pings right away
+                        if let Err(e) =
+                            self.fw.lock().await.send(Message::Imok).await
+                        {
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
+                        }
+                        info!(self.inner.log, "responded to ping");
+
                         continue;
                     }
 
@@ -379,6 +400,7 @@ pub(crate) mod protocol_test {
                         Ok(v) => match v {
                             None => {
                                 // disconnection, bail
+                                error!(log, "spawn_message_receiver saw disconnect, bailing");
                                 return;
                             }
 
@@ -389,6 +411,7 @@ pub(crate) mod protocol_test {
                                 {
                                     error!(log, "spawn_message_receiver could not send on fw due to {}", e);
                                 }
+                                info!(log, "responded to ping");
                             }
 
                             Some(m) => {
@@ -831,8 +854,6 @@ pub(crate) mod protocol_test {
     /// letting it reconnect, live repair occurs. Check that each extent is
     /// repaired with the correct source, and that extent limits are honoured if
     /// additional IO comes through.
-    /// XXX Turning this test off until we can figure out why it fails, but
-    /// only in buildomat.
     #[tokio::test]
     async fn test_successful_live_repair() -> Result<()> {
         let harness = Arc::new(TestHarness::new().await?);
