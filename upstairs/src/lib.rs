@@ -3437,7 +3437,9 @@ impl Downstairs {
 
         info!(
             self.log,
-            "[{}] changed {} to fault skipped", client_id, number_jobs_skipped
+            "[{}] changed {} jobs to fault skipped",
+            client_id,
+            number_jobs_skipped
         );
 
         for ds_id in retire_check {
