@@ -2802,7 +2802,7 @@ impl Work {
      * InProgress. If the dependencies are not met, move the state to DepWait.
      *
      * If this job is not new, then just return none. This can be okay as we
-     * build or work list with the new_work fn above, but we drop and re-aquire
+     * build our work list with the new_work fn above, but we drop and re-aquire
      * the Work mutex and things can change.
      *
      * If the job is InProgress, return itself.
