@@ -2067,8 +2067,6 @@ where
                 return Ok(());
             }
             _ = sleep_until(ping_interval) => {
-                info!(up.log, "[{}] sending ping", up_coms.client_id);
-
                 /*
                  * To keep things alive, initiate a ping any time we have
                  * been idle for (TBD) seconds.
