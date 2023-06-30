@@ -1710,7 +1710,7 @@ pub(crate) mod up_test {
     async fn write_single_skip() {
         // Verfy that a write with one skipped job will still result in
         // success being sent back to the guest.
-        w_io_single_skip(true).await;
+        w_io_single_skip(false).await;
     }
 
     async fn w_io_single_skip(is_write_unwritten: bool) {
@@ -1804,7 +1804,7 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn write_double_skip() {
         // Verify that write IO errors are counted.
-        w_io_double_skip(true).await;
+        w_io_double_skip(false).await;
     }
 
     async fn w_io_double_skip(is_write_unwritten: bool) {
@@ -1887,7 +1887,7 @@ pub(crate) mod up_test {
     async fn write_fail_and_skip() {
         // Verify that a write error + a skip results in error back to the
         // guest
-        w_io_fail_and_skip(true).await;
+        w_io_fail_and_skip(false).await;
     }
 
     async fn w_io_fail_and_skip(is_write_unwritten: bool) {
@@ -2063,8 +2063,8 @@ pub(crate) mod up_test {
 
     #[tokio::test]
     async fn flush_io_double_skip() {
-        // up_ds_listen test, a double skip on a write or write_unwritten
-        // will result in an error back to the guest.
+        // up_ds_listen test, a double skip on a flush will result in an error
+        // back to the guest.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
@@ -2135,8 +2135,8 @@ pub(crate) mod up_test {
 
     #[tokio::test]
     async fn flush_io_fail_and_skip() {
-        // up_ds_listen test, a fail plus a skip on a write or write_unwritten
-        // will result in an error back to the guest.
+        // up_ds_listen test, a fail plus a skip on a flush will result in an
+        // error back to the guest.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
