@@ -1701,6 +1701,529 @@ pub(crate) mod up_test {
     }
 
     #[tokio::test]
+    async fn write_unwritten_single_skip() {
+        // Verfy that a write_unwritten with one skipped job will still
+        // result in success sent back to the guest.
+        w_io_single_skip(true).await;
+    }
+    #[tokio::test]
+    async fn write_single_skip() {
+        // Verfy that a write with one skipped job will still result in
+        // success being sent back to the guest.
+        w_io_single_skip(false).await;
+    }
+
+    async fn w_io_single_skip(is_write_unwritten: bool) {
+        // up_ds_listen test, a single downstairs skip won't prevent us
+        // from acking back OK to the guest.
+        let up = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+
+        let mut gw = up.guest.guest_work.lock().await;
+        let mut ds = up.downstairs.lock().await;
+
+        let gw_id = 19;
+        let next_id = 1010;
+
+        // Create a write, enqueue it on both the downstairs
+        // and the guest work queues.
+        let (request, iblocks) = generic_write_request();
+        let op = create_write_eob(
+            next_id,
+            vec![],
+            gw_id,
+            vec![request],
+            is_write_unwritten,
+            iblocks,
+        );
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        drop(gw);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+
+        assert!(ds.in_progress(next_id, 0).is_some());
+        assert!(ds.in_progress(next_id, 2).is_some());
+
+        let response = Ok(vec![]);
+        ds.process_ds_completion(
+            next_id,
+            0,
+            response.clone(),
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        ds.process_ds_completion(
+            next_id,
+            2,
+            response,
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        let ack_list = ds.ackable_work();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            assert_eq!(done.ack_status, AckStatus::AckReady);
+
+            assert_eq!(done.guest_id, gw_id);
+
+            ds.ack(*ds_id_done);
+
+            assert!(ds.result(*ds_id_done).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn write_unwritten_double_skip() {
+        // Verify that write IO errors are counted.
+        w_io_double_skip(true).await;
+    }
+    #[tokio::test]
+    async fn write_double_skip() {
+        // Verify that write IO errors are counted.
+        w_io_double_skip(false).await;
+    }
+
+    async fn w_io_double_skip(is_write_unwritten: bool) {
+        // up_ds_listen test, a double skip on a write or write_unwritten
+        // will result in an error back to the guest.
+        let up = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+        up.ds_transition(2, DsState::Faulted).await;
+
+        let mut gw = up.guest.guest_work.lock().await;
+        let mut ds = up.downstairs.lock().await;
+
+        let gw_id = 19;
+        let next_id = 1010;
+
+        // Create a write, enqueue it on both the downstairs
+        // and the guest work queues.
+        let (request, iblocks) = generic_write_request();
+        let op = create_write_eob(
+            next_id,
+            vec![],
+            gw_id,
+            vec![request],
+            is_write_unwritten,
+            iblocks,
+        );
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        drop(gw);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+        assert!(ds.in_progress(next_id, 0).is_some());
+
+        ds.process_ds_completion(
+            next_id,
+            0,
+            Ok(vec![]),
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        let ack_list = ds.ackable_work();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            assert_eq!(done.ack_status, AckStatus::AckReady);
+
+            assert_eq!(done.guest_id, gw_id);
+            ds.ack(*ds_id_done);
+
+            assert!(ds.result(*ds_id_done).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn write_unwritten_fail_and_skip() {
+        // Verify that an write_unwritten error + a skip results in error
+        // back to the guest
+        w_io_fail_and_skip(true).await;
+    }
+    #[tokio::test]
+    async fn write_fail_and_skip() {
+        // Verify that a write error + a skip results in error back to the
+        // guest
+        w_io_fail_and_skip(false).await;
+    }
+
+    async fn w_io_fail_and_skip(is_write_unwritten: bool) {
+        // up_ds_listen test, a fail plus a skip on a write or write_unwritten
+        // will result in an error back to the guest.
+        let up = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(2, DsState::Faulted).await;
+
+        let mut gw = up.guest.guest_work.lock().await;
+        let mut ds = up.downstairs.lock().await;
+
+        let gw_id = 19;
+        let next_id = 1010;
+
+        // Create a write, enqueue it on both the downstairs
+        // and the guest work queues.
+        let (request, iblocks) = generic_write_request();
+        let op = create_write_eob(
+            next_id,
+            vec![],
+            gw_id,
+            vec![request],
+            is_write_unwritten,
+            iblocks,
+        );
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        drop(gw);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+        assert!(ds.in_progress(next_id, 0).is_some());
+        assert!(ds.in_progress(next_id, 1).is_some());
+
+        // DS 0, the good IO.
+        ds.process_ds_completion(
+            next_id,
+            0,
+            Ok(vec![]),
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        // DS 1, return error.
+        // This will return true because we have now completed all
+        // three IOs (skipped, ok, and error here).
+        assert!(ds
+            .process_ds_completion(
+                next_id,
+                1,
+                Err(CrucibleError::GenericError("bad".to_string())),
+                &None,
+                UpState::Active,
+                None,
+            )
+            .unwrap());
+
+        let ack_list = ds.ackable_work();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            assert_eq!(done.ack_status, AckStatus::AckReady);
+
+            assert_eq!(done.guest_id, gw_id);
+
+            ds.ack(*ds_id_done);
+
+            assert!(ds.result(*ds_id_done).is_err());
+        }
+        info!(up.log, "All done");
+    }
+
+    #[tokio::test]
+    async fn flush_io_single_skip() {
+        // up_ds_listen test, a single downstairs skip won't prevent us
+        // from acking back OK for a flush to the guest.
+        let up = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+
+        let mut gw = up.guest.guest_work.lock().await;
+        let mut ds = up.downstairs.lock().await;
+
+        let gw_id = 19;
+        let next_id = 1010;
+
+        // Create a flush, enqueue it on both the downstairs
+        // and the guest work queues.
+        let op = create_flush(
+            next_id,
+            vec![],
+            22, // Flush number
+            gw_id,
+            11, // Gen number
+            None,
+            ImpactedBlocks::Empty,
+            None,
+        );
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        drop(gw);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+
+        assert!(ds.in_progress(next_id, 0).is_some());
+        assert!(ds.in_progress(next_id, 2).is_some());
+
+        let response = Ok(vec![]);
+        ds.process_ds_completion(
+            next_id,
+            0,
+            response.clone(),
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        ds.process_ds_completion(
+            next_id,
+            2,
+            response,
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        let ack_list = ds.ackable_work();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            assert_eq!(done.ack_status, AckStatus::AckReady);
+
+            assert_eq!(done.guest_id, gw_id);
+            ds.ack(*ds_id_done);
+
+            assert!(ds.result(*ds_id_done).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_io_double_skip() {
+        // up_ds_listen test, a double skip on a flush will result in an error
+        // back to the guest.
+        let up = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        up.ds_transition(1, DsState::Faulted).await;
+        up.ds_transition(2, DsState::Faulted).await;
+
+        let mut gw = up.guest.guest_work.lock().await;
+        let mut ds = up.downstairs.lock().await;
+
+        let gw_id = 19;
+        let next_id = 1010;
+
+        // Create a flush, enqueue it on both the downstairs
+        // and the guest work queues.
+        let op = create_flush(
+            next_id,
+            vec![],
+            22, // Flush number
+            gw_id,
+            11, // Gen number
+            None,
+            ImpactedBlocks::Empty,
+            None,
+        );
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        drop(gw);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+        assert!(ds.in_progress(next_id, 0).is_some());
+
+        ds.process_ds_completion(
+            next_id,
+            0,
+            Ok(vec![]),
+            &None,
+            UpState::Active,
+            None,
+        )
+        .unwrap();
+
+        let ack_list = ds.ackable_work();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            assert_eq!(done.ack_status, AckStatus::AckReady);
+
+            assert_eq!(done.guest_id, gw_id);
+            ds.ack(*ds_id_done);
+
+            assert!(ds.result(*ds_id_done).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_io_fail_and_skip() {
+        // up_ds_listen test, a fail plus a skip on a flush will result in an
+        // error back to the guest.
+        let up = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        up.set_active().await.unwrap();
+        for cid in 0..3 {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+        // Only DS 0 is faulted.
+        up.ds_transition(0, DsState::Faulted).await;
+
+        let mut gw = up.guest.guest_work.lock().await;
+        let mut ds = up.downstairs.lock().await;
+
+        let gw_id = 19;
+        let next_id = 1010;
+
+        // Create a flush, enqueue it on both the downstairs
+        // and the guest work queues.
+        let op = create_flush(
+            next_id,
+            vec![],
+            22, // Flush number
+            gw_id,
+            11, // Gen number
+            None,
+            ImpactedBlocks::Empty,
+            None,
+        );
+
+        let mut sub = HashMap::new();
+        sub.insert(next_id, 0);
+        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        {
+            gw.active.insert(gw_id, new_gtos);
+        }
+        drop(gw);
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+        assert!(ds.in_progress(next_id, 1).is_some());
+        assert!(ds.in_progress(next_id, 2).is_some());
+
+        // DS 1 has a failure, and this won't return true as we don't
+        // have enough success yet to ACK to the guest.
+        assert!(!ds
+            .process_ds_completion(
+                next_id,
+                1,
+                Err(CrucibleError::GenericError("bad".to_string())),
+                &None,
+                UpState::Active,
+                None,
+            )
+            .unwrap());
+
+        // DS 2 as it's the final IO will indicate it is time to notify
+        // the guest we have a result for them.
+        assert!(ds
+            .process_ds_completion(
+                next_id,
+                2,
+                Ok(vec![]),
+                &None,
+                UpState::Active,
+                None
+            )
+            .unwrap());
+
+        let ack_list = ds.ackable_work();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            assert_eq!(done.ack_status, AckStatus::AckReady);
+
+            assert_eq!(done.guest_id, gw_id);
+
+            ds.ack(*ds_id_done);
+
+            assert!(ds.result(*ds_id_done).is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn work_assert_reads_do_not_cause_failure_state_transition() {
         let upstairs = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
@@ -6398,7 +6921,7 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
 
         // Verify all IOs are done
-        // We are simulating what would happen here by the ds_up_listen
+        // We are simulating what would happen here by the up_ds_listen
         // task, after it receives a notification from the ds_done_tx.
         let mut ds = up.downstairs.lock().await;
         ds.ack(read_one);
@@ -6447,7 +6970,7 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
 
         // Verify all IOs are done
-        // We are simulating what would happen here by the ds_up_listen
+        // We are simulating what would happen here by the up_ds_listen
         // task, after it receives a notification from the ds_done_tx.
         let mut ds = up.downstairs.lock().await;
         ds.ack(write_one);
@@ -6561,7 +7084,7 @@ pub(crate) mod up_test {
         }
 
         // Verify all IOs are done
-        // We are simulating what would happen here by the ds_up_listen
+        // We are simulating what would happen here by the up_ds_listen
         // task, after it receives a notification from the ds_done_tx.
         ds.ack(read_one);
         ds.ack(write_one);

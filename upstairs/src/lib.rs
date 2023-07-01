@@ -3618,17 +3618,26 @@ impl Downstairs {
         job.ack_status = AckStatus::Acked;
     }
 
+    /*
+     * Verify that we have enough valid IO results when considering
+     * all downstairs results before we send back success to the guest..
+     *
+     * During normal operations, reads can have two failures or skipps
+     * and still return valid data.
+     *
+     * During normal operations, write, write_unwritten, and
+     * flush can have one error or skip and still return success to
+     * the upstairs (though, the downstairs normally will not return
+     * error to the upstairs on W/F).
+     *
+     * For repair, we don't permit any errors, but do allow and
+     * handle the "skipped" case for IOs.  This allows us to
+     * recover if we are repairing a downstairs and one of the
+     * valid remaining downstairs goes offline.
+     */
     fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
         /*
-         * If enough downstairs returned an error, then return an error to
-         * the Guest
-         *
-         * Not ok:
-         * - 2+ errors for Write/Flush
-         * - 3+ errors for Reads
-         *
          * TODO: this doesn't tell the Guest what the error(s) were?
-         * TODO: Add retries here as well.
          */
         let wc = self.state_count(ds_id).unwrap();
 
@@ -3637,62 +3646,27 @@ impl Downstairs {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        /*
-         * This code assumes that 3 downstairs is the max that we'll
-         * ever support.
-         */
         let bad_job = match &job.work {
-            IOop::Read {
-                dependencies: _dependencies,
-                requests: _,
-            } => wc.error == 3,
-            IOop::Write {
-                dependencies: _dependencies,
-                writes: _,
-            } => wc.error >= 2,
-            IOop::WriteUnwritten {
-                dependencies: _dependencies,
-                writes: _,
-            } => wc.error == 2,
-            IOop::Flush {
-                dependencies: _dependencies,
-                flush_number: _flush_number,
-                gen_number: _gen_number,
-                snapshot_details: _,
-                extent_limit: _,
-            } => wc.error >= 2,
+            IOop::Read { .. } => wc.error == 3,
+            IOop::Write { .. } => wc.skipped + wc.error > 1,
+            IOop::WriteUnwritten { .. } => wc.skipped + wc.error > 1,
+            IOop::Flush { .. } => wc.skipped + wc.error > 1,
             IOop::ExtentClose {
                 dependencies: _,
                 extent,
             } => {
                 panic!("Received illegal IOop::ExtentClose: {}", extent);
             }
-            IOop::ExtentFlushClose {
-                dependencies: _,
-                extent: _,
-                flush_number: _,
-                gen_number: _,
-                source_downstairs: _,
-                repair_downstairs: _,
-            } => wc.error >= 1,
-            IOop::ExtentLiveRepair {
-                dependencies: _,
-                extent: _,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
-            } => wc.error >= 1,
-            IOop::ExtentLiveReopen {
-                dependencies: _,
-                extent: _,
-            } => wc.error >= 1,
-            IOop::ExtentLiveNoOp { dependencies: _ } => wc.error >= 1,
+            IOop::ExtentFlushClose { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveRepair { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveReopen { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
         };
 
         if bad_job {
             Err(CrucibleError::IoError(format!(
-                "{} out of 3 downstairs returned an error",
-                wc.error
+                "{} out of 3 downstairs failed to complete this IO",
+                wc.error + wc.skipped,
             )))
         } else {
             Ok(())
@@ -4552,6 +4526,10 @@ impl Downstairs {
             // double count three done and return true if we already have
             // AckReady set.
             let wc = job.state_count();
+
+            // If we are a write or a flush with one success, then
+            // we must switch our state to failed.  This condition is
+            // handled in Downstairs::result()
             if (wc.error + wc.skipped + wc.done) == 3 {
                 notify_guest = true;
                 job.ack_status = AckStatus::AckReady;
@@ -5143,8 +5121,8 @@ impl Upstairs {
         let ds_state = self.ds_state_copy().await;
         let ds = self.downstairs.lock().await;
         let ds_io_count = ds.io_state_count;
-        let ds_reconciled = ds.reconcile_repaired.clone();
-        let ds_reconcile_needed = ds.reconcile_repair_needed.clone();
+        let ds_reconciled = ds.reconcile_repaired;
+        let ds_reconcile_needed = ds.reconcile_repair_needed;
         let ds_live_repair_completed = ds.live_repair_completed.clone();
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
         let ds_connected = ds.connected.clone();
