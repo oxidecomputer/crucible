@@ -1903,13 +1903,28 @@ where
         tokio::select! {
             /*
              * We set biased so the loop will:
-             * First make sure the pm task is still running.
-             * Second, get and look at messages received from the downstairs.
-             *   Some messages we can handle right here, but ACKs from
-             *   messages we sent are passed on to the pm task.
              *
-             * By handling messages from the downstairs before sending
-             * new work, we help to avoid overwhelming the downstairs.
+             * 1. First make sure the pm task is still running.
+             *
+             * 2. Get and look at messages received from the downstairs. Some
+             *    messages we can handle right here, but ACKs from messages we
+             *    sent are passed on to the pm task.
+             *
+             * 3. Send a ping if the timeout has been reached. If the downstairs
+             *    responds, then the #2 select branch will bump the deadlines.
+             *
+             * 4. Timeout the downstairs if it has been too long.
+             *
+             * 5. Check for changes to the work hashmap, and send messages to
+             *    the downstairs if new work is available.
+             *
+             * 6. Check for (and possibly send) more work if #5 triggered flow
+             *    control.
+             *
+             * By handling messages from the downstairs before sending new work,
+             * we help to avoid overwhelming the downstairs. By sending a ping
+             * before checking for new work, we avoid a scenario where too much
+             * new work would result in pings not being sent.
              */
             biased;
             e = &mut pm_task => {
@@ -2030,42 +2045,6 @@ where
                     }
                 }
             }
-            _ = up_coms.ds_work_rx.recv() => {
-                /*
-                 * A change here indicates the work hashmap has changed
-                 * and we should go look for new work to do. It is possible
-                 * that there is no new work but we won't know until we
-                 * check.
-                 */
-                let more =
-                    io_send(up, &mut fw, up_coms.client_id).await?;
-
-                if more && !more_work {
-                    warn!(up.log, "[{}] flow control start ",
-                        up_coms.client_id
-                    );
-
-                    more_work = true;
-                    more_work_interval = deadline_secs(1.0);
-                }
-            }
-            _ = sleep_until(more_work_interval), if more_work => {
-                more_work = io_send(up, &mut fw, up_coms.client_id).await?;
-                if !more_work {
-                    warn!(up.log, "[{}] flow control end ", up_coms.client_id);
-                }
-
-                more_work_interval = deadline_secs(1.0);
-            }
-            /*
-             * Don't wait more than 50 seconds to hear from the other side.
-             * TODO: 50 is too long, but what is the correct value?
-             */
-            _ = sleep_until(timeout_deadline) => {
-                warn!(up.log, "[{}] Downstairs not responding, take offline",
-                    up_coms.client_id);
-                return Ok(());
-            }
             _ = sleep_until(ping_interval) => {
                 /*
                  * To keep things alive, initiate a ping any time we have
@@ -2100,6 +2079,41 @@ where
                 }
 
                 ping_interval = deadline_secs(10.0);
+            }
+            /*
+             * Don't wait more than 50 seconds to hear from the other side.
+             * TODO: 50 is too long, but what is the correct value?
+             */
+            _ = sleep_until(timeout_deadline) => {
+                warn!(up.log, "[{}] Downstairs not responding, take offline",
+                    up_coms.client_id);
+                return Ok(());
+            }
+            _ = up_coms.ds_work_rx.recv() => {
+                /*
+                 * A change here indicates the work hashmap has changed and we
+                 * should go look for new work to do. It is possible that there
+                 * is no new work but we won't know until we check.
+                 */
+                let more =
+                    io_send(up, &mut fw, up_coms.client_id).await?;
+
+                if more && !more_work {
+                    warn!(up.log, "[{}] flow control start ",
+                        up_coms.client_id
+                    );
+
+                    more_work = true;
+                    more_work_interval = deadline_secs(1.0);
+                }
+            }
+            _ = sleep_until(more_work_interval), if more_work => {
+                more_work = io_send(up, &mut fw, up_coms.client_id).await?;
+                if !more_work {
+                    warn!(up.log, "[{}] flow control end ", up_coms.client_id);
+                }
+
+                more_work_interval = deadline_secs(1.0);
             }
         }
     }
@@ -3377,22 +3391,21 @@ impl Downstairs {
             "[{client_id}] client skip {} in process jobs because fault",
             self.ds_active.len(),
         );
+
         let mut notify_guest = false;
         let mut retire_check = vec![];
+        let mut number_jobs_skipped = 0;
 
         for (ds_id, job) in self.ds_active.iter_mut() {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
-                info!(
-                    self.log,
-                    "[{}] change {} to fault skipped", client_id, ds_id
-                );
                 let old_state =
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
+                number_jobs_skipped += 1;
 
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
@@ -3421,6 +3434,13 @@ impl Downstairs {
                 }
             }
         }
+
+        info!(
+            self.log,
+            "[{}] changed {} jobs to fault skipped",
+            client_id,
+            number_jobs_skipped
+        );
 
         for ds_id in retire_check {
             self.retire_check(ds_id);
