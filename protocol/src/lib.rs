@@ -140,6 +140,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Added ErrorReport
+    V4 = 4,
+
     /// Added ExtentLiveRepairAckId for LiveRepair
     V3 = 3,
 
@@ -151,7 +154,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V3
+        Self::V4
     }
 }
 
@@ -160,7 +163,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 3;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 4;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -480,16 +483,77 @@ pub enum Message {
         result: Result<(), CrucibleError>,
     },
 
+    ErrorReport {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: u64,
+        error: CrucibleError,
+    },
+
     /*
      * Misc
      */
     Unknown(u32, BytesMut),
 }
+
 /*
  * If you just added or changed the Message enum above, you must also
  * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
  * forget.
  */
+
+impl Message {
+    /// Return true if this message contains an Error result
+    pub fn err(&self) -> Option<&CrucibleError> {
+        match self {
+            Message::HereIAm { .. } => None,
+            Message::YesItsMe { .. } => None,
+            Message::VersionMismatch { .. } => None,
+            Message::ReadOnlyMismatch { .. } => None,
+            Message::EncryptedMismatch { .. } => None,
+            Message::PromoteToActive { .. } => None,
+            Message::YouAreNowActive { .. } => None,
+            Message::YouAreNoLongerActive { .. } => None,
+            Message::UuidMismatch { .. } => None,
+            Message::Ruok { .. } => None,
+            Message::Imok { .. } => None,
+            Message::ExtentClose { .. } => None,
+            Message::ExtentReopen { .. } => None,
+            Message::ExtentFlush { .. } => None,
+            Message::ExtentRepair { .. } => None,
+            Message::RepairAckId { .. } => None,
+            Message::RegionInfoPlease { .. } => None,
+            Message::RegionInfo { .. } => None,
+            Message::ExtentVersionsPlease { .. } => None,
+            Message::ExtentVersions { .. } => None,
+            Message::LastFlush { .. } => None,
+            Message::LastFlushAck { .. } => None,
+            Message::Write { .. } => None,
+            Message::ExtentLiveClose { .. } => None,
+            Message::ExtentLiveFlushClose { .. } => None,
+            Message::ExtentLiveRepair { .. } => None,
+            Message::ExtentLiveReopen { .. } => None,
+            Message::ExtentLiveNoOp { .. } => None,
+            Message::Flush { .. } => None,
+            Message::ReadRequest { .. } => None,
+            Message::WriteUnwritten { .. } => None,
+            Message::Unknown(..) => None,
+
+            Message::ExtentError { error, .. } => Some(error),
+            Message::ErrorReport { error, .. } => Some(error),
+
+            Message::ExtentLiveCloseAck { result, .. } => result.as_ref().err(),
+            Message::ExtentLiveRepairAckId { result, .. } => {
+                result.as_ref().err()
+            }
+            Message::ExtentLiveAckId { result, .. } => result.as_ref().err(),
+            Message::WriteAck { result, .. } => result.as_ref().err(),
+            Message::FlushAck { result, .. } => result.as_ref().err(),
+            Message::ReadResponse { responses, .. } => responses.as_ref().err(),
+            Message::WriteUnwrittenAck { result, .. } => result.as_ref().err(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct CrucibleEncoder {}
