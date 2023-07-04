@@ -245,19 +245,21 @@ echo mv "${testdir}/previous" "${testdir}/${port}"
 rm -rf "${testdir:?}/${port:?}"
 mv "${testdir}/previous" "${testdir}/${port}"
 
-echo "Restart downstairs with old directory"
-
-if ! "$dsc" cmd start -c 2; then
-    (( res += 1 ))
-    echo ""
-    echo "Failed repair test part 1, starting downstairs 2"
-    echo "Failed repair test part 1, starting downstairs 2" >> "$fail_log"
-    echo
-fi
 
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
 # The dump args look different than other downstairs commands
+
+# shut down all downstairs so we can dump
+echo "Shutting down all downstairs so we can dump"
+if ! "$dsc" cmd stop-all; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed dsc stop-all"
+    echo "Failed dsc stop-all" >> "$fail_log"
+    echo
+fi
+
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
@@ -275,6 +277,16 @@ else
     echo "dump test found error as expected"
 fi
 
+
+echo "Restart downstairs with old directory"
+if ! "$dsc" cmd start-all; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed repair test part 1, starting downstairs"
+    echo "Failed repair test part 1, starting downstairs" >> "$fail_log"
+    echo
+fi
+
 echo ""
 echo ""
 echo "$ct" "$tt" -g "$gen" -q "${args[@]}"
@@ -288,6 +300,16 @@ else
     echo "Repair part 2 passed"
 fi
 (( gen += 1 ))
+
+# shut down all downstairs so we can dump
+echo "Shutting down downstairs for the last time"
+if ! "$dsc" cmd shutdown; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed dsc shutdown"
+    echo "Failed dsc shutdown" >> "$fail_log"
+    echo
+fi
 
 # Now that repair has finished, make sure the dump command does not detect
 # any errors
@@ -323,16 +345,6 @@ if ! "$cds" dump "${dump_args[@]}" -b 20 ; then
     echo ""
 else
     echo "dump block test passed"
-fi
-
-# Tests done, shut down the downstairs.
-echo "Upstairs tests have completed, stopping all downstairs"
-if ! "$dsc" cmd shutdown; then
-    (( res += 1 ))
-    echo ""
-    echo "Failed dsc shutdown"
-    echo "Failed dsc shutdown" >> "$fail_log"
-    echo
 fi
 
 echo ""
