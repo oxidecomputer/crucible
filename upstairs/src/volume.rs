@@ -161,6 +161,7 @@ impl Volume {
         extent_info: RegionExtentInfo,
         gen: u64,
         producer_registry: Option<ProducerRegistry>,
+        log: Option<Logger>,
     ) -> Result<(), CrucibleError> {
         let region_def = build_region_definition(&extent_info, &opts)?;
         let guest = Arc::new(Guest::new());
@@ -174,7 +175,7 @@ impl Volume {
             Some(region_def),
             guest_clone,
             producer_registry,
-            None,
+            log,
         )
         .await?;
 
@@ -1003,6 +1004,7 @@ impl Volume {
     pub async fn construct(
         request: VolumeConstructionRequest,
         producer_registry: Option<ProducerRegistry>,
+        log: Option<Logger>,
     ) -> Result<Volume> {
         match request {
             VolumeConstructionRequest::Volume {
@@ -1015,16 +1017,24 @@ impl Volume {
 
                 for subreq in sub_volumes {
                     vol.add_subvolume(Arc::new(
-                        Volume::construct(subreq, producer_registry.clone())
-                            .await?,
+                        Volume::construct(
+                            subreq,
+                            producer_registry.clone(),
+                            log.clone(),
+                        )
+                        .await?,
                     ))
                     .await?;
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
                     vol.add_read_only_parent(Arc::new(
-                        Volume::construct(*read_only_parent, producer_registry)
-                            .await?,
+                        Volume::construct(
+                            *read_only_parent,
+                            producer_registry,
+                            log,
+                        )
+                        .await?,
                     ))
                     .await?;
                 }
@@ -1062,6 +1072,7 @@ impl Volume {
                     },
                     gen,
                     producer_registry,
+                    log,
                 )
                 .await?;
                 Ok(vol)
@@ -2164,7 +2175,7 @@ mod test {
                 path: file_path.into_os_string().into_string().unwrap(),
             })),
         };
-        let volume = Volume::construct(request, None).await.unwrap();
+        let volume = Volume::construct(request, None, None).await.unwrap();
 
         let buffer = Buffer::new(BLOCK_SIZE);
         volume

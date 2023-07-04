@@ -402,9 +402,12 @@ impl Pantry {
             "no entry exists for volume {}, constructing...", volume_id
         );
 
-        let volume =
-            Volume::construct(volume_construction_request.clone(), None)
-                .await?;
+        let volume = Volume::construct(
+            volume_construction_request.clone(),
+            None,
+            Some(self.log.clone()),
+        )
+        .await?;
 
         info!(self.log, "volume {} constructed ok", volume_id);
 
