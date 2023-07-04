@@ -969,6 +969,7 @@ where
     while job_channel_rx.recv().await.is_some() {
         // Add a little time to completion for this operation.
         if ads.lock().await.lossy && random() && random() {
+            info!(ads.lock().await.log, "[lossy] sleeping 1 second");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
@@ -981,7 +982,7 @@ where
          * Build ourselves a list of all the jobs on the work hashmap that
          * are New or DepWait.
          */
-        let mut new_work = {
+        let mut new_work: Vec<u64> = {
             if let Ok(new_work) =
                 ads.lock().await.new_work(upstairs_connection).await
             {
@@ -1000,64 +1001,98 @@ where
          */
         new_work.sort_unstable();
 
-        for new_id in new_work.iter() {
-            if ads.lock().await.lossy && random() && random() {
-                // Skip a job that needs to be done. Sometimes
-                continue;
-            }
+        while !new_work.is_empty() {
+            let mut repeat_work = Vec::with_capacity(new_work.len());
 
-            /*
-             * If this job is still new, take it and go to work. The
-             * in_progress method will only return a job if all
-             * dependencies are met.
-             */
-            let job_id = ads
-                .lock()
-                .await
-                .in_progress(upstairs_connection, *new_id)
-                .await?;
+            for new_id in new_work.drain(..) {
+                if ads.lock().await.lossy && random() && random() {
+                    // Skip a job that needs to be done. Sometimes
+                    info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
+                    repeat_work.push(new_id);
+                    continue;
+                }
 
-            if let Some(job_id) = job_id {
-                cdt::work__process!(|| job_id);
-                let m = ads
+                /*
+                 * If this job is still new, take it and go to work. The
+                 * in_progress method will only return a job if all
+                 * dependencies are met.
+                 */
+                let job_id = ads
                     .lock()
                     .await
-                    .do_work(upstairs_connection, job_id)
+                    .in_progress(upstairs_connection, new_id)
                     .await?;
 
-                // If this is a repair job, and that repair failed, we
-                // can do no more work on this downstairs and should
-                // force everything to come down before more work arrives.
-                //
-                // However, we can respond to the upstairs with the failed
-                // result, and let the upstairs take action that will
-                // allow it to abort the repair and continue working in
-                // some degraded state.
-                let mut abort_needed = false;
-                if let Some(m) = m {
-                    abort_needed = check_message_for_abort(&m);
-                    ads.lock()
+                if let Some(job_id) = job_id {
+                    cdt::work__process!(|| job_id);
+                    let m = ads
+                        .lock()
                         .await
-                        .complete_work_stat(upstairs_connection, &m, job_id)
+                        .do_work(upstairs_connection, job_id)
                         .await?;
-                    // Notify the upstairs before completing work
-                    let mut fw = fw.lock().await;
-                    fw.send(&m).await?;
-                    drop(fw);
 
-                    ads.lock()
-                        .await
-                        .complete_work(upstairs_connection, job_id, m)
-                        .await?;
-                    cdt::work__done!(|| job_id);
-                }
+                    // If this is a repair job, and that repair failed, we
+                    // can do no more work on this downstairs and should
+                    // force everything to come down before more work arrives.
+                    //
+                    // However, we can respond to the upstairs with the failed
+                    // result, and let the upstairs take action that will
+                    // allow it to abort the repair and continue working in
+                    // some degraded state.
+                    let mut abort_needed = false;
+                    if let Some(m) = m {
+                        abort_needed = check_message_for_abort(&m);
 
-                // Now, if the message requires an abort, we handle
-                // that now by exiting this task with error.
-                if abort_needed {
-                    bail!("Repair has failed, exiting task");
+                        if let Some(error) = m.err() {
+                            let mut fw = fw.lock().await;
+                            fw.send(&Message::ErrorReport {
+                                upstairs_id: upstairs_connection.upstairs_id,
+                                session_id: upstairs_connection.session_id,
+                                job_id: new_id,
+                                error: error.clone(),
+                            })
+                            .await?;
+                            drop(fw);
+
+                            // If the job errored, do not consider it completed.
+                            // Retry it.
+                            repeat_work.push(new_id);
+                        } else {
+                            // The job completed successfully, so inform the
+                            // Upstairs
+
+                            ads.lock()
+                                .await
+                                .complete_work_stat(
+                                    upstairs_connection,
+                                    &m,
+                                    job_id,
+                                )
+                                .await?;
+
+                            // Notify the upstairs before completing work
+                            let mut fw = fw.lock().await;
+                            fw.send(&m).await?;
+                            drop(fw);
+
+                            ads.lock()
+                                .await
+                                .complete_work(upstairs_connection, job_id, m)
+                                .await?;
+
+                            cdt::work__done!(|| job_id);
+                        }
+                    }
+
+                    // Now, if the message requires an abort, we handle
+                    // that now by exiting this task with error.
+                    if abort_needed {
+                        bail!("Repair has failed, exiting task");
+                    }
                 }
             }
+
+            new_work = repeat_work;
         }
     }
 
@@ -2751,12 +2786,14 @@ impl Work {
 
     /**
      * If the requested job is still new, and the dependencies are all met,
-     * return the job ID and the upstairs UUID, moving the state of the
-     * job as InProgress.
+     * return the job ID and the upstairs UUID, moving the state of the job as
+     * InProgress. If the dependencies are not met, move the state to DepWait.
      *
-     * If this job is not new, then just return none.  This can be okay as
-     * we build or work list with the new_work fn above, but we drop and
-     * re-aquire the Work mutex and things can change.
+     * If this job is not new, then just return none. This can be okay as we
+     * build our work list with the new_work fn above, but we drop and re-aquire
+     * the Work mutex and things can change.
+     *
+     * If the job is InProgress, return itself.
      */
     fn in_progress(
         &mut self,
@@ -2892,6 +2929,10 @@ impl Work {
                 job.state = WorkState::InProgress;
 
                 Some((job.ds_id, job.upstairs_connection))
+            } else if job.state == WorkState::InProgress {
+                // A previous call of this function put this job in progress, so
+                // return idempotently.
+                Some((job.ds_id, job.upstairs_connection))
             } else {
                 /*
                  * job id is not new, we can't run it.
@@ -2946,8 +2987,8 @@ impl Work {
 }
 
 /*
- * We may not need Done or Error.  At the moment all we actually look
- * at is New or InProgress.
+ * XXX We may not need Done. At the moment all we actually look at is New or
+ * InProgress.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
@@ -2956,7 +2997,6 @@ pub enum WorkState {
     DepWait,
     InProgress,
     Done,
-    Error,
 }
 
 impl fmt::Display for WorkState {
@@ -2973,9 +3013,6 @@ impl fmt::Display for WorkState {
             }
             WorkState::Done => {
                 write!(f, "Done")
-            }
-            WorkState::Error => {
-                write!(f, " Err")
             }
         }
     }

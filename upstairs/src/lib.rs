@@ -497,6 +497,20 @@ async fn process_message(
                 None,
             )
         }
+        Message::ErrorReport {
+            upstairs_id: _,
+            session_id: _,
+            job_id,
+            error,
+        } => {
+            // XXX currently, this error report goes nowhere except to the log.
+            // The Upstairs should track this for each Downstairs.
+            error!(
+                u.log,
+                "[{}] job id {} saw error {:?}", client_id, job_id, error
+            );
+            return Ok(());
+        }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
          * I don't think there is anything else we can do.
@@ -1903,13 +1917,28 @@ where
         tokio::select! {
             /*
              * We set biased so the loop will:
-             * First make sure the pm task is still running.
-             * Second, get and look at messages received from the downstairs.
-             *   Some messages we can handle right here, but ACKs from
-             *   messages we sent are passed on to the pm task.
              *
-             * By handling messages from the downstairs before sending
-             * new work, we help to avoid overwhelming the downstairs.
+             * 1. First make sure the pm task is still running.
+             *
+             * 2. Get and look at messages received from the downstairs. Some
+             *    messages we can handle right here, but ACKs from messages we
+             *    sent are passed on to the pm task.
+             *
+             * 3. Send a ping if the timeout has been reached. If the downstairs
+             *    responds, then the #2 select branch will bump the deadlines.
+             *
+             * 4. Timeout the downstairs if it has been too long.
+             *
+             * 5. Check for changes to the work hashmap, and send messages to
+             *    the downstairs if new work is available.
+             *
+             * 6. Check for (and possibly send) more work if #5 triggered flow
+             *    control.
+             *
+             * By handling messages from the downstairs before sending new work,
+             * we help to avoid overwhelming the downstairs. By sending a ping
+             * before checking for new work, we avoid a scenario where too much
+             * new work would result in pings not being sent.
              */
             biased;
             e = &mut pm_task => {
@@ -2030,42 +2059,6 @@ where
                     }
                 }
             }
-            _ = up_coms.ds_work_rx.recv() => {
-                /*
-                 * A change here indicates the work hashmap has changed
-                 * and we should go look for new work to do. It is possible
-                 * that there is no new work but we won't know until we
-                 * check.
-                 */
-                let more =
-                    io_send(up, &mut fw, up_coms.client_id).await?;
-
-                if more && !more_work {
-                    warn!(up.log, "[{}] flow control start ",
-                        up_coms.client_id
-                    );
-
-                    more_work = true;
-                    more_work_interval = deadline_secs(1.0);
-                }
-            }
-            _ = sleep_until(more_work_interval), if more_work => {
-                more_work = io_send(up, &mut fw, up_coms.client_id).await?;
-                if !more_work {
-                    warn!(up.log, "[{}] flow control end ", up_coms.client_id);
-                }
-
-                more_work_interval = deadline_secs(1.0);
-            }
-            /*
-             * Don't wait more than 50 seconds to hear from the other side.
-             * TODO: 50 is too long, but what is the correct value?
-             */
-            _ = sleep_until(timeout_deadline) => {
-                warn!(up.log, "[{}] Downstairs not responding, take offline",
-                    up_coms.client_id);
-                return Ok(());
-            }
             _ = sleep_until(ping_interval) => {
                 /*
                  * To keep things alive, initiate a ping any time we have
@@ -2100,6 +2093,41 @@ where
                 }
 
                 ping_interval = deadline_secs(10.0);
+            }
+            /*
+             * Don't wait more than 50 seconds to hear from the other side.
+             * TODO: 50 is too long, but what is the correct value?
+             */
+            _ = sleep_until(timeout_deadline) => {
+                warn!(up.log, "[{}] Downstairs not responding, take offline",
+                    up_coms.client_id);
+                return Ok(());
+            }
+            _ = up_coms.ds_work_rx.recv() => {
+                /*
+                 * A change here indicates the work hashmap has changed and we
+                 * should go look for new work to do. It is possible that there
+                 * is no new work but we won't know until we check.
+                 */
+                let more =
+                    io_send(up, &mut fw, up_coms.client_id).await?;
+
+                if more && !more_work {
+                    warn!(up.log, "[{}] flow control start ",
+                        up_coms.client_id
+                    );
+
+                    more_work = true;
+                    more_work_interval = deadline_secs(1.0);
+                }
+            }
+            _ = sleep_until(more_work_interval), if more_work => {
+                more_work = io_send(up, &mut fw, up_coms.client_id).await?;
+                if !more_work {
+                    warn!(up.log, "[{}] flow control end ", up_coms.client_id);
+                }
+
+                more_work_interval = deadline_secs(1.0);
             }
         }
     }
@@ -3377,22 +3405,21 @@ impl Downstairs {
             "[{client_id}] client skip {} in process jobs because fault",
             self.ds_active.len(),
         );
+
         let mut notify_guest = false;
         let mut retire_check = vec![];
+        let mut number_jobs_skipped = 0;
 
         for (ds_id, job) in self.ds_active.iter_mut() {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
-                info!(
-                    self.log,
-                    "[{}] change {} to fault skipped", client_id, ds_id
-                );
                 let old_state =
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
+                number_jobs_skipped += 1;
 
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
@@ -3421,6 +3448,13 @@ impl Downstairs {
                 }
             }
         }
+
+        info!(
+            self.log,
+            "[{}] changed {} jobs to fault skipped",
+            client_id,
+            number_jobs_skipped
+        );
 
         for ds_id in retire_check {
             self.retire_check(ds_id);
@@ -3618,17 +3652,26 @@ impl Downstairs {
         job.ack_status = AckStatus::Acked;
     }
 
+    /*
+     * Verify that we have enough valid IO results when considering
+     * all downstairs results before we send back success to the guest..
+     *
+     * During normal operations, reads can have two failures or skipps
+     * and still return valid data.
+     *
+     * During normal operations, write, write_unwritten, and
+     * flush can have one error or skip and still return success to
+     * the upstairs (though, the downstairs normally will not return
+     * error to the upstairs on W/F).
+     *
+     * For repair, we don't permit any errors, but do allow and
+     * handle the "skipped" case for IOs.  This allows us to
+     * recover if we are repairing a downstairs and one of the
+     * valid remaining downstairs goes offline.
+     */
     fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
         /*
-         * If enough downstairs returned an error, then return an error to
-         * the Guest
-         *
-         * Not ok:
-         * - 2+ errors for Write/Flush
-         * - 3+ errors for Reads
-         *
          * TODO: this doesn't tell the Guest what the error(s) were?
-         * TODO: Add retries here as well.
          */
         let wc = self.state_count(ds_id).unwrap();
 
@@ -3637,62 +3680,27 @@ impl Downstairs {
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        /*
-         * This code assumes that 3 downstairs is the max that we'll
-         * ever support.
-         */
         let bad_job = match &job.work {
-            IOop::Read {
-                dependencies: _dependencies,
-                requests: _,
-            } => wc.error == 3,
-            IOop::Write {
-                dependencies: _dependencies,
-                writes: _,
-            } => wc.error >= 2,
-            IOop::WriteUnwritten {
-                dependencies: _dependencies,
-                writes: _,
-            } => wc.error == 2,
-            IOop::Flush {
-                dependencies: _dependencies,
-                flush_number: _flush_number,
-                gen_number: _gen_number,
-                snapshot_details: _,
-                extent_limit: _,
-            } => wc.error >= 2,
+            IOop::Read { .. } => wc.error == 3,
+            IOop::Write { .. } => wc.skipped + wc.error > 1,
+            IOop::WriteUnwritten { .. } => wc.skipped + wc.error > 1,
+            IOop::Flush { .. } => wc.skipped + wc.error > 1,
             IOop::ExtentClose {
                 dependencies: _,
                 extent,
             } => {
                 panic!("Received illegal IOop::ExtentClose: {}", extent);
             }
-            IOop::ExtentFlushClose {
-                dependencies: _,
-                extent: _,
-                flush_number: _,
-                gen_number: _,
-                source_downstairs: _,
-                repair_downstairs: _,
-            } => wc.error >= 1,
-            IOop::ExtentLiveRepair {
-                dependencies: _,
-                extent: _,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
-            } => wc.error >= 1,
-            IOop::ExtentLiveReopen {
-                dependencies: _,
-                extent: _,
-            } => wc.error >= 1,
-            IOop::ExtentLiveNoOp { dependencies: _ } => wc.error >= 1,
+            IOop::ExtentFlushClose { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveRepair { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveReopen { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
         };
 
         if bad_job {
             Err(CrucibleError::IoError(format!(
-                "{} out of 3 downstairs returned an error",
-                wc.error
+                "{} out of 3 downstairs failed to complete this IO",
+                wc.error + wc.skipped,
             )))
         } else {
             Ok(())
@@ -4552,6 +4560,10 @@ impl Downstairs {
             // double count three done and return true if we already have
             // AckReady set.
             let wc = job.state_count();
+
+            // If we are a write or a flush with one success, then
+            // we must switch our state to failed.  This condition is
+            // handled in Downstairs::result()
             if (wc.error + wc.skipped + wc.done) == 3 {
                 notify_guest = true;
                 job.ack_status = AckStatus::AckReady;
@@ -5143,8 +5155,8 @@ impl Upstairs {
         let ds_state = self.ds_state_copy().await;
         let ds = self.downstairs.lock().await;
         let ds_io_count = ds.io_state_count;
-        let ds_reconciled = ds.reconcile_repaired.clone();
-        let ds_reconcile_needed = ds.reconcile_repair_needed.clone();
+        let ds_reconciled = ds.reconcile_repaired;
+        let ds_reconcile_needed = ds.reconcile_repair_needed;
         let ds_live_repair_completed = ds.live_repair_completed.clone();
         let ds_live_repair_aborted = ds.live_repair_aborted.clone();
         let ds_connected = ds.connected.clone();

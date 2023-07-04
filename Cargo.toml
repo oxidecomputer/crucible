@@ -51,7 +51,7 @@ hyper = { version = "0.14", features = [ "full" ] }
 hyper-staticfile = "0.9"
 indicatif = { version = "0.17.3", features = ["rayon"] }
 itertools = "0.10.5"
-libc = "0.2.144"
+libc = "0.2.147"
 mime_guess = "2.0.4"
 nbd = "0.2.3"
 nix = { version = "0.26", features = [ "feature", "uio" ] }
@@ -62,7 +62,7 @@ omicron-zone-package = "0.9.0"
 openapiv3 = "1.0"
 opentelemetry = "0.19.0"
 opentelemetry-jaeger = { version = "0.17.0" }
-percent-encoding = "2.2"
+percent-encoding = "2.3"
 proptest = "1.2.0"
 rand = { version = "0.8.5", features = ["min_const_gen"] }
 rand_chacha = "0.3.1"

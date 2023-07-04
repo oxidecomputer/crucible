@@ -42,6 +42,7 @@ mod test {
             read_only: bool,
             blocks_per_extent: u64,
             extent_count: u32,
+            problematic: bool,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
@@ -61,10 +62,10 @@ mod test {
 
             let downstairs = build_downstairs_for_region(
                 tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
+                problematic, /* lossy */
+                problematic, /* read errors */
+                problematic, /* write errors */
+                problematic, /* flush errors */
                 read_only,
                 Some(csl()),
             )
@@ -134,28 +135,60 @@ mod test {
     impl TestDownstairsSet {
         /// Spin off three downstairs, with a 5120b region
         pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
-            TestDownstairsSet::new_with_flag(read_only, false).await
+            // 5 * 2 * 512 = 5120b
+            let blocks_per_extent = 5;
+            let extent_count = 2;
+            TestDownstairsSet::new_with_flag(
+                read_only,
+                blocks_per_extent,
+                extent_count,
+                false,
+            )
+            .await
         }
 
         /// Spin off three downstairs, with a 50 MB region
         pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
-            TestDownstairsSet::new_with_flag(read_only, true).await
+            // 512 * 188 * 512 = 49283072b ~= 50MB
+            let blocks_per_extent = 512;
+            let extent_count = 188;
+            TestDownstairsSet::new_with_flag(
+                read_only,
+                blocks_per_extent,
+                extent_count,
+                false,
+            )
+            .await
+        }
+
+        /// Spin off three problematic downstairs, with a 10 MB region
+        pub async fn problem() -> Result<TestDownstairsSet> {
+            // 512 * 40 * 512 = 10485760b = 10MB
+            let blocks_per_extent = 512;
+            let extent_count = 188;
+            TestDownstairsSet::new_with_flag(
+                false, // read only
+                blocks_per_extent,
+                extent_count,
+                true, // problematic
+            )
+            .await
         }
 
         /// Spin off three downstairs
         pub async fn new_with_flag(
             read_only: bool,
-            big: bool,
+            blocks_per_extent: u64,
+            extent_count: u32,
+            problematic: bool,
         ) -> Result<TestDownstairsSet> {
-            let (blocks_per_extent, extent_count) =
-                if big { (512, 188) } else { (5, 2) };
-
             let downstairs1 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 true,
                 read_only,
                 blocks_per_extent,
                 extent_count,
+                problematic,
             )
             .await?;
             let downstairs2 = TestDownstairs::new(
@@ -164,6 +197,7 @@ mod test {
                 read_only,
                 blocks_per_extent,
                 extent_count,
+                problematic,
             )
             .await?;
             let downstairs3 = TestDownstairs::new(
@@ -172,6 +206,7 @@ mod test {
                 read_only,
                 blocks_per_extent,
                 extent_count,
+                problematic,
             )
             .await?;
 
@@ -243,6 +278,7 @@ mod test {
                 false,
                 self.blocks_per_extent,
                 self.extent_count,
+                false,
             )
             .await
         }
@@ -2554,6 +2590,74 @@ mod test {
 
         let buffer_vec = buffer.as_vec().await;
         assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_problematic_downstairs() -> Result<()> {
+        // Make sure problematic downstairs don't cause problems Upstairs.
+        const BLOCK_SIZE: usize = 512;
+
+        // Create three problematic downstairs.
+        let test_downstairs_set = TestDownstairsSet::problem().await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Write three times, read three times, for a total of 150M
+        let total_size = volume.total_size().await? as usize;
+        const CHUNK_SIZE: usize = 1048576; // 1M
+
+        for _ in 0..3 {
+            let chunks: Vec<(usize, Vec<u8>)> = (0..total_size)
+                .step_by(CHUNK_SIZE)
+                .map(|i| {
+                    (
+                        i / 512, // block offset!
+                        {
+                            let mut random_buffer = vec![0u8; CHUNK_SIZE];
+                            rand::thread_rng().fill(&mut random_buffer[..]);
+                            random_buffer
+                        },
+                    )
+                })
+                .collect();
+
+            for (i, random_buffer) in chunks.iter() {
+                volume
+                    .write(
+                        Block::new(*i as u64, BLOCK_SIZE.trailing_zeros()),
+                        Bytes::from(random_buffer.clone()),
+                    )
+                    .await?;
+            }
+
+            for (i, random_buffer) in chunks {
+                let buffer = Buffer::new(CHUNK_SIZE);
+                volume
+                    .read(
+                        Block::new(i as u64, BLOCK_SIZE.trailing_zeros()),
+                        buffer.clone(),
+                    )
+                    .await?;
+
+                assert_eq!(random_buffer, *buffer.as_vec().await);
+            }
+        }
 
         Ok(())
     }
