@@ -314,7 +314,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
 
@@ -396,6 +396,7 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -490,7 +491,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let mut volume = Volume::construct(vcr, None).await?;
+        let mut volume = Volume::construct(vcr, None, None).await?;
 
         volume
             .add_read_only_parent({
@@ -584,7 +585,7 @@ mod test {
                 )),
             };
 
-        let volume = Volume::construct(vcr, None).await?;
+        let volume = Volume::construct(vcr, None, None).await?;
         volume.activate().await?;
 
         // Read one block: should be all 0xff
@@ -637,7 +638,7 @@ mod test {
                 )),
             };
 
-        let volume = Volume::construct(vcr, None).await?;
+        let volume = Volume::construct(vcr, None, None).await?;
         volume.activate().await?;
 
         // Read one block: should be all 0x00
@@ -684,7 +685,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
 
@@ -755,7 +756,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
 
@@ -828,7 +829,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
 
@@ -913,7 +914,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
 
@@ -999,7 +1000,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
         let full_volume_size = BLOCK_SIZE * 20;
@@ -1107,7 +1108,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let volume = Arc::new(Volume::construct(vcr, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
         volume.activate().await?;
         let full_volume_size = BLOCK_SIZE * 20;
@@ -1217,6 +1218,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
         volume.add_read_only_parent(in_memory_data).await?;
@@ -1296,6 +1298,7 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -1379,6 +1382,7 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -1484,6 +1488,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
         volume.add_read_only_parent(in_memory_data).await?;
@@ -1578,6 +1583,7 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -1679,7 +1685,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let mut volume = Volume::construct(vcr, None).await?;
+        let mut volume = Volume::construct(vcr, None, None).await?;
 
         volume
             .add_read_only_parent({
@@ -1804,7 +1810,7 @@ mod test {
                 read_only_parent: None,
             };
 
-        let mut volume = Volume::construct(vcr, None).await?;
+        let mut volume = Volume::construct(vcr, None, None).await?;
 
         volume
             .add_read_only_parent({
@@ -1922,10 +1928,10 @@ mod test {
                 )),
             };
 
-        let volume1 = Volume::construct(vcr_1, None).await?;
+        let volume1 = Volume::construct(vcr_1, None, None).await?;
         volume1.activate().await?;
 
-        let volume2 = Volume::construct(vcr_2, None).await?;
+        let volume2 = Volume::construct(vcr_2, None, None).await?;
         volume2.activate().await?;
 
         // Read one block: should be all 0x00
@@ -1975,6 +1981,7 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -2038,6 +2045,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
 
@@ -2076,6 +2084,7 @@ mod test {
                         extent_count: test_downstairs_set.extent_count(),
                     },
                     2,
+                    None,
                     None,
                 )
                 .await?;
@@ -2137,7 +2146,7 @@ mod test {
                 )),
             };
 
-        let volume = Volume::construct(vcr, None).await?;
+        let volume = Volume::construct(vcr, None, None).await?;
         volume.activate().await?;
 
         // Validate that source blocks originally come from the read-only parent
@@ -2203,6 +2212,7 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -2295,6 +2305,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
 
@@ -2339,6 +2350,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
 
@@ -2377,6 +2389,7 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -2432,6 +2445,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
 
@@ -2479,6 +2493,7 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
+                None,
                 None,
             )
             .await?;
@@ -3312,7 +3327,7 @@ mod test {
                 }],
                 read_only_parent: None,
             };
-        let volume = Volume::construct(vcr, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(bytes.len());
@@ -3422,7 +3437,8 @@ mod test {
 
         // Verify contents are zero on init
         {
-            let volume = Volume::construct(vcr.clone(), None).await.unwrap();
+            let volume =
+                Volume::construct(vcr.clone(), None, None).await.unwrap();
             volume.activate().await.unwrap();
 
             let buffer = Buffer::new(5120);
@@ -3477,7 +3493,7 @@ mod test {
                 }],
                 read_only_parent: None,
             };
-        let volume = Volume::construct(vcr, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(5120);
@@ -3557,7 +3573,7 @@ mod test {
                 }],
                 read_only_parent: None,
             };
-        let volume = Volume::construct(vcr, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(5120);
@@ -3620,7 +3636,7 @@ mod test {
                 }],
                 read_only_parent: None,
             };
-        let volume = Volume::construct(vcr, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer =
@@ -3695,7 +3711,7 @@ mod test {
 
         // Verify contents match data on init
         {
-            let volume = Volume::construct(vcr, None).await.unwrap();
+            let volume = Volume::construct(vcr, None, None).await.unwrap();
             volume.activate().await.unwrap();
 
             let buffer = Buffer::new(data.len());
@@ -3794,7 +3810,7 @@ mod test {
 
         // Attach, validate random data got imported
 
-        let volume = Volume::construct(vcr, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, Some(log)).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(data.len());
