@@ -290,6 +290,10 @@ mod test {
         pub async fn downstairs2_address(&self) -> SocketAddr {
             self.downstairs2.address().await
         }
+
+        pub async fn downstairs3_address(&self) -> SocketAddr {
+            self.downstairs3.address().await
+        }
     }
 
     #[tokio::test]
@@ -2472,6 +2476,135 @@ mod test {
             )
             .await
             .unwrap_err();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_volume_replace_downstairs_then_takeover(
+    ) -> Result<()> {
+        // Replace a downstairs with a new one, then an Upstairs with a newer
+        // generation number activates.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them
+        let test_downstairs_set = TestDownstairsSet::big(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        // Create a new downstairs, then replace one of our current
+        // downstairs with that new one.
+        let new_downstairs = test_downstairs_set.new_downstairs().await?;
+
+        let res = volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs1_address().await,
+                new_downstairs.address().await,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res, ReplaceResult::Started);
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            match volume
+                .replace_downstairs(
+                    test_downstairs_set.opts().id,
+                    test_downstairs_set.downstairs1_address().await,
+                    new_downstairs.address().await,
+                )
+                .await
+                .unwrap()
+            {
+                ReplaceResult::StartedAlready => {
+                    eprintln!(
+                        "Waited for some repair work, proceeding with test"
+                    );
+                    break;
+                }
+                ReplaceResult::CompletedAlready => {
+                    // This test is invalid if the repair completed already
+                    panic!("Downstairs replacement completed");
+                }
+                x => {
+                    panic!("Bad result from replace_downstairs: {:?}", x);
+                }
+            }
+        }
+
+        // A new Upstairs arrives, with a newer gen number, and the updated
+        // target list
+        let mut opts = test_downstairs_set.opts();
+        opts.target = vec![
+            new_downstairs.address().await,
+            test_downstairs_set.downstairs2_address().await,
+            test_downstairs_set.downstairs3_address().await,
+        ];
+
+        let mut new_volume = Volume::new(BLOCK_SIZE as u64);
+        new_volume
+            .add_subvolume_create_guest(
+                opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                2,
+                None,
+            )
+            .await?;
+
+        new_volume.activate().await?;
+
+        while !new_volume.query_is_active().await? {
+            // new_volume will repair before activating, so this waits for that
+            println!("Waiting for new_volume activate");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        // Old volume is no longer active
+        assert!(!volume.query_is_active().await?);
+
+        // Read back what we wrote.
+        let buffer = Buffer::new(new_volume.total_size().await? as usize);
+        new_volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        let buffer_vec = buffer.as_vec().await;
+        assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+
         Ok(())
     }
 
@@ -2708,7 +2841,6 @@ mod test {
     async fn integration_test_guest_replace_many_downstairs() -> Result<()> {
         // Test using the guest layer to verify we can replace one
         // downstairs, but not another while the replace is active.
-        const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::small(false).await?;
@@ -3351,8 +3483,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_import_from_url_ovmf_bad_digest() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::big(false).await.unwrap();
 
@@ -3507,8 +3637,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_snapshot() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
         let tds = TestDownstairsSet::small(false).await.unwrap();
 
@@ -3824,8 +3952,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_bulk_read() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
@@ -3908,8 +4034,6 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_bulk_read_max_chunk_size() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::big(false).await.unwrap();
@@ -4224,8 +4348,6 @@ mod test {
     // Test validating a non-block size amount fails
     #[tokio::test]
     async fn test_pantry_validate_fail() {
-        const BLOCK_SIZE: usize = 512;
-
         // Spin off three downstairs, build our Crucible struct.
 
         let tds = TestDownstairsSet::small(false).await.unwrap();
