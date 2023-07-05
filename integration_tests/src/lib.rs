@@ -2501,6 +2501,7 @@ mod test {
                 },
                 1,
                 None,
+                None,
             )
             .await?;
 
@@ -2581,6 +2582,7 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 2,
+                None,
                 None,
             )
             .await?;
