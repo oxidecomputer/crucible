@@ -1671,7 +1671,7 @@ async fn replay_workload(
     dsc_client: Client,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-    let mut generic_wtq = WhenToQuit::Count { count: 100 };
+    let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
     let mut c = 1;
     loop {
@@ -1681,7 +1681,6 @@ async fn replay_workload(
         loop {
             let res = dsc_client.dsc_get_ds_state(stopped_ds).await.unwrap();
             let state = res.into_inner();
-            println!("after stop state got back: {:?}", state);
             if state == DownstairsState::Exit {
                 break;
             }
@@ -1691,7 +1690,7 @@ async fn replay_workload(
         generic_workload(guest, &mut generic_wtq, ri, false).await?;
 
         let res = dsc_client.dsc_start(stopped_ds).await;
-        println!("Replay: started 0, returned:{:?}", res);
+        println!("Replay: started {stopped_ds}, returned:{:?}", res);
 
         // Wait for all IO to finish before we continue
         loop {
