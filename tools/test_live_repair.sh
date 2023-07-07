@@ -116,7 +116,6 @@ do
     # Give the fault time to be noticed
     sleep 5
 
-
 	# Now wait for all downstairs to be active
     all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
     while [[ "${all_state}" != "active,active,active" ]]; do

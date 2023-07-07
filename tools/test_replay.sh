@@ -6,23 +6,6 @@ err=0
 total=0
 pass_total=0
 SECONDS=0
-loops=2
-
-usage () {
-    echo "Usage: $0 [-l #]]" >&2
-    echo " -l loops   Number of test loops to perform (default 10)" >&2
-}
-
-while getopts 'l:' opt; do
-    case "$opt" in
-        l)  loops=$OPTARG
-            ;;
-        *)  echo "Invalid option"
-            usage
-            exit 1
-            ;;
-    esac
-done
 
 # Control-C to cleanup.
 trap ctrl_c INT
@@ -44,6 +27,24 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
     echo "Missing $crucible_test or $dsc or $downstairs"
     exit 1
 fi
+
+loops=20
+
+usage () {
+    echo "Usage: $0 [-l #]]" >&2
+    echo " -l loops   Number of test loops to perform (default 20)" >&2
+}
+
+while getopts 'l:' opt; do
+    case "$opt" in
+        l)  loops=$OPTARG
+            ;;
+        *)  echo "Invalid option"
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 echo "" > ${loop_log}
 echo "" > ${test_log}
@@ -91,7 +92,7 @@ while [[ $count -le $loops ]]; do
         touch /var/tmp/ds_test/up 2> /dev/null
         (( err += 1 ))
         duration=$SECONDS
-        printf "[%03d] Error $result after %d:%02d\n" "$i" \
+        printf "[%03d] Error $result after %d:%02d\n" "$count" \
                 $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
         mv "$test_log" "$test_log".lastfail
         break
@@ -112,7 +113,7 @@ wait "$dsc_pid"
 
 sleep 4
 echo "Final results:" | tee -a ${loop_log}
-printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
+printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$count" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
 echo "$(date) Test ends with $err" >> "$test_log" 2>&1
 exit "$err"
 

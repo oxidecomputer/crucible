@@ -24,10 +24,11 @@ tar cavf out/crucible-nightly.tar.gz \
   tools/dtrace/* \
   tools/hammer_loop.sh \
   tools/test_live_repair.sh \
+  tools/test_live_repair_new.sh \
   tools/test_fail_live_repair.sh \
   tools/test_mem.sh \
   tools/test_perf.sh \
-  tools/test_reconnect.sh \
+  tools/test_replay.sh \
   tools/test_repair.sh \
   tools/test_restart_repair.sh \
   tools/test_nightly.sh \

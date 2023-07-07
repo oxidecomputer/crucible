@@ -16,7 +16,7 @@ export BINDIR=${BINDIR:-$ROOT/target/release}
 echo "Nightly starts at $(date)" | tee "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
-./tools/hammer_loop.sh
+./tools/hammer_loop.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) hammer pass" >> "$output_file"
@@ -25,20 +25,20 @@ else
     (( err += 1 ))
 fi
 
-banner reconnect
-echo "$(date) reconnect start" >> "$output_file"
-./tools/test_reconnect.sh
+banner replay
+echo "$(date) replay start" >> "$output_file"
+./tools/test_replay.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
-    echo "$(date) reconnect pass" >> "$output_file"
+    echo "$(date) replay pass" >> "$output_file"
 else
-    echo "$(date) reconnect fail with: $res" >> "$output_file"
+    echo "$(date) replay fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
 
 banner repair
 echo "$(date) repair start" >> "$output_file"
-./tools/test_repair.sh
+./tools/test_repair.sh -l 500
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) repair pass" >> "$output_file"
@@ -49,7 +49,7 @@ fi
 
 banner restart_repair
 echo "$(date) restart_repair start" >> "$output_file"
-./tools/test_restart_repair.sh
+./tools/test_restart_repair.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) restart_repair pass" >> "$output_file"
@@ -58,6 +58,16 @@ else
     (( err += 1 ))
 fi
 
+banner live_repair
+echo "$(date) live_repair start" >> "$output_file"
+./tools/test_live_repair_new.sh -l 20
+res=$?
+if [[ "$res" -eq 0 ]]; then
+    echo "$(date) live_repair pass" >> "$output_file"
+else
+    echo "$(date) live_repair fail with: $res" >> "$output_file"
+    (( err += 1 ))
+fi
 duration=$SECONDS
 
 banner results
