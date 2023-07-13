@@ -2,7 +2,7 @@
 #:
 #: name = "rbuild"
 #: variety = "basic"
-#: target = "helios"
+#: target = "helios-2.0"
 #: rust_toolchain = "1.66"
 #: output_rules = [
 #:	"/out/*",

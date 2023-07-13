@@ -2,7 +2,7 @@
 #:
 #: name = "test-ds"
 #: variety = "basic"
-#: target = "helios"
+#: target = "helios-2.0"
 #: output_rules = [
 #:	"/tmp/*.txt",
 #: ]
