@@ -2,7 +2,7 @@
 #:
 #: name = "test-perf"
 #: variety = "basic"
-#: target = "helios"
+#: target = "helios-2.0"
 #: output_rules = [
 #:  "=/tmp/perf*.csv",
 #:  "/tmp/perfout.txt",
