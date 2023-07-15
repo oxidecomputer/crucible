@@ -17,7 +17,7 @@ const SERVICE: &str = "oxide/crucible/downstairs";
  * As a safety mechanism to prevent the agent from creating more regions
  * than we have physical space, we using a zfs reservation on each dataset
  * we create.  While not a complete solution, it does help in some
- * situations to avoid allocation of a regions that we don't have the
+ * situations to avoid allocation of a region that we don't have the
  * space for if that region was to fill up.
  * As for how much we reserve, it's the region size itself, plus the
  * amount we need for metadata (currently around 17%) then an additional
