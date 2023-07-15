@@ -14,12 +14,22 @@ use std::sync::Arc;
 const PROG: &str = "crucible-agent";
 const SERVICE: &str = "oxide/crucible/downstairs";
 /*
- * As a safety mechanism, we reserve some additional space using zfs quotas
- * and reservations that prevent us from creating more downstairs regions
- * than our zpool has space for.  The region itself needs roughly 17% for
- * metadata, and we give ourselves a little more.
+ * As a safety mechanism to prevent the agent from creating more regions
+ * than we have physical space, we using a zfs reservation on each dataset
+ * we create.  While not a complete solution, it does help in some
+ * situations to avoid allocation of a regions that we don't have the
+ * space for if that region was to fill up.
+ * As for how much we reserve, it's the region size itself, plus the
+ * amount we need for metadata (currently around 17%) then an additional
+ * 8% that, if things are behaving, we will have for snapshots and
+ * to prevent us from using all the data in the pool.
+ *
+ * In addition, we throw a quota of 3x the region size.  If the region
+ * has grown that big, then something is wrong and we should prevent it
+ * from growing any larger and impacting other regions in the dataset.
  */
 const METADATA_BUFFER: f64 = 1.25;
+const REGION_QUOTA: u64 = 3;
 
 mod datafile;
 mod model;
@@ -102,6 +112,7 @@ impl ZFSDataset {
     pub fn ensure_child_dataset(
         &self,
         child: &str,
+        reservation: Option<u64>,
         quota: Option<u64>,
         log: &Logger,
     ) -> Result<ZFSDataset> {
@@ -130,36 +141,11 @@ impl ZFSDataset {
         }
 
         // If requested, set a quota and reservation here.
-        if let Some(my_quota) = quota {
-            info!(
-                log,
-                "zfs set reservation and quota of {my_quota} for {dataset}"
-            );
+        if let Some(reservation) = reservation {
+            info!(log, "zfs set reservation of {reservation} for {dataset}");
             let cmd = std::process::Command::new("zfs")
                 .arg("set")
-                .arg(format!("reservation={}", my_quota))
-                .arg(&dataset)
-                .output()?;
-
-            if !cmd.status.success() {
-                let out = String::from_utf8_lossy(&cmd.stdout);
-                let err = String::from_utf8_lossy(&cmd.stderr);
-                info!(log,
-                    "zfs set reservation failed! quota:{my_quota} out:{} err:{}",
-                    out, err
-                );
-                // Destroy the dataset and return the error. Ignore any error here.
-                let _cmd = std::process::Command::new("zfs")
-                    .arg("destroy")
-                    .arg(&dataset)
-                    .output();
-
-                bail!("zfs set reservation failed! out:{} err:{}", out, err);
-            }
-
-            let cmd = std::process::Command::new("zfs")
-                .arg("set")
-                .arg(format!("quota={}", my_quota))
+                .arg(format!("reservation={}", reservation))
                 .arg(&dataset)
                 .output()?;
 
@@ -168,11 +154,40 @@ impl ZFSDataset {
                 let err = String::from_utf8_lossy(&cmd.stderr);
                 info!(
                     log,
-                    "zfs set quota failed! quota:{my_quota} out:{} err:{}",
+                    "zfs set reservation failed! reservation:{} out:{} err:{}",
+                    reservation,
                     out,
                     err
                 );
-                // Destroy the dataset and return the error. Ignore any error here.
+                // Destroy the dataset and return the original error.
+                let _cmd = std::process::Command::new("zfs")
+                    .arg("destroy")
+                    .arg(&dataset)
+                    .output();
+
+                bail!("zfs set reservation failed! out:{} err:{}", out, err);
+            }
+        }
+
+        if let Some(quota) = quota {
+            info!(log, "zfs set quota of {quota} for {dataset}");
+            let cmd = std::process::Command::new("zfs")
+                .arg("set")
+                .arg(format!("quota={}", quota))
+                .arg(&dataset)
+                .output()?;
+
+            if !cmd.status.success() {
+                let out = String::from_utf8_lossy(&cmd.stdout);
+                let err = String::from_utf8_lossy(&cmd.stderr);
+                info!(
+                    log,
+                    "zfs set quota failed! quota:{} out:{} err:{}",
+                    quota,
+                    out,
+                    err
+                );
+                // Destroy the dataset and return the original error.
                 let _cmd = std::process::Command::new("zfs")
                     .arg("destroy")
                     .arg(&dataset)
@@ -307,8 +322,9 @@ async fn main() -> Result<()> {
                 lowport + 999, // TODO high port as an argument?
             )?);
 
-            let regions_dataset =
-                dataset.ensure_child_dataset("regions", None, &log).unwrap();
+            let regions_dataset = dataset
+                .ensure_child_dataset("regions", None, None, &log)
+                .unwrap();
 
             /*
              * Ensure that the SMF service we will use exists already.  If
@@ -882,19 +898,24 @@ fn worker(
                          */
                         let region_size =
                             r.block_size * r.extent_size * r.extent_count;
-                        let quota_size = (region_size as f64 * METADATA_BUFFER)
+                        let reservation = (region_size as f64 * METADATA_BUFFER)
                             .round()
                             as u64;
+                        let quota = region_size * REGION_QUOTA;
 
                         info!(
                             log,
-                            "Size: {region_size} quota_size:{quota_size}"
+                            "Region size:{} reservation:{} quota:{}",
+                            region_size,
+                            reservation,
+                            quota,
                         );
                         // if regions need to be created, do that before apply_smf.
                         let region_dataset = regions_dataset
                             .ensure_child_dataset(
                                 &r.id.0,
-                                Some(quota_size),
+                                Some(reservation),
+                                Some(quota),
                                 &log,
                             )
                             .unwrap();
