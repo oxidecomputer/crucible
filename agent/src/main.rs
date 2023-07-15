@@ -14,19 +14,25 @@ use std::sync::Arc;
 const PROG: &str = "crucible-agent";
 const SERVICE: &str = "oxide/crucible/downstairs";
 /*
- * As a safety mechanism to prevent the agent from creating more regions
- * than we have physical space, we using a zfs reservation on each dataset
- * we create.  While not a complete solution, it does help in some
- * situations to avoid allocation of a region that we don't have the
- * space for if that region was to fill up.
- * As for how much we reserve, it's the region size itself, plus the
- * amount we need for metadata (currently around 17%) then an additional
- * 8% that, if things are behaving, we will have for snapshots and
- * to prevent us from using all the data in the pool.
+ * As a safety mechanism to prevent the agent from allocating more space to
+ * regions than we have physical space on disk, we use a zfs reservation on
+ * each dataset we create. While it does prevent us from allocating more space
+ * to regions than the disk could accommodate, it is not a complete solution in
+ * that we ideally would like Nexus to track allocations (for crucible and
+ * other significant datasets), an adequate capacity margin to ensure that disk
+ * performance doesn't become pathological, and monitors any over-use for
+ * appropriate mitigation (migration, termination, etc).
  *
- * In addition, we throw a quota of 3x the region size.  If the region
- * has grown that big, then something is wrong and we should prevent it
- * from growing any larger and impacting other regions in the dataset.
+ * As for how much we reserve, it's the region size itself, plus the amount
+ * we need for metadata (currently around 17%) then an additional 8% that, if
+ * things are behaving, we will have for snapshots and to prevent us from
+ * using all the data in the pool.
+ *
+ * In addition, we throw a quota of 3x the region size. The failure modes of
+ * exhausting the quota are potentially severe and not (as yet) well-tested so
+ * we want some buffer between the reservation and the quota. If the region has
+ * grown that big however, something is potentially very wrong and we should
+ * prevent it from growing any larger and impacting other regions on the disk.
  */
 const METADATA_BUFFER: f64 = 1.25;
 const REGION_QUOTA: u64 = 3;
@@ -129,72 +135,25 @@ impl ZFSDataset {
         }
 
         // If not, create it
-        let cmd = std::process::Command::new("zfs")
-            .arg("create")
-            .arg(&dataset)
-            .output()?;
+        let mut cmd = std::process::Command::new("zfs");
+        cmd.arg("create");
 
-        if !cmd.status.success() {
-            let out = String::from_utf8_lossy(&cmd.stdout);
-            let err = String::from_utf8_lossy(&cmd.stderr);
-            bail!("zfs create failed! out:{} err:{}", out, err);
-        }
-
-        // If requested, set a quota and reservation here.
         if let Some(reservation) = reservation {
             info!(log, "zfs set reservation of {reservation} for {dataset}");
-            let cmd = std::process::Command::new("zfs")
-                .arg("set")
-                .arg(format!("reservation={}", reservation))
-                .arg(&dataset)
-                .output()?;
-
-            if !cmd.status.success() {
-                let out = String::from_utf8_lossy(&cmd.stdout);
-                let err = String::from_utf8_lossy(&cmd.stderr);
-                info!(
-                    log,
-                    "zfs set reservation failed! reservation:{} out:{} err:{}",
-                    reservation,
-                    out,
-                    err
-                );
-                // Destroy the dataset and return the original error.
-                let _cmd = std::process::Command::new("zfs")
-                    .arg("destroy")
-                    .arg(&dataset)
-                    .output();
-
-                bail!("zfs set reservation failed! out:{} err:{}", out, err);
-            }
+            cmd.arg("-o").arg(format!("reservation={}", reservation));
         }
 
         if let Some(quota) = quota {
             info!(log, "zfs set quota of {quota} for {dataset}");
-            let cmd = std::process::Command::new("zfs")
-                .arg("set")
-                .arg(format!("quota={}", quota))
-                .arg(&dataset)
-                .output()?;
+            cmd.arg("-o").arg(format!("quota={}", quota));
+        }
 
-            if !cmd.status.success() {
-                let out = String::from_utf8_lossy(&cmd.stdout);
-                let err = String::from_utf8_lossy(&cmd.stderr);
-                info!(
-                    log,
-                    "zfs set quota failed! quota:{} out:{} err:{}",
-                    quota,
-                    out,
-                    err
-                );
-                // Destroy the dataset and return the original error.
-                let _cmd = std::process::Command::new("zfs")
-                    .arg("destroy")
-                    .arg(&dataset)
-                    .output();
+        let res = cmd.arg(&dataset).output()?;
 
-                bail!("zfs set quota failed! out:{} err:{}", out, err);
-            }
+        if !res.status.success() {
+            let out = String::from_utf8_lossy(&res.stdout);
+            let err = String::from_utf8_lossy(&res.stderr);
+            bail!("zfs create failed! out:{} err:{}", out, err);
         }
 
         Ok(ZFSDataset { dataset })
