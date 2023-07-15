@@ -34,8 +34,8 @@ const SERVICE: &str = "oxide/crucible/downstairs";
  * grown that big however, something is potentially very wrong and we should
  * prevent it from growing any larger and impacting other regions on the disk.
  */
-const METADATA_BUFFER: f64 = 1.25;
-const REGION_QUOTA: u64 = 3;
+const RESERVATION_FACTOR: f64 = 1.25;
+const QUOTA_FACTOR: u64 = 3;
 
 mod datafile;
 mod model;
@@ -857,10 +857,10 @@ fn worker(
                          */
                         let region_size =
                             r.block_size * r.extent_size * r.extent_count;
-                        let reservation = (region_size as f64 * METADATA_BUFFER)
-                            .round()
-                            as u64;
-                        let quota = region_size * REGION_QUOTA;
+                        let reservation =
+                            (region_size as f64 * RESERVATION_FACTOR).round()
+                                as u64;
+                        let quota = region_size * QUOTA_FACTOR;
 
                         info!(
                             log,
