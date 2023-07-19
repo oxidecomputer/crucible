@@ -251,6 +251,39 @@ impl DataFile {
         }
 
         /*
+         * Wait for ZFS snapshot directory to get mounted before
+         * starting a read-only downstairs that points to it. Note
+         * `create_running_snapshot_request` is only entered if the
+         * snapshot exists for the region so this should eventually
+         * be a directory.
+         */
+        {
+            let mut snapshot_path = self.base_path.to_path_buf();
+            snapshot_path.push("regions");
+            snapshot_path.push(request.id.0.clone());
+            snapshot_path.push(".zfs");
+            snapshot_path.push("snapshot");
+            snapshot_path.push(request.name.clone());
+
+            // Wait a maximum of 5 seconds for the
+            // <region>/.zfs/snapshot/<snapshot> directory to appear
+            let mut appeared = false;
+            for _ in 0..50 {
+                if snapshot_path.is_dir() {
+                    appeared = true;
+                    break;
+                }
+                info!(self.log, "waiting for path {:?}", snapshot_path);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            if !appeared {
+                error!(self.log, "{:?} did not appear!", snapshot_path);
+                bail!("{:?} did not appear!", snapshot_path);
+            }
+        }
+
+        /*
          * Allocate a port number that is not yet in use.
          */
         let port_number = self.get_free_port(&inner)?;
@@ -341,17 +374,26 @@ impl DataFile {
         let inner = self.inner.lock().unwrap();
 
         /*
-         * Are we running this snapshot? Fail if so.
+         * Are we running a read-only downstairs for this snapshot? Fail if so.
          */
         if let Some(running_snapshots) =
             inner.running_snapshots.get(&request.id)
         {
-            if running_snapshots.get(&request.name).is_some() {
-                bail!(
-                    "downstairs running for region {} snapshot {}",
-                    request.id.0,
-                    request.name
-                );
+            if let Some(running_snapshot) = running_snapshots.get(&request.name)
+            {
+                match running_snapshot.state {
+                    State::Requested | State::Created | State::Tombstoned => {
+                        bail!(
+                            "read-only downstairs running for region {} snapshot {}",
+                            request.id.0,
+                            request.name
+                        );
+                    }
+
+                    State::Destroyed | State::Failed => {
+                        // ok to delete
+                    }
+                }
             }
         }
 
@@ -714,106 +756,93 @@ impl DataFile {
 
         let region = region.unwrap();
 
-        if region.state != State::Created {
-            bail!("region.state is {:?}", region.state);
+        match region.state {
+            State::Requested | State::Destroyed | State::Tombstoned => {
+                // Either the region hasn't been created yet, or it has been
+                // destroyed or marked to be destroyed (both of which require
+                // that no snapshots exist). Return an empty list.
+                return Ok(vec![]);
+            }
+
+            State::Created => {
+                // proceed to next section
+            }
+
+            State::Failed => {
+                bail!("region.state is failed!");
+            }
         }
 
         let mut path = self.base_path.to_path_buf();
         path.push("regions");
         path.push(region_id.0.clone());
-        path.push(".zfs");
-        path.push("snapshot");
 
-        info!(self.log, "checking if path {:?} exists", path);
+        info!(self.log, "path is {:?}", &path);
 
-        if !path.exists() {
-            // No snapshots directory
-            return Ok(vec![]);
+        let dataset =
+            ZFSDataset::new(path.into_os_string().into_string().unwrap())?;
+
+        info!(self.log, "dataset is {}", dataset.dataset());
+
+        let cmd = Command::new("zfs")
+            .arg("list")
+            .arg("-t")
+            .arg("snapshot")
+            .arg("-H")
+            .arg("-o")
+            .arg("name")
+            .arg("-r")
+            .arg(dataset.dataset())
+            .output()?;
+
+        if !cmd.status.success() {
+            bail!("zfs list snapshots failed!");
         }
 
-        info!(self.log, "checking path {:?}", path);
+        let mut results = Vec::new();
 
-        let paths = std::fs::read_dir(&path);
-        if paths.is_err() {
-            bail!(paths.err().unwrap());
-        }
+        let snapshots_stdout = String::from_utf8_lossy(&cmd.stdout);
+        let snapshots_list: Vec<&str> = snapshots_stdout
+            .trim_end()
+            .split('\n')
+            .filter(|x| !x.is_empty())
+            .collect();
 
-        let mut results: Vec<Snapshot> = vec![];
-        for path in paths.unwrap() {
-            if path.is_err() {
-                bail!(path.err().unwrap());
+        for snapshot in snapshots_list {
+            if snapshot == dataset.dataset() {
+                info!(self.log, "skipping {} matches dataset name", snapshot);
+                continue;
             }
-
-            let path = path.unwrap().path();
-
-            if path.is_dir() {
-                let dir_name = path
-                    .file_name()
-                    .ok_or_else(|| {
-                        anyhow!("could not turn {:?} into filename!", path)
-                    })?
-                    .to_str()
-                    .ok_or_else(|| {
-                        anyhow!("could not turn {:?} into str!", path)
-                    })?
-                    .to_string();
-
-                let dataset = {
-                    let mut path = self.base_path.clone().to_path_buf();
-                    path.push("regions");
-                    path.push(region_id.0.clone());
-
-                    ZFSDataset::new(
-                        path.into_os_string().into_string().unwrap(),
-                    )?
-                };
-
-                let snapshot_name =
-                    format!("{}@{}", dataset.dataset(), dir_name);
-
-                // Creation time of a .zfs/snapshot/<folder> as retrieved by
-                // stat doesn't make sense. Use `zfs get`:
-                //
-                //   # zfs get -pH -o value creation <snapshot_name>
-                //   1644441276
-
-                let mut cmd = Command::new("zfs");
-                cmd.arg("get");
-                cmd.arg("-pH");
-                cmd.arg("-o");
-                cmd.arg("value");
-                cmd.arg("creation");
-                cmd.arg(snapshot_name);
-
-                info!(
-                    self.log,
-                    "command {:?} {:?}",
-                    cmd.get_program(),
-                    cmd.get_args()
-                );
-
-                let cmd = cmd.output()?;
-
-                if !cmd.status.success() {
-                    bail!("stat didn't work!");
-                }
-
-                let cmd_stdout = {
-                    let cmd_stdout = String::from_utf8_lossy(&cmd.stdout);
-
-                    // Remove newline
-                    let cmd_stdout = cmd_stdout.trim_end().to_string();
-
-                    cmd_stdout
-                };
-
-                info!(self.log, "stdout is {}", &cmd_stdout);
-
-                results.push(Snapshot {
-                    name: dir_name,
-                    created: Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap(),
-                });
+            info!(self.log, "snapshot is {}", &snapshot);
+            let parts: Vec<&str> = snapshot.split('@').collect();
+            info!(self.log, "parts is {:?}", &parts);
+            if parts.len() != 2 {
+                panic!("bad snapshot name");
             }
+            let snapshot_name = parts[1];
+
+            let cmd = Command::new("zfs")
+                .arg("get")
+                .arg("-pH")
+                .arg("-o")
+                .arg("value")
+                .arg("creation")
+                .arg(snapshot)
+                .output()?;
+
+            let cmd_stdout = {
+                let cmd_stdout = String::from_utf8_lossy(&cmd.stdout);
+
+                // Remove newline
+                let cmd_stdout = cmd_stdout.trim_end().to_string();
+
+                cmd_stdout
+            };
+
+            results.push(Snapshot {
+                name: snapshot_name.to_string(),
+                created: Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap(),
+            });
         }
 
         Ok(results)
