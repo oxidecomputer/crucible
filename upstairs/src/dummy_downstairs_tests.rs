@@ -12,6 +12,7 @@ pub(crate) mod protocol_test {
     use crate::BlockContext;
     use crate::BlockIO;
     use crate::Buffer;
+    use crate::CrucibleError;
     use crate::Guest;
     use crate::IO_OUTSTANDING_MAX;
     use crate::MAX_ACTIVE_COUNT;
@@ -1877,6 +1878,720 @@ pub(crate) mod protocol_test {
                 Message::ReadRequest { .. },
             ));
         }
+
+        Ok(())
+    }
+
+    /// Test that an error during the live repair doesn't halt indefinitely
+    #[tokio::test]
+    async fn test_error_during_live_repair_no_halt() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
+
+        let (jh1, mut ds1_messages) =
+            harness.ds1().await.spawn_message_receiver().await;
+        let (_jh2, mut ds2_messages) =
+            harness.ds2.spawn_message_receiver().await;
+        let (_jh3, mut ds3_messages) =
+            harness.ds3.spawn_message_receiver().await;
+
+        // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
+        // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
+        // while reads are being sent. After IO_OUTSTANDING_MAX jobs, the
+        // Upstairs will set ds1 to faulted, and send it no more work.
+        const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
+        let mut job_ids = Vec::with_capacity(NUM_JOBS);
+
+        for i in 0..NUM_JOBS {
+            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
+
+            {
+                let harness = harness.clone();
+
+                // We must tokio::spawn here because `read` will wait for the
+                // response to come back before returning
+                tokio::spawn(async move {
+                    let buffer = Buffer::new(512);
+                    harness
+                        .guest
+                        .read(Block::new_512(0), buffer)
+                        .await
+                        .unwrap();
+                });
+            }
+
+            if i < MAX_ACTIVE_COUNT {
+                // Before flow control kicks in, assert we're seeing the read
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::ReadRequest { .. },
+                ));
+            } else {
+                // After flow control kicks in, we shouldn't see any more
+                // messages
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
+
+            match ds2_messages.recv().await.unwrap() {
+                Message::ReadRequest { job_id, .. } => {
+                    // Record the job ids of the read requests
+                    job_ids.push(job_id);
+                }
+
+                _ => bail!("saw non read request!"),
+            }
+
+            bail_assert!(matches!(
+                ds3_messages.recv().await.unwrap(),
+                Message::ReadRequest { .. },
+            ));
+
+            // Respond with read responses for downstairs 2 and 3
+            harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::ReadResponse {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds2
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[i],
+                    responses: Ok(vec![make_blank_read_response()]),
+                })
+                .await
+                .unwrap();
+
+            harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::ReadResponse {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds3
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[i],
+                    responses: Ok(vec![make_blank_read_response()]),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
+        // flush_timeout set to 24 hours, we shouldn't see anything else
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+
+        // Flush to clean out skipped jobs
+        {
+            let jh = {
+                let harness = harness.clone();
+
+                // We must tokio::spawn here because `flush` will wait for the
+                // response to come back before returning
+                tokio::spawn(async move {
+                    harness.guest.flush(None).await.unwrap();
+                })
+            };
+
+            let flush_job_id = match ds2_messages.recv().await.unwrap() {
+                Message::Flush { job_id, .. } => job_id,
+
+                _ => bail!("saw non flush ack!"),
+            };
+
+            bail_assert!(matches!(
+                ds3_messages.recv().await.unwrap(),
+                Message::Flush { .. },
+            ));
+
+            harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::FlushAck {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds2
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: flush_job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap();
+
+            harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::FlushAck {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds3
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: flush_job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap();
+
+            // Wait for the flush to come back
+            jh.await.unwrap();
+        }
+
+        // Send ds1 responses for the jobs it saw
+        for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
+            match harness
+                .ds1()
+                .await
+                .fw
+                .lock()
+                .await
+                .send(Message::ReadResponse {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds1()
+                        .await
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: *job_id,
+                    responses: Ok(vec![make_blank_read_response()]),
+                })
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        harness.log,
+                        "sent read response for job {} = {}", i, job_id,
+                    );
+                }
+
+                Err(e) => {
+                    // We should be able to send a few, but at some point
+                    // the Upstairs will disconnect us.
+                    error!(
+                        harness.log,
+                        "could not send read response for job {} = {}: {}",
+                        i,
+                        job_id,
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Assert the Upstairs isn't sending ds1 more work, because it is
+        // Faulted
+        let v = ds1_messages.try_recv();
+        match v {
+            // We're either disconnected, or the queue is empty.
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
+                // This is expected, continue on
+            }
+
+            _ => {
+                // Any other error (or success!) is unexpected
+                bail!("try_recv returned {:?}", v);
+            }
+        }
+
+        // Reconnect ds1
+        drop(ds1_messages);
+        jh1.abort();
+
+        let ds1 = harness.take_ds1().await;
+        let ds1 = ds1.close();
+        let ds1 = ds1.into_connected_downstairs().await;
+
+        ds1.negotiate_start().await?;
+        ds1.negotiate_step_extent_versions_please().await?;
+
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+
+        // The Upstairs will start sending LiveRepair related work, which may be
+        // out of order. Buffer some here.
+
+        let mut ds1_buffered_messages = vec![];
+        let mut ds2_buffered_messages = vec![];
+        let mut ds3_buffered_messages = vec![];
+
+        // EID 0
+
+        // The Upstairs first sends the close and reopen jobs
+        for _ in 0..2 {
+            ds1_buffered_messages.push(ds1_messages.recv().await.unwrap());
+            ds2_buffered_messages.push(ds2_messages.recv().await.unwrap());
+            ds3_buffered_messages.push(ds3_messages.recv().await.unwrap());
+        }
+
+        bail_assert!(ds1_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveClose { .. })));
+        bail_assert!(ds2_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
+        bail_assert!(ds3_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
+
+        bail_assert!(ds1_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
+        bail_assert!(ds2_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
+        bail_assert!(ds3_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
+
+        // The repair task then waits for the close responses.
+
+        let m1 = filter_out(&mut ds1_buffered_messages, |x| {
+            matches!(x, Message::ExtentLiveClose { .. })
+        })
+        .unwrap();
+        let m2 = filter_out(&mut ds2_buffered_messages, |x| {
+            matches!(x, Message::ExtentLiveFlushClose { .. })
+        })
+        .unwrap();
+        let m3 = filter_out(&mut ds3_buffered_messages, |x| {
+            matches!(x, Message::ExtentLiveFlushClose { .. })
+        })
+        .unwrap();
+
+        match &m1 {
+            Message::ExtentLiveClose {
+                upstairs_id,
+                session_id,
+                job_id,
+                extent_id,
+                ..
+            } => {
+                bail_assert!(*extent_id == 0);
+
+                // ds1 didn't get the flush, it was set to faulted
+                let gen = 1;
+                let flush = 0;
+                let dirty = false;
+
+                ds1.fw
+                    .lock()
+                    .await
+                    .send(Message::ExtentLiveCloseAck {
+                        upstairs_id: *upstairs_id,
+                        session_id: *session_id,
+                        job_id: *job_id,
+                        result: Ok((gen, flush, dirty)),
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            _ => bail!("saw {:?}", m1),
+        }
+
+        match &m2 {
+            Message::ExtentLiveFlushClose {
+                upstairs_id,
+                session_id,
+                job_id,
+                extent_id,
+                ..
+            } => {
+                bail_assert!(*extent_id == 0);
+
+                // ds2 and ds3 did get a flush
+                let gen = 0;
+                let flush = 2;
+                let dirty = false;
+
+                harness
+                    .ds2
+                    .fw
+                    .lock()
+                    .await
+                    .send(Message::ExtentLiveCloseAck {
+                        upstairs_id: *upstairs_id,
+                        session_id: *session_id,
+                        job_id: *job_id,
+                        result: Ok((gen, flush, dirty)),
+                    })
+                    .await
+                    .unwrap()
+            }
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        match &m3 {
+            Message::ExtentLiveFlushClose {
+                upstairs_id,
+                session_id,
+                job_id,
+                extent_id,
+                ..
+            } => {
+                bail_assert!(*extent_id == 0);
+
+                // ds2 and ds3 did get a flush
+                let gen = 0;
+                let flush = 2;
+                let dirty = false;
+
+                harness
+                    .ds3
+                    .fw
+                    .lock()
+                    .await
+                    .send(Message::ExtentLiveCloseAck {
+                        upstairs_id: *upstairs_id,
+                        session_id: *session_id,
+                        job_id: *job_id,
+                        result: Ok((gen, flush, dirty)),
+                    })
+                    .await
+                    .unwrap()
+            }
+
+            _ => bail!("saw {:?}", m3),
+        }
+
+        // Based on those gen, flush, and dirty values, ds1 should get the
+        // ExtentLiveRepair message, while ds2 and ds3 should get
+        // ExtentLiveNoOp.
+
+        let m1 = ds1_messages.recv().await.unwrap();
+        let m2 = ds2_messages.recv().await.unwrap();
+        let m3 = ds3_messages.recv().await.unwrap();
+
+        match &m1 {
+            Message::ExtentLiveRepair {
+                upstairs_id,
+                session_id,
+                job_id,
+                extent_id,
+                source_client_id,
+                ..
+            } => {
+                bail_assert!(*source_client_id != 0);
+                bail_assert!(*extent_id == 0);
+
+                // send back error report here!
+                ds1.fw
+                    .lock()
+                    .await
+                    .send(Message::ErrorReport {
+                        upstairs_id: *upstairs_id,
+                        session_id: *session_id,
+                        job_id: *job_id,
+                        error: CrucibleError::GenericError(String::from("bad news, networks are tricky")),
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            _ => bail!("saw {:?}", m3),
+        }
+
+        match &m2 {
+            Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                job_id,
+                ..
+            } => harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::ExtentLiveAckId {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    job_id: *job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap(),
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        match &m3 {
+            Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                job_id,
+                ..
+            } => harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::ExtentLiveAckId {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    job_id: *job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap(),
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        error!(harness.log, "dropping ds1 now!");
+
+        // Now, all downstairs will see ExtentLiveNoop, except ds1, which will
+        // abort itself due to an ErrorReport during an extent repair.
+        drop(ds1_messages);
+        jh1.abort();
+
+        let ds1 = ds1.close();
+
+        // If the Upstairs doesn't disconnect and try to reconnect to the
+        // downstairs, this test will get stuck here, and will not progress to
+        // the negotate_start function below.
+        error!(harness.log, "reconnecting ds1 now!");
+        let ds1 = ds1.into_connected_downstairs().await;
+
+        error!(harness.log, "ds1 negotiate start now!");
+        ds1.negotiate_start().await?;
+        error!(harness.log, "ds1 negotiate extent versions please now!");
+        ds1.negotiate_step_extent_versions_please().await?;
+
+        error!(harness.log, "ds1 spawn message receiver now!");
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+
+        // Continue faking for downstairs 2 and 3 - the work that was occuring
+        // for extent 0 should finish before the Upstairs aborts the repair
+        // task.
+
+        let m2 = ds2_messages.recv().await.unwrap();
+        let m3 = ds3_messages.recv().await.unwrap();
+
+        match &m2 {
+            Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                job_id,
+                ..
+            } => harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::ExtentLiveAckId {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    job_id: *job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap(),
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        match &m3 {
+            Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                job_id,
+                ..
+            } => harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::ExtentLiveAckId {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    job_id: *job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap(),
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        let m2 = filter_out(&mut ds2_buffered_messages, |x| {
+            matches!(x, Message::ExtentLiveReopen { .. })
+        })
+        .unwrap();
+        let m3 = filter_out(&mut ds3_buffered_messages, |x| {
+            matches!(x, Message::ExtentLiveReopen { .. })
+        })
+        .unwrap();
+
+        match &m2 {
+            Message::ExtentLiveReopen {
+                upstairs_id,
+                session_id,
+                job_id,
+                ..
+            } => {
+                harness
+                    .ds2
+                    .fw
+                    .lock()
+                    .await
+                    .send(Message::ExtentLiveAckId {
+                        upstairs_id: *upstairs_id,
+                        session_id: *session_id,
+                        job_id: *job_id,
+                        result: Ok(()),
+                    })
+                    .await
+                    .unwrap()
+            }
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        match &m3 {
+            Message::ExtentLiveReopen {
+                upstairs_id,
+                session_id,
+                job_id,
+                ..
+            } => {
+                harness
+                    .ds3
+                    .fw
+                    .lock()
+                    .await
+                    .send(Message::ExtentLiveAckId {
+                        upstairs_id: *upstairs_id,
+                        session_id: *session_id,
+                        job_id: *job_id,
+                        result: Ok(()),
+                    })
+                    .await
+                    .unwrap()
+            }
+
+            _ => bail!("saw {:?}", m2),
+        }
+
+        // The Upstairs will abort the live repair task, and will send a final
+        // flush to ds2 and ds3. The flush number will not be incremented as it
+        // would have been for each extent.
+
+        let flush_job_id = match ds2_messages.recv().await.unwrap() {
+            Message::Flush {
+                job_id,
+                flush_number: 3,
+                ..
+            } => job_id,
+
+            _ => bail!("saw non flush!"),
+        };
+
+        bail_assert!(matches!(
+            ds3_messages.recv().await.unwrap(),
+            Message::Flush {
+                flush_number: 3,
+                ..
+            },
+        ));
+
+        harness
+            .ds2
+            .fw
+            .lock()
+            .await
+            .send(Message::FlushAck {
+                upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                session_id: harness
+                    .ds2
+                    .upstairs_session_id
+                    .lock()
+                    .await
+                    .unwrap(),
+                job_id: flush_job_id,
+                result: Ok(()),
+            })
+            .await
+            .unwrap();
+
+        harness
+            .ds3
+            .fw
+            .lock()
+            .await
+            .send(Message::FlushAck {
+                upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                session_id: harness
+                    .ds3
+                    .upstairs_session_id
+                    .lock()
+                    .await
+                    .unwrap(),
+                job_id: flush_job_id,
+                result: Ok(()),
+            })
+            .await
+            .unwrap();
+
+        // After this, another repair task will start from the beginning, and
+        // send a bunch of work to ds1 again.
+
+        bail_assert!(matches!(
+            ds1_messages.recv().await.unwrap(),
+            Message::ExtentLiveClose {
+                extent_id: 0,
+                ..
+            },
+        ));
+
+        bail_assert!(matches!(
+            ds1_messages.recv().await.unwrap(),
+            Message::ExtentLiveReopen {
+                extent_id: 0,
+                ..
+            },
+        ));
 
         Ok(())
     }
