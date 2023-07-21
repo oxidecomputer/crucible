@@ -13,6 +13,29 @@ use std::sync::Arc;
 
 const PROG: &str = "crucible-agent";
 const SERVICE: &str = "oxide/crucible/downstairs";
+/*
+ * As a safety mechanism to prevent the agent from allocating more space to
+ * regions than we have physical space on disk, we use a zfs reservation on
+ * each dataset we create. While it does prevent us from allocating more space
+ * to regions than the disk could accommodate, it is not a complete solution in
+ * that we ideally would like Nexus to track allocations (for crucible and
+ * other significant datasets), an adequate capacity margin to ensure that disk
+ * performance doesn't become pathological, and monitors any over-use for
+ * appropriate mitigation (migration, termination, etc).
+ *
+ * As for how much we reserve, it's the region size itself, plus the amount
+ * we need for metadata (currently around 17%) then an additional 8% that, if
+ * things are behaving, we will have for snapshots and to prevent us from
+ * using all the data in the pool.
+ *
+ * In addition, we throw a quota of 3x the region size. The failure modes of
+ * exhausting the quota are potentially severe and not (as yet) well-tested so
+ * we want some buffer between the reservation and the quota. If the region has
+ * grown that big however, something is potentially very wrong and we should
+ * prevent it from growing any larger and impacting other regions on the disk.
+ */
+const RESERVATION_FACTOR: f64 = 1.25;
+const QUOTA_FACTOR: u64 = 3;
 
 mod datafile;
 mod model;
@@ -92,7 +115,13 @@ impl ZFSDataset {
     }
 
     // Given "dataset", ensure that "dataset/child" exists, and return it.
-    pub fn ensure_child_dataset(&self, child: &str) -> Result<ZFSDataset> {
+    pub fn ensure_child_dataset(
+        &self,
+        child: &str,
+        reservation: Option<u64>,
+        quota: Option<u64>,
+        log: &Logger,
+    ) -> Result<ZFSDataset> {
         let dataset = format!("{}/{}", self.dataset, child);
 
         // Does it exist already?
@@ -106,14 +135,24 @@ impl ZFSDataset {
         }
 
         // If not, create it
-        let cmd = std::process::Command::new("zfs")
-            .arg("create")
-            .arg(&dataset)
-            .output()?;
+        let mut cmd = std::process::Command::new("zfs");
+        cmd.arg("create");
 
-        if !cmd.status.success() {
-            let out = String::from_utf8_lossy(&cmd.stdout);
-            let err = String::from_utf8_lossy(&cmd.stderr);
+        if let Some(reservation) = reservation {
+            info!(log, "zfs set reservation of {reservation} for {dataset}");
+            cmd.arg("-o").arg(format!("reservation={}", reservation));
+        }
+
+        if let Some(quota) = quota {
+            info!(log, "zfs set quota of {quota} for {dataset}");
+            cmd.arg("-o").arg(format!("quota={}", quota));
+        }
+
+        let res = cmd.arg(&dataset).output()?;
+
+        if !res.status.success() {
+            let out = String::from_utf8_lossy(&res.stdout);
+            let err = String::from_utf8_lossy(&res.stderr);
             bail!("zfs create failed! out:{} err:{}", out, err);
         }
 
@@ -242,8 +281,9 @@ async fn main() -> Result<()> {
                 lowport + 999, // TODO high port as an argument?
             )?);
 
-            let regions_dataset =
-                dataset.ensure_child_dataset("regions").unwrap();
+            let regions_dataset = dataset
+                .ensure_child_dataset("regions", None, None, &log)
+                .unwrap();
 
             /*
              * Ensure that the SMF service we will use exists already.  If
@@ -803,17 +843,40 @@ fn worker(
         match work {
             Resource::Region(r) => {
                 /*
-                 * If the region is State::Requested, we create that region then run
-                 * the apply_smf().
+                 * If the region is State::Requested, we create that region
+                 * then run the apply_smf().
                  *
-                 * If the region is State:Tombstoned, we apply_smf() first, then we
-                 * finish up destroying the region.
+                 * If the region is State:Tombstoned, we apply_smf() first,
+                 * then we finish up destroying the region.
                  */
                 match &r.state {
                     State::Requested => {
+                        /*
+                         * Compute the actual size required for a full region,
+                         * then add our metadata overhead to that.
+                         */
+                        let region_size =
+                            r.block_size * r.extent_size * r.extent_count;
+                        let reservation =
+                            (region_size as f64 * RESERVATION_FACTOR).round()
+                                as u64;
+                        let quota = region_size * QUOTA_FACTOR;
+
+                        info!(
+                            log,
+                            "Region size:{} reservation:{} quota:{}",
+                            region_size,
+                            reservation,
+                            quota,
+                        );
                         // if regions need to be created, do that before apply_smf.
                         let region_dataset = regions_dataset
-                            .ensure_child_dataset(&r.id.0)
+                            .ensure_child_dataset(
+                                &r.id.0,
+                                Some(reservation),
+                                Some(quota),
+                                &log,
+                            )
                             .unwrap();
 
                         let res = worker_region_create(

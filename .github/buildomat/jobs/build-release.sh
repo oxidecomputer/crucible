@@ -2,7 +2,7 @@
 #:
 #: name = "rbuild"
 #: variety = "basic"
-#: target = "helios"
+#: target = "helios-2.0"
 #: rust_toolchain = "1.66"
 #: output_rules = [
 #:	"/out/*",
@@ -62,7 +62,7 @@ banner rbuild
 ptime -m cargo build --verbose --release --all-features
 
 banner rtest
-ptime -m cargo test --verbose
+ptime -m cargo test --verbose -- --nocapture > /tmp/cargo-test-out.log 2>&1
 
 banner output
 mkdir -p /work/rbins
