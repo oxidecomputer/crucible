@@ -2324,7 +2324,9 @@ pub(crate) mod protocol_test {
                         upstairs_id: *upstairs_id,
                         session_id: *session_id,
                         job_id: *job_id,
-                        error: CrucibleError::GenericError(String::from("bad news, networks are tricky")),
+                        error: CrucibleError::GenericError(String::from(
+                            "bad news, networks are tricky",
+                        )),
                     })
                     .await
                     .unwrap();
@@ -2470,21 +2472,19 @@ pub(crate) mod protocol_test {
                 session_id,
                 job_id,
                 ..
-            } => {
-                harness
-                    .ds2
-                    .fw
-                    .lock()
-                    .await
-                    .send(Message::ExtentLiveAckId {
-                        upstairs_id: *upstairs_id,
-                        session_id: *session_id,
-                        job_id: *job_id,
-                        result: Ok(()),
-                    })
-                    .await
-                    .unwrap()
-            }
+            } => harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::ExtentLiveAckId {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    job_id: *job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap(),
 
             _ => bail!("saw {:?}", m2),
         }
@@ -2495,21 +2495,19 @@ pub(crate) mod protocol_test {
                 session_id,
                 job_id,
                 ..
-            } => {
-                harness
-                    .ds3
-                    .fw
-                    .lock()
-                    .await
-                    .send(Message::ExtentLiveAckId {
-                        upstairs_id: *upstairs_id,
-                        session_id: *session_id,
-                        job_id: *job_id,
-                        result: Ok(()),
-                    })
-                    .await
-                    .unwrap()
-            }
+            } => harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::ExtentLiveAckId {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    job_id: *job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap(),
 
             _ => bail!("saw {:?}", m2),
         }
@@ -2579,18 +2577,12 @@ pub(crate) mod protocol_test {
 
         bail_assert!(matches!(
             ds1_messages.recv().await.unwrap(),
-            Message::ExtentLiveClose {
-                extent_id: 0,
-                ..
-            },
+            Message::ExtentLiveClose { extent_id: 0, .. },
         ));
 
         bail_assert!(matches!(
             ds1_messages.recv().await.unwrap(),
-            Message::ExtentLiveReopen {
-                extent_id: 0,
-                ..
-            },
+            Message::ExtentLiveReopen { extent_id: 0, .. },
         ));
 
         Ok(())
