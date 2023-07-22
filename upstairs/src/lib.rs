@@ -4333,8 +4333,8 @@ impl Downstairs {
                 | IOop::ExtentLiveReopen { .. }
                 | IOop::ExtentLiveNoOp { .. } => {
                     panic!(
-                        "Bad  job received in process_ds_completion: {:?}",
-                        job
+                        "[{}] Bad  job received in process_ds_completion: {:?}",
+                        client_id, job
                     );
                 }
             }
@@ -4461,8 +4461,8 @@ impl Downstairs {
                     extent,
                 } => {
                     panic!(
-                        "job: {:?} Received illegal IOop::ExtentClose {}",
-                        job, extent,
+                        "[{}] job: {:?} Received illegal IOop::ExtentClose {}",
+                        client_id, job, extent,
                     );
                 }
                 IOop::ExtentFlushClose {
@@ -6466,8 +6466,8 @@ impl Upstairs {
             },
             _ => {
                 panic!(
-                    "Make a check for transition {} to {}",
-                    old_state, new_state
+                    "[{}] Make a check for transition {} to {}",
+                    client_id, old_state, new_state
                 );
             }
         }
@@ -7225,8 +7225,8 @@ impl Upstairs {
             {
                 // TODO(#558) Figure out if we can handle this error. Possibly not.
                 panic!(
-                    "New downstairs region info mismatch {:?} vs. {:?}",
-                    *ddef, client_ddef
+                    "[{}] New downstairs region info mismatch {:?} vs. {:?}",
+                    client_id, *ddef, client_ddef
                 );
             }
         }
