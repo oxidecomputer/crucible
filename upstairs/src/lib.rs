@@ -4229,7 +4229,7 @@ impl Downstairs {
                                 .insert(client_id, errors + 1);
                         }
 
-                        // If an repair job errors, mark that downstairs as bad
+                        // If a repair job errors, mark that downstairs as bad
                         IOop::ExtentClose {
                             dependencies: _,
                             extent: _,
