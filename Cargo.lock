@@ -725,7 +725,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.23.4",
  "tokio-test",
- "tokio-util 0.7.3",
+ "tokio-util",
  "toml",
  "tracing",
  "usdt",
@@ -870,7 +870,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls 0.23.4",
- "tokio-util 0.7.3",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-opentelemetry",
@@ -945,7 +945,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-util 0.7.3",
+ "tokio-util",
  "toml",
 ]
 
@@ -1014,7 +1014,7 @@ dependencies = [
  "crucible-common",
  "num_enum",
  "serde",
- "tokio-util 0.7.3",
+ "tokio-util",
  "uuid",
 ]
 
@@ -1046,7 +1046,7 @@ dependencies = [
  "signal-hook",
  "signal-hook-tokio",
  "tokio",
- "tokio-util 0.7.3",
+ "tokio-util",
  "toml",
 ]
 
@@ -1082,7 +1082,7 @@ dependencies = [
  "signal-hook-tokio",
  "statistical",
  "tokio",
- "tokio-util 0.7.3",
+ "tokio-util",
  "toml",
  "uuid",
 ]
@@ -1682,9 +1682,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.3.12"
+version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62eeb471aa3e3c9197aa4bfeabfe02982f6dc96f750486c0bb0009ac58b26d2b"
+checksum = "97ec8491ebaf99c8eaa73058b045fe58073cd6be7f596ac993ced0b0a0c01049"
 dependencies = [
  "bytes",
  "fnv",
@@ -1695,7 +1695,7 @@ dependencies = [
  "indexmap 1.9.3",
  "slab",
  "tokio",
- "tokio-util 0.6.9",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3566,7 +3566,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls 0.24.1",
- "tokio-util 0.7.3",
+ "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -4596,7 +4596,7 @@ dependencies = [
  "postgres-types",
  "socket2",
  "tokio",
- "tokio-util 0.7.3",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4642,20 +4642,6 @@ dependencies = [
  "futures-core",
  "tokio",
  "tokio-stream",
-]
-
-[[package]]
-name = "tokio-util"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e99e1983e5d376cd8eb4b66604d2e99e79f5bd988c3055891dcd8c9e2604cc0"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "log",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
