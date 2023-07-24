@@ -522,7 +522,7 @@ async fn process_message(
 
             if let Some(job) = ds.ds_active.get(job_id) {
                 if job.work.is_repair() {
-                    // Return the is error and let the previously written error
+                    // Return the error and let the previously written error
                     // processing code work.
                     cdt::ds__repair__done!(|| (job_id, client_id as u64));
 
