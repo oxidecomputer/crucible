@@ -85,7 +85,7 @@ slog-term = { version = "2.9" }
 statistical = "1.0.0"
 subprocess = "0.2.9"
 tempfile = "3"
-test-strategy = "0.3.0"
+test-strategy = "0.3.1"
 thiserror = "1"
 tokio = { version = "1.28", features = ["full"] }
 tokio-rustls = { version = "0.23.4" }
