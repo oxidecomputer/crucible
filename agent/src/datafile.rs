@@ -795,13 +795,23 @@ impl DataFile {
             .arg(dataset.dataset())
             .output()?;
 
+        let snapshots_stdout = String::from_utf8_lossy(&cmd.stdout);
         if !cmd.status.success() {
+            let snapshots_stderr = String::from_utf8_lossy(&cmd.stderr);
+
+            error!(
+                self.log,
+                "zfs list snapshot for dataset {:?} list failed: out {:?} err {:?}",
+                dataset.dataset(),
+                snapshots_stdout,
+                snapshots_stderr,
+            );
+
             bail!("zfs list snapshots failed!");
         }
 
         let mut results = Vec::new();
 
-        let snapshots_stdout = String::from_utf8_lossy(&cmd.stdout);
         let snapshots_list: Vec<&str> = snapshots_stdout
             .trim_end()
             .split('\n')
@@ -838,6 +848,20 @@ impl DataFile {
 
                 cmd_stdout
             };
+
+            if !cmd.status.success() {
+                let err = String::from_utf8_lossy(&cmd.stderr);
+
+                error!(
+                    self.log,
+                    "zfs get for snapshot {} failed: out {:?} err {:?}",
+                    snapshot,
+                    cmd_stdout,
+                    err,
+                );
+
+                bail!("zfs get failed!");
+            }
 
             results.push(Snapshot {
                 name: snapshot_name.to_string(),
