@@ -827,7 +827,10 @@ impl DataFile {
             let parts: Vec<&str> = snapshot.split('@').collect();
             info!(self.log, "parts is {:?}", &parts);
             if parts.len() != 2 {
-                panic!("bad snapshot name");
+                // If some non-snapshot-name output snuck in here, then don't
+                // panic! Continue to the next one in the list.
+                error!(self.log, "bad snapshot name {}!", &snapshot);
+                continue;
             }
             let snapshot_name = parts[1];
 
