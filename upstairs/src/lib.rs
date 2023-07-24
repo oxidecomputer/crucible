@@ -4269,12 +4269,13 @@ impl Downstairs {
                                 .insert(client_id, errors + 1);
                         }
 
+                        // If a read job fails, we sometimes need to panic.
                         IOop::Read {
                             dependencies: _,
                             requests: _,
                         } => {
                             // It's possible we get a read error if the
-                            // downstairs disconnects.  However XXX, someone
+                            // downstairs disconnects. However XXX, someone
                             // should be told about this error.
                             //
                             // Some errors, we need to panic on.
