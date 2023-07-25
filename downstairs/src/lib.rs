@@ -1428,7 +1428,7 @@ where
                         }
 
                         // Only allowed to promote or demote self
-                        let mut upstairs_connection =
+                        let upstairs_connection =
                             upstairs_connection.as_mut().unwrap();
                         let matches_self =
                             upstairs_connection.upstairs_id == upstairs_id &&

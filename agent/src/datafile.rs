@@ -462,7 +462,7 @@ impl DataFile {
     pub fn fail(&self, id: &RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner.regions.get_mut(id).unwrap();
+        let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Failed;
         if r.state == nstate {
             return;
@@ -483,7 +483,7 @@ impl DataFile {
     pub fn fail_rs(&self, region_id: &RegionId, snapshot_name: &str) {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut rs = inner
+        let rs = inner
             .running_snapshots
             .get_mut(region_id)
             .unwrap()
@@ -513,7 +513,7 @@ impl DataFile {
     pub fn created(&self, id: &RegionId) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner.regions.get_mut(id).unwrap();
+        let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Created;
         match &r.state {
             State::Requested => (),
@@ -547,7 +547,7 @@ impl DataFile {
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut rs = inner
+        let rs = inner
             .running_snapshots
             .get_mut(region_id)
             .unwrap()
@@ -590,7 +590,7 @@ impl DataFile {
     pub fn destroyed(&self, id: &RegionId) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner.regions.get_mut(id).unwrap();
+        let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Destroyed;
         match &r.state {
             State::Tombstoned => (),
@@ -619,7 +619,7 @@ impl DataFile {
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut rs = inner
+        let rs = inner
             .running_snapshots
             .get_mut(region_id)
             .unwrap()
@@ -649,7 +649,7 @@ impl DataFile {
     pub fn destroy(&self, id: &RegionId) -> Result<bool> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner
+        let r = inner
             .regions
             .get_mut(id)
             .ok_or_else(|| anyhow!("region {} does not exist", id.0))?;

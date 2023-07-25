@@ -27,4 +27,4 @@ twox-hash.workspace = true
 uuid.workspace = true
 
 [build-dependencies]
-vergen = { version = "8.0", features = ["cargo", "git", "git2", "rustc" ] }
+vergen = { version = "8.2", features = ["cargo", "git", "git2", "rustc" ] }

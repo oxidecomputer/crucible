@@ -2,7 +2,7 @@
 #:
 #: name = "build"
 #: variety = "basic"
-#: target = "helios"
+#: target = "helios-2.0"
 #: rust_toolchain = "1.66"
 #: output_rules = [
 #:	"/work/bins/*",
@@ -48,4 +48,4 @@ echo in_work_bins
 ls -l /work/bins
 
 banner test
-ptime -m cargo test --verbose
+ptime -m cargo test --verbose -- --nocapture > /tmp/cargo-test-out.log 2>&1
