@@ -7,12 +7,11 @@ use serde::{Deserialize, Serialize};
 use slog::{crit, error, info, Logger};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use chrono::{TimeZone, Utc};
-
+use crate::snapshot_interface::SnapshotInterface;
 use crate::ZFSDataset;
 
 pub struct DataFile {
@@ -24,6 +23,7 @@ pub struct DataFile {
     port_max: u16,
     bell: Condvar,
     inner: Mutex<Inner>,
+    snapshot_interface: Arc<dyn SnapshotInterface>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -40,6 +40,7 @@ impl DataFile {
         listen: SocketAddr,
         port_min: u16,
         port_max: u16,
+        snapshot_interface: Arc<dyn SnapshotInterface>,
     ) -> Result<DataFile> {
         let mut conf_path = base_path.to_path_buf();
         conf_path.push("crucible.json");
@@ -64,6 +65,7 @@ impl DataFile {
             port_max,
             bell: Condvar::new(),
             inner: Mutex::new(inner),
+            snapshot_interface,
         })
     }
 
@@ -390,8 +392,18 @@ impl DataFile {
                         );
                     }
 
-                    State::Destroyed | State::Failed => {
+                    State::Destroyed => {
                         // ok to delete
+                    }
+
+                    State::Failed => {
+                        // Something has set the running snapshot to state
+                        // failed, so we can't delete this snapshot.
+                        bail!(
+                            "read-only downstairs state set to failed for region {} snapshot {}",
+                            request.id.0,
+                            request.name
+                        );
                     }
                 }
             }
@@ -406,52 +418,7 @@ impl DataFile {
 
         let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 
-        // If the snapshot doesn't exist, return Ok - this call should be
-        // idempotent
-        let cmd = Command::new("zfs")
-            .arg("list")
-            .arg(snapshot_name.clone())
-            .output()?;
-
-        if !cmd.status.success() {
-            let out = String::from_utf8_lossy(&cmd.stdout);
-            let err = String::from_utf8_lossy(&cmd.stderr);
-
-            if err.trim_end().ends_with("dataset does not exist") {
-                return Ok(());
-            }
-
-            error!(
-                self.log,
-                "zfs snapshot {:?} list failed: out {:?} err {:?}",
-                snapshot_name,
-                out,
-                err,
-            );
-
-            bail!("zfs snapshot list failure");
-        }
-
-        // Delete it if it exists
-        let cmd = Command::new("zfs")
-            .arg("destroy")
-            .arg(snapshot_name.clone())
-            .output()?;
-
-        if !cmd.status.success() {
-            let err = String::from_utf8_lossy(&cmd.stderr);
-            let out = String::from_utf8_lossy(&cmd.stdout);
-
-            error!(
-                self.log,
-                "zfs snapshot {:?} delete failed: out {:?} err {:?}",
-                snapshot_name,
-                out,
-                err,
-            );
-
-            bail!("zfs snapshot delete failure");
-        }
+        self.snapshot_interface.delete_snapshot(snapshot_name)?;
 
         Ok(())
     }
@@ -558,15 +525,33 @@ impl DataFile {
 
         match &rs.state {
             State::Requested => (),
+
             State::Tombstoned => {
                 /*
-                 * Nexus requested that we destroy this running snapshot before
-                 * we finished provisioning it.
+                 * Something else set this to Tombstoned between when the SMF
+                 * was applied and before the state in the datafile changed!
+                 * This means that Nexus requested that we destroy this running
+                 * snapshot before we finished creating it. Return Ok(()) here,
+                 * something else is working on this running snapshot.
                  */
                 return Ok(());
             }
 
-            x => bail!("created running_snapshot in weird state {:?}", x),
+            x => {
+                /*
+                 * Something else set this to an unexpected state. Bailing here
+                 * will cause the RS to be marked as failed, we'll have to
+                 * investigate.
+                 */
+                error!(
+                    self.log,
+                    "running snapshot {} is currently in unexpected state: {:?}",
+                    rs.id.0,
+                    rs.state,
+                );
+
+                bail!("created running_snapshot in weird state {:?}", x);
+            }
         }
 
         info!(
@@ -784,93 +769,9 @@ impl DataFile {
 
         info!(self.log, "dataset is {}", dataset.dataset());
 
-        let cmd = Command::new("zfs")
-            .arg("list")
-            .arg("-t")
-            .arg("snapshot")
-            .arg("-H")
-            .arg("-o")
-            .arg("name")
-            .arg("-r")
-            .arg(dataset.dataset())
-            .output()?;
-
-        let snapshots_stdout = String::from_utf8_lossy(&cmd.stdout);
-        if !cmd.status.success() {
-            let snapshots_stderr = String::from_utf8_lossy(&cmd.stderr);
-
-            error!(
-                self.log,
-                "zfs list snapshot for dataset {:?} list failed: out {:?} err {:?}",
-                dataset.dataset(),
-                snapshots_stdout,
-                snapshots_stderr,
-            );
-
-            bail!("zfs list snapshots failed!");
-        }
-
-        let mut results = Vec::new();
-
-        let snapshots_list: Vec<&str> = snapshots_stdout
-            .trim_end()
-            .split('\n')
-            .filter(|x| !x.is_empty())
-            .collect();
-
-        for snapshot in snapshots_list {
-            if snapshot == dataset.dataset() {
-                info!(self.log, "skipping {} matches dataset name", snapshot);
-                continue;
-            }
-            info!(self.log, "snapshot is {}", &snapshot);
-            let parts: Vec<&str> = snapshot.split('@').collect();
-            info!(self.log, "parts is {:?}", &parts);
-            if parts.len() != 2 {
-                // If some non-snapshot-name output snuck in here, then don't
-                // panic! Continue to the next one in the list.
-                error!(self.log, "bad snapshot name {}!", &snapshot);
-                continue;
-            }
-            let snapshot_name = parts[1];
-
-            let cmd = Command::new("zfs")
-                .arg("get")
-                .arg("-pH")
-                .arg("-o")
-                .arg("value")
-                .arg("creation")
-                .arg(snapshot)
-                .output()?;
-
-            let cmd_stdout = {
-                let cmd_stdout = String::from_utf8_lossy(&cmd.stdout);
-
-                // Remove newline
-                let cmd_stdout = cmd_stdout.trim_end().to_string();
-
-                cmd_stdout
-            };
-
-            if !cmd.status.success() {
-                let err = String::from_utf8_lossy(&cmd.stderr);
-
-                error!(
-                    self.log,
-                    "zfs get for snapshot {} failed: out {:?} err {:?}",
-                    snapshot,
-                    cmd_stdout,
-                    err,
-                );
-
-                bail!("zfs get failed!");
-            }
-
-            results.push(Snapshot {
-                name: snapshot_name.to_string(),
-                created: Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap(),
-            });
-        }
+        let results = self
+            .snapshot_interface
+            .get_snapshots_for_dataset(dataset.dataset())?;
 
         Ok(results)
     }

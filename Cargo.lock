@@ -754,7 +754,9 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
+ "slog-term",
  "subprocess",
+ "tempfile",
  "tokio",
  "uuid",
 ]
