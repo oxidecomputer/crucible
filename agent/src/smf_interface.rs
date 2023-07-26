@@ -296,6 +296,7 @@ pub struct RealSmfValue<'a> {
 }
 
 impl<'a> RealSmfValue<'a> {
+    #[allow(unused)]
     pub fn new(v: crucible_smf::Value<'a>) -> RealSmfValue<'a> {
         RealSmfValue { v }
     }
