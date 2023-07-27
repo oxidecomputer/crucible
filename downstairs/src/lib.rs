@@ -1675,8 +1675,6 @@ where
              * trigger once then never again.
              */
             _ = sleep_until(lossy_interval), if lossy => {
-                //let ds = ads.lock().await;
-                //show_work(&ds).await;
                 job_channel_tx.lock().await.send(0).await?;
                 lossy_interval = deadline_secs(5);
             }
@@ -1769,8 +1767,6 @@ where
                             if let Err(e) = fw.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
-                            let mut ds = ads.lock().await;
-                            show_work(&mut ds).await;
                         } else if let Err(e) = message_channel_tx.send(msg).await {
                             bail!("Failed sending message to proc_frame: {}", e);
                         }
