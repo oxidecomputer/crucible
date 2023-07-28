@@ -29,6 +29,7 @@ mod test {
     }
 
     #[allow(dead_code)]
+    #[derive(Debug)]
     struct TestDownstairs {
         address: IpAddr,
         tempdir: TempDir,
@@ -123,6 +124,7 @@ mod test {
         }
     }
 
+    #[derive(Debug)]
     struct TestDownstairsSet {
         downstairs1: TestDownstairs,
         downstairs2: TestDownstairs,
@@ -4387,5 +4389,65 @@ mod test {
         assert!(!response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+    }
+
+    // XXX
+    // Negative tests for volume type mismatches.
+    // Basically, you can have all sorts of differences.
+    // Test where VCR has one field different.
+    #[tokio::test]
+    async fn test_volume_replace_alan() {
+        const BLOCK_SIZE: usize = 512;
+        let log = csl();
+
+        info!(log, "test_volume_replace of a volume");
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+        let volume_id = Uuid::new_v4();
+
+        let original: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
+                read_only_parent: None,
+            };
+
+        let volume =
+            Volume::construct(original.clone(), None, None).await.unwrap();
+        volume.activate().await.unwrap();
+
+        let new_downstairs = tds.new_downstairs().await.unwrap();
+        info!(log, "A New downstairs: {:?}", new_downstairs.address().await);
+
+        let mut new_opts = tds.opts().clone();
+        new_opts.target[0] = new_downstairs.address().await;
+        info!(log, "Old ops: {:?}", opts.target);
+        info!(log, "New ops: {:?}", new_opts.target);
+
+        let replacement: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts: new_opts.clone(),
+                    gen: 3,
+                }],
+                read_only_parent: None,
+            };
+
+        info!(log, "replace volume now: {:?}", replacement);
+        let res = Volume::replace(original, replacement, &log).await.unwrap();
+        info!(log, "Test returns: {:?}", res);
     }
 }

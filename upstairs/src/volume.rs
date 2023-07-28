@@ -1092,6 +1092,280 @@ impl Volume {
             }
         }
     }
+
+    pub async fn compare_vcr_for_replacement(
+        original: VolumeConstructionRequest,
+        replacement: VolumeConstructionRequest,
+        log: &Logger,
+    ) -> Result<(), CrucibleError> {
+        let (o_id, o_block_size, o_sub_volumes, o_read_only_parent) =
+            match original {
+                VolumeConstructionRequest::Volume {
+                    id,
+                    block_size,
+                    sub_volumes,
+                    read_only_parent,
+                } => {
+                    (id, block_size, sub_volumes, read_only_parent)
+                },
+                VolumeConstructionRequest::Url { .. } => {
+                    crucible_bail!(Unsupported, "Cannot replace URL VCR")
+                }
+
+                VolumeConstructionRequest::Region { .. } => {
+                    crucible_bail!(Unsupported, "Cannot replace Region VCR")
+                }
+
+                VolumeConstructionRequest::File { .. } => {
+                    crucible_bail!(Unsupported, "Cannot replace File VCR")
+                }
+            };
+
+        info!(log, "Original {o_id}");
+        let (id, block_size, sub_volumes, read_only_parent) =
+            match replacement {
+                VolumeConstructionRequest::Volume {
+                    id,
+                    block_size,
+                    sub_volumes,
+                    read_only_parent,
+                } => {
+                    (id, block_size, sub_volumes, read_only_parent)
+                },
+                VolumeConstructionRequest::Url { .. } => {
+                    crucible_bail!(Unsupported, "Replacement URL VCR invalid ")
+                }
+
+                VolumeConstructionRequest::Region { .. } => {
+                    crucible_bail!(Unsupported, "Replacement Region VCR invalid")
+                }
+                VolumeConstructionRequest::File { .. } => {
+                    crucible_bail!(Unsupported, "Replacement File VCR invalid")
+                }
+            };
+        info!(log, "Replacement {id}");
+        if id != o_id {
+            crucible_bail!(Unsupported, "ID {o_id} mismatch {id}")
+        }
+        if block_size != o_block_size {
+            crucible_bail!(Unsupported, "block_size mismatch")
+        }
+        // For a read only parent:
+        // If we had one originally, then we can either have the same
+        // one in the new VCR, or None.  We can't go from None to Some.
+
+        if o_sub_volumes.len() != sub_volumes.len() {
+            crucible_bail!(
+                Unsupported,
+                "subvolume len mismatch {} vs. {}",
+                o_sub_volumes.len(),
+                sub_volumes.len(),
+            )
+        }
+
+// XXX
+// This has to be like above, where we match and only allow VCR:Region
+// out of the match, and return error elsewhere.
+//
+// Make a VCR compare function?
+// Maybe everything but targets?
+// Maybe only one target diff
+// Maybe "valid_for_replacement" method, which would add the requirement
+// that only targets differ between the two VCRs?
+// Like "(old, new) = vcr_replace_ok()?"
+//
+        for index in 0..o_sub_volumes.len() {
+            let (
+                o_block_size,
+                o_blocks_per_extent,
+                o_extent_count,
+                o_opts,
+                o_gen,
+            ) = match &o_sub_volumes[index] {
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts,
+                    gen,
+                } => {(
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts.clone(),
+                    gen,
+                )},
+                _ => {
+                    crucible_bail!(
+                        Unsupported,
+                        "Invalid VCR type for subvolume"
+                    )
+                }
+            };
+            let (
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts,
+                gen,
+            ) = match &sub_volumes[index] {
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts,
+                    gen,
+                } => {(
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts.clone(),
+                    gen,
+                )},
+                _ => {
+                    crucible_bail!(
+                        Unsupported,
+                        "Invalid VCR type for replacement subvolume"
+                    )
+                }
+            };
+
+            if o_block_size != block_size {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] block_size mismatch"
+                )
+            }
+            if o_blocks_per_extent != blocks_per_extent {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] blocks_per_extent mismatch"
+                )
+            }
+            if o_extent_count != extent_count {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] extent_count mismatch"
+                )
+            }
+            // The original generation number should always
+            // be lower than the new.  This could almost be
+            // a panic, as if they are the same, something
+            // has gone wrong.
+            if o_gen >= gen {
+                error!(log,
+                    "Current:{} New:{} Volume replace gen bad",
+                    o_gen,
+                    gen
+                );
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] generation invalid"
+                )
+            }
+
+            if o_opts.id != opts.id {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts id invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.lossy != opts.lossy {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts lossy invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.flush_timeout != opts.flush_timeout {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts flush_timeout mismatch {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.key != opts.key {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts key invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.cert_pem != opts.cert_pem {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts cert_pem invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.key_pem != opts.key_pem {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts key_pem invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.root_cert_pem != opts.root_cert_pem {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts root_cert_pem invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.control != opts.control {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts control invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.read_only != opts.read_only {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts read_only invalid {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+            if o_opts.target == opts.target {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts target unchanged {:?} vs. new {:?}",
+                    o_opts.id, opts.id
+                )
+            }
+
+            if o_opts != opts {
+                crucible_bail!(
+                    Unsupported,
+                    "subvol[{index}] opts invalid \n{:?}\nvs. new\n{:?}",
+                    o_opts, opts
+                )
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn replace(
+        original: VolumeConstructionRequest,
+        replacement: VolumeConstructionRequest,
+        log: &Logger,
+    ) -> Result<(), CrucibleError> {
+
+        // This is start of vcr replace
+        // Make a vcr compare?
+        // Compare VCRs
+        // Return the 
+        Self::compare_vcr_for_replacement(
+            original,
+            replacement,
+            log
+        ).await?;
+
+        info!(log, "OK to replace");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1099,7 +1373,16 @@ mod test {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+
+    use base64::{engine, Engine};
+    use slog::{info, o, Drain, Logger}; 
     use tempfile::tempdir;
+
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+	}
 
     #[test]
     fn test_single_block() -> Result<()> {
@@ -2632,5 +2915,121 @@ mod test {
             .await;
 
         assert!(matches!(res, Err(CrucibleError::OffsetInvalid)));
+    }
+
+	// Return a generic set of CrucibleOpts
+	fn generic_crucible_opts(vol_id: Uuid) -> CrucibleOpts {
+		// Generate random data for our key
+		let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+		let key_string =
+			engine::general_purpose::STANDARD.encode(key_bytes);
+
+		CrucibleOpts {
+			id: vol_id,
+			target: vec![
+				"127.0.0.1:5555".parse().unwrap(),
+				"127.0.0.1:6666".parse().unwrap(),
+				"127.0.0.1:7777".parse().unwrap(),
+			],
+			lossy: false,
+			flush_timeout: None,
+			key: Some(key_string),
+			cert_pem: None,
+			key_pem: None,
+			root_cert_pem: None,
+			control: None,
+			read_only: false,
+		}
+	}
+
+    #[tokio::test]
+    async fn volume_replace_basic() {
+		// A valid replacement VCR is provided with only one target being
+        // different.
+        const BLOCK_SIZE: usize = 512;
+		let vol_id = Uuid::new_v4();
+		let blocks_per_extent = 10;
+		let extent_count = 9;
+
+		let mut opts = generic_crucible_opts(vol_id);
+
+        let original: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: vol_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
+                read_only_parent: None,
+            };
+
+
+        opts.target[0] = "127.0.0.1:8888".parse().unwrap();
+
+        let replacement: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: vol_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                }],
+                read_only_parent: None,
+            };
+
+		let log = csl();
+
+        Volume::compare_vcr_for_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn volume_replace_self() {
+		// Send the same VCR as both old and new, this should return error
+        // because the generation number did not change.
+        const BLOCK_SIZE: usize = 512;
+		let vol_id = Uuid::new_v4();
+		let blocks_per_extent = 10;
+		let extent_count = 9;
+
+		let opts = generic_crucible_opts(vol_id);
+
+        let original: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: vol_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
+                read_only_parent: None,
+            };
+
+		let log = csl();
+
+		assert!(
+            Volume::compare_vcr_for_replacement(
+                original.clone(),
+                original,
+                &log
+            )
+            .await
+            .is_err()
+        );
     }
 }
