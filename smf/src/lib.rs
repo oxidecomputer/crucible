@@ -20,7 +20,7 @@ mod service;
 pub use service::{Service, Services};
 
 mod instance;
-pub use instance::{Instance, Instances};
+pub use instance::{Instance, Instances, State};
 
 mod snapshot;
 pub use snapshot::{Snapshot, Snapshots};

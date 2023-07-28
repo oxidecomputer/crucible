@@ -27,3 +27,5 @@ expectorate.workspace = true
 openapi-lint.workspace = true
 openapiv3.workspace = true
 subprocess.workspace = true
+tempfile.workspace = true
+slog-term.workspace = true
