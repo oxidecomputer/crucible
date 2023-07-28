@@ -1100,7 +1100,8 @@ where
     Ok(())
 }
 
-// Check and see if this message is A LiveRepair, and if it has failed
+// Check and see if this message is A LiveRepair, and if it has failed. If you
+// change this, change how the Upstairs processes ErrorReports!
 fn check_message_for_abort(m: &Message) -> bool {
     if let Message::ExtentLiveRepairAckId { result, .. } = m {
         if result.is_err() {
