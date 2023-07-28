@@ -1467,7 +1467,9 @@ fn worker(
 
                 if let Err(e) = result {
                     error!(log, "SMF application failure: {:?}", e);
-                    // XXX no fail_rs?! RS is still in requested
+
+                    // There's no fail_rs here: a future `apply_smf` should
+                    // attempt to start the service again.
                 } else {
                     info!(log, "SMF ok!");
 
