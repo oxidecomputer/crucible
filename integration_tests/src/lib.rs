@@ -9,7 +9,9 @@ mod test {
     use anyhow::*;
     use base64::{engine, Engine};
     use crucible::{Bytes, *};
-    use crucible_client_types::VolumeConstructionRequest;
+    use crucible_client_types::{
+        VcrRegion, VcrUrl, VcrVolume, VolumeConstructionRequest,
+    };
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
@@ -307,18 +309,20 @@ mod test {
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -484,18 +488,20 @@ mod test {
 
         // Create volume with read only parent
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         let mut volume = Volume::construct(vcr, None, None).await?;
 
@@ -567,29 +573,33 @@ mod test {
         );
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Volume {
+                    VolumeConstructionRequest::Volume(VcrVolume {
                         id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
-                        sub_volumes: vec![VolumeConstructionRequest::Url {
-                            id: Uuid::new_v4(),
-                            block_size: BLOCK_SIZE as u64,
-                            url: server.url("/ff.raw").to_string(),
-                        }],
+                        sub_volumes: vec![VolumeConstructionRequest::Url(
+                            VcrUrl {
+                                id: Uuid::new_v4(),
+                                block_size: BLOCK_SIZE as u64,
+                                url: server.url("/ff.raw").to_string(),
+                            },
+                        )],
                         read_only_parent: None,
-                    },
+                    }),
                 )),
-            };
+            });
 
         let volume = Volume::construct(vcr, None, None).await?;
         volume.activate().await?;
@@ -629,20 +639,20 @@ mod test {
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![],
                 read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
+                    VolumeConstructionRequest::Region(VcrRegion {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: tds.blocks_per_extent(),
                         extent_count: tds.extent_count(),
                         opts,
                         gen: 1,
-                    },
+                    }),
                 )),
-            };
+            });
 
         let volume = Volume::construct(vcr, None, None).await?;
         volume.activate().await?;
@@ -678,18 +688,20 @@ mod test {
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -749,18 +761,20 @@ mod test {
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -822,18 +836,20 @@ mod test {
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -895,30 +911,30 @@ mod test {
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
         let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: sv,
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -981,30 +997,30 @@ mod test {
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
         let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: sv,
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -1089,30 +1105,30 @@ mod test {
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
         let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: sv,
                 read_only_parent: None,
-            };
+            });
 
         let volume = Arc::new(Volume::construct(vcr, None, None).await?);
 
@@ -1666,30 +1682,30 @@ mod test {
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
         let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: sv,
                 read_only_parent: None,
-            };
+            });
 
         let mut volume = Volume::construct(vcr, None, None).await?;
 
@@ -1791,30 +1807,30 @@ mod test {
         let mut sv = Vec::new();
         let tds1 = TestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
         let tds2 = TestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
-        sv.push(VolumeConstructionRequest::Region {
+        sv.push(VolumeConstructionRequest::Region(VcrRegion {
             block_size: BLOCK_SIZE as u64,
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
             gen: 1,
-        });
+        }));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: sv,
                 read_only_parent: None,
-            };
+            });
 
         let mut volume = Volume::construct(vcr, None, None).await?;
 
@@ -1900,39 +1916,39 @@ mod test {
         let mut opts = tds.opts();
 
         let vcr_1: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![],
                 read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
+                    VolumeConstructionRequest::Region(VcrRegion {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: tds.blocks_per_extent(),
                         extent_count: tds.extent_count(),
                         opts: opts.clone(),
                         gen: 1,
-                    },
+                    }),
                 )),
-            };
+            });
 
         // Second volume should have a unique UUID
         opts.id = Uuid::new_v4();
 
         let vcr_2: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
                 sub_volumes: vec![],
                 read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
+                    VolumeConstructionRequest::Region(VcrRegion {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: tds.blocks_per_extent(),
                         extent_count: tds.extent_count(),
                         opts,
                         gen: 1,
-                    },
+                    }),
                 )),
-            };
+            });
 
         let volume1 = Volume::construct(vcr_1, None, None).await?;
         volume1.activate().await?;
@@ -2125,32 +2141,37 @@ mod test {
         let bottom_layer_opts = test_downstairs_set.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: Uuid::new_v4(),
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: top_layer_tds.blocks_per_extent(),
-                    extent_count: top_layer_tds.extent_count(),
-                    opts: top_layer_opts,
-                    gen: 3,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: top_layer_tds.blocks_per_extent(),
+                        extent_count: top_layer_tds.extent_count(),
+                        opts: top_layer_opts,
+                        gen: 3,
+                    },
+                )],
                 read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Volume {
+                    VolumeConstructionRequest::Volume(VcrVolume {
                         id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
-                        sub_volumes: vec![VolumeConstructionRequest::Region {
-                            block_size: BLOCK_SIZE as u64,
-                            blocks_per_extent: test_downstairs_set
-                                .blocks_per_extent(),
-                            extent_count: test_downstairs_set.extent_count(),
-                            opts: bottom_layer_opts,
-                            gen: 3,
-                        }],
+                        sub_volumes: vec![VolumeConstructionRequest::Region(
+                            VcrRegion {
+                                block_size: BLOCK_SIZE as u64,
+                                blocks_per_extent: test_downstairs_set
+                                    .blocks_per_extent(),
+                                extent_count: test_downstairs_set
+                                    .extent_count(),
+                                opts: bottom_layer_opts,
+                                gen: 3,
+                            },
+                        )],
                         read_only_parent: None,
-                    },
+                    }),
                 )),
-            };
+            });
 
         let volume = Volume::construct(vcr, None, None).await?;
         volume.activate().await?;
@@ -3347,18 +3368,20 @@ mod test {
         let opts = tds.opts();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts: opts.clone(),
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         let client =
             CruciblePantryClient::new(&format!("http://{}", pantry_addr));
@@ -3451,18 +3474,20 @@ mod test {
             .unwrap();
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts: opts.clone(),
+                        gen: 2,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
         let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -3556,18 +3581,20 @@ mod test {
 
         let volume_id = Uuid::new_v4();
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts: opts.clone(),
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         // Verify contents are zero on init
         {
@@ -3615,18 +3642,20 @@ mod test {
         // Attach, validate img.raw got imported
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 3,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 3,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
         let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -3693,18 +3722,20 @@ mod test {
         // Attach, validate bulk write worked
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 2,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 2,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
         let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -3756,18 +3787,20 @@ mod test {
         // Attach, validate bulk write worked
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 2,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 2,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
         let volume = Volume::construct(vcr, None, None).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -3821,25 +3854,28 @@ mod test {
 
         let volume_id = Uuid::new_v4();
         let rop_id = Uuid::new_v4();
-        let read_only_parent = Some(Box::new(VolumeConstructionRequest::Url {
-            id: rop_id,
-            block_size: BLOCK_SIZE as u64,
-            url: url.clone(),
-        }));
+        let read_only_parent =
+            Some(Box::new(VolumeConstructionRequest::Url(VcrUrl {
+                id: rop_id,
+                block_size: BLOCK_SIZE as u64,
+                url: url.clone(),
+            })));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts: opts.clone(),
+                        gen: 1,
+                    },
+                )],
                 read_only_parent: read_only_parent.clone(),
-            };
+            });
 
         // Verify contents match data on init
         {
@@ -3877,18 +3913,20 @@ mod test {
             CruciblePantryClient::new(&format!("http://{}", pantry_addr));
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts: opts.clone(),
+                        gen: 2,
+                    },
+                )],
                 read_only_parent,
-            };
+            });
         client
             .attach(
                 &volume_id.to_string(),
@@ -3927,18 +3965,20 @@ mod test {
         // Drop the read only parent from the volume construction request
 
         let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 3,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    VcrRegion {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: tds.blocks_per_extent(),
+                        extent_count: tds.extent_count(),
+                        opts,
+                        gen: 3,
+                    },
+                )],
                 read_only_parent: None,
-            };
+            });
 
         // Attach, validate random data got imported
 
@@ -4391,63 +4431,100 @@ mod test {
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 
-    // XXX
-    // Negative tests for volume type mismatches.
-    // Basically, you can have all sorts of differences.
-    // Test where VCR has one field different.
     #[tokio::test]
-    async fn test_volume_replace_alan() {
+    async fn test_volume_replace_vcr() {
+        // Test of a replacement of a downstairs given two
+        // VolumeConstructionRequests.
+        // We create a volume, write some data to it, then replace a downstairs
+        // in that volume.  After replacement, we verify we can read back the
+        // data.
         const BLOCK_SIZE: usize = 512;
         let log = csl();
 
         info!(log, "test_volume_replace of a volume");
-        // Spin off three downstairs, build our Crucible struct.
+        // Make three downstairs
         let tds = TestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
         let volume_id = Uuid::new_v4();
 
+        let mut vcr_r = VcrRegion {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds.blocks_per_extent(),
+            extent_count: tds.extent_count(),
+            opts: opts.clone(),
+            gen: 2,
+        };
+
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    vcr_r.clone(),
+                )],
                 read_only_parent: None,
-            };
+            });
 
-        let volume =
-            Volume::construct(original.clone(), None, None).await.unwrap();
+        let volume = Volume::construct(original.clone(), None, None)
+            .await
+            .unwrap();
         volume.activate().await.unwrap();
 
+        // Write data in
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+            )
+            .await
+            .unwrap();
+
+        // Read parent, verify contents
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+
+        // Make one new downstairs
         let new_downstairs = tds.new_downstairs().await.unwrap();
-        info!(log, "A New downstairs: {:?}", new_downstairs.address().await);
+        info!(
+            log,
+            "A New downstairs: {:?}",
+            new_downstairs.address().await
+        );
 
         let mut new_opts = tds.opts().clone();
         new_opts.target[0] = new_downstairs.address().await;
-        info!(log, "Old ops: {:?}", opts.target);
-        info!(log, "New ops: {:?}", new_opts.target);
+        info!(log, "Old ops target: {:?}", opts.target);
+        info!(log, "New ops target: {:?}", new_opts.target);
+        vcr_r.gen += 1;
+        vcr_r.opts = new_opts;
 
+        // Our "new" VCR must have a new downstairs in the opts, and have
+        // the generation number be larger than the original.
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
+            VolumeConstructionRequest::Volume(VcrVolume {
                 id: volume_id,
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: new_opts.clone(),
-                    gen: 3,
-                }],
+                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
                 read_only_parent: None,
-            };
+            });
 
-        info!(log, "replace volume now: {:?}", replacement);
-        let res = Volume::replace(original, replacement, &log).await.unwrap();
-        info!(log, "Test returns: {:?}", res);
+        info!(log, "Replace VCR now: {:?}", replacement);
+        volume
+            .target_replace(original, replacement, &log)
+            .await
+            .unwrap();
+        info!(log, "send read now");
+        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
     }
 }

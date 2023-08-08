@@ -9453,10 +9453,7 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
-        println!("Send replace message somewhere");
         self.send(sw).await.wait().await?;
-
-        println!("wait for replace message somewhere");
         let result = data.lock().await;
         Ok(*result)
     }

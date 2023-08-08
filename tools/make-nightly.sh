@@ -17,6 +17,7 @@ tar cavf out/crucible-nightly.tar.gz \
   target/release/cmon \
   target/release/crudd \
   target/release/crutest \
+  target/release/crucible-agent \
   target/release/crucible-downstairs \
   target/release/crucible-hammer \
   target/release/dsc \
