@@ -1143,7 +1143,7 @@ impl Volume {
             VolumeConstructionRequest::Url { .. } => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
-                    "Replacement URL VCR invalid "
+                    "Replacement URL VCR invalid"
                 )
             }
 
