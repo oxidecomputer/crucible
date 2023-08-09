@@ -1396,25 +1396,28 @@ impl Volume {
         replacement: VolumeConstructionRequest,
         log: &Logger,
     ) -> Result<(), CrucibleError> {
-        let (original_target, new_target) =
-            match Self::compare_vcr_for_update(original, replacement, log)
-                .await
-            {
-                Ok(Some((o, n))) => (o, n),
-                Ok(None) => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "VCR replacement does not differ on targets",
-                    )
-                }
-                Err(e) => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "VCR replacement invalid: {}",
-                        e
-                    )
-                }
-            };
+        let (original_target, new_target) = match Self::compare_vcr_for_update(
+            original,
+            replacement,
+            log,
+        )
+        .await
+        {
+            Ok(Some((o, n))) => (o, n),
+            Ok(None) => {
+                crucible_bail!(
+                    ReplaceRequestInvalid,
+                    "VCR replacement does not differ on targets",
+                )
+            }
+            Err(e) => {
+                crucible_bail!(
+                    ReplaceRequestInvalid,
+                    "VCR replacement invalid: {}",
+                    e
+                )
+            }
+        };
 
         info!(
             log,
@@ -3317,10 +3320,9 @@ mod test {
 
         let log = csl();
         // This should return OK, but not have any targets.
-        let res =
-            Volume::compare_vcr_for_update(original, replacement, &log)
-                .await
-                .unwrap();
+        let res = Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .unwrap();
 
         assert!(res.is_none());
     }
@@ -3367,13 +3369,9 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(
-            original,
-            replacement,
-            &log
-        )
-        .await
-        .is_err());
+        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -3418,13 +3416,9 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(
-            original,
-            replacement,
-            &log
-        )
-        .await
-        .is_err());
+        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -3479,13 +3473,9 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(
-            original,
-            replacement,
-            &log
-        )
-        .await
-        .is_err());
+        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -3532,13 +3522,9 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(
-            original,
-            replacement,
-            &log
-        )
-        .await
-        .is_err());
+        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -3585,13 +3571,9 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(
-            original,
-            replacement,
-            &log
-        )
-        .await
-        .is_err());
+        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -3638,13 +3620,9 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(
-            original,
-            replacement,
-            &log
-        )
-        .await
-        .is_err());
+        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
+            .await
+            .is_err());
     }
 
     // This is a wrapper function to test changing CrucibleOpts structures.
