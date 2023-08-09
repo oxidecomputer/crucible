@@ -1397,7 +1397,7 @@ impl Volume {
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let (original_target, new_target) =
-            match Self::compare_vcr_for_replacement(original, replacement, log)
+            match Self::compare_vcr_for_update(original, replacement, log)
                 .await
             {
                 Ok(Some((o, n))) => (o, n),
@@ -3093,7 +3093,7 @@ mod test {
         let log = csl();
         info!(log, "Test replacement of CID {cid}");
         let Some((old_t, new_t)) =
-            Volume::compare_vcr_for_replacement(original, replacement, &log)
+            Volume::compare_vcr_for_update(original, replacement, &log)
                 .await
                 .unwrap()
             else {
@@ -3160,7 +3160,7 @@ mod test {
 
         let log = csl();
         let Some((old_t, new_t)) =
-            Volume::compare_vcr_for_replacement(original, replacement, &log)
+            Volume::compare_vcr_for_update(original, replacement, &log)
                 .await
                 .unwrap()
             else {
@@ -3226,7 +3226,7 @@ mod test {
 
         let log = csl();
         let Some((old_t, new_t)) =
-            Volume::compare_vcr_for_replacement(original, replacement, &log)
+            Volume::compare_vcr_for_update(original, replacement, &log)
                 .await
                 .unwrap()
             else {
@@ -3266,7 +3266,7 @@ mod test {
 
         let log = csl();
 
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original.clone(),
             original,
             &log
@@ -3318,7 +3318,7 @@ mod test {
         let log = csl();
         // This should return OK, but not have any targets.
         let res =
-            Volume::compare_vcr_for_replacement(original, replacement, &log)
+            Volume::compare_vcr_for_update(original, replacement, &log)
                 .await
                 .unwrap();
 
@@ -3367,7 +3367,7 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original,
             replacement,
             &log
@@ -3418,7 +3418,7 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original,
             replacement,
             &log
@@ -3479,7 +3479,7 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original,
             replacement,
             &log
@@ -3532,7 +3532,7 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original,
             replacement,
             &log
@@ -3585,7 +3585,7 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original,
             replacement,
             &log
@@ -3638,7 +3638,7 @@ mod test {
             });
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_replacement(
+        assert!(Volume::compare_vcr_for_update(
             original,
             replacement,
             &log
@@ -3650,7 +3650,7 @@ mod test {
     // This is a wrapper function to test changing CrucibleOpts structures.
     // We create two Volumes with the provided information, and use o_opts
     // for one Volume and n_opts for the other.  We return the result of
-    // the compare_vcr_for_replacement function.
+    // the compare_vcr_for_update function.
     async fn test_volume_replace_opts(
         id: Uuid,
         block_size: u64,
@@ -3690,7 +3690,7 @@ mod test {
             });
 
         let log = csl();
-        Volume::compare_vcr_for_replacement(original, replacement, &log).await
+        Volume::compare_vcr_for_update(original, replacement, &log).await
     }
 
     #[tokio::test]
