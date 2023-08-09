@@ -324,7 +324,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
 
@@ -396,7 +396,7 @@ mod test {
 
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -406,7 +406,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -503,11 +502,12 @@ mod test {
                 read_only_parent: None,
             });
 
-        let mut volume = Volume::construct(vcr, None, None).await?;
+        let log = csl();
+        let mut volume = Volume::construct(vcr, None, log.clone()).await?;
 
         volume
             .add_read_only_parent({
-                let mut volume = Volume::new(BLOCK_SIZE as u64);
+                let mut volume = Volume::new(BLOCK_SIZE as u64, log.clone());
                 volume.add_subvolume(in_memory_data.clone()).await?;
                 Arc::new(volume)
             })
@@ -601,7 +601,7 @@ mod test {
                 )),
             });
 
-        let volume = Volume::construct(vcr, None, None).await?;
+        let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
 
         // Read one block: should be all 0xff
@@ -654,7 +654,7 @@ mod test {
                 )),
             });
 
-        let volume = Volume::construct(vcr, None, None).await?;
+        let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
 
         // Read one block: should be all 0x00
@@ -703,7 +703,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
 
@@ -776,7 +776,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
 
@@ -851,7 +851,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
 
@@ -936,7 +936,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
 
@@ -1022,7 +1022,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
         let full_volume_size = BLOCK_SIZE * 20;
@@ -1130,7 +1130,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Arc::new(Volume::construct(vcr, None, None).await?);
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
         let full_volume_size = BLOCK_SIZE * 20;
@@ -1229,7 +1229,7 @@ mod test {
 
         assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -1239,7 +1239,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -1310,7 +1309,7 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -1320,7 +1319,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -1338,7 +1336,7 @@ mod test {
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // data as the scrubber has finished.
@@ -1394,7 +1392,7 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -1404,7 +1402,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -1430,7 +1427,7 @@ mod test {
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Now, try a write_unwritten, this should not change our
         // unwritten data as the scrubber has finished.
@@ -1499,7 +1496,7 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -1509,7 +1506,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -1536,7 +1532,7 @@ mod test {
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume except where new writes have
         // landed
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1595,7 +1591,7 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -1605,7 +1601,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -1630,7 +1625,7 @@ mod test {
             .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -1707,11 +1702,12 @@ mod test {
                 read_only_parent: None,
             });
 
-        let mut volume = Volume::construct(vcr, None, None).await?;
+        let log = csl();
+        let mut volume = Volume::construct(vcr, None, log.clone()).await?;
 
         volume
             .add_read_only_parent({
-                let mut volume = Volume::new(BLOCK_SIZE as u64);
+                let mut volume = Volume::new(BLOCK_SIZE as u64, log.clone());
                 volume.add_subvolume(in_memory_data).await?;
                 Arc::new(volume)
             })
@@ -1745,7 +1741,7 @@ mod test {
             .await?;
 
         // Call the scrubber
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
@@ -1832,11 +1828,12 @@ mod test {
                 read_only_parent: None,
             });
 
-        let mut volume = Volume::construct(vcr, None, None).await?;
+        let log = csl();
+        let mut volume = Volume::construct(vcr, None, log.clone()).await?;
 
         volume
             .add_read_only_parent({
-                let mut volume = Volume::new(BLOCK_SIZE as u64);
+                let mut volume = Volume::new(BLOCK_SIZE as u64, log.clone());
                 volume.add_subvolume(in_memory_data).await?;
                 Arc::new(volume)
             })
@@ -1881,7 +1878,7 @@ mod test {
             .await?;
 
         // Call the scrubber
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
@@ -1950,10 +1947,11 @@ mod test {
                 )),
             });
 
-        let volume1 = Volume::construct(vcr_1, None, None).await?;
+        let log = csl();
+        let volume1 = Volume::construct(vcr_1, None, log.clone()).await?;
         volume1.activate().await?;
 
-        let volume2 = Volume::construct(vcr_2, None, None).await?;
+        let volume2 = Volume::construct(vcr_2, None, log.clone()).await?;
         volume2.activate().await?;
 
         // Read one block: should be all 0x00
@@ -1993,7 +1991,7 @@ mod test {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 opts,
@@ -2003,7 +2001,6 @@ mod test {
                     extent_count: tds.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2027,7 +2024,7 @@ mod test {
             .await?;
 
         // Call the scrubber.  This should do nothing
-        volume.scrub(&csl(), None, None).await.unwrap();
+        volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
@@ -2056,7 +2053,7 @@ mod test {
         // read-only.
         let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2066,7 +2063,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2095,7 +2091,7 @@ mod test {
 
         // Validate that this now accepts reads and flushes, but rejects writes
         {
-            let mut volume = Volume::new(BLOCK_SIZE as u64);
+            let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
             volume
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
@@ -2106,7 +2102,6 @@ mod test {
                         extent_count: test_downstairs_set.extent_count(),
                     },
                     2,
-                    None,
                     None,
                 )
                 .await?;
@@ -2173,7 +2168,7 @@ mod test {
                 )),
             });
 
-        let volume = Volume::construct(vcr, None, None).await?;
+        let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
 
         // Validate that source blocks originally come from the read-only parent
@@ -2229,7 +2224,7 @@ mod test {
         // boot three downstairs, write some data to them
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2239,7 +2234,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2321,7 +2315,7 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2331,7 +2325,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2366,7 +2359,7 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2376,7 +2369,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2406,7 +2398,7 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2416,7 +2408,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2461,7 +2452,7 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2471,7 +2462,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2513,7 +2503,7 @@ mod test {
         // boot three downstairs, write some data to them
         let test_downstairs_set = TestDownstairsSet::big(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2523,7 +2513,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -2595,7 +2584,7 @@ mod test {
             test_downstairs_set.downstairs3_address().await,
         ];
 
-        let mut new_volume = Volume::new(BLOCK_SIZE as u64);
+        let mut new_volume = Volume::new(BLOCK_SIZE as u64, csl());
         new_volume
             .add_subvolume_create_guest(
                 opts,
@@ -2605,7 +2594,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 2,
-                None,
                 None,
             )
             .await?;
@@ -2641,7 +2629,7 @@ mod test {
         // Create three problematic downstairs.
         let test_downstairs_set = TestDownstairsSet::problem().await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64);
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
@@ -2651,7 +2639,6 @@ mod test {
                     extent_count: test_downstairs_set.extent_count(),
                 },
                 1,
-                None,
                 None,
             )
             .await?;
@@ -3488,7 +3475,7 @@ mod test {
                 )],
                 read_only_parent: None,
             });
-        let volume = Volume::construct(vcr, None, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(bytes.len());
@@ -3558,6 +3545,7 @@ mod test {
     #[tokio::test]
     async fn test_pantry_import_from_local_server() {
         const BLOCK_SIZE: usize = 512;
+        let log = csl();
 
         let server = Server::run();
         server.expect(
@@ -3598,8 +3586,9 @@ mod test {
 
         // Verify contents are zero on init
         {
-            let volume =
-                Volume::construct(vcr.clone(), None, None).await.unwrap();
+            let volume = Volume::construct(vcr.clone(), None, log.clone())
+                .await
+                .unwrap();
             volume.activate().await.unwrap();
 
             let buffer = Buffer::new(5120);
@@ -3656,7 +3645,7 @@ mod test {
                 )],
                 read_only_parent: None,
             });
-        let volume = Volume::construct(vcr, None, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(5120);
@@ -3736,7 +3725,7 @@ mod test {
                 )],
                 read_only_parent: None,
             });
-        let volume = Volume::construct(vcr, None, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(5120);
@@ -3801,7 +3790,7 @@ mod test {
                 )],
                 read_only_parent: None,
             });
-        let volume = Volume::construct(vcr, None, None).await.unwrap();
+        let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer =
@@ -3879,7 +3868,7 @@ mod test {
 
         // Verify contents match data on init
         {
-            let volume = Volume::construct(vcr, None, None).await.unwrap();
+            let volume = Volume::construct(vcr, None, csl()).await.unwrap();
             volume.activate().await.unwrap();
 
             let buffer = Buffer::new(data.len());
@@ -3982,7 +3971,7 @@ mod test {
 
         // Attach, validate random data got imported
 
-        let volume = Volume::construct(vcr, None, Some(log)).await.unwrap();
+        let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(data.len());
@@ -4465,7 +4454,7 @@ mod test {
                 read_only_parent: None,
             });
 
-        let volume = Volume::construct(original.clone(), None, None)
+        let volume = Volume::construct(original.clone(), None, log.clone())
             .await
             .unwrap();
         volume.activate().await.unwrap();
