@@ -1381,18 +1381,6 @@ impl Volume {
     // only have the proper differences and if the VCRs are valid, submit
     // the targets for replacement.  A success here means the upstairs has
     // accepted the replacement and the process has started.
-    //
-    // Some thoughts:
-    // What if the original VCR differs from what state we have internally?
-    // Do we need to update the Volume layer when we replace a downstairs?
-    // Will the old one come back?  Could it?
-    //
-    // Will we encounter issues if you replace one downstairs, then replace
-    // a second?  The "original" VCR here will need to mutate as we change
-    // things.
-    //
-    // If we replace a downstairs before the volume is activated, that
-    // should fail, right?
     pub async fn target_replace(
         &self,
         original: VolumeConstructionRequest,
@@ -1403,7 +1391,11 @@ impl Volume {
             Self::compare_vcr_for_replacement(original, replacement, log)
                 .await?;
 
-        info!(log, "OK to replace: {original_target} with {new_target}");
+        info!(
+            log,
+            "Volume {}, OK to replace: {original_target} with {new_target}",
+            self.uuid
+        );
 
         match self
             .replace_downstairs(self.uuid, original_target, new_target)
@@ -1412,21 +1404,24 @@ impl Volume {
             Ok(ReplaceResult::Missing) => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
-                    "Can't locate {original_target} to replace"
+                    "Volume {} Can't locate {} to replace",
+                    self.uuid,
+                    original_target,
                 )
             }
             Ok(ReplaceResult::Started)
             | Ok(ReplaceResult::StartedAlready)
             | Ok(ReplaceResult::CompletedAlready) => {
-                info!(log, "Replace downstairs underway, update locally");
-                // XXX
-                // TODO: what happens here?  Self is now no longer the
-                // same as what the actual upstairs has, will this be
-                // a problem?
+                info!(log, "Replace downstairs underway for {}", self.uuid);
                 Ok(())
             }
             Err(e) => {
-                crucible_bail!(ReplaceRequestInvalid, "Failed {}", e)
+                crucible_bail!(
+                    ReplaceRequestInvalid,
+                    "Replace downstairs failed for {} with {}",
+                    self.uuid,
+                    e
+                )
             }
         }
     }
