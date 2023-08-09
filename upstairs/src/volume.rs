@@ -1101,25 +1101,35 @@ impl Volume {
     }
 
     // We compare two VolumeConstructionRequests to see if the second one
-    // can be a replacement for the first.
-    // The requirements are:
+    // could be considered as an updated VCR to the original.  We are
+    // considering two situations here, one for migration and one for a
+    // downstairs target replacement.
+    //
+    // The requirements to allow a new VCR are:
     // 1. Only VolumeConstructionRequests::Volume type is supported.
     // 2. Sub volumes must all be VolumeConstructionRequest::Region
     // 3. Everything must be the same between the two Volumes, except:
     //    A. The new generation number must be greater than the old.
-    //    B. Only one CrucibleOpts::target[] is different.
-    //    C. The new Volume can have None for read only parent if the
+    //    B. The new Volume can have None for read only parent if the
     //       original had Some(), or it must match the Some().
+    //
+    //  Specifically for the downstairs target replacement case we also require
+    //  this difference:
+    //    C. Only one CrucibleOpts::target[] is different.
     //
     // Any other difference between the two volumes is considered a failure.
     //
-    // On success, we record the old and new downstairs target and return
-    // those to the caller.
-    pub async fn compare_vcr_for_replacement(
+    // We return Ok(None) if requirements 1, 2, 3A, 3B are met.  This would
+    // mean a migration using the old/new VCRs are acceptable.
+    //
+    // We return Ok(Some(old_target, new_target)) if requirements 1, 2, 3A,
+    // 3B, and 3C are all met.  This would mean that the VCRs are valid for
+    // a downstairs replacement.
+    pub async fn compare_vcr_for_update(
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
         log: &Logger,
-    ) -> Result<(SocketAddr, SocketAddr), CrucibleError> {
+    ) -> Result<Option<(SocketAddr, SocketAddr)>, CrucibleError> {
         let o_volume = match original {
             VolumeConstructionRequest::Volume(vcr_v) => vcr_v,
             VolumeConstructionRequest::Url { .. } => {
@@ -1347,14 +1357,6 @@ impl Volume {
                 n_opts.read_only
             )
         }
-        if o_opts.target == n_opts.target {
-            crucible_bail!(
-                ReplaceRequestInvalid,
-                "sub_volume opts target unchanged {:?} vs. {:?}",
-                o_opts.target,
-                n_opts.target
-            )
-        }
 
         // Walk the targets, we can only have one different
         let mut new_target_cid = None;
@@ -1373,16 +1375,14 @@ impl Volume {
             }
         }
 
-        // We should not exit the loop without setting new_target_cid
+        // If we found a old/new target, we can return that now.
         if let Some(cid) = new_target_cid {
-            Ok((o_opts.target[cid], n_opts.target[cid]))
+            Ok(Some((o_opts.target[cid], n_opts.target[cid])))
         } else {
-            crucible_bail!(
-                ReplaceRequestInvalid,
-                "sub_volume no target difference {:?} vs. {:?}",
-                o_opts.target,
-                n_opts.target
-            )
+            // We failed to find any targets different, but all the other
+            // checks between the VCRs found the required differences,
+            // so return Ok(None).
+            Ok(None)
         }
     }
 
@@ -1397,8 +1397,24 @@ impl Volume {
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let (original_target, new_target) =
-            Self::compare_vcr_for_replacement(original, replacement, log)
-                .await?;
+            match Self::compare_vcr_for_replacement(original, replacement, log)
+                .await
+            {
+                Ok(Some((o, n))) => (o, n),
+                Ok(None) => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "VCR replacement does not differ on targets",
+                    )
+                }
+                Err(e) => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "VCR replacement invalid: {}",
+                        e
+                    )
+                }
+            };
 
         info!(
             log,
@@ -3076,10 +3092,13 @@ mod test {
 
         let log = csl();
         info!(log, "Test replacement of CID {cid}");
-        let (old_t, new_t) =
+        let Some((old_t, new_t)) =
             Volume::compare_vcr_for_replacement(original, replacement, &log)
                 .await
-                .unwrap();
+                .unwrap()
+            else {
+                panic!("No differing targets found");
+            };
 
         info!(log, "replace {old_t} with {new_t}");
         assert_eq!(original_target, old_t);
@@ -3125,7 +3144,9 @@ mod test {
             });
 
         let mut new_opts = opts.clone();
-        new_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
+        let original_target = opts.target[1];
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        new_opts.target[1] = new_target;
         vcr_r.gen += 1;
         vcr_r.opts = new_opts.clone();
 
@@ -3138,10 +3159,18 @@ mod test {
             });
 
         let log = csl();
-        Volume::compare_vcr_for_replacement(original, replacement, &log)
-            .await
-            .unwrap();
+        let Some((old_t, new_t)) =
+            Volume::compare_vcr_for_replacement(original, replacement, &log)
+                .await
+                .unwrap()
+            else {
+                panic!("No differing targets found");
+            };
+
+        assert_eq!(original_target, old_t);
+        assert_eq!(new_target, new_t);
     }
+
     #[tokio::test]
     async fn volume_replace_drop_rop() {
         // A replacement VCR is provided with one target being
@@ -3181,7 +3210,9 @@ mod test {
                 read_only_parent: Some(rop.clone()),
             });
 
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
+        let original_target = opts.target[1];
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        opts.target[1] = new_target;
         vcr_r.gen += 1;
         vcr_r.opts = opts.clone();
 
@@ -3194,9 +3225,16 @@ mod test {
             });
 
         let log = csl();
-        Volume::compare_vcr_for_replacement(original, replacement, &log)
-            .await
-            .unwrap();
+        let Some((old_t, new_t)) =
+            Volume::compare_vcr_for_replacement(original, replacement, &log)
+                .await
+                .unwrap()
+            else {
+                panic!("No differing targets found");
+            };
+
+        assert_eq!(original_target, old_t);
+        assert_eq!(new_target, new_t);
     }
 
     #[tokio::test]
@@ -3235,6 +3273,56 @@ mod test {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn volume_vcr_no_target() {
+        // A replacement VCR is provided with differing gen, but the
+        // same targets which should return OK(None).
+        let block_size = 512;
+        let vol_id = Uuid::new_v4();
+        let blocks_per_extent = 10;
+        let extent_count = 9;
+
+        let opts = generic_crucible_opts(vol_id);
+        // Create a Region for the sub_volume that both volumes can share.
+        let mut vcr_r = VcrRegion {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts: opts.clone(),
+            gen: 2,
+        };
+
+        let original: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume(VcrVolume {
+                id: vol_id,
+                block_size,
+                sub_volumes: vec![VolumeConstructionRequest::Region(
+                    vcr_r.clone(),
+                )],
+                read_only_parent: None,
+            });
+
+        vcr_r.gen += 1;
+        vcr_r.opts = opts.clone();
+
+        let replacement: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume(VcrVolume {
+                id: vol_id,
+                block_size,
+                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                read_only_parent: None,
+            });
+
+        let log = csl();
+        // This should return OK, but not have any targets.
+        let res =
+            Volume::compare_vcr_for_replacement(original, replacement, &log)
+                .await
+                .unwrap();
+
+        assert!(res.is_none());
     }
 
     #[tokio::test]
@@ -3570,7 +3658,8 @@ mod test {
         extent_count: u32,
         o_opts: CrucibleOpts,
         n_opts: CrucibleOpts,
-    ) -> Result<(SocketAddr, SocketAddr), crucible_common::CrucibleError> {
+    ) -> Result<Option<(SocketAddr, SocketAddr)>, crucible_common::CrucibleError>
+    {
         // Create a Region for the sub_volume that both volumes can share.
         let mut vcr_r = VcrRegion {
             block_size,
