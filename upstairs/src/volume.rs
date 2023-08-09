@@ -1210,6 +1210,10 @@ impl Volume {
         }
 
         // Presently, we only support one sub_volume for replacement.
+        // If support for multiple sub_volumes is added, then this following
+        // section will need to be updated to loop over the sub_volume Vec and
+        // find the specific one with a difference, while verifying that all
+        // other sub_volumes are no different.
         if n_volume.sub_volumes.len() != 1 {
             crucible_bail!(
                 ReplaceRequestInvalid,
