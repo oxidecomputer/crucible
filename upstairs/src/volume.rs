@@ -6,9 +6,7 @@ use oximeter::types::ProducerRegistry;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crucible_client_types::{
-    VcrFile, VcrRegion, VcrUrl, VcrVolume, VolumeConstructionRequest,
-};
+use crucible_client_types::VolumeConstructionRequest;
 
 pub struct RegionExtentInfo {
     pub block_size: u64,
@@ -1015,12 +1013,12 @@ impl Volume {
         log: Logger,
     ) -> Result<Volume> {
         match request {
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id,
                 block_size,
                 sub_volumes,
                 read_only_parent,
-            }) => {
+            } => {
                 let mut vol = Volume::new_with_id(block_size, id, log.clone());
 
                 for subreq in sub_volumes {
@@ -1050,11 +1048,11 @@ impl Volume {
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::Url(VcrUrl {
+            VolumeConstructionRequest::Url {
                 id,
                 block_size,
                 url,
-            }) => {
+            } => {
                 let mut vol = Volume::new(block_size, log.clone());
                 vol.add_subvolume(Arc::new(
                     ReqwestBlockIO::new(id, block_size, url).await?,
@@ -1063,13 +1061,13 @@ impl Volume {
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::Region(VcrRegion {
+            VolumeConstructionRequest::Region {
                 block_size,
                 blocks_per_extent,
                 extent_count,
                 opts,
                 gen,
-            }) => {
+            } => {
                 let mut vol = Volume::new(block_size, log.clone());
                 vol.add_subvolume_create_guest(
                     opts,
@@ -1085,11 +1083,11 @@ impl Volume {
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::File(VcrFile {
+            VolumeConstructionRequest::File {
                 id,
                 block_size,
                 path,
-            }) => {
+            } => {
                 let mut vol = Volume::new(block_size, log.clone());
                 vol.add_subvolume(Arc::new(FileBlockIO::new(
                     id, block_size, path,
@@ -1159,78 +1157,97 @@ impl Volume {
         replacement: VolumeConstructionRequest,
         log: &Logger,
     ) -> Result<Option<(SocketAddr, SocketAddr)>, CrucibleError> {
-        let o_volume = match original {
-            VolumeConstructionRequest::Volume(vcr_v) => vcr_v,
-            VolumeConstructionRequest::Url { .. } => {
-                crucible_bail!(ReplaceRequestInvalid, "Cannot replace URL VCR")
-            }
+        let (o_id, o_block_size, o_sub_volumes, o_read_only_parent) =
+            match original {
+                VolumeConstructionRequest::Volume {
+                    id,
+                    block_size,
+                    sub_volumes,
+                    read_only_parent,
+                } => (id, block_size, sub_volumes, read_only_parent),
+                VolumeConstructionRequest::Url { .. } => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Cannot replace URL VCR"
+                    )
+                }
 
-            VolumeConstructionRequest::Region { .. } => {
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "Cannot replace Region VCR"
-                )
-            }
+                VolumeConstructionRequest::Region { .. } => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Cannot replace Region VCR"
+                    )
+                }
 
-            VolumeConstructionRequest::File { .. } => {
-                crucible_bail!(ReplaceRequestInvalid, "Cannot replace File VCR")
-            }
-        };
+                VolumeConstructionRequest::File { .. } => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Cannot replace File VCR"
+                    )
+                }
+            };
 
-        let n_volume = match replacement {
-            VolumeConstructionRequest::Volume(vcr_v) => vcr_v,
-            VolumeConstructionRequest::Url { .. } => {
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "Replacement URL VCR invalid"
-                )
-            }
+        let (n_id, n_block_size, n_sub_volumes, n_read_only_parent) =
+            match replacement {
+                VolumeConstructionRequest::Volume {
+                    id,
+                    block_size,
+                    sub_volumes,
+                    read_only_parent,
+                } => (id, block_size, sub_volumes, read_only_parent),
+                VolumeConstructionRequest::Url { .. } => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Cannot replace URL VCR"
+                    )
+                }
 
-            VolumeConstructionRequest::Region { .. } => {
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "Replacement Region VCR invalid"
-                )
-            }
-            VolumeConstructionRequest::File { .. } => {
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "Replacement File VCR invalid"
-                )
-            }
-        };
+                VolumeConstructionRequest::Region { .. } => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Cannot replace Region VCR"
+                    )
+                }
 
-        if o_volume.id != n_volume.id {
+                VolumeConstructionRequest::File { .. } => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Cannot replace File VCR"
+                    )
+                }
+            };
+
+        if o_id != n_id {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "ID mismatch {} vs. {}",
-                o_volume.id,
-                n_volume.id
+                o_id,
+                n_id
             );
         }
-        if o_volume.block_size != n_volume.block_size {
+        if o_block_size != n_block_size {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "block_size mismatch {} vs. {}",
-                o_volume.block_size,
-                n_volume.block_size
+                o_block_size,
+                n_block_size
             )
         }
 
         // For a read only parent:
         // If we had one originally, then we can either have the same
         // one in the new VCR, or None.  We can't go from None to Some.
-        if n_volume.read_only_parent.is_some() {
-            if o_volume.read_only_parent.is_none() {
+        if n_read_only_parent.is_some() {
+            if o_read_only_parent.is_none() {
                 crucible_bail!(
                     ReplaceRequestInvalid,
                     "Unexpected read_only_parent on new VCR"
                 )
             }
-            if o_volume.read_only_parent != n_volume.read_only_parent {
+            if o_read_only_parent != n_read_only_parent {
                 info!(log, "rop mismatch");
-                info!(log, "rop old {:?}", o_volume.read_only_parent);
-                info!(log, "rop new {:?}", n_volume.read_only_parent);
+                info!(log, "rop old {:?}", o_read_only_parent);
+                info!(log, "rop new {:?}", n_read_only_parent);
                 crucible_bail!(
                     ReplaceRequestInvalid,
                     "read_only_parent mismatch"
@@ -1239,12 +1256,12 @@ impl Volume {
         }
 
         // Sub volume lengths should be the same.
-        if n_volume.sub_volumes.len() != o_volume.sub_volumes.len() {
+        if n_sub_volumes.len() != o_sub_volumes.len() {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "subvolume len mismatch {} vs. {}",
-                o_volume.sub_volumes.len(),
-                n_volume.sub_volumes.len(),
+                o_sub_volumes.len(),
+                n_sub_volumes.len(),
             )
         }
 
@@ -1253,16 +1270,27 @@ impl Volume {
         // section will need to be updated to loop over the sub_volume Vec and
         // find the specific one with a difference, while verifying that all
         // other sub_volumes are no different.
-        if n_volume.sub_volumes.len() != 1 {
+        if n_sub_volumes.len() != 1 {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "Only a single sub_volume is supported"
             )
         }
-
         // Sub volumes must all be VolumeConstructionRequest::Region
-        let o_sub_volume = match &o_volume.sub_volumes[0] {
-            VolumeConstructionRequest::Region(vcr_r) => vcr_r,
+        let (
+            o_sv_block_size,
+            o_sv_blocks_per_extent,
+            o_sv_extent_count,
+            o_sv_opts,
+            o_sv_gen,
+        ) = match &o_sub_volumes[0] {
+            VolumeConstructionRequest::Region {
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts,
+                gen,
+            } => (block_size, blocks_per_extent, extent_count, opts, gen),
             _ => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
@@ -1271,29 +1299,42 @@ impl Volume {
             }
         };
 
-        let n_sub_volume = match &n_volume.sub_volumes[0] {
-            VolumeConstructionRequest::Region(vcr_r) => vcr_r,
+        let (
+            n_sv_block_size,
+            n_sv_blocks_per_extent,
+            n_sv_extent_count,
+            n_sv_opts,
+            n_sv_gen,
+        ) = match &n_sub_volumes[0] {
+            VolumeConstructionRequest::Region {
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts,
+                gen,
+            } => (block_size, blocks_per_extent, extent_count, opts, gen),
             _ => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
-                    "Invalid VCR type for replacement sub_volume"
+                    "Invalid VCR type for sub_volume"
                 )
             }
         };
 
-        if o_sub_volume.block_size != n_sub_volume.block_size {
+        if o_sv_block_size != n_sv_block_size {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume block_size mismatch"
             )
         }
-        if o_sub_volume.blocks_per_extent != n_sub_volume.blocks_per_extent {
+
+        if o_sv_blocks_per_extent != n_sv_blocks_per_extent {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume blocks_per_extent mismatch"
             )
         }
-        if o_sub_volume.extent_count != n_sub_volume.extent_count {
+        if o_sv_extent_count != n_sv_extent_count {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume extent_count mismatch"
@@ -1303,100 +1344,99 @@ impl Volume {
         // be lower than the new.  This could almost be
         // a panic, as if they are the same, something
         // has gone wrong.
-        if o_sub_volume.gen >= n_sub_volume.gen {
+        if o_sv_gen >= n_sv_gen {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume generation invalid {:?} vs. {:?}",
-                o_sub_volume.gen,
-                n_sub_volume.gen,
+                o_sv_gen,
+                n_sv_gen,
             )
         }
 
-        let o_opts = &o_sub_volume.opts;
-        let n_opts = &n_sub_volume.opts;
-        if o_opts.id != n_opts.id {
+        if o_sv_opts.id != n_sv_opts.id {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts id invalid {:?} vs. {:?}",
-                o_opts.id,
-                n_opts.id
+                o_sv_opts.id,
+                n_sv_opts.id
             )
         }
-        if o_opts.lossy != n_opts.lossy {
+
+        if o_sv_opts.lossy != n_sv_opts.lossy {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts lossy invalid {:?} vs. {:?}",
-                o_opts.lossy,
-                n_opts.lossy
+                o_sv_opts.lossy,
+                n_sv_opts.lossy
             )
         }
-        if o_opts.flush_timeout != n_opts.flush_timeout {
+        if o_sv_opts.flush_timeout != n_sv_opts.flush_timeout {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts flush_timeout mismatch {:?} vs. {:?}",
-                o_opts.flush_timeout,
-                n_opts.flush_timeout
+                o_sv_opts.flush_timeout,
+                n_sv_opts.flush_timeout
             )
         }
-        if o_opts.key != n_opts.key {
+        if o_sv_opts.key != n_sv_opts.key {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts key invalid {:?} vs. {:?}",
-                o_opts.key,
-                n_opts.key
+                o_sv_opts.key,
+                n_sv_opts.key
             )
         }
-        if o_opts.cert_pem != n_opts.cert_pem {
+        if o_sv_opts.cert_pem != n_sv_opts.cert_pem {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts cert_pem invalid {:?} vs. {:?}",
-                o_opts.cert_pem,
-                n_opts.cert_pem
+                o_sv_opts.cert_pem,
+                n_sv_opts.cert_pem
             )
         }
-        if o_opts.key_pem != n_opts.key_pem {
+        if o_sv_opts.key_pem != n_sv_opts.key_pem {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts key_pem invalid {:?} vs. {:?}",
-                o_opts.key_pem,
-                n_opts.key_pem
+                o_sv_opts.key_pem,
+                n_sv_opts.key_pem
             )
         }
-        if o_opts.root_cert_pem != n_opts.root_cert_pem {
+        if o_sv_opts.root_cert_pem != n_sv_opts.root_cert_pem {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts root_cert_pem invalid {:?} vs. {:?}",
-                o_opts.root_cert_pem,
-                n_opts.root_cert_pem
+                o_sv_opts.root_cert_pem,
+                n_sv_opts.root_cert_pem
             )
         }
-        if o_opts.control != n_opts.control {
+        if o_sv_opts.control != n_sv_opts.control {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts control invalid {:?} vs. {:?}",
-                o_opts.control,
-                n_opts.control
+                o_sv_opts.control,
+                n_sv_opts.control
             )
         }
-        if o_opts.read_only != n_opts.read_only {
+        if o_sv_opts.read_only != n_sv_opts.read_only {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume opts read_only invalid {:?} vs. {:?}",
-                o_opts.read_only,
-                n_opts.read_only
+                o_sv_opts.read_only,
+                n_sv_opts.read_only
             )
         }
 
         // Walk the targets, we can only have one different
         let mut new_target_cid = None;
         for cid in 0..3 {
-            if o_opts.target[cid] != n_opts.target[cid] {
+            if o_sv_opts.target[cid] != n_sv_opts.target[cid] {
                 if new_target_cid.is_some() {
                     crucible_bail!(
                         ReplaceRequestInvalid,
                         "sub_volume multiple different targets: {:?} vs. {:?}",
-                        o_opts.target,
-                        n_opts.target
+                        o_sv_opts.target,
+                        n_sv_opts.target
                     )
                 } else {
                     new_target_cid = Some(cid);
@@ -1406,7 +1446,7 @@ impl Volume {
 
         // If we found a old/new target, we can return that now.
         if let Some(cid) = new_target_cid {
-            Ok(Some((o_opts.target[cid], n_opts.target[cid])))
+            Ok(Some((o_sv_opts.target[cid], n_sv_opts.target[cid])))
         } else {
             // We failed to find any targets different, but all the other
             // checks between the VCRs found the required differences,
@@ -2556,18 +2596,16 @@ mod test {
         file.write_all(&vec![0u8; 512]).unwrap();
         file.write_all(&vec![5u8; 512]).unwrap();
 
-        let request = VolumeConstructionRequest::Volume(VcrVolume {
+        let request = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
             block_size: 512,
             sub_volumes: vec![],
-            read_only_parent: Some(Box::new(VolumeConstructionRequest::File(
-                VcrFile {
-                    id: Uuid::new_v4(),
-                    block_size: 512,
-                    path: file_path.into_os_string().into_string().unwrap(),
-                },
-            ))),
-        });
+            read_only_parent: Some(Box::new(VolumeConstructionRequest::File {
+                id: Uuid::new_v4(),
+                block_size: 512,
+                path: file_path.into_os_string().into_string().unwrap(),
+            })),
+        };
         let volume = Volume::construct(request, None, csl()).await.unwrap();
 
         let buffer = Buffer::new(BLOCK_SIZE);
@@ -3072,40 +3110,39 @@ mod test {
 
         let mut opts = generic_crucible_opts(vol_id);
 
-        // Create a Region both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         // Change just the minimum things and use the updated values
         // in the replacement volume.
         let original_target = opts.target[cid];
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         opts.target[cid] = new_target;
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
 
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         info!(log, "Test replacement of CID {cid}");
@@ -3133,46 +3170,46 @@ mod test {
 
         let opts = generic_crucible_opts(vol_id);
 
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-        let rop = Box::new(VolumeConstructionRequest::Region(VcrRegion {
+        let rop = Box::new(VolumeConstructionRequest::Region {
             block_size,
             blocks_per_extent,
             extent_count,
             opts: opts.clone(),
             gen: 3,
-        }));
+        });
 
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: Some(rop.clone()),
-            });
+            };
 
         let mut new_opts = opts.clone();
         let original_target = opts.target[1];
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         new_opts.target[1] = new_target;
-        vcr_r.gen += 1;
-        vcr_r.opts = new_opts.clone();
 
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: new_opts.clone(),
+                    gen: 3,
+                }],
                 read_only_parent: Some(rop),
-            });
+            };
 
         let log = csl();
         let (old_t, new_t) = Volume::compare_vcr_for_target_replacement(
@@ -3199,46 +3236,46 @@ mod test {
 
         let mut opts = generic_crucible_opts(vol_id);
 
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
         // Create the read only parent
-        let rop = Box::new(VolumeConstructionRequest::Region(VcrRegion {
+        let rop = Box::new(VolumeConstructionRequest::Region {
             block_size,
             blocks_per_extent,
             extent_count,
             opts: opts.clone(),
             gen: 3,
-        }));
+        });
 
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
-                read_only_parent: Some(rop.clone()),
-            });
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
+                read_only_parent: Some(rop),
+            };
 
         let original_target = opts.target[1];
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         opts.target[1] = new_target;
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
 
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         let (old_t, new_t) = Volume::compare_vcr_for_target_replacement(
@@ -3265,20 +3302,18 @@ mod test {
         let opts = generic_crucible_opts(vol_id);
 
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    VcrRegion {
-                        block_size,
-                        blocks_per_extent,
-                        extent_count,
-                        opts: opts.clone(),
-                        gen: 2,
-                    },
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
 
@@ -3303,35 +3338,33 @@ mod test {
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
-
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
+            };
 
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
 
@@ -3360,36 +3393,36 @@ mod test {
         let extent_count = 9;
 
         let mut opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
 
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
 
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size: 4096,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts,
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         assert!(Volume::compare_vcr_for_target_replacement(
@@ -3411,36 +3444,34 @@ mod test {
         let extent_count = 9;
 
         let mut opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
-
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: Uuid::new_v4(),
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         assert!(Volume::compare_vcr_for_target_replacement(
@@ -3463,45 +3494,43 @@ mod test {
         let extent_count = 9;
 
         let mut opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
-
         // Replacement can't have a read_only_parent
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                }],
                 read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region(VcrRegion {
+                    VolumeConstructionRequest::Region {
                         block_size,
                         blocks_per_extent,
                         extent_count,
                         opts: opts.clone(),
                         gen: 3,
-                    }),
+                    },
                 )),
-            });
+            };
 
         let log = csl();
         assert!(Volume::compare_vcr_for_target_replacement(
@@ -3524,37 +3553,34 @@ mod test {
         let extent_count = 9;
 
         let mut opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
-        vcr_r.block_size = 4096;
-
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: 4096,
+                    blocks_per_extent,
+                    extent_count,
+                    opts,
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         assert!(Volume::compare_vcr_for_target_replacement(
@@ -3577,37 +3603,35 @@ mod test {
         let extent_count = 9;
 
         let mut opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
-        vcr_r.blocks_per_extent += 8;
 
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent: blocks_per_extent + 2,
+                    extent_count,
+                    opts,
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         assert!(Volume::compare_vcr_for_target_replacement(
@@ -3630,37 +3654,34 @@ mod test {
         let extent_count = 9;
 
         let mut opts = generic_crucible_opts(vol_id);
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        vcr_r.gen += 1;
-        vcr_r.opts = opts.clone();
-        vcr_r.extent_count += 1;
-
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id: vol_id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count: extent_count + 2,
+                    opts,
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         assert!(Volume::compare_vcr_for_update(original, replacement, &log)
@@ -3680,34 +3701,33 @@ mod test {
         o_opts: CrucibleOpts,
         n_opts: CrucibleOpts,
     ) -> Result<(SocketAddr, SocketAddr), crucible_common::CrucibleError> {
-        // Create a Region for the sub_volume that both volumes can share.
-        let mut vcr_r = VcrRegion {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: o_opts,
-            gen: 2,
-        };
-
         let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(
-                    vcr_r.clone(),
-                )],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: o_opts,
+                    gen: 2,
+                }],
                 read_only_parent: None,
-            });
+            };
 
-        vcr_r.gen += 1;
-        vcr_r.opts = n_opts;
         let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume(VcrVolume {
+            VolumeConstructionRequest::Volume {
                 id,
                 block_size,
-                sub_volumes: vec![VolumeConstructionRequest::Region(vcr_r)],
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: n_opts,
+                    gen: 3,
+                }],
                 read_only_parent: None,
-            });
+            };
 
         let log = csl();
         Volume::compare_vcr_for_target_replacement(original, replacement, &log)
