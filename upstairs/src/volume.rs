@@ -1463,18 +1463,17 @@ impl Volume {
         &self,
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
-        log: &Logger,
     ) -> Result<(), CrucibleError> {
         let (original_target, new_target) =
             Self::compare_vcr_for_target_replacement(
                 original,
                 replacement,
-                log,
+                &self.log,
             )
             .await?;
 
         info!(
-            log,
+            self.log,
             "Volume {}, OK to replace: {original_target} with {new_target}",
             self.uuid
         );
@@ -1494,7 +1493,10 @@ impl Volume {
             Ok(ReplaceResult::Started)
             | Ok(ReplaceResult::StartedAlready)
             | Ok(ReplaceResult::CompletedAlready) => {
-                info!(log, "Replace downstairs underway for {}", self.uuid);
+                info!(
+                    self.log,
+                    "Replace downstairs underway for {}", self.uuid
+                );
                 Ok(())
             }
             Err(e) => {
