@@ -3560,6 +3560,7 @@ impl Downstairs {
         ds_done_tx: mpsc::Sender<u64>,
     ) {
         let mut skipped = 0;
+        let is_write = matches!(io.work, IOop::Write { .. });
         for cid in 0..3 {
             assert_eq!(io.state[&cid], IOState::New);
 
@@ -3619,6 +3620,14 @@ impl Downstairs {
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
             info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
+
+            ds_done_tx.send(ds_id).await.unwrap();
+        } else if is_write {
+            // XXX Check for replay moving things back to NotAcked
+            // Does WriteUnwritten need to be here?
+            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            assert_eq!(job.ack_status, AckStatus::NotAcked);
+            job.ack_status = AckStatus::AckReady;
 
             ds_done_tx.send(ds_id).await.unwrap();
         }
