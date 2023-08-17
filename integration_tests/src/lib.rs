@@ -4463,10 +4463,7 @@ mod test {
             };
 
         info!(log, "Replace VCR now: {:?}", replacement);
-        volume
-            .target_replace(original, replacement, &log)
-            .await
-            .unwrap();
+        volume.target_replace(original, replacement).await.unwrap();
         info!(log, "send read now");
         let buffer = Buffer::new(BLOCK_SIZE * 10);
         volume
