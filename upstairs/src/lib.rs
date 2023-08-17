@@ -6357,7 +6357,37 @@ impl Upstairs {
          */
         match new_state {
             DsState::Replacing => {
-                // A downstairs can be replaced at any time.
+                /*
+                 * For LiveRepair (and that is what this will become) to work,
+                 * we have to have transitioned the upstairs to active.
+                 * Otherwise, we don't have consensus on what data is valid
+                 * and we need to go through the reconciliation process.
+                 */
+                if up_state != UpState::Active {
+                    panic!(
+                        "[{}] {} Can't replace when not active {} -> {}",
+                        client_id, self.uuid, old_state, new_state,
+                    );
+                }
+                match old_state {
+                    DsState::Active
+                    | DsState::LiveRepair
+                    | DsState::LiveRepairReady
+                    | DsState::Offline
+                    | DsState::Faulted
+                    | DsState::Disabled
+                    | DsState::Replacing
+                    | DsState::Replaced
+                    | DsState::Replay => {
+                        // All valid active states to repair from
+                    }
+                    _ => {
+                        panic!(
+                            "[{}] {} Invalid transition: {:?} -> {:?}",
+                            client_id, self.uuid, old_state, new_state
+                        );
+                    }
+                }
             }
             DsState::Replaced => {
                 assert_eq!(old_state, DsState::Replacing);
@@ -7478,6 +7508,12 @@ impl Upstairs {
         );
         let active = self.active.lock().await;
         let up_state = active.up_state;
+        if up_state != UpState::Active {
+            crucible_bail!(
+                ReplaceRequestInvalid,
+                "Crucible upstairs is not active",
+            );
+        }
         let mut ds = self.downstairs.lock().await;
 
         // We check all targets first to not only find our current target,

@@ -2333,6 +2333,8 @@ mod test {
     async fn integration_test_volume_inactive_replace_downstairs() -> Result<()>
     {
         // Replace a downstairs before the volume is active.
+        // This should return error, as a replace before activation is not
+        // supported.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
@@ -2362,10 +2364,10 @@ mod test {
                 test_downstairs_set.downstairs1_address().await,
                 new_downstairs.address().await,
             )
-            .await
-            .unwrap();
+            .await;
 
-        assert_eq!(res, ReplaceResult::Started);
+        // This should have returned error
+        assert!(res.is_err());
         Ok(())
     }
 
