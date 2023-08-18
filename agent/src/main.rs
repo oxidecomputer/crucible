@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-#![allow(clippy::needless_collect)]
+
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
@@ -14,12 +14,39 @@ use std::sync::Arc;
 const PROG: &str = "crucible-agent";
 const SERVICE: &str = "oxide/crucible/downstairs";
 
+/*
+ * As a safety mechanism to prevent the agent from allocating more space to
+ * regions than we have physical space on disk, we use a zfs reservation on
+ * each dataset we create. While it does prevent us from allocating more space
+ * to regions than the disk could accommodate, it is not a complete solution in
+ * that we ideally would like Nexus to track allocations (for crucible and
+ * other significant datasets), an adequate capacity margin to ensure that disk
+ * performance doesn't become pathological, and monitors any over-use for
+ * appropriate mitigation (migration, termination, etc).
+ *
+ * As for how much we reserve, it's the region size itself, plus the amount
+ * we need for metadata (currently around 17%) then an additional 8% that, if
+ * things are behaving, we will have for snapshots and to prevent us from
+ * using all the data in the pool.
+ *
+ * In addition, we throw a quota of 3x the region size. The failure modes of
+ * exhausting the quota are potentially severe and not (as yet) well-tested so
+ * we want some buffer between the reservation and the quota. If the region has
+ * grown that big however, something is potentially very wrong and we should
+ * prevent it from growing any larger and impacting other regions on the disk.
+ */
+const RESERVATION_FACTOR: f64 = 1.25;
+const QUOTA_FACTOR: u64 = 3;
+
 mod datafile;
 mod model;
 mod server;
+mod smf_interface;
+mod snapshot_interface;
 
 use model::Resource;
 use model::State;
+use smf_interface::*;
 
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible zone management agent")]
@@ -92,7 +119,13 @@ impl ZFSDataset {
     }
 
     // Given "dataset", ensure that "dataset/child" exists, and return it.
-    pub fn ensure_child_dataset(&self, child: &str) -> Result<ZFSDataset> {
+    pub fn ensure_child_dataset(
+        &self,
+        child: &str,
+        reservation: Option<u64>,
+        quota: Option<u64>,
+        log: &Logger,
+    ) -> Result<ZFSDataset> {
         let dataset = format!("{}/{}", self.dataset, child);
 
         // Does it exist already?
@@ -106,14 +139,24 @@ impl ZFSDataset {
         }
 
         // If not, create it
-        let cmd = std::process::Command::new("zfs")
-            .arg("create")
-            .arg(&dataset)
-            .output()?;
+        let mut cmd = std::process::Command::new("zfs");
+        cmd.arg("create");
 
-        if !cmd.status.success() {
-            let out = String::from_utf8_lossy(&cmd.stdout);
-            let err = String::from_utf8_lossy(&cmd.stderr);
+        if let Some(reservation) = reservation {
+            info!(log, "zfs set reservation of {reservation} for {dataset}");
+            cmd.arg("-o").arg(format!("reservation={}", reservation));
+        }
+
+        if let Some(quota) = quota {
+            info!(log, "zfs set quota of {quota} for {dataset}");
+            cmd.arg("-o").arg(format!("quota={}", quota));
+        }
+
+        let res = cmd.arg(&dataset).output()?;
+
+        if !res.status.success() {
+            let out = String::from_utf8_lossy(&res.stdout);
+            let err = String::from_utf8_lossy(&res.stderr);
             bail!("zfs create failed! out:{} err:{}", out, err);
         }
 
@@ -240,10 +283,16 @@ async fn main() -> Result<()> {
                 listen,
                 lowport,
                 lowport + 999, // TODO high port as an argument?
+                Arc::new(snapshot_interface::ZfsSnapshotInterface::new(
+                    log.new(
+                        o!("component" => String::from("ZfsSnapshotInterface")),
+                    ),
+                )),
             )?);
 
-            let regions_dataset =
-                dataset.ensure_child_dataset("regions").unwrap();
+            let regions_dataset = dataset
+                .ensure_child_dataset("regions", None, None, &log)
+                .unwrap();
 
             /*
              * Ensure that the SMF service we will use exists already.  If
@@ -300,6 +349,31 @@ fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
     Ok(())
 }
 
+fn apply_smf(
+    log: &Logger,
+    df: &Arc<datafile::DataFile>,
+    datapath: PathBuf,
+    downstairs_prefix: &str,
+    snapshot_prefix: &str,
+) -> Result<()> {
+    let scf = crucible_smf::Scf::new()?;
+    let scope = scf.scope_local()?;
+    let svc = scope
+        .get_service(SERVICE)?
+        .ok_or_else(|| anyhow!("service missing"))?;
+
+    let smf_interface = RealSmf::new(&svc)?;
+
+    apply_smf_actual(
+        &smf_interface,
+        log,
+        df,
+        datapath,
+        downstairs_prefix,
+        snapshot_prefix,
+    )
+}
+
 /**
  * Provisioning requests will update the local intent store, and provision
  * downstairs data files, but SMF services are a bit different.
@@ -310,21 +384,19 @@ fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
  * idempotent routine that we can call both at startup and after any changes
  * to the intent store.
  */
-fn apply_smf(
+fn apply_smf_actual<T>(
+    smf_interface: &T,
     log: &Logger,
     df: &Arc<datafile::DataFile>,
     datapath: PathBuf,
     downstairs_prefix: &str,
     snapshot_prefix: &str,
-) -> Result<()> {
+) -> Result<()>
+where
+    T: SmfInterface,
+{
     let regions = df.regions();
     let mut running_snapshots = df.running_snapshots();
-
-    let scf = crucible_smf::Scf::new()?;
-    let scope = scf.scope_local()?;
-    let svc = scope
-        .get_service(SERVICE)?
-        .ok_or_else(|| anyhow!("service missing"))?;
 
     /*
      * First, check to see if there are any instances that we do not expect,
@@ -348,9 +420,7 @@ fn apply_smf(
         })
         .collect();
 
-    let mut insts = svc.instances()?;
-
-    while let Some(inst) = insts.next().transpose()? {
+    for inst in smf_interface.instances()? {
         let n = inst.name()?;
 
         if &n == "default" {
@@ -377,6 +447,7 @@ fn apply_smf(
         } else if n.starts_with(&format!("{}-", snapshot_prefix)) {
             if !expected_snapshot_instances.contains(&n) {
                 error!(log, "remove snapshot instance: {}", n);
+                info!(log, "instance states: {:?}", inst.states()?);
 
                 /*
                  * XXX just disable for now.
@@ -395,6 +466,8 @@ fn apply_smf(
      * Second, create any downstairs and snapshot instances that are missing.
      */
     for r in regions.iter() {
+        // If the region is in state Created, then the dataset exists, so start
+        // a downstairs that points to it.
         if r.state != State::Created {
             continue;
         }
@@ -421,11 +494,11 @@ fn apply_smf(
             properties
         };
 
-        let inst = if let Some(inst) = svc.get_instance(&name)? {
+        let inst = if let Some(inst) = smf_interface.get_instance(&name)? {
             inst
         } else {
             info!(log, "creating missing downstairs instance {}", name);
-            let inst = svc.add_instance(&name)?;
+            let inst = smf_interface.add_instance(&name)?;
             info!(log, "ok, have {}", inst.fmri()?);
             inst
         };
@@ -540,7 +613,19 @@ fn apply_smf(
 
     for (_, region_snapshots) in running_snapshots.iter_mut() {
         for snapshot in region_snapshots.values_mut() {
-            if snapshot.state != State::Requested {
+            // The agent is not responsible for creating snapshots, only
+            // starting a read-only downstairs that points to them. When the
+            // original request to start a running snapshot is made, the object
+            // begins in state Requested, and once apply_smf returns
+            // successfully has its state changed to Created (this is used by
+            // the caller to query if the service has been created yet).
+            //
+            // If the agent zone is bounced, we want it to read the datafile
+            // and restore all the previously created SMF instances. This means
+            // that we have to take action on both Requested and Created for
+            // running snapshots. This is in contrast to Region, which has
+            // different actions for Requested and Created.
+            if !matches!(snapshot.state, State::Requested | State::Created) {
                 continue;
             }
 
@@ -573,11 +658,11 @@ fn apply_smf(
                 properties
             };
 
-            let inst = if let Some(inst) = svc.get_instance(&name)? {
+            let inst = if let Some(inst) = smf_interface.get_instance(&name)? {
                 inst
             } else {
                 info!(log, "creating missing snapshot instance {}", name);
-                let inst = svc.add_instance(&name)?;
+                let inst = smf_interface.add_instance(&name)?;
                 info!(log, "ok, have {}", inst.fmri()?);
                 inst
             };
@@ -699,8 +784,16 @@ fn apply_smf(
 
 #[cfg(test)]
 mod test {
+    use super::*;
+
     use crate::model::*;
+    use crate::snapshot_interface::SnapshotInterface;
+    use crate::snapshot_interface::TestSnapshotInterface;
+
+    use slog::{o, Drain, Logger};
     use std::collections::BTreeMap;
+    use tempfile::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_collect_behaviour() {
@@ -769,6 +862,436 @@ mod test {
             ],
         );
     }
+
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
+
+    /// Wrap a datafile, mock SMF interface, and mock snapshot interface, in order to test the
+    /// agent's SMF related behaviour.
+    pub struct TestSmfHarness {
+        log: Logger,
+        dir: TempDir,
+        pub df: Arc<datafile::DataFile>,
+        smf_interface: MockSmf,
+        snapshot_interface: Arc<TestSnapshotInterface>,
+    }
+
+    impl TestSmfHarness {
+        pub fn new() -> Result<TestSmfHarness> {
+            let log = csl();
+            let dir = tempdir()?;
+            let snapshot_interface =
+                Arc::new(TestSnapshotInterface::new(log.new(
+                    o!("component" => String::from("test_snapshot_interface")),
+                )));
+
+            let df = Arc::new(datafile::DataFile::new(
+                log.new(
+                    o!("component" => String::from("test_harness_datafile")),
+                ),
+                dir.path(),
+                "127.0.0.1:0".parse()?,
+                1000,
+                2000,
+                snapshot_interface.clone(),
+            )?);
+
+            Ok(TestSmfHarness {
+                log: log.clone(),
+                dir,
+                df,
+                smf_interface: MockSmf::new(SERVICE.to_string()),
+                snapshot_interface,
+            })
+        }
+
+        pub fn path_buf(&self) -> PathBuf {
+            self.dir.path().to_path_buf()
+        }
+
+        pub fn apply_smf(&self) -> Result<()> {
+            let mut path_buf = self.dir.path().to_path_buf();
+            path_buf.push("regions");
+
+            apply_smf_actual(
+                &self.smf_interface,
+                &self.log,
+                &self.df,
+                path_buf,
+                "downstairs",
+                "snapshot",
+            )
+        }
+
+        pub fn smf_is_empty(&self) -> bool {
+            self.smf_interface.config_is_empty()
+        }
+
+        pub fn region_path(&self, region_id: &RegionId) -> PathBuf {
+            let mut path_buf = self.path_buf();
+            path_buf.push("regions");
+            path_buf.push(&region_id.0);
+            path_buf
+        }
+
+        pub fn region_path_string(&self, region_id: &RegionId) -> String {
+            self.region_path(region_id)
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        }
+
+        pub fn create_snapshot(
+            &self,
+            region_id: String,
+            snapshot_name: String,
+        ) {
+            self.snapshot_interface.create_snapshot(
+                self.path_buf(),
+                region_id,
+                snapshot_name,
+            );
+        }
+
+        pub fn snapshot_path(
+            &self,
+            region_id: &RegionId,
+            snapshot_name: String,
+        ) -> PathBuf {
+            let mut path_buf = self.region_path(region_id);
+            path_buf.push(".zfs");
+            path_buf.push("snapshot");
+            path_buf.push(snapshot_name);
+            path_buf
+        }
+
+        pub fn snapshot_path_string(
+            &self,
+            region_id: &RegionId,
+            snapshot_name: String,
+        ) -> String {
+            self.snapshot_path(region_id, snapshot_name)
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        }
+    }
+
+    impl Drop for TestSmfHarness {
+        fn drop(&mut self) {
+            // If the agent zone bounces, it should read state from the datafile and recreate
+            // everything. Compare here during the drop.
+            let after_bounce_smf_interface = MockSmf::new(SERVICE.to_string());
+
+            let mut path_buf = self.dir.path().to_path_buf();
+            path_buf.push("regions");
+
+            apply_smf_actual(
+                &after_bounce_smf_interface,
+                &self.log,
+                &self.df,
+                path_buf,
+                "downstairs",
+                "snapshot",
+            )
+            .unwrap();
+
+            // Prune disabled services: a bounced agent zone will lose all these, and the agent
+            // will not recreate them.
+            self.smf_interface.prune();
+
+            assert_eq!(self.smf_interface, after_bounce_smf_interface);
+        }
+    }
+
+    #[test]
+    fn test_smf_region() -> Result<()> {
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+
+        // Submit a create region request
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // Call apply_smf before `df.created`
+        harness.apply_smf()?;
+
+        // Nothing should have happened
+        assert!(harness.smf_is_empty());
+
+        // Pretend to actually create the region
+        harness.df.created(&region_id)?;
+
+        // Now call apply_smf
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was created
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!("downstairs-{}", region_id.0))?
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.region_path_string(&region_id)
+            );
+        }
+
+        // Tombstone the region
+        harness.df.destroy(&region_id)?;
+
+        // Now call apply_smf
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was disabled
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!("downstairs-{}", region_id.0))?
+                .unwrap();
+            assert!(!instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.region_path_string(&region_id)
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_smf_region_failed() -> Result<()> {
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+
+        // Submit a create region request
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // Pretend creating the region failed
+        harness.df.fail(&region_id);
+
+        // Now call apply_smf
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was never created
+        assert!(harness.smf_is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_smf_region_bounce_idempotent() -> Result<()> {
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+
+        // Submit a create region request
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // Pretend to actually create the region
+        harness.df.created(&region_id)?;
+
+        // Now call apply_smf
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was created
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!("downstairs-{}", region_id.0))?
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.region_path_string(&region_id)
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_smf_region_create_then_destroy() -> Result<()> {
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+
+        // Submit a create region request
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // Call apply_smf before `df.created`
+        harness.apply_smf()?;
+
+        // Nothing should have happened
+        assert!(harness.smf_is_empty());
+
+        // Pretend Nexus requests to destroy the region in another thread
+        harness.df.destroy(&region_id)?;
+
+        // In this thread, still try to create the region
+        harness.df.created(&region_id)?;
+
+        // Now call apply_smf
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was *not* created
+        assert!(harness.smf_is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_smf_running_snapshot() -> Result<()> {
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+        let snapshot_name = Uuid::new_v4().to_string();
+
+        // Submit a create region request
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // Pretend to actually create the region
+        harness.df.created(&region_id)?;
+
+        // Now call apply_smf
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was created
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!("downstairs-{}", region_id.0))?
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.region_path_string(&region_id)
+            );
+        }
+
+        // Pretend to create a snapshot
+        harness.create_snapshot(region_id.0.to_string(), snapshot_name.clone());
+
+        // Submit a create running snapshot request
+        harness.df.create_running_snapshot_request(
+            CreateRunningSnapshotRequest {
+                id: region_id.clone(),
+                name: snapshot_name.clone(),
+
+                cert_pem: None,
+                key_pem: None,
+                root_pem: None,
+            },
+        )?;
+
+        // Call apply_smf
+        harness.apply_smf()?;
+
+        // The running snapshot should exist
+        {
+            eprintln!("{:?}", harness.smf_interface);
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!(
+                    "snapshot-{}-{}",
+                    region_id.0, snapshot_name
+                ))?
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.snapshot_path_string(&region_id, snapshot_name.clone())
+            );
+        }
+
+        // Running snapshots transition from state Requested to state Created
+        // when the smf apply is ok. Make sure (via the Drop comparison that
+        // TestSmfHarness does) that when the agent zone bounces it reads
+        // from the datafile, then creates running snapshots for objects in
+        // state Created too.
+        harness.df.created_rs(&region_id, &snapshot_name)?;
+
+        Ok(())
+    }
 }
 
 /**
@@ -803,17 +1326,40 @@ fn worker(
         match work {
             Resource::Region(r) => {
                 /*
-                 * If the region is State::Requested, we create that region then run
-                 * the apply_smf().
+                 * If the region is State::Requested, we create that region
+                 * then run the apply_smf().
                  *
-                 * If the region is State:Tombstoned, we apply_smf() first, then we
-                 * finish up destroying the region.
+                 * If the region is State:Tombstoned, we apply_smf() first,
+                 * then we finish up destroying the region.
                  */
                 match &r.state {
                     State::Requested => {
+                        /*
+                         * Compute the actual size required for a full region,
+                         * then add our metadata overhead to that.
+                         */
+                        let region_size =
+                            r.block_size * r.extent_size * r.extent_count;
+                        let reservation =
+                            (region_size as f64 * RESERVATION_FACTOR).round()
+                                as u64;
+                        let quota = region_size * QUOTA_FACTOR;
+
+                        info!(
+                            log,
+                            "Region size:{} reservation:{} quota:{}",
+                            region_size,
+                            reservation,
+                            quota,
+                        );
                         // if regions need to be created, do that before apply_smf.
                         let region_dataset = regions_dataset
-                            .ensure_child_dataset(&r.id.0)
+                            .ensure_child_dataset(
+                                &r.id.0,
+                                Some(reservation),
+                                Some(quota),
+                                &log,
+                            )
                             .unwrap();
 
                         let res = worker_region_create(
@@ -921,6 +1467,9 @@ fn worker(
 
                 if let Err(e) = result {
                     error!(log, "SMF application failure: {:?}", e);
+
+                    // There's no fail_rs here: a future `apply_smf` should
+                    // attempt to start the service again.
                 } else {
                     info!(log, "SMF ok!");
 

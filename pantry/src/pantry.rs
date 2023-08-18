@@ -271,8 +271,8 @@ impl PantryEntry {
         Ok(response.clone())
     }
 
-    pub async fn scrub(&self, log: &Logger) -> Result<()> {
-        self.volume.scrub(log, None, None).await?;
+    pub async fn scrub(&self) -> Result<()> {
+        self.volume.scrub(None, None).await?;
         Ok(())
     }
 
@@ -405,7 +405,7 @@ impl Pantry {
         let volume = Volume::construct(
             volume_construction_request.clone(),
             None,
-            Some(self.log.clone()),
+            self.log.clone(),
         )
         .await?;
 
@@ -564,9 +564,8 @@ impl Pantry {
     pub async fn scrub(&self, volume_id: String) -> Result<String, HttpError> {
         let entry = self.entry(volume_id).await?;
         let entry = entry.clone();
-        let log = self.log.clone();
 
-        let join_handle = tokio::spawn(async move { entry.scrub(&log).await });
+        let join_handle = tokio::spawn(async move { entry.scrub().await });
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();

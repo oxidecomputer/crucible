@@ -498,18 +498,53 @@ async fn process_message(
             )
         }
         Message::ErrorReport {
-            upstairs_id: _,
-            session_id: _,
+            upstairs_id,
+            session_id,
             job_id,
             error,
         } => {
-            // XXX currently, this error report goes nowhere except to the log.
-            // The Upstairs should track this for each Downstairs.
+            // The Upstairs should not consider a job completed until it has
+            // returned an Ok result, and should therefore log and eat all
+            // ErrorReport messages here. This will change in the future when
+            // the Upstairs tracks the number of errors per Downstairs, and acts
+            // on that information somehow.
             error!(
                 u.log,
                 "[{}] job id {} saw error {:?}", client_id, job_id, error
             );
-            return Ok(());
+
+            // However, there is one case (see `check_message_for_abort` in
+            // downstairs/src/lib.rs) where the Upstairs **does** need to
+            // act: when a repair job in the Downstairs fails, that Downstairs
+            // aborts itself and reconnects.
+            let _active = u.active.lock().await;
+            let ds = u.downstairs.lock().await;
+
+            if let Some(job) = ds.ds_active.get(job_id) {
+                if job.work.is_repair() {
+                    // Return the error and let the previously written error
+                    // processing code work.
+                    cdt::ds__repair__done!(|| (job_id, client_id as u64));
+
+                    // XXX uncomment this to see the upstairs disconnect this
+                    // bad downstairs. test_error_during_live_repair_no_halt
+                    // should proceed to the end.
+                    (
+                        *upstairs_id,
+                        *session_id,
+                        *job_id,
+                        Err(error.clone()),
+                        None,
+                    )
+
+                    // XXX uncomment this to make the upstairs stuck in test_error_during_live_repair_no_halt
+                    //return Ok(());
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
         }
         /*
          * For this case, we will (TODO) want to log an error to someone, but
@@ -4166,10 +4201,10 @@ impl Downstairs {
                     // pass
                 }
                 _ => {
-                    // Mark this downstairs as bad if this was a write or flush
-                    // XXX: reconcilation, retries?
-                    // XXX: Errors should be reported to nexus
                     match job.work {
+                        // Mark this downstairs as bad if this was a write or flush
+                        // XXX: reconcilation, retries?
+                        // XXX: Errors should be reported to nexus
                         IOop::Write {
                             dependencies: _,
                             writes: _,
@@ -4193,6 +4228,8 @@ impl Downstairs {
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
                         }
+
+                        // If a repair job errors, mark that downstairs as bad
                         IOop::ExtentClose {
                             dependencies: _,
                             extent: _,
@@ -4231,12 +4268,14 @@ impl Downstairs {
                             self.downstairs_errors
                                 .insert(client_id, errors + 1);
                         }
+
+                        // If a read job fails, we sometimes need to panic.
                         IOop::Read {
                             dependencies: _,
                             requests: _,
                         } => {
                             // It's possible we get a read error if the
-                            // downstairs disconnects.  However XXX, someone
+                            // downstairs disconnects. However XXX, someone
                             // should be told about this error.
                             //
                             // Some errors, we need to panic on.
@@ -9414,10 +9453,7 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
-        println!("Send replace message somewhere");
         self.send(sw).await.wait().await?;
-
-        println!("wait for replace message somewhere");
         let result = data.lock().await;
         Ok(*result)
     }

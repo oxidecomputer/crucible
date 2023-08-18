@@ -68,7 +68,7 @@ enum Action {
         #[clap(long, action)]
         encrypted: bool,
 
-        /// The extent size for the region
+        /// The extent size for the region (in blocks NOT bytes!)
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
@@ -170,7 +170,7 @@ enum Action {
         #[clap(long, action)]
         encrypted: bool,
 
-        /// If creating, the extent size for the region
+        /// If creating, the extent size for the region (in blocks NOT bytes!)
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
 

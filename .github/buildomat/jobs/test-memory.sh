@@ -2,7 +2,7 @@
 #:
 #: name = "test-memory"
 #: variety = "basic"
-#: target = "helios"
+#: target = "helios-2.0"
 #: output_rules = [
 #:  "/tmp/test_mem_log.txt",
 #:  "/tmp/dsc/*.txt",

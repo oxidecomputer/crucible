@@ -7,12 +7,11 @@ use serde::{Deserialize, Serialize};
 use slog::{crit, error, info, Logger};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use chrono::{TimeZone, Utc};
-
+use crate::snapshot_interface::SnapshotInterface;
 use crate::ZFSDataset;
 
 pub struct DataFile {
@@ -24,6 +23,7 @@ pub struct DataFile {
     port_max: u16,
     bell: Condvar,
     inner: Mutex<Inner>,
+    snapshot_interface: Arc<dyn SnapshotInterface>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -40,6 +40,7 @@ impl DataFile {
         listen: SocketAddr,
         port_min: u16,
         port_max: u16,
+        snapshot_interface: Arc<dyn SnapshotInterface>,
     ) -> Result<DataFile> {
         let mut conf_path = base_path.to_path_buf();
         conf_path.push("crucible.json");
@@ -64,6 +65,7 @@ impl DataFile {
             port_max,
             bell: Condvar::new(),
             inner: Mutex::new(inner),
+            snapshot_interface,
         })
     }
 
@@ -251,6 +253,39 @@ impl DataFile {
         }
 
         /*
+         * Wait for ZFS snapshot directory to get mounted before
+         * starting a read-only downstairs that points to it. Note
+         * `create_running_snapshot_request` is only entered if the
+         * snapshot exists for the region so this should eventually
+         * be a directory.
+         */
+        {
+            let mut snapshot_path = self.base_path.to_path_buf();
+            snapshot_path.push("regions");
+            snapshot_path.push(request.id.0.clone());
+            snapshot_path.push(".zfs");
+            snapshot_path.push("snapshot");
+            snapshot_path.push(request.name.clone());
+
+            // Wait a maximum of 5 seconds for the
+            // <region>/.zfs/snapshot/<snapshot> directory to appear
+            let mut appeared = false;
+            for _ in 0..50 {
+                if snapshot_path.is_dir() {
+                    appeared = true;
+                    break;
+                }
+                info!(self.log, "waiting for path {:?}", snapshot_path);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            if !appeared {
+                error!(self.log, "{:?} did not appear!", snapshot_path);
+                bail!("{:?} did not appear!", snapshot_path);
+            }
+        }
+
+        /*
          * Allocate a port number that is not yet in use.
          */
         let port_number = self.get_free_port(&inner)?;
@@ -341,17 +376,36 @@ impl DataFile {
         let inner = self.inner.lock().unwrap();
 
         /*
-         * Are we running this snapshot? Fail if so.
+         * Are we running a read-only downstairs for this snapshot? Fail if so.
          */
         if let Some(running_snapshots) =
             inner.running_snapshots.get(&request.id)
         {
-            if running_snapshots.get(&request.name).is_some() {
-                bail!(
-                    "downstairs running for region {} snapshot {}",
-                    request.id.0,
-                    request.name
-                );
+            if let Some(running_snapshot) = running_snapshots.get(&request.name)
+            {
+                match running_snapshot.state {
+                    State::Requested | State::Created | State::Tombstoned => {
+                        bail!(
+                            "read-only downstairs running for region {} snapshot {}",
+                            request.id.0,
+                            request.name
+                        );
+                    }
+
+                    State::Destroyed => {
+                        // ok to delete
+                    }
+
+                    State::Failed => {
+                        // Something has set the running snapshot to state
+                        // failed, so we can't delete this snapshot.
+                        bail!(
+                            "read-only downstairs state set to failed for region {} snapshot {}",
+                            request.id.0,
+                            request.name
+                        );
+                    }
+                }
             }
         }
 
@@ -364,52 +418,7 @@ impl DataFile {
 
         let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 
-        // If the snapshot doesn't exist, return Ok - this call should be
-        // idempotent
-        let cmd = Command::new("zfs")
-            .arg("list")
-            .arg(snapshot_name.clone())
-            .output()?;
-
-        if !cmd.status.success() {
-            let out = String::from_utf8_lossy(&cmd.stdout);
-            let err = String::from_utf8_lossy(&cmd.stderr);
-
-            if err.trim_end().ends_with("dataset does not exist") {
-                return Ok(());
-            }
-
-            error!(
-                self.log,
-                "zfs snapshot {:?} list failed: out {:?} err {:?}",
-                snapshot_name,
-                out,
-                err,
-            );
-
-            bail!("zfs snapshot list failure");
-        }
-
-        // Delete it if it exists
-        let cmd = Command::new("zfs")
-            .arg("destroy")
-            .arg(snapshot_name.clone())
-            .output()?;
-
-        if !cmd.status.success() {
-            let err = String::from_utf8_lossy(&cmd.stderr);
-            let out = String::from_utf8_lossy(&cmd.stdout);
-
-            error!(
-                self.log,
-                "zfs snapshot {:?} delete failed: out {:?} err {:?}",
-                snapshot_name,
-                out,
-                err,
-            );
-
-            bail!("zfs snapshot delete failure");
-        }
+        self.snapshot_interface.delete_snapshot(snapshot_name)?;
 
         Ok(())
     }
@@ -420,7 +429,7 @@ impl DataFile {
     pub fn fail(&self, id: &RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner.regions.get_mut(id).unwrap();
+        let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Failed;
         if r.state == nstate {
             return;
@@ -441,7 +450,7 @@ impl DataFile {
     pub fn fail_rs(&self, region_id: &RegionId, snapshot_name: &str) {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut rs = inner
+        let rs = inner
             .running_snapshots
             .get_mut(region_id)
             .unwrap()
@@ -471,7 +480,7 @@ impl DataFile {
     pub fn created(&self, id: &RegionId) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner.regions.get_mut(id).unwrap();
+        let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Created;
         match &r.state {
             State::Requested => (),
@@ -505,7 +514,7 @@ impl DataFile {
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut rs = inner
+        let rs = inner
             .running_snapshots
             .get_mut(region_id)
             .unwrap()
@@ -516,15 +525,33 @@ impl DataFile {
 
         match &rs.state {
             State::Requested => (),
+
             State::Tombstoned => {
                 /*
-                 * Nexus requested that we destroy this running snapshot before
-                 * we finished provisioning it.
+                 * Something else set this to Tombstoned between when the SMF
+                 * was applied and before the state in the datafile changed!
+                 * This means that Nexus requested that we destroy this running
+                 * snapshot before we finished creating it. Return Ok(()) here,
+                 * something else is working on this running snapshot.
                  */
                 return Ok(());
             }
 
-            x => bail!("created running_snapshot in weird state {:?}", x),
+            x => {
+                /*
+                 * Something else set this to an unexpected state. Bailing here
+                 * will cause the RS to be marked as failed, we'll have to
+                 * investigate.
+                 */
+                error!(
+                    self.log,
+                    "running snapshot {} is currently in unexpected state: {:?}",
+                    rs.id.0,
+                    rs.state,
+                );
+
+                bail!("created running_snapshot in weird state {:?}", x);
+            }
         }
 
         info!(
@@ -548,7 +575,7 @@ impl DataFile {
     pub fn destroyed(&self, id: &RegionId) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner.regions.get_mut(id).unwrap();
+        let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Destroyed;
         match &r.state {
             State::Tombstoned => (),
@@ -577,7 +604,7 @@ impl DataFile {
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut rs = inner
+        let rs = inner
             .running_snapshots
             .get_mut(region_id)
             .unwrap()
@@ -607,7 +634,7 @@ impl DataFile {
     pub fn destroy(&self, id: &RegionId) -> Result<bool> {
         let mut inner = self.inner.lock().unwrap();
 
-        let mut r = inner
+        let r = inner
             .regions
             .get_mut(id)
             .ok_or_else(|| anyhow!("region {} does not exist", id.0))?;
@@ -714,107 +741,37 @@ impl DataFile {
 
         let region = region.unwrap();
 
-        if region.state != State::Created {
-            bail!("region.state is {:?}", region.state);
+        match region.state {
+            State::Requested | State::Destroyed | State::Tombstoned => {
+                // Either the region hasn't been created yet, or it has been
+                // destroyed or marked to be destroyed (both of which require
+                // that no snapshots exist). Return an empty list.
+                return Ok(vec![]);
+            }
+
+            State::Created => {
+                // proceed to next section
+            }
+
+            State::Failed => {
+                bail!("region.state is failed!");
+            }
         }
 
         let mut path = self.base_path.to_path_buf();
         path.push("regions");
         path.push(region_id.0.clone());
-        path.push(".zfs");
-        path.push("snapshot");
 
-        info!(self.log, "checking if path {:?} exists", path);
+        info!(self.log, "path is {:?}", &path);
 
-        if !path.exists() {
-            // No snapshots directory
-            return Ok(vec![]);
-        }
+        let dataset =
+            ZFSDataset::new(path.into_os_string().into_string().unwrap())?;
 
-        info!(self.log, "checking path {:?}", path);
+        info!(self.log, "dataset is {}", dataset.dataset());
 
-        let paths = std::fs::read_dir(&path);
-        if paths.is_err() {
-            bail!(paths.err().unwrap());
-        }
-
-        let mut results: Vec<Snapshot> = vec![];
-        for path in paths.unwrap() {
-            if path.is_err() {
-                bail!(path.err().unwrap());
-            }
-
-            let path = path.unwrap().path();
-
-            if path.is_dir() {
-                let dir_name = path
-                    .file_name()
-                    .ok_or_else(|| {
-                        anyhow!("could not turn {:?} into filename!", path)
-                    })?
-                    .to_str()
-                    .ok_or_else(|| {
-                        anyhow!("could not turn {:?} into str!", path)
-                    })?
-                    .to_string();
-
-                let dataset = {
-                    let mut path = self.base_path.clone().to_path_buf();
-                    path.push("regions");
-                    path.push(region_id.0.clone());
-
-                    ZFSDataset::new(
-                        path.into_os_string().into_string().unwrap(),
-                    )?
-                };
-
-                let snapshot_name =
-                    format!("{}@{}", dataset.dataset(), dir_name);
-
-                // Creation time of a .zfs/snapshot/<folder> as retrieved by
-                // stat doesn't make sense. Use `zfs get`:
-                //
-                //   # zfs get -pH -o value creation <snapshot_name>
-                //   1644441276
-
-                let mut cmd = Command::new("zfs");
-                cmd.arg("get");
-                cmd.arg("-pH");
-                cmd.arg("-o");
-                cmd.arg("value");
-                cmd.arg("creation");
-                cmd.arg(snapshot_name);
-
-                info!(
-                    self.log,
-                    "command {:?} {:?}",
-                    cmd.get_program(),
-                    cmd.get_args()
-                );
-
-                let cmd = cmd.output()?;
-
-                if !cmd.status.success() {
-                    bail!("stat didn't work!");
-                }
-
-                let cmd_stdout = {
-                    let cmd_stdout = String::from_utf8_lossy(&cmd.stdout);
-
-                    // Remove newline
-                    let cmd_stdout = cmd_stdout.trim_end().to_string();
-
-                    cmd_stdout
-                };
-
-                info!(self.log, "stdout is {}", &cmd_stdout);
-
-                results.push(Snapshot {
-                    name: dir_name,
-                    created: Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap(),
-                });
-            }
-        }
+        let results = self
+            .snapshot_interface
+            .get_snapshots_for_dataset(dataset.dataset())?;
 
         Ok(results)
     }

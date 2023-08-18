@@ -1100,7 +1100,8 @@ where
     Ok(())
 }
 
-// Check and see if this message is A LiveRepair, and if it has failed
+// Check and see if this message is A LiveRepair, and if it has failed. If you
+// change this, change how the Upstairs processes ErrorReports!
 fn check_message_for_abort(m: &Message) -> bool {
     if let Message::ExtentLiveRepairAckId { result, .. } = m {
         if result.is_err() {
@@ -1428,7 +1429,7 @@ where
                         }
 
                         // Only allowed to promote or demote self
-                        let mut upstairs_connection =
+                        let upstairs_connection =
                             upstairs_connection.as_mut().unwrap();
                         let matches_self =
                             upstairs_connection.upstairs_id == upstairs_id &&
@@ -1675,8 +1676,6 @@ where
              * trigger once then never again.
              */
             _ = sleep_until(lossy_interval), if lossy => {
-                //let ds = ads.lock().await;
-                //show_work(&ds).await;
                 job_channel_tx.lock().await.send(0).await?;
                 lossy_interval = deadline_secs(5);
             }
@@ -1769,8 +1768,6 @@ where
                             if let Err(e) = fw.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
-                            let mut ds = ads.lock().await;
-                            show_work(&mut ds).await;
                         } else if let Err(e) = message_channel_tx.send(msg).await {
                             bail!("Failed sending message to proc_frame: {}", e);
                         }
