@@ -406,12 +406,17 @@ impl Volume {
                     }
                 }
 
-                // TODO: Nexus needs to know about this failure.
-                self.write_unwritten(
-                    Block::new(offset, bs.trailing_zeros()),
-                    Bytes::from(buffer.as_vec().await.clone()),
-                )
-                .await?;
+                // If the block is blank, don't worry about writing it
+                if !buffer.as_vec().await.iter().all(|&x| x == 0) {
+                    // TODO: Nexus needs to know about this failure.
+                    self.write_unwritten(
+                        Block::new(offset, bs.trailing_zeros()),
+                        Bytes::from(buffer.as_vec().await.clone()),
+                    )
+                    .await?;
+                } else {
+                    info!(self.log, "Scrub eliding blank write at offset {}", offset);
+                }
 
                 offset += block_count as u64;
 
@@ -428,6 +433,7 @@ impl Volume {
                     );
                     showat += showstep;
                 }
+
                 // Pause just a bit between IOs so we don't starve the guest
                 // TODO: More benchmarking to find a good value here.
                 tokio::time::sleep(Duration::from_millis(pause_millis)).await;
@@ -444,6 +450,7 @@ impl Volume {
                 end - start,
                 pause_millis,
             );
+
             self.flush(None).await?;
         } else {
             info!(self.log, "Scrub for {} not required", self.uuid);
