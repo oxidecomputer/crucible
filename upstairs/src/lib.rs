@@ -73,7 +73,7 @@ use async_trait::async_trait;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
-const IO_OUTSTANDING_MAX: usize = 7000;
+const IO_OUTSTANDING_MAX: usize = 97000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
