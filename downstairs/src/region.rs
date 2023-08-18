@@ -645,7 +645,6 @@ impl Extent {
         Ok(extent)
     }
 
-    #[cfg(test)]
     pub async fn dirty(&self) -> bool {
         self.inner.lock().await.dirty().unwrap()
     }
@@ -1520,6 +1519,16 @@ pub struct Region {
     pub dir: PathBuf,
     def: RegionDefinition,
     pub extents: Vec<Arc<Mutex<ExtentState>>>,
+
+    /// extents which are dirty and need to be flushed. should be true if the
+    /// dirty flag in the extent's metadata is set. When an extent is opened, if
+    /// it's dirty, it's added to here. When a write is issued to an extent,
+    /// it's added to here. If the write doesn't actually make the extent dirty
+    /// that's fine, because the extent will NOP during the flush anyway, but
+    /// this mainly serves to cut down on the extents we're considering for a
+    /// flush in the first place.
+    dirty_extents: HashSet<usize>,
+
     read_only: bool,
     log: Logger,
 }
@@ -1644,6 +1653,7 @@ impl Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
+            dirty_extents: HashSet::new(),
             read_only: false,
             log,
         };
@@ -1714,6 +1724,7 @@ impl Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
+            dirty_extents: HashSet::new(),
             read_only,
             log: log.clone(),
         };
@@ -1765,9 +1776,14 @@ impl Region {
                     &self.log,
                 )
                 .await
-            };
+            }?;
+
+            if extent.dirty().await {
+                self.dirty_extents.insert(eid as usize);
+            }
+
             these_extents.push(Arc::new(Mutex::new(ExtentState::Opened(
-                Arc::new(extent?),
+                Arc::new(extent),
             ))));
         }
 
@@ -1785,7 +1801,7 @@ impl Region {
      * Walk the list of all extents and find any that are not open.
      * Open any extents that are not.
      */
-    pub async fn reopen_all_extents(&self) -> Result<()> {
+    pub async fn reopen_all_extents(&mut self) -> Result<()> {
         let mut to_open = Vec::new();
         for (i, extent) in self.extents.iter().enumerate() {
             let inner = extent.lock().await;
@@ -1804,7 +1820,10 @@ impl Region {
     /**
      * Re open an extent that was previously closed
      */
-    pub async fn reopen_extent(&self, eid: usize) -> Result<(), CrucibleError> {
+    pub async fn reopen_extent(
+        &mut self,
+        eid: usize,
+    ) -> Result<(), CrucibleError> {
         /*
          * Make sure the extent :
          *
@@ -1824,6 +1843,10 @@ impl Region {
             &self.log,
         )
         .await?;
+
+        if new_extent.dirty().await {
+            self.dirty_extents.insert(eid as usize);
+        }
 
         *mg = ExtentState::Opened(Arc::new(new_extent));
 
@@ -2169,7 +2192,7 @@ impl Region {
 
     #[instrument]
     pub async fn region_write(
-        &self,
+        &mut self,
         writes: &[crucible_protocol::Write],
         job_id: u64,
         only_write_unwritten: bool,
@@ -2209,6 +2232,10 @@ impl Region {
                 .write(job_id, &writes[..], only_write_unwritten)
                 .await?;
         }
+
+        // Mark any extents we sent a write-command to as potentially dirty
+        self.dirty_extents.extend(batched_writes.keys().into_iter());
+
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id);
         } else {
@@ -2303,7 +2330,7 @@ impl Region {
      */
     #[instrument]
     pub async fn region_flush(
-        &self,
+        &mut self,
         flush_number: u64,
         gen_number: u64,
         snapshot_details: &Option<SnapshotDetails>,
@@ -2317,23 +2344,41 @@ impl Region {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        // Set the extent we will stop flushing at.
         cdt::os__flush__start!(|| job_id);
-        let extent_count = match extent_limit {
+
+        // Drain any dirty extents we're going to flush, while respecting the
+        // extent_limit if one was provided.
+        let dirty_extents: Vec<usize> = match extent_limit {
             Some(el) => {
                 if el > self.def.extent_count().try_into().unwrap() {
                     crucible_bail!(InvalidExtent);
                 }
-                el + 1 // +1 because our loop is exclusive.
+
+                // TODO someday we can use drain_filter here when it finally
+                // gets out of nightly...
+                let dirty_extents = self
+                    .dirty_extents
+                    .iter()
+                    .copied()
+                    .filter(|x| *x <= el)
+                    .collect();
+
+                for eid in &dirty_extents {
+                    self.dirty_extents.remove(eid);
+                }
+
+                dirty_extents
             }
-            None => self.def.extent_count().try_into().unwrap(),
+            None => self.dirty_extents.drain().collect(),
         };
+
+        let extent_count = dirty_extents.len();
 
         // Spawn parallel tasks for the flush
         let mut join_handles: Vec<JoinHandle<Result<(), CrucibleError>>> =
             Vec::with_capacity(extent_count);
 
-        for eid in 0..extent_count {
+        for eid in dirty_extents {
             let extent = self.get_opened_extent(eid).await;
             let log = self.log.clone();
             let jh = tokio::spawn(async move {
@@ -5906,7 +5951,7 @@ mod test {
 
     #[tokio::test]
     async fn test_write_single_large_contiguous() -> Result<()> {
-        let (_dir, region, mut data) = prepare_random_region().await?;
+        let (_dir, mut region, mut data) = prepare_random_region().await?;
 
         // Call region_write with a single large contiguous range
         let writes = prepare_writes(1..8, &mut data);
@@ -5920,7 +5965,7 @@ mod test {
 
     #[tokio::test]
     async fn test_write_single_large_contiguous_span_extents() -> Result<()> {
-        let (_dir, region, mut data) = prepare_random_region().await?;
+        let (_dir, mut region, mut data) = prepare_random_region().await?;
 
         // Call region_write with a single large contiguous range that spans
         // multiple extents
@@ -5935,7 +5980,7 @@ mod test {
 
     #[tokio::test]
     async fn test_write_multiple_disjoint_large_contiguous() -> Result<()> {
-        let (_dir, region, mut data) = prepare_random_region().await?;
+        let (_dir, mut region, mut data) = prepare_random_region().await?;
 
         // Call region_write with a multiple disjoint large contiguous ranges
         let writes = vec![
@@ -5954,7 +5999,7 @@ mod test {
 
     #[tokio::test]
     async fn test_write_multiple_disjoint_none_contiguous() -> Result<()> {
-        let (_dir, region, mut data) = prepare_random_region().await?;
+        let (_dir, mut region, mut data) = prepare_random_region().await?;
 
         // Call region_write with a multiple disjoint non-contiguous ranges
         let writes = vec![
