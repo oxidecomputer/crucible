@@ -1684,16 +1684,20 @@ pub(crate) mod up_test {
 
         let response = Ok(vec![]);
 
-        assert!(ds
+        let res = ds
             .process_ds_completion(
                 next_id,
                 2,
                 response,
                 &None,
                 UpState::Active,
-                None
+                None,
             )
-            .unwrap());
+            .unwrap();
+
+        // If it's write_unwritten, then this should have returned true,
+        // if it's just a write, then it should be false.
+        assert_eq!(res, is_write_unwritten);
 
         assert!(ds.downstairs_errors.get(&0).is_some());
         assert!(ds.downstairs_errors.get(&1).is_some());
@@ -1945,9 +1949,9 @@ pub(crate) mod up_test {
         .unwrap();
 
         // DS 1, return error.
-        // This will return true because we have now completed all
-        // three IOs (skipped, ok, and error here).
-        assert!(ds
+        // On a write_unwritten, This will return true because we have now
+        // completed all three IOs (skipped, ok, and error here).
+        let res = ds
             .process_ds_completion(
                 next_id,
                 1,
@@ -1956,7 +1960,9 @@ pub(crate) mod up_test {
                 UpState::Active,
                 None,
             )
-            .unwrap());
+            .unwrap();
+
+        assert_eq!(res, is_write_unwritten);
 
         let ack_list = ds.ackable_work();
         assert_eq!(ack_list.len(), 1);
@@ -5603,15 +5609,10 @@ pub(crate) mod up_test {
         assert_eq!(up.ds_state(1).await, DsState::Faulted);
         assert_eq!(up.ds_state(2).await, DsState::Active);
 
-        {
-            // Verify we are not ready to ACK yet.
-            let mut ds = up.downstairs.lock().await;
-            let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
-            assert_eq!(state, AckStatus::NotAcked);
-        }
-        // Three failures, process_ds_operation should return true now.
+        // Three failures, But since this is a write we already have marked
+        // the ACK as ready.
         // Process the operation for client 2
-        assert!(up
+        assert!(!up
             .process_ds_operation(next_id, 2, response, None)
             .await
             .unwrap());
@@ -5619,7 +5620,7 @@ pub(crate) mod up_test {
         assert_eq!(up.ds_state(1).await, DsState::Faulted);
         assert_eq!(up.ds_state(2).await, DsState::Faulted);
 
-        // Verify we can ack this (failed) work
+        // Verify we can still ack this (failed) work
         let mut ds = up.downstairs.lock().await;
         assert_eq!(ds.ackable_work().len(), 1);
     }
@@ -5862,8 +5863,8 @@ pub(crate) mod up_test {
         assert_eq!(up.ds_state(2).await, DsState::Active);
 
         let ok_response = Ok(vec![]);
-        // process_ds_operation should return true after we process this.
-        assert!(up
+        // Because we ACK writes, this op will always return false
+        assert!(!up
             .process_ds_operation(next_id, 2, ok_response, None)
             .await
             .unwrap());
