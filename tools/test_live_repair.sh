@@ -57,28 +57,15 @@ echo "" > ${test_log}
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-region_dir1="/stock-0/dsc"
-region_dir2="/stock-1/dsc"
-region_dir3="/stock-2/dsc"
-region_dir4="/stock-3/dsc"
-
 if ! ${dsc} create --cleanup \
   --region-count 4 \
   --ds-bin "$downstairs" \
-  --region-dir ${region_dir1} \
-  --region-dir ${region_dir2} \
-  --region-dir ${region_dir3} \
-  --region-dir ${region_dir4} \
   --extent-count 50 >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
 ${dsc} start --ds-bin "$downstairs" \
-  --region-count 4 \
-  --region-dir ${region_dir1} \
-  --region-dir ${region_dir2} \
-  --region-dir ${region_dir3} \
-  --region-dir ${region_dir4} >> "$test_log" 2>&1 &
+  --region-count 4 >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
 if ! ps -p $dsc_pid > /dev/null; then
