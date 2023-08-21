@@ -1766,21 +1766,23 @@ impl Region {
 
         for eid in eid_range {
             let extent = if create {
-                Extent::create(&self.dir, &self.def, eid)
+                Extent::create(&self.dir, &self.def, eid)?
             } else {
-                Extent::open(
+                let extent = Extent::open(
                     &self.dir,
                     &self.def,
                     eid,
                     self.read_only,
                     &self.log,
                 )
-                .await
-            }?;
+                .await?;
 
-            if extent.dirty().await {
-                self.dirty_extents.insert(eid as usize);
-            }
+                if extent.dirty().await {
+                    self.dirty_extents.insert(eid as usize);
+                }
+
+                extent
+            };
 
             these_extents.push(Arc::new(Mutex::new(ExtentState::Opened(
                 Arc::new(extent),
@@ -2346,30 +2348,21 @@ impl Region {
 
         cdt::os__flush__start!(|| job_id);
 
-        // Drain any dirty extents we're going to flush, while respecting the
+        // Select extents we're going to flush, while respecting the
         // extent_limit if one was provided.
         let dirty_extents: Vec<usize> = match extent_limit {
+            None => self.dirty_extents.iter().copied().collect(),
             Some(el) => {
                 if el > self.def.extent_count().try_into().unwrap() {
                     crucible_bail!(InvalidExtent);
                 }
 
-                // TODO someday we can use drain_filter here when it finally
-                // gets out of nightly...
-                let dirty_extents = self
-                    .dirty_extents
+                self.dirty_extents
                     .iter()
                     .copied()
                     .filter(|x| *x <= el)
-                    .collect();
-
-                for eid in &dirty_extents {
-                    self.dirty_extents.remove(eid);
-                }
-
-                dirty_extents
+                    .collect()
             }
-            None => self.dirty_extents.drain().collect(),
         };
 
         let extent_count = dirty_extents.len();
@@ -2378,8 +2371,8 @@ impl Region {
         let mut join_handles: Vec<JoinHandle<Result<(), CrucibleError>>> =
             Vec::with_capacity(extent_count);
 
-        for eid in dirty_extents {
-            let extent = self.get_opened_extent(eid).await;
+        for eid in &dirty_extents {
+            let extent = self.get_opened_extent(*eid).await;
             let log = self.log.clone();
             let jh = tokio::spawn(async move {
                 extent.flush(flush_number, gen_number, job_id, &log).await
@@ -2405,6 +2398,17 @@ impl Region {
             // the results were all collected above, each extent flush has
             // completed at this point.
             result??;
+        }
+
+        // Now everything has succeeded, we can remove these extents from the
+        // flush candidates
+        match extent_limit {
+            None => self.dirty_extents.clear(),
+            Some(_) => {
+                for eid in &dirty_extents {
+                    self.dirty_extents.remove(eid);
+                }
+            }
         }
 
         // snapshots currently only work with ZFS
