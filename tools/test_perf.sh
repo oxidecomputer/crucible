@@ -32,6 +32,9 @@ prefill=0
 read_loops=2
 write_loops=2
 region_dir="/var/tmp/dsc"
+region_dir1="/oxp_20a40868-243c-45dc-8dae-059b9f9e1e63/dsc"
+region_dir2="/oxp_34a8f396-7396-40ce-a21a-5f918924464d/dsc"
+region_dir3="/oxp_f369e166-6e82-4628-a696-08f15dbd809b/dsc"
 
 while getopts 'b:c:g:hfr:w:' opt; do
     case "$opt" in
@@ -78,9 +81,15 @@ function perf_round() {
 
     "$dsc" create --ds-bin "$downstairs" --cleanup \
         --extent-size "$es" --extent-count "$ec" \
-        --region-dir "$region_dir" --block-size "$block_size"
+        --region-dir "$region_dir1" \
+        --region-dir "$region_dir2" \
+        --region-dir "$region_dir3" \
+        --block-size "$block_size"
 
-    "$dsc" start --ds-bin "$downstairs" --region-dir "$region_dir" &
+    "$dsc" start --ds-bin "$downstairs" \
+    --region-dir "$region_dir1" \
+    --region-dir "$region_dir2" \
+    --region-dir "$region_dir3" &
     dsc_pid=$!
     sleep 5
     if ! pgrep -P $dsc_pid; then
