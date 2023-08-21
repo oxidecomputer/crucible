@@ -37,7 +37,6 @@ use uuid::Uuid;
 
 use aes_gcm_siv::aead::AeadInPlace;
 use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
-use rand_chacha::ChaCha20Rng;
 
 pub mod control;
 mod dummy_downstairs_tests;
@@ -4840,11 +4839,18 @@ impl EncryptionContext {
     }
 
     pub fn get_random_nonce(&self) -> Nonce {
-        let mut rng = ChaCha20Rng::from_entropy();
-
         let mut random_iv = Vec::<u8>::with_capacity(12);
         random_iv.resize(12, 1);
-        rng.fill_bytes(&mut random_iv);
+
+        let filled = unsafe {
+            libc::getrandom(
+                random_iv.as_mut_ptr() as *mut libc::c_void,
+                12,
+                libc::GRND_NONBLOCK,
+            )
+        };
+
+        assert_eq!(filled, 12);
 
         Nonce::clone_from_slice(&random_iv)
     }

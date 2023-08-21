@@ -26,6 +26,7 @@ dropshot.workspace = true
 futures.workspace = true
 futures-core.workspace = true
 itertools.workspace = true
+libc.workspace = true
 omicron-common.workspace = true
 oximeter-producer.workspace = true
 oximeter.workspace = true
