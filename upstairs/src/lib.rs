@@ -3629,8 +3629,6 @@ impl Downstairs {
 
             ds_done_tx.send(ds_id).await.unwrap();
         } else if is_write {
-            // XXX Check for replay moving things back to NotAcked
-            // Does WriteUnwritten need to be here?
             let job = self.ds_active.get_mut(&ds_id).unwrap();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
