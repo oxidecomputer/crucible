@@ -80,12 +80,19 @@ enum Action {
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
         output_dir: PathBuf,
 
+        /// The port_base where the downstairs will listen.
+        /// Note: is used as part of the expected region directory path.
+        #[clap(long, default_value = "8810", action)]
+        port_base: u32,
+
         /// The directory where the downstairs regions will be created.
         /// Either provide once, or "N" times.  One means all downstairs
         /// share the same top level directory (each downstairs has its own
         /// subdirectory).  "N" means we will create "N" downstairs and each
         /// downstairs will get its own region directory.  If using N other
         /// than 3, you must also provide a matching "region-dir" value.
+        /// Note that, for each downstairs, dsc adds a "port" to the
+        /// region directory path.
         #[clap(
             long,
             global = true,
@@ -182,12 +189,19 @@ enum Action {
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
         output_dir: PathBuf,
 
+        /// The port_base where the downstairs will listen
+        /// Note: is used as part of the expected region directory path.
+        #[clap(long, default_value = "8810", action)]
+        port_base: u32,
+
         /// The directory where the downstairs regions will be created.
         /// Either provide once, or "N" times.  One means all downstairs
         /// share the same top level directory (each downstairs has its own
         /// subdirectory).  "N" means we will create "N" downstairs and each
         /// downstairs will get its own region directory.  If using N other
         /// than 3, you must also provide a matching "region-dir" value.
+        /// Note that, for each downstairs, dsc adds a "port" to the
+        /// region directory path.
         #[clap(
             long,
             global = true,
@@ -1359,6 +1373,7 @@ fn main() -> Result<()> {
             extent_size,
             extent_count,
             output_dir,
+            port_base,
             region_dir,
             region_count,
         } => {
@@ -1371,7 +1386,7 @@ fn main() -> Result<()> {
                 region_dir,
                 notify_tx,
                 true,
-                8810,
+                port_base,
                 region_count,
             )?;
 
@@ -1405,6 +1420,7 @@ fn main() -> Result<()> {
             extent_size,
             extent_count,
             output_dir,
+            port_base,
             region_dir,
             region_count,
         } => {
@@ -1426,7 +1442,7 @@ fn main() -> Result<()> {
                 region_dir,
                 notify_tx,
                 create,
-                8810,
+                port_base,
                 region_count,
             )?;
 
