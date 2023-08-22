@@ -73,7 +73,7 @@ use async_trait::async_trait;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
-const IO_OUTSTANDING_MAX: usize = 97000;
+const IO_OUTSTANDING_MAX: usize = 57000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -3368,6 +3368,7 @@ impl Downstairs {
 
         for (ds_id, job) in self.ds_active.iter_mut() {
             let is_read = job.work.is_read();
+            let is_write = matches!(job.work, IOop::Write { .. });
             let wc = job.state_count();
             let jobs_completed_ok = wc.completed_ok();
 
@@ -3401,16 +3402,21 @@ impl Downstairs {
                             job.ack_status = AckStatus::NotAcked;
                             job.read_response_hashes = Vec::new();
                         }
+                    } else if is_write {
+                        /*
+                         * Writes we ack when we put them on the upstairs work
+                         * queue, so a replay here won't change that.
+                         */
                     } else {
                         /*
-                         * For a write or flush, if we have 3 completed,
-                         * then we can leave this job as AckReady, if not,
-                         * then we have to undo the AckReady.
+                         * For a write_unwritten or a flush, if we have 3 completed,
+                         * then we can leave this job as AckReady, if not, then we
+                         * have to undo the AckReady.
                          */
                         if jobs_completed_ok < 3 {
                             info!(
                                 self.log,
-                                "Remove AckReady for W/F {}", ds_id
+                                "Remove AckReady for Wu/F {}", ds_id
                             );
                             job.ack_status = AckStatus::NotAcked;
                         }

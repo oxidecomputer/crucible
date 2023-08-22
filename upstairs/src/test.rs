@@ -3631,9 +3631,14 @@ pub(crate) mod up_test {
         // Now the IO should be replay
         assert!(ds.ds_active.get_mut(&id1).unwrap().replay);
 
-        // State goes back to NotAcked
+        // Write Unwritten State goes back to NotAcked,
+        // Write will remain AckReady
         let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
-        assert_eq!(state, AckStatus::NotAcked);
+        if is_write_unwritten {
+            assert_eq!(state, AckStatus::NotAcked);
+        } else {
+            assert_eq!(state, AckStatus::AckReady);
+        }
 
         // Re-submit and complete the write
         assert!(ds.in_progress(id1, 1).is_some());
