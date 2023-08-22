@@ -490,6 +490,14 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
     metadb.pragma_update(None, "journal_mode", "WAL")?;
     metadb.pragma_update(None, "synchronous", "FULL")?;
 
+    // 16 page * 4KiB page size = 64KiB cache size
+    // Value chosen somewhat arbitrarily as a guess at a good starting point.
+    // the default is a 2000KiB cache size which was way too large, and we did
+    // not see any performance changes moving to a 64KiB cache size. But, this
+    // value may be something we want to reduce further, tune, or scale with
+    // extent size.
+    metadb.pragma_update(None, "cache_size", 16)?;
+
     // rusqlite provides an LRU Cache (a cache which, when full, evicts the
     // least-recently-used value). This caches prepared statements, allowing
     // us to nullify the cost of parsing and compiling frequently used
