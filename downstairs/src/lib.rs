@@ -923,7 +923,7 @@ where
             extent_id,
         } => {
             let msg = {
-                let d = ad.lock().await;
+                let mut d = ad.lock().await;
                 debug!(d.log, "{} Reopen extent {}", repair_id, extent_id);
                 match d.region.reopen_extent(*extent_id).await {
                     Ok(()) => Message::RepairAckId {
@@ -1797,7 +1797,7 @@ pub struct ActiveUpstairs {
  */
 #[derive(Debug)]
 pub struct Downstairs {
-    pub region: Arc<Region>,
+    pub region: Region,
     lossy: bool,        // Test flag, enables pauses and skipped jobs
     read_errors: bool,  // Test flag
     write_errors: bool, // Test flag
@@ -1829,7 +1829,7 @@ impl Downstairs {
             ))),
         };
         Downstairs {
-            region: Arc::new(region),
+            region,
             lossy,
             read_errors,
             write_errors,
