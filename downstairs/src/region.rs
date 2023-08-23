@@ -1855,7 +1855,7 @@ impl Region {
         .await?;
 
         if new_extent.dirty().await {
-            self.dirty_extents.insert(eid as usize);
+            self.dirty_extents.insert(eid);
         }
 
         *mg = ExtentState::Opened(Arc::new(new_extent));
@@ -2244,7 +2244,7 @@ impl Region {
         }
 
         // Mark any extents we sent a write-command to as potentially dirty
-        self.dirty_extents.extend(batched_writes.keys().into_iter());
+        self.dirty_extents.extend(batched_writes.keys());
 
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id);
