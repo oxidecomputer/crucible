@@ -4838,7 +4838,28 @@ impl EncryptionContext {
         self.block_size
     }
 
-    pub fn get_random_nonce(&self) -> Nonce {
+    #[cfg(target_os = "illumos")]
+    fn get_random_nonce(&self) -> Nonce {
+        let mut random_iv = Vec::<u8>::with_capacity(12);
+        random_iv.resize(12, 1);
+
+        // illumos' libc contains this
+        extern "C" {
+            pub fn arc4random_buf(buf: *mut libc::c_void, nbytes: libc::size_t);
+        }
+
+        unsafe {
+            arc4random_buf(
+                random_iv.as_mut_ptr() as *mut libc::c_void,
+                12,
+            )
+        }
+
+        Nonce::clone_from_slice(&random_iv)
+    }
+
+    #[cfg(not(target_os = "illumos"))]
+    fn get_random_nonce(&self) -> Nonce {
         let mut random_iv = Vec::<u8>::with_capacity(12);
         random_iv.resize(12, 1);
 
