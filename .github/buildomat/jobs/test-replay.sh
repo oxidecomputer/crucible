@@ -34,4 +34,4 @@ done
 export BINDIR=/var/tmp/bins
 
 banner replay
-ptime -m bash "$input/scripts/test_replay.sh" "-l 3"
+ptime -m bash "$input/scripts/test_replay.sh"
