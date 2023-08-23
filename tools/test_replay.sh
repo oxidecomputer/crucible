@@ -83,7 +83,6 @@ fi
 (( gen += 1 ))
 
 SECONDS=0
-echo "" > "$test_log"
 echo "Replay loop starts now $(date)" | tee -a "$test_log"
 "$crucible_test" replay "${args[@]}" -c "$loops" \
         --stable -g "$gen" --verify-out alan \
@@ -94,7 +93,6 @@ duration=$SECONDS
 if [[ $result -ne 0 ]]; then
     printf "Error $result after %d:%02d\n" \
             $((duration / 60)) $((duration % 60)) | tee -a ${test_log}
-    mv "$test_log" "$test_log".lastfail
 else
     (( gen += 1 ))
     printf "Replays:%d time: %d:%02d\n" \
