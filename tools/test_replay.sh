@@ -2,7 +2,9 @@
 
 # Create regions and start up the downstairs.
 # Run the crutest replay test using the downstairs.
-err=0
+# Start the downstairs using dsc, connect to dsc from within
+# crutest and use that interface to stop a downstairs.
+result=0
 total=0
 pass_total=0
 SECONDS=0
@@ -14,7 +16,6 @@ function ctrl_c() {
     ${dsc} cmd shutdown
 }
 
-loop_log=/tmp/test_replay_summary.log
 test_log=/tmp/test_replay.log
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,11 +29,11 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
     exit 1
 fi
 
-loops=20
+loops=30
 
 usage () {
     echo "Usage: $0 [-l #]]" >&2
-    echo " -l loops   Number of test loops to perform (default 20)" >&2
+    echo " -l loops   Number of times to cause a replay." >&2
 }
 
 while getopts 'l:' opt; do
@@ -46,15 +47,17 @@ while getopts 'l:' opt; do
     esac
 done
 
-echo "" > ${loop_log}
 echo "" > ${test_log}
-echo "starting $(date)" | tee ${loop_log}
+echo "starting $(date)" | tee ${test_log}
 echo "Tail $test_log for test output"
 
+echo "Creating downstairs regions" | tee -a "$test_log"
 if ! ${dsc} create --cleanup --ds-bin "$downstairs" --extent-count 50 >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
+
+echo "Starting downstairs" | tee -a "$test_log"
 ${dsc} start --ds-bin "$downstairs" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -70,50 +73,44 @@ args+=( -t "127.0.0.1:8830" )
 
 gen=1
 # Initial seed for verify file
+echo "Running initial fill" | tee -a "$test_log"
 if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
+    exit 1
 fi
 (( gen += 1 ))
 
-# Now run the crutest replay test in a loop
-count=1
-while [[ $count -le $loops ]]; do
-    SECONDS=0
-    echo "" > "$test_log"
-    echo "New loop starts now $(date)" >> "$test_log"
-    "$crucible_test" replay "${args[@]}" -c 2 \
-            --stable -g "$gen" --verify-out alan \
-            --verify-in alan \
-            --retry-activate >> "$test_log" 2>&1
-    result=$?
-    if [[ $result -ne 0 ]]; then
-        touch /var/tmp/ds_test/up 2> /dev/null
-        (( err += 1 ))
-        duration=$SECONDS
-        printf "[%03d] Error $result after %d:%02d\n" "$count" \
-                $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
-        mv "$test_log" "$test_log".lastfail
-        break
-    fi
-    duration=$SECONDS
+SECONDS=0
+echo "" > "$test_log"
+echo "Replay loop starts now $(date)" | tee -a "$test_log"
+"$crucible_test" replay "${args[@]}" -c "$loops" \
+        --stable -g "$gen" --verify-out alan \
+        --verify-in alan \
+        --retry-activate >> "$test_log" 2>&1
+result=$?
+duration=$SECONDS
+if [[ $result -ne 0 ]]; then
+    printf "Error $result after %d:%02d\n" \
+            $((duration / 60)) $((duration % 60)) | tee -a ${test_log}
+    mv "$test_log" "$test_log".lastfail
+else
     (( gen += 1 ))
-    (( pass_total += 1 ))
-    (( total += duration ))
-    ave=$(( total / pass_total ))
-    printf "[%03d/%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
-last_run_seconds:%d\n" "$count" "$loops" $((duration / 60)) $((duration % 60)) \
-$((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
-"$err" $duration | tee -a ${loop_log}
-	(( count += 1 ))
-done
+    printf "Replays:%d time: %d:%02d\n" \
+      "$loops" $((duration / 60)) $((duration % 60)) | tee -a ${test_log}
+
+    echo "Do final verify" | tee -a "$test_log"
+    if ! "$crucible_test" verify "${args[@]}" -q -g "$gen"\
+              --verify-out alan --verify-in alan >> "$test_log" 2>&1 ; then
+        echo Failed on final verify, check "$test_log"
+        result=1
+    fi
+fi
+
 ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 sleep 4
-echo "Final results:" | tee -a ${loop_log}
-printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$count" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
-echo "$(date) Test ends with $err" >> "$test_log" 2>&1
-exit "$err"
-
+echo "$(date) Test ends with $result" | tee -a "$test_log" 2>&1
+exit "$result"

@@ -60,7 +60,7 @@ fi
 
 banner live_repair
 echo "$(date) live_repair start" >> "$output_file"
-./tools/test_live_repair_new.sh -l 20
+./tools/test_live_repair.sh -l 20
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) live_repair pass" >> "$output_file"
