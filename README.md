@@ -49,7 +49,7 @@ Here is an example running crutest with the "one" test option.  This will
 connect to the three downstairs and do one write/read/flush then exit.
 
 ```
-$ cargo run -q -p crutest -- one -t 127.0.0.1:3830 -t 127.0.0.1:3820 -t 127.0.0.1:3810 -q
+$ cargo run -q -p crutest -- one -t 127.0.0.1:3830 -t 127.0.0.1:3820 -t 127.0.0.1:3810 -q --gen $(date "+%s")
 raw options: Opt { target: [127.0.0.1:3830, 127.0.0.1:3820, 127.0.0.1:3810] }
 runtime is spawned
 DTrace probes registered ok
