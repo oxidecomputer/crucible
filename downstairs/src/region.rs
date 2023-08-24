@@ -13,7 +13,8 @@ use tokio::task::JoinHandle;
 use anyhow::{anyhow, bail, Result};
 use futures::TryStreamExt;
 use nix::unistd::{sysconf, SysconfVar};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
+
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -262,26 +263,47 @@ impl Inner {
     /// Get rid of all block context rows except those that match the on-disk
     /// hash that is computed after a flush. For best performance, make sure
     /// `extent_block_indexes_and_hashes` is sorted by block number before
-    /// calling this function.
-    fn truncate_encryption_contexts_and_hashes(
-        &mut self,
+    /// calling this function.  Note that this takes an open transaction as
+    /// a parameter; if a caller does not have an open transaction, the
+    /// unadorned variant should be called instead.
+    fn truncate_encryption_contexts_and_hashes_with_tx(
+        &self,
         extent_block_indexes_and_hashes: Vec<(usize, u64)>,
+        tx: &Transaction,
     ) -> Result<()> {
         let n_blocks = extent_block_indexes_and_hashes.len();
         cdt::extent__context__truncate__start!(|| n_blocks as u64);
 
-        let tx = self.metadb.transaction()?;
         {
-            let stmt = "DELETE FROM block_context where block == ?1 and on_disk_hash != ?2";
+            let stmt = "DELETE FROM block_context \
+                where block == ?1 and on_disk_hash != ?2";
+
             let mut stmt = tx.prepare_cached(stmt)?;
             for (block, on_disk_hash) in extent_block_indexes_and_hashes {
                 let _rows_affected =
                     stmt.execute(params![block, on_disk_hash as i64])?;
             }
         }
-        tx.commit()?;
 
         cdt::extent__context__truncate__done!(|| ());
+
+        Ok(())
+    }
+
+    /// A wrapper around ['truncate_encryption_contexts_and_hashes_with_tx']
+    /// that calls it from within a transaction.
+    fn truncate_encryption_contexts_and_hashes(
+        &self,
+        extent_block_indexes_and_hashes: Vec<(usize, u64)>,
+    ) -> Result<()> {
+        let tx = self.metadb.unchecked_transaction()?;
+
+        self.truncate_encryption_contexts_and_hashes_with_tx(
+            extent_block_indexes_and_hashes,
+            &tx
+        )?;
+
+        tx.commit()?;
 
         Ok(())
     }
@@ -1165,6 +1187,13 @@ impl Extent {
             }
         }
 
+        // We do all of our metadb updates in a single transaction to minimize
+        // syncs.  (Note that the "unchecked" in the signature merely denotes
+        // that we are taking responsibility for assuring that we are not
+        // in a nested transaction, accepting that it will fail at run-time
+        // if we are.)
+        let tx = inner.metadb.unchecked_transaction()?;
+
         inner.set_dirty()?;
 
         // Write all the metadata to the DB
@@ -1173,7 +1202,7 @@ impl Extent {
         cdt::extent__write__sqlite__insert__start!(|| {
             (job_id, self.number, writes.len() as u64)
         });
-        let tx = inner.metadb.transaction()?;
+
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
                 debug_assert!(only_write_unwritten);
@@ -1426,18 +1455,25 @@ impl Extent {
         cdt::extent__flush__sqlite__insert__start!(|| {
             (job_id, self.number, n_dirty_blocks)
         });
-        inner.truncate_encryption_contexts_and_hashes(
+
+        // We put all of our metadb updates into a single transaction to
+        // assure that we have a single sync.
+        let tx = inner.metadb.unchecked_transaction()?;
+
+        inner.truncate_encryption_contexts_and_hashes_with_tx(
             extent_block_indexes_and_hashes,
+            &tx,
         )?;
+
         cdt::extent__flush__sqlite__insert__done!(|| {
             (job_id, self.number, n_dirty_blocks)
         });
 
-        // Reset the file's seek offset to 0, and set the flush number and gen
-        // number
-        inner.file.seek(SeekFrom::Start(0))?;
-
         inner.set_flush_number(new_flush, new_gen)?;
+        tx.commit()?;
+
+        // Finally, reset the file's seek offset to 0
+        inner.file.seek(SeekFrom::Start(0))?;
 
         cdt::extent__flush__done!(|| { (job_id, self.number, n_dirty_blocks) });
 
