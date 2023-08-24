@@ -4840,7 +4840,9 @@ impl EncryptionContext {
 
     #[cfg(target_os = "illumos")]
     fn get_random_nonce(&self) -> Nonce {
-        let mut random_iv: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ];
 
         // illumos' libc contains this
         extern "C" {
@@ -4851,12 +4853,14 @@ impl EncryptionContext {
             arc4random_buf(random_iv.as_mut_ptr() as *mut libc::c_void, 12)
         }
 
-        Nonce::clone_from_slice(&random_iv)
+        random_iv
     }
 
     #[cfg(not(target_os = "illumos"))]
     fn get_random_nonce(&self) -> Nonce {
-        let mut random_iv: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ];
 
         let filled = unsafe {
             libc::getrandom(
@@ -4868,7 +4872,7 @@ impl EncryptionContext {
 
         assert_eq!(filled, 12);
 
-        Nonce::clone_from_slice(&random_iv)
+        random_iv
     }
 
     pub fn encrypt_in_place(
