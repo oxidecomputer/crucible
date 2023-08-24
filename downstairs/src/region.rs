@@ -300,7 +300,7 @@ impl Inner {
 
         self.truncate_encryption_contexts_and_hashes_with_tx(
             extent_block_indexes_and_hashes,
-            &tx
+            &tx,
         )?;
 
         tx.commit()?;
