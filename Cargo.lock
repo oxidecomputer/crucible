@@ -719,6 +719,7 @@ dependencies = [
  "futures",
  "futures-core",
  "itertools 0.11.0",
+ "libc",
  "omicron-common",
  "openapi-lint",
  "openapiv3",

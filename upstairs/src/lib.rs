@@ -37,7 +37,6 @@ use uuid::Uuid;
 
 use aes_gcm_siv::aead::AeadInPlace;
 use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
-use rand_chacha::ChaCha20Rng;
 
 pub mod control;
 mod dummy_downstairs_tests;
@@ -4839,14 +4838,41 @@ impl EncryptionContext {
         self.block_size
     }
 
-    pub fn get_random_nonce(&self) -> Nonce {
-        let mut rng = ChaCha20Rng::from_entropy();
+    #[cfg(target_os = "illumos")]
+    fn get_random_nonce(&self) -> Nonce {
+        let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ];
 
-        let mut random_iv = Vec::<u8>::with_capacity(12);
-        random_iv.resize(12, 1);
-        rng.fill_bytes(&mut random_iv);
+        // illumos' libc contains this
+        extern "C" {
+            pub fn arc4random_buf(buf: *mut libc::c_void, nbytes: libc::size_t);
+        }
 
-        Nonce::clone_from_slice(&random_iv)
+        unsafe {
+            arc4random_buf(random_iv.as_mut_ptr() as *mut libc::c_void, 12)
+        }
+
+        random_iv
+    }
+
+    #[cfg(not(target_os = "illumos"))]
+    fn get_random_nonce(&self) -> Nonce {
+        let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ];
+
+        let filled = unsafe {
+            libc::getrandom(
+                random_iv.as_mut_ptr() as *mut libc::c_void,
+                12,
+                libc::GRND_NONBLOCK,
+            )
+        };
+
+        assert_eq!(filled, 12);
+
+        random_iv
     }
 
     pub fn encrypt_in_place(
