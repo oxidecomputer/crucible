@@ -26,7 +26,7 @@ pub const REPAIR_PORT_OFFSET: u16 = 4000;
 
 // Max number of submitted IOs between the upstairs and the downstairs, above
 // which flow control kicks in.
-pub const MAX_ACTIVE_COUNT: usize = 600;
+pub const MAX_ACTIVE_COUNT: usize = 2600;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(

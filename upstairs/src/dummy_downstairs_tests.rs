@@ -416,7 +416,6 @@ pub(crate) mod protocol_test {
                             }
 
                             Some(m) => {
-                                info!(log, "received {:?}", m);
                                 tx.send(m).await.unwrap();
                             }
                         },
@@ -874,8 +873,6 @@ pub(crate) mod protocol_test {
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
-            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
-
             {
                 let harness = harness.clone();
 
@@ -1070,13 +1067,7 @@ pub(crate) mod protocol_test {
                 })
                 .await
             {
-                Ok(()) => {
-                    info!(
-                        harness.log,
-                        "sent read response for job {} = {}", i, job_id,
-                    );
-                }
-
+                Ok(()) => {}
                 Err(e) => {
                     // We should be able to send a few, but at some point
                     // the Upstairs will disconnect us.
@@ -1902,8 +1893,6 @@ pub(crate) mod protocol_test {
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
-            info!(harness.log, "sending read {}/{NUM_JOBS}", i);
-
             {
                 let harness = harness.clone();
 
