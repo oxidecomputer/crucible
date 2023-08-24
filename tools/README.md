@@ -50,16 +50,15 @@ the crutest perf test using those regions.
 A variety of extent size and extent counts are used (always the same total
 region size of ~100G).
 
-## test_reconnect.sh
-A stress test of the reconnect code path.
-Start up the "downstairs_daemon" script that will start three downstairs, then
-in a loop kill and restart one at random.
-Then, run in a loop the client "one" test which tries to start the upstairs
-and do one IO, wait for the result, then exit.
-
 ## test_repair.sh
 A test to break, then repair a downstairs region that is out of sync with
 the other regions, in a loop
+
+## test_replay.sh
+A test that checks the replay code path, if a downstairs disconnects and
+then reconnects, we replay jobs to it.  This is a thin wrapper around the
+crutest replay test.  We use dsc to start and run the downstairs, then
+subject the crutest upstairs to disconnecting downstairs.
 
 ## test_restart_repair.sh
 Test the repair process while the downstairs are restarting, in a loop.

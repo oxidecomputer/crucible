@@ -78,9 +78,11 @@ function perf_round() {
 
     "$dsc" create --ds-bin "$downstairs" --cleanup \
         --extent-size "$es" --extent-count "$ec" \
-        --region-dir "$region_dir" --block-size "$block_size"
+        --region-dir "$region_dir" \
+        --block-size "$block_size"
 
-    "$dsc" start --ds-bin "$downstairs" --region-dir "$region_dir" &
+    "$dsc" start --ds-bin "$downstairs" \
+    --region-dir "$region_dir" &
     dsc_pid=$!
     sleep 5
     if ! pgrep -P $dsc_pid; then

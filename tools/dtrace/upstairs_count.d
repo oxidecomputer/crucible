@@ -1,14 +1,62 @@
-/*
- * Display internal Upstairs live repair status.
- */
 #pragma D option quiet
-#pragma D option strsize=1k
+/*
+ * IO counters for upstairs.
+ */
+
 /*
  * Print the header right away
  */
 dtrace:::BEGIN
 {
     show = 21;
+}
+
+crucible_upstairs*:::gw-flush-start
+/pid == $1/
+{
+    @flush_start = count();
+}
+
+crucible_upstairs*:::gw-flush-done
+/pid == $1/
+{
+    @flush_done = count();
+}
+
+crucible_upstairs*:::gw-write-start
+/pid == $1/
+{
+    @write_start = count();
+}
+
+crucible_upstairs*:::gw-write-done
+/pid == $1/
+{
+    @write_done = count();
+}
+
+crucible_upstairs*:::gw-read-start
+/pid == $1/
+{
+    @read_start = count();
+}
+
+crucible_upstairs*:::gw-read-done
+/pid == $1/
+{
+    @read_done = count();
+}
+
+crucible_upstairs*:::gw-write-unwritten-start
+/pid == $1/
+{
+    @write_unwritten_start = count();
+}
+
+crucible_upstairs*:::gw-write-unwritten-done
+/pid == $1/
+{
+    @write_unwritten_done = count();
 }
 
 /*
@@ -18,41 +66,26 @@ dtrace:::BEGIN
 tick-1s
 /show > 20/
 {
-    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
-    printf("  %4s %4s %4s %4s %4s %4s",
-        "CON0", "CON1", "CON2", "LRC0", "LRC1", "LRC2");
-    printf(" %4s %4s %4s %4s %4s %4s",
-        "LRA0", "LRA1", "LRA2", "REP0", "REP1", "REP2");
+    printf("%4s %4s %4s %4s %5s %5s %4s %4s",
+        "F>", "F<", "W>", "W<", "R>", "R<", "WU>", "WU<");
     printf("\n");
     show = 0;
 }
 
-crucible_upstairs*:::up-status
+tick-1s
 {
-    show = show + 1;
-    /*
-     * State for the three downstiars
-     */
-    printf("%17s", json(copyinstr(arg1), "ok.ds_state[0]"));
-    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[1]"));
-    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[2]"));
-
-    /*
-     * Repair counts for the downstairs
-     */
-    printf(" ");
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_connected[0]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_connected[1]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_connected[2]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_live_repair_completed[0]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_live_repair_completed[1]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_live_repair_completed[2]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_live_repair_aborted[0]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_live_repair_aborted[1]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_live_repair_aborted[2]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_replaced[0]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_replaced[1]"));
-    printf(" %4s", json(copyinstr(arg1), "ok.ds_replaced[2]"));
-
+    printa("%@4u %@4u %@4u %@4u %@5u %@5u %@4u %@4u",
+        @flush_start, @flush_done, @write_start, @write_done,
+        @read_start, @read_done, @write_unwritten_start, @write_unwritten_done
+    );
     printf("\n");
+    clear(@flush_start);
+    clear(@flush_done);
+    clear(@write_start);
+    clear(@write_done);
+    clear(@read_start);
+    clear(@read_done);
+    clear(@write_unwritten_start);
+    clear(@write_unwritten_done);
+    show = show + 1;
 }

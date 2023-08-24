@@ -3,7 +3,7 @@
 #: name = "build"
 #: variety = "basic"
 #: target = "helios-2.0"
-#: rust_toolchain = "1.66"
+#: rust_toolchain = "1.70.0"
 #: output_rules = [
 #:	"/work/bins/*",
 #:	"/work/scripts/*",
@@ -38,7 +38,7 @@ for t in crucible-downstairs crucible-hammer crutest dsc; do
 done
 
 mkdir -p /work/scripts
-for s in tools/test_live_repair.sh tools/test_repair.sh tools/test_up.sh tools/test_ds.sh; do
+for s in tools/test_live_repair.sh tools/test_repair.sh tools/test_up.sh tools/test_ds.sh tools/test_replay.sh ; do
 	cp "$s" /work/scripts/
 done
 

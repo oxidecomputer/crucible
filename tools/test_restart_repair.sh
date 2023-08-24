@@ -12,6 +12,7 @@ err=0
 total=0
 pass_total=0
 SECONDS=0
+
 # Control-C to cleanup.
 trap ctrl_c INT
 function ctrl_c() {
@@ -52,17 +53,6 @@ function stop_all_downstairs() {
     fi
 }
 
-export loop_log=/tmp/repair_restart.log
-export test_log=/tmp/repair_restart_test.log
-export dsc_log=/tmp/repair_restart_dsc.log
-export region_dir="./var"
-
-echo "" > ${loop_log}
-echo "starting $(date)" | tee ${loop_log}
-echo "Tail $test_log for test output"
-echo "Tail $loop_log for summary output"
-echo "Tail $dsc_log for dsc outout"
-
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
@@ -81,6 +71,35 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
     echo Run: pkill -f -U "$(id -u)" "$cds" >&2
     exit 1
 fi
+
+loops=10
+
+usage () {
+    echo "Usage: $0 [-l #]]" >&2
+    echo " -l loops   Number of test loops to perform (default 10)" >&2
+}
+
+while getopts 'l:' opt; do
+    case "$opt" in
+        l)  loops=$OPTARG
+            ;;
+        *)  echo "Invalid option"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+export loop_log=/tmp/repair_restart.log
+export test_log=/tmp/repair_restart_test.log
+export dsc_log=/tmp/repair_restart_dsc.log
+export region_dir="./var"
+
+echo "" > ${loop_log}
+echo "starting $(date)" | tee ${loop_log}
+echo "Tail $test_log for test output"
+echo "Tail $loop_log for summary output"
+echo "Tail $dsc_log for dsc outout"
 
 echo "Create a new region to test" | tee -a "${loop_log}"
 ulimit -n 65536
@@ -165,8 +184,8 @@ printf "Initial fill and verify took: %d:%02d \n" \
     $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
 
 # Now run the repair loop
-for i in {1..10}
-do
+count=1
+while [[ $count -le $loops ]]; do
     SECONDS=0
     echo "" >> "$test_log"
     echo "" >> "$test_log"
@@ -212,7 +231,7 @@ do
     if [[ $result -ne 0 ]]; then
         (( err += 1 ))
         duration=$SECONDS
-        printf "[%03d] Error $result in one test after %d:%02d\n" "$i" \
+        printf "[%03d] Error $result in one test after %d:%02d\n" "$count" \
                 $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
         mv "$test_log" "$test_log".lastfail
         break
@@ -223,10 +242,11 @@ do
     (( pass_total += 1 ))
     (( total += duration ))
     ave=$(( total / pass_total ))
-    printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
-last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) \
+    printf "[%03d/%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
+last_run_seconds:%d\n" "$count" "$loops" $((duration / 60)) $((duration % 60)) \
 $((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
 "$err" $duration | tee -a ${loop_log}
+    (( count += 1 ))
 
 done
 "$dsc" cmd shutdown
@@ -235,6 +255,10 @@ if [[ -n "$dsc_pid" ]]; then
 fi
 
 echo "Final results $(date):" | tee -a ${loop_log}
-printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
+printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" \
+  "$count" $((duration / 60)) $((duration % 60)) \
+  $((ave / 60)) $((ave % 60)) \
+  $((total / 60)) $((total % 60)) \
+  "$err" $duration | tee -a ${loop_log}
 exit "$err"
 

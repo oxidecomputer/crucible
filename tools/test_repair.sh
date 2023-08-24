@@ -47,16 +47,24 @@ fi
 verify_file=/tmp/test_repair_verify.data
 test_log=/tmp/test_repair_out.txt
 ds_log_prefix=/tmp/test_repair_ds
+loops=100
+
+usage () {
+    echo "Usage: $0 [-l #] [N]" >&2
+    echo " -l loops   Number of test loops to perform (default 100)" >&2
+	echo " -N         Don't dump color output"
+}
 
 dump_args=()
-while getopts 'N' opt; do
+while getopts 'l:N' opt; do
 	case "$opt" in
+        l)  loops=$OPTARG
+            ;;
 		N)  echo "Turn off color for downstairs dump"
             dump_args+=(" --no-color")
             ;;
-        *)
-			echo "Usage: $0 [N]"
-			echo "N:  Don't dump color output"
+        *)  echo "Invalid option"
+            usage
 			exit 1
 			;;
 	esac
@@ -106,11 +114,12 @@ fi
 (( generation += 1))
 
 # Start loop
-for (( i = 0; i < 100; i += 1 )); do
+count=1
+while [[ $count -lt $loops ]]; do
 
     choice=$((RANDOM % 3))
     echo ""
-    echo "Begin loop $i"
+    echo "Begin loop $count"
     echo "Downstairs to restart: $choice"
 
     # stop a downstairs and restart with lossy
@@ -133,7 +142,7 @@ for (( i = 0; i < 100; i += 1 )); do
 
     if ! ${ct} repair ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" -c 30 -g "$generation"
     then
-        echo "Exit on repair fail, loop: $i, choice: $choice"
+        echo "Exit on repair fail, loop: $count, choice: $choice"
         cleanup
         exit 1
     fi
@@ -157,7 +166,7 @@ for (( i = 0; i < 100; i += 1 )); do
     # a mismatch
     echo "Current downstairs dump: da:${dump_args}"
     ${cds} dump ${dump_args} || true
-    echo "On loop $i"
+    echo "On loop $count"
 
     echo ""
     # Start downstairs without lossy
@@ -177,7 +186,7 @@ for (( i = 0; i < 100; i += 1 )); do
     echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" > "$test_log"
     if ! ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" >> "$test_log" 2>&1
     then
-        echo "Exit on verify fail, loop: $i, choice: $choice"
+        echo "Exit on verify fail, loop: $count, choice: $choice"
         echo "Check $test_log for details"
         cleanup
         exit 1
@@ -194,8 +203,9 @@ for (( i = 0; i < 100; i += 1 )); do
     set -o errexit
     (( generation += 1))
 
-    echo "Loop: $i  Downstairs dump after verify (and repair):"
+    echo "Loop: $count  Downstairs dump after verify (and repair):"
     ${cds} dump ${dump_args[@]}
+    (( count += 1 ))
 
 done
 

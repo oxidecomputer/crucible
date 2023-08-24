@@ -29,6 +29,25 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
     exit 1
 fi
 
+loops=20
+
+usage () {
+    echo "Usage: $0 [-l #]" >&2
+    echo " -l loops   Number of test loops to perform (default 20)" >&2
+}
+
+dump_args=()
+while getopts 'l:' opt; do
+	case "$opt" in
+        l)  loops=$OPTARG
+            ;;
+        *)  echo "Invalid option"
+            usage
+			exit 1
+			;;
+	esac
+done
+
 if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 --extent-size 50; then
     echo "Failed to create region"
     exit 1
@@ -70,8 +89,8 @@ echo "Tail $test_log for test output"
 gen=1
 # This is held at 1 loop till we fix the #389 issue, or implement
 # generation numbers properly.
-for i in {1..20}
-do
+count=1
+while [[ $count -le $loops ]]; do
     SECONDS=0
     echo "" > "$test_log"
     echo "New loop with gen $gen starts now $(date)" >> "$test_log"
@@ -82,7 +101,7 @@ do
         touch /tmp/ds_test/up 2> /dev/null
         (( err += 1 ))
         duration=$SECONDS
-        printf "[%03d] Error $result after %d:%02d\n" "$i" \
+        printf "[%03d] Error $result after %d:%02d\n" "$count" \
                 $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
         mv "$test_log" "$test_log".lastfail
         echo "Failing test log at: $test_log.lastfail"
@@ -102,14 +121,22 @@ do
     (( pass_total += 1 ))
     (( total += duration ))
     ave=$(( total / pass_total ))
-    printf "[%03d][%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
-last_run_seconds:%d\n" "$i" "$gen" $((duration / 60)) $((duration % 60)) \
-$((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
-"$err" $duration | tee -a ${loop_log}
-
+    printf "[%03d/%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
+last_run_seconds:%d\n" \
+  "$count" "$loops" \
+  $((duration / 60)) $((duration % 60)) \
+  $((ave / 60)) $((ave % 60)) \
+  $((total / 60)) $((total % 60)) \
+  "$err" $duration | tee -a ${loop_log}
+    (( count += 1 ))
 done
 echo "Final results:" | tee -a ${loop_log}
-printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" "$i" $((duration / 60)) $((duration % 60)) $((ave / 60)) $((ave % 60)) $((total / 60)) $((total % 60)) "$err" $duration | tee -a ${loop_log}
+printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" \
+  "$count" \
+   $((duration / 60)) $((duration % 60)) \
+  $((ave / 60)) $((ave % 60)) \
+  $((total / 60)) $((total % 60)) \
+  "$err" $duration | tee -a ${loop_log}
 
 echo "Stopping dsc"
 kill $dsc_pid 2> /dev/null

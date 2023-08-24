@@ -79,7 +79,7 @@ banner LR
 ptime -m "$BINDIR"/crutest replace \
   -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 \
   --replacement 127.0.0.1:8840 \
-  -g 1 -c 10 -q > /tmp/crutest-replace.log
+  -g 1 -c 10 --stable > /tmp/crutest-replace.log
 
 banner StopDSC
 $BINDIR/dsc cmd shutdown
