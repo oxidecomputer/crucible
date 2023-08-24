@@ -415,7 +415,10 @@ impl Volume {
                     )
                     .await?;
                 } else {
-                    info!(self.log, "Scrub eliding blank write at offset {}", offset);
+                    info!(
+                        self.log,
+                        "Scrub eliding blank write at offset {}", offset
+                    );
                 }
 
                 offset += block_count as u64;
