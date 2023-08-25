@@ -415,7 +415,7 @@ impl Volume {
                     )
                     .await?;
                 } else {
-                    info!(
+                    debug!(
                         self.log,
                         "Scrub eliding blank write at offset {}", offset
                     );
