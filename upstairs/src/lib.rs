@@ -4851,13 +4851,13 @@ impl EncryptionContext {
         self.block_size
     }
 
-    #[cfg(target_os = "illumos")]
+    #[cfg(any(target_os = "illumos", target_os = "macos"))]
     fn get_random_nonce(&self) -> Nonce {
         let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         ];
 
-        // illumos' libc contains this
+        // macos' and illumos' libc contain this
         extern "C" {
             pub fn arc4random_buf(buf: *mut libc::c_void, nbytes: libc::size_t);
         }
@@ -4869,7 +4869,7 @@ impl EncryptionContext {
         random_iv
     }
 
-    #[cfg(not(target_os = "illumos"))]
+    #[cfg(not(any(target_os = "illumos", target_os = "macos")))]
     fn get_random_nonce(&self) -> Nonce {
         let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
