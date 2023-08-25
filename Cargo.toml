@@ -88,7 +88,7 @@ tempfile = "3"
 test-strategy = "0.3.1"
 thiserror = "1"
 tokio = { version = "1.29", features = ["full"] }
-tokio-rustls = { version = "0.23.4" }
+tokio-rustls = { version = "0.24.1" }
 tokio-test = "*"
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.7"
