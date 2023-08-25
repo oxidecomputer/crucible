@@ -111,13 +111,13 @@ impl Producer for DsStatOuter {
     ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, MetricsError> {
         let dss = executor::block_on(self.ds_stat_wrap.lock());
 
-        let mut data = Vec::with_capacity(4);
-        let name = dss.stat_name;
-
-        data.push(Sample::new(&name, &dss.up_connect_count));
-        data.push(Sample::new(&name, &dss.flush_count));
-        data.push(Sample::new(&name, &dss.write_count));
-        data.push(Sample::new(&name, &dss.read_count));
+        let name = &dss.stat_name;
+        let data = vec![
+            Sample::new(name, &dss.up_connect_count)?,
+            Sample::new(name, &dss.flush_count)?,
+            Sample::new(name, &dss.write_count)?,
+            Sample::new(name, &dss.read_count)?,
+        ];
 
         // Yield the available samples.
         Ok(Box::new(data.into_iter()))

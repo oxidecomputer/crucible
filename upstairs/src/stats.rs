@@ -177,19 +177,19 @@ impl Producer for UpStatOuter {
             tokio::runtime::Handle::current().block_on(self.up_stat_wrap.lock())
         });
 
-        let mut data = Vec::with_capacity(6);
-        let name = ups.stat_name;
-
-        data.push(Sample::new(&name, &ups.activated_count));
-        data.push(Sample::new(&name, &ups.flush_count));
-        data.push(Sample::new(&name, &ups.write_count));
-        data.push(Sample::new(&name, &ups.write_bytes));
-        data.push(Sample::new(&name, &ups.read_count));
-        data.push(Sample::new(&name, &ups.read_bytes));
-        data.push(Sample::new(&name, &ups.flush_close_count));
-        data.push(Sample::new(&name, &ups.extent_repair_count));
-        data.push(Sample::new(&name, &ups.extent_noop_count));
-        data.push(Sample::new(&name, &ups.extent_reopen_count));
+        let name = &ups.stat_name;
+        let data = vec![
+            Sample::new(name, &ups.activated_count)?,
+            Sample::new(name, &ups.flush_count)?,
+            Sample::new(name, &ups.write_count)?,
+            Sample::new(name, &ups.write_bytes)?,
+            Sample::new(name, &ups.read_count)?,
+            Sample::new(name, &ups.read_bytes)?,
+            Sample::new(name, &ups.flush_close_count)?,
+            Sample::new(name, &ups.extent_repair_count)?,
+            Sample::new(name, &ups.extent_noop_count)?,
+            Sample::new(name, &ups.extent_reopen_count)?,
+        ];
 
         // Yield the available samples.
         Ok(Box::new(data.into_iter()))
