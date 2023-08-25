@@ -176,12 +176,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayvec"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
-
-[[package]]
 name = "async-recursion"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3501,9 +3495,9 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2fde955d11817fdcb79d703932fb6b473192cb36b6a92ba21f7f4ac0513374e"
+checksum = "3defc4467a8909614bcb02cb304a3e8472c31f7a44e6c6c287eb9575b212bc4d"
 dependencies = [
  "chrono",
  "crossterm 0.26.1",
@@ -4261,9 +4255,9 @@ dependencies = [
 
 [[package]]
 name = "strip-ansi-escapes"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "011cbb39cf7c1f62871aea3cc46e5817b0937b49e9447370c93cacbe93a766d8"
+checksum = "55ff8ef943b384c414f54aefa961dd2bd853add74ec75e7ac74cf91dba62bcfa"
 dependencies = [
  "vte",
 ]
@@ -5108,11 +5102,10 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "vte"
-version = "0.10.1"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cbce692ab4ca2f1f3047fcf732430249c0e971bfdd2b234cf2c47ad93af5983"
+checksum = "f5022b5fbf9407086c180e9557be968742d839e68346af7792b8592489732197"
 dependencies = [
- "arrayvec",
  "utf8parse",
  "vte_generate_state_changes",
 ]
