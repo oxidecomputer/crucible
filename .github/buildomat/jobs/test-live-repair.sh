@@ -6,11 +6,44 @@
 #: output_rules = [
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
+#:	"/tmp/dsc/*.txt",
+#:	"/tmp/dsc.tar",
 #: ]
 #: skip_clone = true
 #:
 #: [dependencies.build]
 #: job = "build"
+
+#
+# If we fail, try to collect some debugging information
+#
+_exit_trap() {
+    local status=$?
+    [[ $status -eq 0 ]] && exit 0
+
+    set +o errexit
+    set -o xtrace
+    sleep 5
+    banner evidence
+
+    CORES=$(ls /tmp/core*)
+    for c in $CORES; do
+        echo "Stack for Core file $c"
+        pfexec pstack "$c"
+    done
+
+    tar cf /tmp/dsc.tar /var/tmp/dsc/region
+
+    echo "Final region compare"
+    $BINDIR/crucible-downstairs dump \
+        -d /var/tmp/dsc/region/8810 \
+        -d /var/tmp/dsc/region/8820 \
+        -d /var/tmp/dsc/region/8830
+
+    exit $status
+}
+
+trap _exit_trap EXIT
 
 input="/input/build/work"
 
@@ -79,7 +112,7 @@ banner LR
 ptime -m "$BINDIR"/crutest replace \
   -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 \
   --replacement 127.0.0.1:8840 \
-  -g 1 -c 10 --stable > /tmp/crutest-replace.log
+  -g 1 -c 10 --stable > /tmp/crutest-replace.log 2>&1
 
 banner StopDSC
 $BINDIR/dsc cmd shutdown
