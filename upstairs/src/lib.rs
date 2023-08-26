@@ -23,7 +23,7 @@ pub use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
-use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
+use ringbuffer::{AllocRingBuffer, RingBuffer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, warn, Logger};
@@ -2968,8 +2968,8 @@ impl Downstairs {
             ds_active: BTreeMap::new(),
             ds_new: vec![Vec::new(); 3],
             ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
-            completed: AllocRingBuffer::with_capacity(2048),
-            completed_jobs: AllocRingBuffer::with_capacity(8),
+            completed: AllocRingBuffer::new(2048),
+            completed_jobs: AllocRingBuffer::new(8),
             next_id: 1000,
             region_metadata: HashMap::new(),
             reconcile_current_work: None,
@@ -9116,7 +9116,7 @@ impl Guest {
             guest_work: Mutex::new(GuestWork {
                 active: HashMap::new(), // GtoS
                 next_gw_id: 1,
-                completed: AllocRingBuffer::with_capacity(2048),
+                completed: AllocRingBuffer::new(2048),
             }),
 
             iop_tokens: Mutex::new(0),
