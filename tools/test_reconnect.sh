@@ -81,11 +81,11 @@ do
     echo "New loop starts now $(date)" >> "$test_log"
     "$crucible_test" generic "${args[@]}" -c 15000 \
             -q -g "$gen" --verify-out alan \
+            --range \
             --verify-in alan \
             --retry-activate >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
-        touch /var/tmp/ds_test/up 2> /dev/null
         (( err += 1 ))
         duration=$SECONDS
         printf "[%03d] Error $result after %d:%02d\n" "$i" \

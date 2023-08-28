@@ -277,8 +277,8 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" -g "$gen" -q "${args[@]}"
-if ! "$ct" verify -g "$gen" -q "${args[@]}"; then
+echo "$ct" "$tt" --range -g "$gen" -q "${args[@]}"
+if ! "$ct" verify --range -g "$gen" -q "${args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"

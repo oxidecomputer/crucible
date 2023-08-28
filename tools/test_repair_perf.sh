@@ -72,8 +72,8 @@ function repair_round() {
     # Do one IO to each block, verify.
     gen=1
     echo "$(date) fill" >> "$test_log"
-    echo "$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log"
-    "$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log" 2>&1
+    echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log"
+    "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log" 2>&1
     if [[ $? -ne 0 ]]; then
         echo "Error in initial fill"
         stop_test

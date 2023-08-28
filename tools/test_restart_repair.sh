@@ -138,8 +138,8 @@ gen=1
 # Send something to the region so our old region files have data.
 echo "$(date) pre-fill" >> "$test_log"
 echo "$(date) run pre-fill of our region" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" -q -g "$gen" >> "$test_log"
-"$ct" fill "${args[@]}" -q -g "$gen" >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" --stable -g "$gen" >> "$test_log"
+"$ct" fill "${args[@]}" --stable -g "$gen" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial pre-fill"
     ctrl_c
@@ -170,8 +170,8 @@ bring_all_downstairs_online
 # different data in current vs. old region directories.
 echo "$(date) Run a second fill test" >> "$test_log"
 echo "$(date) Run a second fill test" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log"
-"$ct" fill "${args[@]}" -q -g "$gen" --verify-out alan >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log"
+"$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
