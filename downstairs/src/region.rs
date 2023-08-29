@@ -72,32 +72,22 @@ impl Inner {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='gen_number'",
         )?;
-        let gen_number_iter = stmt.query_map([], |row| row.get(0))?;
+        let mut gen_number_iter = stmt.query_map([], |row| row.get(0))?;
+        let gen_number = gen_number_iter.next().unwrap()?;
+        assert!(gen_number_iter.next().is_none());
 
-        let mut gen_number_values: Vec<u64> = vec![];
-        for gen_number_value in gen_number_iter {
-            gen_number_values.push(gen_number_value?);
-        }
-
-        assert!(gen_number_values.len() == 1);
-
-        Ok(gen_number_values[0])
+        Ok(gen_number)
     }
 
     pub fn flush_number(&self) -> Result<u64> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='flush_number'",
         )?;
-        let flush_number_iter = stmt.query_map([], |row| row.get(0))?;
+        let mut flush_number_iter = stmt.query_map([], |row| row.get(0))?;
+        let flush_number = flush_number_iter.next().unwrap()?;
+        assert!(flush_number_iter.next().is_none());
 
-        let mut flush_number_values: Vec<u64> = vec![];
-        for flush_number_value in flush_number_iter {
-            flush_number_values.push(flush_number_value?);
-        }
-
-        assert!(flush_number_values.len() == 1);
-
-        Ok(flush_number_values[0])
+        Ok(flush_number)
     }
 
     /*
@@ -132,16 +122,11 @@ impl Inner {
         let mut stmt = self
             .metadb
             .prepare_cached("SELECT value FROM metadata where name='dirty'")?;
-        let dirty_iter = stmt.query_map([], |row| row.get(0))?;
+        let mut dirty_iter = stmt.query_map([], |row| row.get(0))?;
+        let dirty = dirty_iter.next().unwrap()?;
+        assert!(dirty_iter.next().is_none());
 
-        let mut dirty_values: Vec<bool> = vec![];
-        for dirty_value in dirty_iter {
-            dirty_values.push(dirty_value?);
-        }
-
-        assert!(dirty_values.len() == 1);
-
-        Ok(dirty_values[0])
+        Ok(dirty)
     }
 
     fn set_dirty(&self) -> Result<()> {
