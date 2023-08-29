@@ -1316,10 +1316,10 @@ impl Extent {
         // Write any remaining data
         batched_pwritev.perform_writes()?;
 
-        // At this point, we know that the on-disk values for any written blocks
+        // At this point, we know that the written data for the target blocks
         // must match the integrity hashes calculated above (and stored to
-        // SQLite).  We can therefore store hash values for many dirty blocks,
-        // allowing us to skip rehashing during a flush operation.
+        // SQLite).  We can therefore store pre-computed hash values for these
+        // dirty blocks, allowing us to skip rehashing during a flush operation.
         for (write, hash) in writes.iter().zip(&hashes_to_write) {
             if let Some(h) = hash {
                 // This overwrites the `None` value written above!
