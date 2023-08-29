@@ -419,13 +419,13 @@ pub mod cdt {
     fn extent__flush__collect__hashes__start(
         job_id: u64,
         extent_id: u32,
-        extent_size: u64,
+        num_dirty: u64,
     ) {
     }
     fn extent__flush__collect__hashes__done(
         job_id: u64,
         extent_id: u32,
-        extent_size: u64,
+        num_rehashed: u64,
     ) {
     }
     fn extent__flush__sqlite__insert__start(

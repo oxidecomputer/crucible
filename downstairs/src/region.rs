@@ -1,6 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{rename, File, OpenOptions};
@@ -56,7 +56,10 @@ pub struct Inner {
     metadb: Connection,
 
     /// Set of blocks that have been written since last flush.
-    dirty_blocks: HashSet<usize>,
+    ///
+    /// If the hash is known, then it's also recorded here.  It _should_ always
+    /// be known, unless the write failed.
+    dirty_blocks: BTreeMap<usize, Option<u64>>,
 }
 
 /// An extent can be Opened or Closed. If Closed, it is probably being updated
@@ -268,7 +271,8 @@ impl Inner {
     /// unadorned variant should be called instead.
     fn truncate_encryption_contexts_and_hashes_with_tx(
         &self,
-        extent_block_indexes_and_hashes: Vec<(usize, u64)>,
+        extent_block_indexes_and_hashes: impl Iterator<Item = (usize, u64)>
+            + ExactSizeIterator,
         tx: &Transaction,
     ) -> Result<()> {
         let n_blocks = extent_block_indexes_and_hashes.len();
@@ -294,7 +298,8 @@ impl Inner {
     /// that calls it from within a transaction.
     fn truncate_encryption_contexts_and_hashes(
         &self,
-        extent_block_indexes_and_hashes: Vec<(usize, u64)>,
+        extent_block_indexes_and_hashes: impl Iterator<Item = (usize, u64)>
+            + ExactSizeIterator,
     ) -> Result<()> {
         let tx = self.metadb.unchecked_transaction()?;
 
@@ -306,6 +311,30 @@ impl Inner {
         tx.commit()?;
 
         Ok(())
+    }
+
+    /// Rehashes any block in `self.dirty_blocks` with an unknown hash
+    ///
+    /// When this function is complete, every value in `self.dirty_blocks`
+    /// should be of the form `Some(hash)` (i.e. there should be no `None`
+    /// values).
+    ///
+    /// Returns the number of blocks that needed to be rehashed.
+    #[allow(clippy::read_zero_byte_vec)] // see rust-clippy#9274
+    fn rehash_dirty_blocks(&mut self, block_size: u64) -> Result<usize> {
+        let mut buffer = vec![]; // resized lazily if needed
+        let mut out = 0;
+        for (block, hash) in self.dirty_blocks.iter_mut() {
+            if hash.is_none() {
+                buffer.resize(block_size as usize, 0u8);
+                self.file
+                    .seek(SeekFrom::Start(*block as u64 * block_size))?;
+                self.file.read_exact(&mut buffer)?;
+                *hash = Some(integrity_hash(&[&buffer]));
+                out += 1;
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -662,7 +691,7 @@ impl Extent {
             inner: Mutex::new(Inner {
                 file,
                 metadb,
-                dirty_blocks: HashSet::new(),
+                dirty_blocks: BTreeMap::new(),
             }),
         };
 
@@ -855,7 +884,7 @@ impl Extent {
             inner: Mutex::new(Inner {
                 file,
                 metadb,
-                dirty_blocks: HashSet::new(),
+                dirty_blocks: BTreeMap::new(),
             }),
         })
     }
@@ -1203,9 +1232,10 @@ impl Extent {
             (job_id, self.number, writes.len() as u64)
         });
 
+        let mut hashes_to_write = vec![];
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
-                debug_assert!(only_write_unwritten);
+                hashes_to_write.push(None);
                 continue;
             }
 
@@ -1231,7 +1261,8 @@ impl Extent {
             // lets us easily test specific edge-cases of the database state.
             // Could make another function that wraps tx_set_block_context
             // and handles this as well.
-            let _ = inner.dirty_blocks.insert(write.offset.value as usize);
+            inner.dirty_blocks.insert(write.offset.value as usize, None);
+            hashes_to_write.push(Some(on_disk_hash));
         }
         tx.commit()?;
 
@@ -1284,6 +1315,20 @@ impl Extent {
 
         // Write any remaining data
         batched_pwritev.perform_writes()?;
+
+        // At this point, we know that the on-disk values for any written blocks
+        // must match the integrity hashes calculated above (and stored to
+        // SQLite).  We can therefore store hash values for many dirty blocks,
+        // allowing us to skip rehashing during a flush operation.
+        for (write, hash) in writes.iter().zip(&hashes_to_write) {
+            if let Some(h) = hash {
+                // This overwrites the `None` value written above!
+                let prev = inner
+                    .dirty_blocks
+                    .insert(write.offset.value as usize, Some(*h));
+                assert_eq!(prev, Some(None));
+            }
+        }
 
         cdt::extent__write__file__done!(|| {
             (job_id, self.number, writes.len() as u64)
@@ -1363,93 +1408,13 @@ impl Extent {
             (job_id, self.number, n_dirty_blocks)
         });
 
-        // We'll fill this up in a moment
-        let mut extent_block_indexes_and_hashes: Vec<(usize, u64)> =
-            Vec::with_capacity(inner.dirty_blocks.len());
-
-        // All blocks that may have changed since the last flush
-        let mut dirty_blocks: Vec<usize> = inner.dirty_blocks.drain().collect();
-
-        // Sorting here is extremely important to get good performance out of
-        // truncate_encryption_contexts_and_hashes() later. It also means we
-        // can efficiently re-read only the dirty parts of the file.
-        dirty_blocks.sort_unstable();
-
-        // Rehash any parts of the file that we wrote data to since the last
-        // flush
-        if !dirty_blocks.is_empty() {
-            // Rehashes a contiguous range of blocks
-            const BUFFER_SIZE: usize = 64 * 1024;
-            let mut buffer = [0u8; BUFFER_SIZE];
-            let mut dirty_block_iter = dirty_blocks.iter().copied();
-            let mut run_start = dirty_block_iter.next().unwrap();
-            let mut prev_block = run_start;
-
-            // Group blocks into contiguous runs for optimal IO, and rehash
-            loop {
-                let cur_block = dirty_block_iter.next();
-
-                // We rehash if there is either a run discontinuity, or when
-                // we hit the end of the iterator.
-                if cur_block == Some(prev_block + 1) {
-                    // Run is continuing
-                    prev_block += 1;
-                } else {
-                    // Discontinuity or end of iteration.
-
-                    // First, do the rehash
-                    inner.file.seek(SeekFrom::Start(
-                        run_start as u64 * self.block_size,
-                    ))?;
-
-                    let run_length = prev_block - run_start + 1;
-                    let mut remaining_bytes =
-                        run_length * self.block_size as usize;
-                    let mut block_being_hashed = run_start;
-                    while remaining_bytes > 0 {
-                        // A run may be larger than our IO buffer, in which
-                        // case we only process what fits in the buffer for
-                        // this iteration of the loop.
-                        let slice =
-                            &mut buffer[0..remaining_bytes.min(BUFFER_SIZE)];
-                        inner.file.read_exact(slice)?;
-                        for block_data in
-                            slice.chunks_exact(self.block_size as usize)
-                        {
-                            // Here's where we do the actual rehashing and
-                            // push it into our vec
-                            extent_block_indexes_and_hashes.push((
-                                block_being_hashed,
-                                integrity_hash(&[block_data]),
-                            ));
-                            block_being_hashed += 1;
-                        }
-                        remaining_bytes -= slice.len();
-                    }
-
-                    // Start a new run if there's more data to process, or
-                    // break out of the loop.
-                    match cur_block {
-                        None => break,
-                        Some(cur_block) => {
-                            run_start = cur_block;
-                            prev_block = cur_block;
-                        }
-                    }
-                }
-            }
-        }
-
-        // We could shrink this to 0, but it's nice not to have to expand the
-        // dirty_blocks HashMap on small writes. They have a hard enough time
-        // as it is. We don't want our maps to be keeping a lot of memory
-        // allocated though. With 16 entries max, even a 32TiB region of
-        // 128MiB extents would only be spending ~64MiB of ram on on this,
-        // across the entire region. There's potential for tuning here.
-        inner.dirty_blocks.shrink_to(16);
+        // Rehash any parts of the file that we *may have written* data to since
+        // the last flush.  (If we know that we wrote the data, then we don't
+        // bother rehashing)
+        let n_rehashed = inner.rehash_dirty_blocks(self.block_size)?;
 
         cdt::extent__flush__collect__hashes__done!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id, self.number, n_rehashed as u64)
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
@@ -1461,7 +1426,10 @@ impl Extent {
         let tx = inner.metadb.unchecked_transaction()?;
 
         inner.truncate_encryption_contexts_and_hashes_with_tx(
-            extent_block_indexes_and_hashes,
+            inner
+                .dirty_blocks
+                .iter()
+                .map(|(block, hash)| (*block, hash.unwrap())),
             &tx,
         )?;
 
@@ -1471,6 +1439,7 @@ impl Extent {
 
         inner.set_flush_number(new_flush, new_gen)?;
         tx.commit()?;
+        inner.dirty_blocks.clear();
 
         // Finally, reset the file's seek offset to 0
         inner.file.seek(SeekFrom::Start(0))?;
@@ -1535,7 +1504,7 @@ impl Extent {
         drop(inner_file_buffered);
 
         inner.truncate_encryption_contexts_and_hashes(
-            extent_block_indexes_and_hashes,
+            extent_block_indexes_and_hashes.into_iter(),
         )?;
 
         // Intentionally not clearing the dirty flag - we want to know that the
@@ -2820,7 +2789,7 @@ mod test {
         let inn = Inner {
             file: ff,
             metadb: Connection::open_in_memory().unwrap(),
-            dirty_blocks: HashSet::new(),
+            dirty_blocks: BTreeMap::new(),
         };
 
         /*
@@ -3861,7 +3830,9 @@ mod test {
         assert_eq!(ctxs[1].on_disk_hash, 65536);
 
         // "Flush", so only the rows that match should remain.
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 65536)])?;
+        inner.truncate_encryption_contexts_and_hashes(
+            vec![(0, 65536)].into_iter(),
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -3924,7 +3895,9 @@ mod test {
 
         // Truncation should still work
 
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 123)])?;
+        inner.truncate_encryption_contexts_and_hashes(
+            vec![(0, 123)].into_iter(),
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
         assert_eq!(ctxs.len(), 1);
@@ -4115,7 +4088,9 @@ mod test {
 
         // "Flush", so only the rows that match the on-disk hash should remain.
 
-        inner.truncate_encryption_contexts_and_hashes(vec![(0, 6), (1, 7)])?;
+        inner.truncate_encryption_contexts_and_hashes(
+            vec![(0, 6), (1, 7)].into_iter(),
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 2)?;
 
@@ -4864,6 +4839,8 @@ mod test {
         for a_buf in buffer.iter_mut().take(512) {
             *a_buf = 9;
         }
+
+        region.region_flush(1, 0, &None, 0, None).await?;
 
         // read data into File, compare what was written to buffer
         let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
