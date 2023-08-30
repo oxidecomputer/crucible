@@ -1172,13 +1172,21 @@ where
     // it here.
     let repair_addr = ads.lock().await.repair_address.unwrap();
 
-    let mut negotiated = 0;
     let mut upstairs_connection: Option<UpstairsConnection> = None;
 
     let (_another_upstairs_active_tx, mut another_upstairs_active_rx) =
         channel::<UpstairsConnection>(1);
     let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
 
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum NegotiationState {
+        Start,
+        ConnectedToUpstairs,
+        PromotedToActive,
+        SentRegionInfo,
+        Ready,
+    }
+    let mut negotiated = NegotiationState::Start;
     let log = ads.lock().await.log.new(o!("task" => "proc".to_string()));
     /*
      * See the comment in the proc() function on the upstairs side that
@@ -1189,7 +1197,7 @@ where
      * that message, we can move forward and start receiving IO from
      * the upstairs.
      */
-    while negotiated < 4 {
+    while negotiated != NegotiationState::Ready {
         tokio::select! {
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -1320,8 +1328,8 @@ where
                         encrypted,
                         alternate_versions,
                     }) => {
-                        if negotiated != 0 {
-                            bail!("Received connect out of order {}",
+                        if negotiated != NegotiationState::Start {
+                            bail!("Received connect out of order {:?}",
                                 negotiated);
                         }
                         info!(log, "Connection request from {} with version {}",
@@ -1397,7 +1405,7 @@ where
                             }
                         }
 
-                        negotiated = 1;
+                        negotiated = NegotiationState::ConnectedToUpstairs;
                         upstairs_connection = Some(UpstairsConnection {
                             upstairs_id,
                             session_id,
@@ -1423,8 +1431,8 @@ where
                         session_id,
                         gen,
                     }) => {
-                        if negotiated != 1 {
-                            bail!("Received activate out of order {}",
+                        if negotiated != NegotiationState::ConnectedToUpstairs {
+                            bail!("Received activate out of order {:?}",
                                 negotiated);
                         }
 
@@ -1477,7 +1485,7 @@ where
                                     another_upstairs_active_tx.clone()
                                 ).await?;
                             }
-                            negotiated = 2;
+                            negotiated = NegotiationState::PromotedToActive;
 
                             let mut fw = fw.lock().await;
                             if let Err(e) = fw.send(Message::YouAreNowActive {
@@ -1490,11 +1498,11 @@ where
                         }
                     }
                     Some(Message::RegionInfoPlease) => {
-                        if negotiated != 2 {
-                            bail!("Received RegionInfo out of order {}",
+                        if negotiated != NegotiationState::PromotedToActive {
+                            bail!("Received RegionInfo out of order {:?}",
                                 negotiated);
                         }
-                        negotiated = 3;
+                        negotiated = NegotiationState::SentRegionInfo;
                         let region_def = {
                             let ds = ads.lock().await;
                             ds.region.def()
@@ -1506,12 +1514,12 @@ where
                         }
                     }
                     Some(Message::LastFlush { last_flush_number }) => {
-                        if negotiated != 3 {
-                            bail!("Received LastFlush out of order {}",
+                        if negotiated != NegotiationState::SentRegionInfo {
+                            bail!("Received LastFlush out of order {:?}",
                                 negotiated);
                         }
 
-                        negotiated = 4;
+                        negotiated = NegotiationState::Ready;
 
                         {
                             let ds = ads.lock().await;
@@ -1537,11 +1545,11 @@ where
                          */
                     }
                     Some(Message::ExtentVersionsPlease) => {
-                        if negotiated != 3 {
-                            bail!("Received ExtentVersions out of order {}",
+                        if negotiated != NegotiationState::SentRegionInfo {
+                            bail!("Received ExtentVersions out of order {:?}",
                                 negotiated);
                         }
-                        negotiated = 4;
+                        negotiated = NegotiationState::Ready;
                         let ds = ads.lock().await;
                         let flush_numbers = ds.region.flush_numbers().await?;
                         let gen_numbers = ds.region.gen_numbers().await?;
