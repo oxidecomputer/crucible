@@ -4840,8 +4840,6 @@ mod test {
             *a_buf = 9;
         }
 
-        region.region_flush(1, 0, &None, 0, None).await?;
-
         // read data into File, compare what was written to buffer
         let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
 
