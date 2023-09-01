@@ -1232,7 +1232,7 @@ impl Extent {
             (job_id, self.number, writes.len() as u64)
         });
 
-        let mut hashes_to_write = vec![];
+        let mut hashes_to_write = Vec::with_capacity(writes.len());
         for write in writes {
             if writes_to_skip.contains(&write.offset.value) {
                 hashes_to_write.push(None);
