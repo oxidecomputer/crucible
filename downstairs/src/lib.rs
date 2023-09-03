@@ -475,7 +475,7 @@ async fn is_message_valid<WT>(
     upstairs_connection: UpstairsConnection,
     upstairs_id: Uuid,
     session_id: Uuid,
-    fw: &mut Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
+    fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
 ) -> Result<bool>
 where
     WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
@@ -507,10 +507,10 @@ where
  */
 async fn proc_frame<WT>(
     upstairs_connection: UpstairsConnection,
-    ad: &mut Arc<Mutex<Downstairs>>,
+    ad: &Mutex<Downstairs>,
     m: Message,
-    fw: &mut Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
-    job_channel_tx: &Arc<Mutex<Sender<u64>>>,
+    fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
+    job_channel_tx: &Mutex<Sender<u64>>,
 ) -> Result<()>
 where
     WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
@@ -918,10 +918,10 @@ where
 }
 
 async fn do_work_task<T>(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
     mut job_channel_rx: Receiver<u64>,
-    fw: &mut Arc<Mutex<FramedWrite<T, CrucibleEncoder>>>,
+    fw: &Mutex<FramedWrite<T, CrucibleEncoder>>,
 ) -> Result<()>
 where
     T: tokio::io::AsyncWrite + std::marker::Unpin,
@@ -1076,7 +1076,7 @@ fn check_message_for_abort(m: &Message) -> bool {
 }
 
 async fn proc_stream(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &Arc<Mutex<Downstairs>>,
     stream: WrappedStream,
 ) -> Result<()> {
     match stream {
@@ -1120,7 +1120,7 @@ pub struct UpstairsConnection {
  * taking IOs from the upstairs.
  */
 async fn proc<RT, WT>(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
 ) -> Result<()>
@@ -1559,7 +1559,7 @@ where
  * downstairs is ready to receive IO.
  */
 async fn resp_loop<RT, WT>(
-    ads: &mut Arc<Mutex<Downstairs>>,
+    ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
     mut another_upstairs_active_rx: mpsc::Receiver<UpstairsConnection>,
@@ -1597,30 +1597,23 @@ where
      * takeover.
      */
     let dw_task = {
-        let mut adc = ads.clone();
-        let mut fwc = fw.clone();
+        let adc = ads.clone();
+        let fwc = fw.clone();
         tokio::spawn(async move {
-            do_work_task(
-                &mut adc,
-                upstairs_connection,
-                job_channel_rx,
-                &mut fwc,
-            )
-            .await
+            do_work_task(&adc, upstairs_connection, job_channel_rx, &fwc).await
         })
     };
 
     let (message_channel_tx, mut message_channel_rx) =
         channel(MAX_ACTIVE_COUNT + 50);
     let pf_task = {
-        let mut adc = ads.clone();
+        let adc = ads.clone();
         let tx = job_channel_tx.clone();
-        let mut fwc = fw.clone();
+        let fwc = fw.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
                 if let Err(e) =
-                    proc_frame(upstairs_connection, &mut adc, m, &mut fwc, &tx)
-                        .await
+                    proc_frame(upstairs_connection, &adc, m, &fwc, &tx).await
                 {
                     bail!("Proc frame returns error: {}", e);
                 }
@@ -3208,10 +3201,10 @@ pub async fn start_downstairs(
                 ds.dss.add_connection().await;
             }
 
-            let mut dd = d.clone();
+            let dd = d.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = proc_stream(&mut dd, stream).await {
+                if let Err(e) = proc_stream(&dd, stream).await {
                     error!(
                         dd.lock().await.log,
                         "connection ({}) Exits with error: {:?}", raddr, e
