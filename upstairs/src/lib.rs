@@ -68,6 +68,9 @@ pub use impacted_blocks::*;
 mod live_repair;
 pub use live_repair::{check_for_repair, ExtentInfo, RepairCheck};
 
+mod active_jobs;
+use active_jobs::ActiveJobs;
+
 use async_trait::async_trait;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
@@ -2774,7 +2777,7 @@ struct Downstairs {
     /**
      * The active list of IO for the downstairs.
      */
-    ds_active: BTreeMap<u64, DownstairsIO>,
+    ds_active: ActiveJobs,
 
     /**
      * Cache of new jobs, indexed by client ID.
@@ -2933,7 +2936,7 @@ impl Downstairs {
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
-            ds_active: BTreeMap::new(),
+            ds_active: ActiveJobs::new(),
             ds_new: vec![Vec::new(); 3],
             ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
             completed: AllocRingBuffer::new(2048),
@@ -5394,7 +5397,7 @@ impl Upstairs {
             panic!("Can't deactivate with downstairs offline (yet)");
         }
 
-        if ds.ds_active.keys().len() == 0 {
+        if ds.ds_active.is_empty() {
             debug!(self.log, "No work, no need to flush, return OK");
             if let Some(req) = req {
                 req.send_ok().await;
@@ -5708,33 +5711,7 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
 
-        /*
-         * To build the dependency list for this flush, iterate from the end of
-         * the downstairs work active list in reverse order and check each job
-         * in that list to see if this new flush must depend on it.
-         *
-         * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But this flush must depend
-         * on the last flush - flush and gen numbers downstairs need to be
-         * sequential and the same for each downstairs.
-         *
-         * The downstairs currently assumes that all jobs previous to the last
-         * flush have completed, so the Upstairs must set that flushes depend on
-         * all jobs. It's currently important that flushes depend on everything,
-         * and everything depends on flushes.
-         */
-        let num_jobs = downstairs.ds_active.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            // Flushes must depend on everything
-            dep.push(*id);
-
-            // Depend on the last flush, but then bail out
-            if job.work.is_flush() {
-                break;
-            }
-        }
+        let dep = downstairs.ds_active.deps_for_flush();
         debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
 
         /*
@@ -5870,61 +5847,12 @@ impl Upstairs {
          * Create the list of downstairs request numbers (ds_id) we created
          * on behalf of this guest job.
          */
-        let mut sub = HashMap::new();
-        let mut cur_offset: usize = 0;
-
-        /*
-         * To build the dependency list for this write, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new write must
-         * depend on it.
-         *
-         * Construct a list of dependencies for this write based on the
-         * following rules:
-         *
-         * - writes have to depend on the last flush completing (because
-         *   currently everything has to depend on flushes)
-         * - any overlap of impacted blocks requires a dependency
-         *
-         * It's important to remember that jobs may arrive at different
-         * Downstairs in different orders but they should still complete in job
-         * dependency order.
-         *
-         * TODO: any overlap of impacted blocks will create a dependency.
-         * take this an example (this shows three writes, all to the
-         * same block, along with the dependency list for each
-         * write):
-         *
-         *       block
-         * op# | 0 1 2 | deps
-         * ----|-------------
-         *   0 | W     |
-         *   1 | W     | 0
-         *   2 | W     | 0,1
-         *
-         * op 2 depends on both op 1 and op 0. If dependencies are transitive
-         * with an existing job, it would be nice if those were removed from
-         * this job's dependencies.
-         */
-        let num_jobs = downstairs.ds_active.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        // Search backwards in the list of active jobs
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            // Depend on the last flush - flushes are a barrier for
-            // all writes.
-            if job.work.is_flush() {
-                dep.push(*id);
-            }
-
-            // If this job impacts the same blocks as something already active,
-            // create a dependency.
-            if impacted_blocks.conflicts(&job.impacted_blocks) {
-                dep.push(*id);
-            }
-        }
-
-        cdt::gw__write__deps!(|| (num_jobs as u64, dep.len() as u64));
+        let mut dep =
+            downstairs.ds_active.deps_for_write(impacted_blocks, ddef);
+        cdt::gw__write__deps!(|| (
+            downstairs.ds_active.len() as u64,
+            dep.len() as u64
+        ));
 
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
@@ -5933,6 +5861,7 @@ impl Upstairs {
         let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
         let extent_under_repair = downstairs.get_extent_under_repair();
 
+        let mut cur_offset: usize = 0;
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
             if let Some(eur) = extent_under_repair {
                 // We are in the middle of a live repair. See if we
@@ -6065,6 +5994,7 @@ impl Upstairs {
             impacted_blocks,
         );
 
+        let mut sub = HashMap::new();
         sub.insert(next_id, 0); // XXX does value here matter?
 
         /*
@@ -6148,36 +6078,7 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
         cdt::gw__read__start!(|| (gw_id));
 
-        /*
-         * To build the dependency list for this read, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new read must
-         * depend on it.
-         *
-         * Construct a list of dependencies for this read based on the
-         * following rules:
-         *
-         * - reads depend on flushes (because currently everything has to depend
-         *   on flushes)
-         * - any write with an overlap of impacted blocks requires a
-         *   dependency
-         */
-        let num_jobs = downstairs.ds_active.keys().len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        // Search backwards in the list of active jobs
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            if job.work.is_flush() {
-                dep.push(*id);
-                break;
-            } else if (job.work.is_write() | job.work.is_repair())
-                && impacted_blocks.conflicts(&job.impacted_blocks)
-            {
-                // If this is a write or repair and it impacts the same blocks
-                // as something already active, create a dependency.
-                dep.push(*id);
-            }
-        }
+        let mut dep = downstairs.ds_active.deps_for_read(impacted_blocks, ddef);
 
         let mut future_repair = false;
         let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
@@ -7438,7 +7339,7 @@ impl Upstairs {
                 );
             } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
                 // skip
-            } else if let Some(job) = ds.ds_active.get_mut(&ds_id) {
+            } else if let Some(job) = ds.ds_active.get(&ds_id) {
                 if matches!(
                     job.work,
                     IOop::Write { .. }
