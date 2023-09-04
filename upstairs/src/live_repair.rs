@@ -611,47 +611,6 @@ fn repair_or_noop(
     }
 }
 
-// Build the list of dependencies for a live repair job.  These are jobs that
-// must finish before this repair job can move begin.  Because we need all
-// three repair jobs to happen lock step, we have to prevent any IO from
-// hitting the same extent, which means any IO going to our ImpactedBlocks
-// (the whole extent) must finish first (or come after) our job.
-fn deps_for_live_repair(
-    ds: &Downstairs,
-    impacted_blocks: ImpactedBlocks,
-    close_id: u64,
-) -> Vec<u64> {
-    let num_jobs = ds.ds_active.keys().len();
-    let mut deps: Vec<u64> = Vec::with_capacity(num_jobs);
-
-    // Search backwards in the list of active jobs, stop at the
-    // last flush
-    for (id, job) in ds.ds_active.iter().rev() {
-        // We are finding dependencies based on impacted blocks.
-        // We may have reserved future job IDs for repair, and it's possible
-        // that this job we are finding dependencies for now is actually a
-        // future repair job we reserved.  If so, don't include ourself in
-        // our own list of dependencies.
-        if job.ds_id > close_id {
-            continue;
-        }
-        // If this operation impacts the same blocks as something
-        // already active, create a dependency.
-        if impacted_blocks.conflicts(&job.impacted_blocks) {
-            deps.push(*id);
-        }
-
-        // A flush job won't show impacted blocks. We can stop looking
-        // for dependencies beyond the last flush.
-        if job.work.is_flush() {
-            deps.push(*id);
-            break;
-        }
-    }
-
-    deps
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn create_and_enqueue_reopen_io(
     ds: &mut Downstairs,
@@ -903,7 +862,9 @@ impl Upstairs {
             let ddef = self.ddef.lock().await.get_def().unwrap();
             let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
-            let deps = deps_for_live_repair(ds, impacted_blocks, ds_id);
+            let deps =
+                ds.ds_active
+                    .deps_for_live_repair(impacted_blocks, ds_id, ddef);
 
             warn!(
                 self.log,
@@ -1117,7 +1078,9 @@ impl Upstairs {
         // time, we go through the list of dependencies and remove jobs
         // that we skipped or finished for that specific downstairs before
         // we send the repair IO over the wire.
-        let mut deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
+        let mut deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, close_id, ddef);
 
         info!(
             self.log,
@@ -4101,7 +4064,9 @@ pub mod repair_test {
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = gw.next_gw_id();
         let close_id = ds.next_id();
-        let deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
+        let deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, close_id, ddef);
 
         // let repair = vec![0, 2];
         let _reopen_brw = create_and_enqueue_close_io(
@@ -4140,7 +4105,9 @@ pub mod repair_test {
         let gw_repair_id: u64 = gw.next_gw_id();
         let extent_repair_ids = ds.get_repair_ids(eid);
         let repair_id = extent_repair_ids.repair_id;
-        let deps = deps_for_live_repair(&ds, impacted_blocks, repair_id);
+        let deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, repair_id, ddef);
 
         let _repair_brw = create_and_enqueue_noop_io(
             &mut ds,
@@ -5906,7 +5873,9 @@ pub mod repair_test {
         let noop_id = extent_repair_ids.noop_id;
         let reopen_id = extent_repair_ids.reopen_id;
 
-        let mut deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
+        let mut deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, close_id, ddef);
 
         // The initial close IO has the base set of dependencies.
         // Each additional job will depend on the previous.

@@ -202,6 +202,48 @@ impl ActiveJobs {
         }
         dep
     }
+
+    // Build the list of dependencies for a live repair job.  These are jobs that
+    // must finish before this repair job can move begin.  Because we need all
+    // three repair jobs to happen lock step, we have to prevent any IO from
+    // hitting the same extent, which means any IO going to our ImpactedBlocks
+    // (the whole extent) must finish first (or come after) our job.
+    pub fn deps_for_live_repair(
+        &self,
+        impacted_blocks: ImpactedBlocks,
+        close_id: u64,
+        _ddef: RegionDefinition,
+    ) -> Vec<u64> {
+        let num_jobs = self.len();
+        let mut deps: Vec<u64> = Vec::with_capacity(num_jobs);
+
+        // Search backwards in the list of active jobs, stop at the
+        // last flush
+        for (id, job) in self.iter().rev() {
+            // We are finding dependencies based on impacted blocks.
+            // We may have reserved future job IDs for repair, and it's possible
+            // that this job we are finding dependencies for now is actually a
+            // future repair job we reserved.  If so, don't include ourself in
+            // our own list of dependencies.
+            if job.ds_id > close_id {
+                continue;
+            }
+            // If this operation impacts the same blocks as something
+            // already active, create a dependency.
+            if impacted_blocks.conflicts(&job.impacted_blocks) {
+                deps.push(*id);
+            }
+
+            // A flush job won't show impacted blocks. We can stop looking
+            // for dependencies beyond the last flush.
+            if job.work.is_flush() {
+                deps.push(*id);
+                break;
+            }
+        }
+
+        deps
+    }
 }
 
 impl<'a> IntoIterator for &'a ActiveJobs {
