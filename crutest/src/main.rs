@@ -2085,10 +2085,9 @@ async fn perf_workload(
     let es = ri.extent_size.value;
     let ec = ri.total_blocks as u64 / es;
 
-    // To make a random block offset modulus, we take the total
-    // block number and subtract the IO size in blocks.
-    let offset_mod =
-        rng.gen::<u64>() % (ri.total_blocks - blocks_per_io) as u64;
+    // To make a random block offset, we take the total block count and subtract
+    // the IO size in blocks (so that we don't overspill the region)
+    let offset_mod = (ri.total_blocks - blocks_per_io) as u64;
 
     for _ in 0..write_loop {
         let mut wtime = Vec::with_capacity(count);
