@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -3645,11 +3645,11 @@ impl Downstairs {
     /**
      * Collect the state of the jobs from each client.
      */
-    fn state_count(&mut self, ds_id: u64) -> Result<WorkCounts> {
+    fn state_count(&self, ds_id: u64) -> Result<WorkCounts> {
         /* XXX Should this support invalid ds_ids? */
         let job = self
             .ds_active
-            .get_mut(&ds_id)
+            .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         Ok(job.state_count())
     }
@@ -4625,20 +4625,15 @@ impl Downstairs {
             assert_eq!(wc.active, 0);
 
             // Retire all the jobs that happened before and including this
-            // flush, with a few exceptions.  For these, we need to make
-            // a prevent_retire list and keep track of them so we can put
-            // them back on the ds_active list after we have finished
-            // processing it.
+            // flush, with a few exceptions.  Because we can't iterate and
+            // modify the list simultaneously, we mark to-be-retired jobs in
+            // `retired`, then remove them in bulk after checking the list.
             let mut retired = Vec::new();
-            let mut prevent_retire = BTreeMap::new();
 
-            loop {
-                let id = match self.ds_active.keys().next() {
-                    Some(id) if *id > ds_id => break,
-                    None => break,
-                    Some(id) => *id,
+            for (&id, job) in &self.ds_active {
+                if id > ds_id {
+                    break;
                 };
-
                 assert!(id <= ds_id);
 
                 // While we don't expect any jobs to still be in progress,
@@ -4646,7 +4641,6 @@ impl Downstairs {
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
                 let wc = self.state_count(id).unwrap();
-                let job = self.ds_active.remove(&id).unwrap();
                 if wc.active != 0 || job.ack_status != AckStatus::Acked {
                     warn!(
                         self.log,
@@ -4655,7 +4649,6 @@ impl Downstairs {
                         ds_id,
                         wc,
                     );
-                    prevent_retire.insert(id, job);
                     continue;
                 }
 
@@ -4674,7 +4667,10 @@ impl Downstairs {
                     self.io_state_count.decr(old_state, cid);
                 }
             }
-            self.ds_active.extend(prevent_retire);
+            // Now that we've collected jobs to retire, remove them from the map
+            for &id in &retired {
+                self.ds_active.remove(&id).unwrap();
+            }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
@@ -5711,7 +5707,7 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
 
-        let dep = downstairs.ds_active.deps_for_flush();
+        let mut dep = downstairs.ds_active.deps_for_flush();
         debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
 
         /*

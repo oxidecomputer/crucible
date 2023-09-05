@@ -264,11 +264,3 @@ impl<'a> IntoIterator for &'a ActiveJobs {
         self.jobs.iter()
     }
 }
-
-impl Extend<(u64, DownstairsIO)> for ActiveJobs {
-    fn extend<T: IntoIterator<Item = (u64, DownstairsIO)>>(&mut self, iter: T) {
-        for (job_id, io) in iter {
-            self.insert(job_id, io);
-        }
-    }
-}
