@@ -18,26 +18,31 @@ impl ActiveJobs {
     }
 
     /// Looks up a job by ID, returning a reference
+    #[inline]
     pub fn get(&self, job_id: &u64) -> Option<&DownstairsIO> {
         self.jobs.get(job_id)
     }
 
     /// Looks up a job by ID, returning a mutable reference
+    #[inline]
     pub fn get_mut(&mut self, job_id: &u64) -> Option<&mut DownstairsIO> {
         self.jobs.get_mut(job_id)
     }
 
     /// Returns the total number of active jobs
+    #[inline]
     pub fn len(&self) -> usize {
         self.jobs.len()
     }
 
     /// Returns `true` if no jobs are active
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
     }
 
     /// Returns an iterator over all active jobs
+    #[inline]
     pub fn iter_mut(
         &mut self,
     ) -> impl Iterator<Item = (&u64, &mut DownstairsIO)> {
@@ -45,6 +50,7 @@ impl ActiveJobs {
     }
 
     /// Inserts a new job ID and its associated IO work
+    #[inline]
     pub fn insert(
         &mut self,
         job_id: u64,
@@ -54,23 +60,27 @@ impl ActiveJobs {
     }
 
     /// Removes a job by ID, returning its IO work
+    #[inline]
     pub fn remove(&mut self, job_id: &u64) -> Option<DownstairsIO> {
         self.jobs.remove(job_id)
     }
 
     /// Returns an iterator over job IDs
+    #[inline]
     pub fn keys(&self) -> std::collections::btree_map::Keys<u64, DownstairsIO> {
         self.jobs.keys()
     }
 
     /// Returns an iterator over job values
     #[cfg(test)]
+    #[inline]
     pub fn values(
         &self,
     ) -> std::collections::btree_map::Values<u64, DownstairsIO> {
         self.jobs.values()
     }
 
+    #[inline]
     pub fn iter(&self) -> std::collections::btree_map::Iter<u64, DownstairsIO> {
         self.jobs.iter()
     }
