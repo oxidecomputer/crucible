@@ -707,19 +707,15 @@ where
                 writes,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__write__io__start!(|| (new_id, client_id as u64));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
-                    writes: writes.clone(),
+                    dependencies: deps,
+                    writes,
                 })
                 .await?
             }
@@ -728,11 +724,7 @@ where
                 writes,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__write__unwritten__io__start!(|| (
                     new_id,
@@ -742,8 +734,8 @@ where
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
-                    writes: writes.clone(),
+                    dependencies: deps,
+                    writes,
                 })
                 .await?
             }
@@ -755,11 +747,7 @@ where
                 extent_limit,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 // If our downstairs is under repair, then include any extent
                 // limit sent in the IOop.
@@ -776,7 +764,7 @@ where
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                     flush_number,
                     gen_number,
                     snapshot_details,
@@ -789,18 +777,14 @@ where
                 requests,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__read__io__start!(|| (new_id, client_id as u64));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                     requests,
                 })
                 .await?
@@ -823,11 +807,7 @@ where
                 repair_downstairs,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__close__start!(|| (new_id, client_id as u64, extent));
                 if repair_downstairs.contains(&client_id) {
@@ -836,7 +816,7 @@ where
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                         extent_id: extent,
                     })
                     .await?
@@ -845,7 +825,7 @@ where
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                         extent_id: extent,
                         flush_number,
                         gen_number,
@@ -861,11 +841,7 @@ where
                 repair_downstairs,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__repair__start!(|| (new_id, client_id as u64, extent));
                 if repair_downstairs.contains(&client_id) {
@@ -873,7 +849,7 @@ where
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                         extent_id: extent,
                         source_client_id: source_downstairs,
                         source_repair_address,
@@ -884,7 +860,7 @@ where
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                     })
                     .await?
                 }
@@ -894,36 +870,28 @@ where
                 extent,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__reopen__start!(|| (new_id, client_id as u64, extent));
                 fw.send(Message::ExtentLiveReopen {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                     extent_id: extent,
                 })
                 .await?
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__noop__start!(|| (new_id, client_id as u64));
                 fw.send(Message::ExtentLiveNoOp {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                 })
                 .await?
             }
@@ -5480,7 +5448,7 @@ impl Upstairs {
         let mut ds = self.downstairs.lock().await;
 
         if ds.dependencies_need_cleanup(client_id) {
-            ds.remove_dep_if_live_repair(client_id, deps.clone(), ds_id)
+            ds.remove_dep_if_live_repair(client_id, deps, ds_id)
         } else {
             deps
         }
