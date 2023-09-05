@@ -7300,7 +7300,7 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 2);
 
         assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]);
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
     #[tokio::test]
@@ -7361,7 +7361,7 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]);
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
         assert_eq!(
             hashset(jobs[2].work.deps()),
             hashset(&[jobs[0].ds_id, jobs[1].ds_id]),
@@ -7421,7 +7421,7 @@ pub(crate) mod up_test {
 
         assert!(jobs[0].work.deps().is_empty()); // write (op 0)
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush (op 1)
-        assert_eq!(hashset(jobs[2].work.deps()), hashset(&[jobs[1].ds_id]),); // write (op 2)
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // write (op 2)
     }
 
     #[tokio::test]
@@ -8077,19 +8077,17 @@ pub(crate) mod up_test {
 
         assert!(jobs[0].work.deps().is_empty()); // flush (op 0)
 
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // write (op 1)
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[0].ds_id]); // write (op 2)
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write (op 1)
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write (op 2)
 
         assert_eq!(
             hashset(jobs[3].work.deps()),
             hashset(&[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]),
         ); // flush (op 3)
 
-        assert_eq!(hashset(jobs[4].work.deps()), hashset(&[jobs[3].ds_id]),); // write (op 4)
-
-        assert_eq!(hashset(jobs[5].work.deps()), hashset(&[jobs[3].ds_id]),); // write (op 5)
-
-        assert_eq!(hashset(jobs[6].work.deps()), hashset(&[jobs[3].ds_id]),); // write (op 6)
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write (op 4)
+        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write (op 5)
+        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write (op 6)
 
         assert_eq!(
             hashset(jobs[7].work.deps()), // flush (op 7)
@@ -8146,7 +8144,7 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 2);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
     }
 
     #[tokio::test]
@@ -8205,8 +8203,8 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 3);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 
     #[tokio::test]
@@ -8303,13 +8301,13 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 6);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
 
         assert!(jobs[2].work.deps().is_empty()); // op 2
-        assert_eq!(jobs[3].work.deps(), &vec![jobs[2].ds_id]); // op 3
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
 
         assert!(jobs[4].work.deps().is_empty()); // op 4
-        assert_eq!(jobs[5].work.deps(), &vec![jobs[4].ds_id]); // op 5
+        assert_eq!(jobs[5].work.deps(), &[jobs[4].ds_id]); // op 5
     }
 
     #[tokio::test]
@@ -8350,10 +8348,10 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 5);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &vec![jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &vec![jobs[3].ds_id]); // op 4
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
     }
 
     #[tokio::test]
@@ -8394,10 +8392,10 @@ pub(crate) mod up_test {
         assert_eq!(jobs.len(), 5);
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &vec![jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &vec![jobs[3].ds_id]); // op 4
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
     }
 
     #[tokio::test]
@@ -8535,8 +8533,8 @@ pub(crate) mod up_test {
 
         // confirm deps
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 
     #[tokio::test]
@@ -8638,8 +8636,8 @@ pub(crate) mod up_test {
         );
 
         assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &vec![jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &vec![jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
         assert_eq!(
             hashset(jobs[3].work.deps()),
             hashset(&[jobs[1].ds_id, jobs[2].ds_id])
@@ -8856,7 +8854,7 @@ pub(crate) mod up_test {
         // assert flush depends on the read
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
 
-        // assert write depends on both the read and flush
-        assert_eq!(hashset(jobs[2].work.deps()), hashset(&[jobs[1].ds_id])); // op 2
+        // assert write depends on just the flush
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 }
