@@ -3558,7 +3558,10 @@ impl Downstairs {
                 DsState::LiveRepair => {
                     let my_limit = self.extent_limit[cid as usize];
                     assert!(self.repair_min_id.is_some());
-                    if io.work.send_io_live_repair(my_limit) {
+                    if io
+                        .work
+                        .send_io_live_repair(my_limit, &self.repair_job_ids)
+                    {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
                         self.ds_new[cid as usize].push(io.ds_id);
@@ -8243,12 +8246,16 @@ impl IOop {
         (job_type, num_blocks, deps)
     }
 
-    // We have a downstairs in LiveRepair.
-    // Compare the extent IDs for this IO and where we have repaired
-    // so far, and determine if this IO should be sent to the downstairs
-    // or not (skipped).
+    // We have a downstairs in LiveRepair. Compare the extent IDs for this IO
+    // and where we have repaired so far (or reserved dependencies for a
+    // repair), and determine if this IO should be sent to the downstairs or not
+    // (skipped).
     // Return true if we should send it.
-    pub fn send_io_live_repair(&self, extent_limit: Option<usize>) -> bool {
+    pub fn send_io_live_repair(
+        &self,
+        extent_limit: Option<usize>,
+        repair_job_ids: &HashMap<u32, ExtentRepairIDs>,
+    ) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -8263,7 +8270,9 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64 {
+                        if write.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(write.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8274,7 +8283,9 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64 {
+                        if write.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(write.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8291,7 +8302,9 @@ impl IOop {
                     requests,
                 } => {
                     for req in requests {
-                        if req.eid <= extent_limit as u64 {
+                        if req.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(req.eid as u32))
+                        {
                             return true;
                         }
                     }
