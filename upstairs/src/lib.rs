@@ -5971,6 +5971,10 @@ impl Upstairs {
                         offset.shift,
                         eur
                     );
+                } else if let Some(rep) =
+                    downstairs.repair_job_ids.get(&(eid as u32))
+                {
+                    dep.push(rep.close_id);
                 }
             }
             let byte_len: usize = ddef.block_size() as usize;
