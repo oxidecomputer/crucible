@@ -5742,8 +5742,18 @@ impl Upstairs {
          * and make sure it matches.
          */
 
-        let extent_under_repair =
+        let mut extent_under_repair =
             downstairs.get_extent_under_repair().map(|i| i as usize);
+        for (target_extent, id) in &downstairs.repair_job_ids {
+            // Depend on the final job in the repair jobs
+            dep.push(id.reopen_id);
+            if let Some(eur) = extent_under_repair {
+                if *target_extent as usize > eur {
+                    extent_under_repair = Some(*target_extent as usize);
+                }
+            }
+        }
+
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
