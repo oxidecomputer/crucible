@@ -5739,7 +5739,8 @@ impl Upstairs {
          * and make sure it matches.
          */
 
-        let extent_under_repair = downstairs.get_extent_under_repair();
+        let extent_under_repair =
+            downstairs.get_extent_under_repair().map(|i| i as usize);
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
