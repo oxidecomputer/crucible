@@ -2,8 +2,8 @@
 
 use crucible_common::RegionDefinition;
 
-use crate::{DownstairsIO, ImpactedBlocks};
-use std::collections::BTreeMap;
+use crate::{AckStatus, DownstairsIO, ImpactedBlocks};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// `ActiveJobs` tracks active jobs by ID
 ///
@@ -19,12 +19,14 @@ use std::collections::BTreeMap;
 #[derive(Debug)]
 pub(crate) struct ActiveJobs {
     jobs: BTreeMap<u64, DownstairsIO>,
+    ackable: BTreeSet<u64>,
 }
 
 impl ActiveJobs {
     pub fn new() -> Self {
         Self {
             jobs: BTreeMap::new(),
+            ackable: BTreeSet::new(),
         }
     }
 
@@ -39,7 +41,7 @@ impl ActiveJobs {
     pub fn get_mut(&mut self, job_id: &u64) -> Option<DownstairsIOHandle> {
         self.jobs
             .get_mut(job_id)
-            .map(|job| DownstairsIOHandle { job })
+            .map(|job| DownstairsIOHandle::new(job, &mut self.ackable))
     }
 
     /// Returns the total number of active jobs
@@ -58,7 +60,7 @@ impl ActiveJobs {
     #[inline]
     pub fn for_each<F: FnMut(&u64, &mut DownstairsIO)>(&mut self, mut f: F) {
         for (job_id, job) in self.jobs.iter_mut() {
-            let handle = DownstairsIOHandle { job };
+            let handle = DownstairsIOHandle::new(job, &mut self.ackable);
             f(job_id, handle.job);
         }
     }
@@ -268,6 +270,10 @@ impl ActiveJobs {
 
         deps
     }
+
+    pub fn ackable_work(&self) -> Vec<u64> {
+        self.ackable.iter().cloned().collect()
+    }
 }
 
 impl<'a> IntoIterator for &'a ActiveJobs {
@@ -288,9 +294,30 @@ impl<'a> IntoIterator for &'a ActiveJobs {
 /// The `DownstairsIOHandle` implements `Deref` and `DerefMut` into a
 /// `DownstairsIO`, but also has a `Drop` implementation to keep other metadata
 /// in sync.
-#[derive(Debug)]
 pub(crate) struct DownstairsIOHandle<'a> {
     job: &'a mut DownstairsIO,
+    initial_status: AckStatus,
+    ackable: &'a mut BTreeSet<u64>,
+}
+
+impl<'a> std::fmt::Debug for DownstairsIOHandle<'a> {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.job.fmt(f)
+    }
+}
+
+impl<'a> DownstairsIOHandle<'a> {
+    fn new(job: &'a mut DownstairsIO, ackable: &'a mut BTreeSet<u64>) -> Self {
+        let initial_status = job.ack_status;
+        Self {
+            job,
+            initial_status,
+            ackable,
+        }
+    }
 }
 
 impl<'a> std::ops::Deref for DownstairsIOHandle<'a> {
@@ -309,6 +336,30 @@ impl<'a> std::ops::DerefMut for DownstairsIOHandle<'a> {
 
 impl<'a> std::ops::Drop for DownstairsIOHandle<'a> {
     fn drop(&mut self) {
-        // nothing to do here yet
+        match (self.initial_status, self.job.ack_status) {
+            (AckStatus::NotAcked, AckStatus::AckReady) => {
+                let prev = self.ackable.insert(self.ds_id);
+                assert!(prev);
+            }
+            (AckStatus::AckReady, AckStatus::Acked | AckStatus::NotAcked) => {
+                let id = self.ds_id;
+                let prev = self.ackable.remove(&id);
+                assert!(prev);
+            }
+            // None transitions
+            (AckStatus::AckReady, AckStatus::AckReady)
+            | (AckStatus::Acked, AckStatus::Acked)
+            | (AckStatus::NotAcked, AckStatus::NotAcked) => (),
+
+            // Invalid transitions!
+            (AckStatus::NotAcked, AckStatus::Acked)
+            | (AckStatus::Acked, AckStatus::NotAcked)
+            | (AckStatus::Acked, AckStatus::AckReady) => {
+                panic!(
+                    "invalid transition: {:?} => {:?}",
+                    self.initial_status, self.job.ack_status
+                )
+            }
+        }
     }
 }

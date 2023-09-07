@@ -3518,13 +3518,7 @@ impl Downstairs {
      * Build a list of jobs that are ready to be acked.
      */
     fn ackable_work(&mut self) -> Vec<u64> {
-        let mut ackable = Vec::new();
-        for (ds_id, job) in &self.ds_active {
-            if job.ack_status == AckStatus::AckReady {
-                ackable.push(*ds_id);
-            }
-        }
-        ackable
+        self.ds_active.ackable_work()
     }
 
     /**
