@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -5930,7 +5930,7 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
         let mut future_repair = false;
-        let mut deps_to_add: HashSet<u32> = HashSet::new();
+        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
         let extent_under_repair = downstairs.get_extent_under_repair();
 
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
@@ -6034,9 +6034,6 @@ impl Upstairs {
 
         for new_dep in deps_to_add.iter() {
             let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.close_id);
-            dep.push(ids.repair_id);
-            dep.push(ids.noop_id);
             dep.push(ids.reopen_id);
         }
 
@@ -6182,7 +6179,7 @@ impl Upstairs {
         }
 
         let mut future_repair = false;
-        let mut deps_to_add: HashSet<u32> = HashSet::new();
+        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
         let extent_under_repair = downstairs.get_extent_under_repair();
 
         /*
@@ -6210,9 +6207,6 @@ impl Upstairs {
         for new_dep in deps_to_add.iter() {
             warn!(self.log, "Create read repair deps for extent {}", new_dep);
             let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.close_id);
-            dep.push(ids.repair_id);
-            dep.push(ids.noop_id);
             dep.push(ids.reopen_id);
         }
 

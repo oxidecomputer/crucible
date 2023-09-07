@@ -3057,9 +3057,9 @@ pub mod repair_test {
         // dependency list.
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
-        assert_eq!(jobs[1].work.deps(), &[1004, 1000, 1001, 1002, 1003]);
-        assert_eq!(jobs[2].work.deps(), &[1005, 1004, 1000, 1001, 1002, 1003]);
+        assert_eq!(jobs[0].work.deps(), &[1003]);
+        assert_eq!(jobs[1].work.deps(), &[1004, 1003]);
+        assert_eq!(jobs[2].work.deps(), &[1005, 1004, 1003]);
     }
 
     #[tokio::test]
@@ -3124,7 +3124,7 @@ pub mod repair_test {
         // won't show up in the work queue.
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
+        assert_eq!(jobs[0].work.deps(), &[1003]);
     }
 
     #[tokio::test]
@@ -3188,7 +3188,7 @@ pub mod repair_test {
         // dependency list.
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
+        assert_eq!(jobs[0].work.deps(), &[1003]);
     }
 
     #[tokio::test]
@@ -3260,10 +3260,7 @@ pub mod repair_test {
         // dependency list.
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        assert_eq!(
-            jobs[0].work.deps(),
-            &[1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
-        );
+        assert_eq!(jobs[0].work.deps(), &[1003, 1007]);
     }
 
     #[tokio::test]
@@ -4910,7 +4907,7 @@ pub mod repair_test {
 
         assert!(jobs[0].work.deps().is_empty());
         assert_eq!(jobs[1].ds_id, 1008);
-        assert_eq!(jobs[1].work.deps(), &[1001, 1004, 1005, 1006, 1007]);
+        assert_eq!(jobs[1].work.deps(), &[1001, 1007]);
     }
 
     #[tokio::test]
@@ -5181,7 +5178,7 @@ pub mod repair_test {
         assert_eq!(jobs.len(), 1);
 
         assert_eq!(jobs[0].ds_id, 1004);
-        assert_eq!(jobs[0].work.deps(), &[1000, 1001, 1002, 1003]);
+        assert_eq!(jobs[0].work.deps(), &[1003]);
     }
 
     #[tokio::test]
@@ -5244,7 +5241,7 @@ pub mod repair_test {
         // Our read should be ID 1004, and have the four repair jobs
         // for dependencies
         assert_eq!(jobs[1].ds_id, 1004);
-        assert_eq!(jobs[1].work.deps(), &[1000, 1001, 1002, 1003]);
+        assert_eq!(jobs[1].work.deps(), &[1003]);
     }
 
     #[tokio::test]
@@ -5827,16 +5824,13 @@ pub mod repair_test {
         // All the current operations, plus four future repair operations
         // that don't exist yet.
         let current_deps = job.work.deps().to_vec();
-        assert_eq!(
-            &current_deps,
-            &[1008, 1007, 1004, 1002, 1001, 1000, 1009, 1010, 1011, 1012]
-        );
+        assert_eq!(&current_deps, &[1008, 1007, 1004, 1002, 1001, 1000, 1012]);
 
         let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 1013);
         // LiveRepair downstairs won't see past the repair, and it won't
         // include the skipped IO at 1007, but will have the future repair
-        // operations that don't yet exist.
-        assert_eq!(new_deps, &[1008, 1004, 1009, 1010, 1011, 1012]);
+        // close operation that doesn't yet exist.
+        assert_eq!(new_deps, &[1008, 1004, 1012]);
     }
 
     #[tokio::test]
@@ -6000,4 +5994,104 @@ pub mod repair_test {
     //   3 |       |       | Reserved for future repair
     //   4 | Reopn |       |
     //   8 |       | W W W | Skipped on DS 1?
+
+    #[tokio::test]
+    async fn test_live_repair_span_write_write() {
+        // We have a downstairs that is in LiveRepair, and we have indicated
+        // that this extent is under repair.  The write (that spans extents
+        // should have created IDs for future repair work and then made itself
+        // dependent on those repairs finishing. The write that comes next
+        // lands on the extent that has future repairs reserved, and that
+        // 2nd write needs to also depend on those repair jobs.
+        //
+        // We start with extent 0 under repair.
+        //     | Under |       |
+        //     | Repair|       |
+        //     | block | block |
+        // op# | 0 1 2 | 3 4 5 | deps
+        // ----|-------|-------|-----
+        //
+        // First, a write spanning extents 0 and 1
+        //     | block | block |
+        //     | 0 1 2 | 3 4 5 |
+        // ----|-------|-------|-----
+        //     |     W | W W   |
+        //
+        // Then, a write on the "spanned to" extent 1, but not overlapping
+        // with the first write.
+        //     | block | block |
+        //     | 0 1 2 | 3 4 5 |
+        // ----|-------|-------|-----
+        //     |       |     W |
+        //
+        // The first write will create and depend on jobs reserved for a
+        // future repair.  The second job should discover the repair jobs and
+        // also have them as dependencies.
+        //     | Under |       |
+        //     | Repair|       |
+        //     | block | block |
+        // op# | 0 1 2 | 3 4 5 | deps
+        // ----|-------|-------|-----
+        //   0 |       | RpRpRp|
+        //   1 |       | RpRpRp|
+        //   2 |       | RpRpRp|
+        //   3 |       | RpRpRp|
+        //   4 |     W | W W   | 0,1,2,3
+        //   6 |       |     W | 0,1,2,3
+        //
+
+        let up = create_test_upstairs(1).await;
+        // Make downstairs 1 in LiveRepair
+        up.ds_transition(1, DsState::Faulted).await;
+        up.ds_transition(1, DsState::LiveRepairReady).await;
+        up.ds_transition(1, DsState::LiveRepair).await;
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+
+        let mut ds = up.downstairs.lock().await;
+
+        // Make extent 0 under repair
+        ds.extent_limit[1] = Some(0);
+        drop(ds);
+
+        // A write of blocks 2,3,4 which spans extents 0-1.
+        up.submit_write(
+            Block::new_512(2),
+            Bytes::from(vec![0xff; 512 * 3]),
+            None,
+            false,
+            ds_done_tx.clone(),
+        )
+        .await
+        .unwrap();
+
+        // A write of block 5 which is on extent 1, but does not
+        // overlap with the previous write
+        up.submit_write(
+            Block::new_512(5),
+            Bytes::from(vec![0xff; 512]),
+            None,
+            false,
+            ds_done_tx.clone(),
+        )
+        .await
+        .unwrap();
+
+        let ds = up.downstairs.lock().await;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+
+        assert_eq!(jobs.len(), 2);
+
+        // The first job, should have the dependences for the new repair work
+        assert_eq!(jobs[0].ds_id, 1004);
+        assert_eq!(jobs[0].work.deps(), &[1003]);
+        assert_eq!(jobs[0].state[&0], IOState::New);
+        assert_eq!(jobs[0].state[&1], IOState::New);
+        assert_eq!(jobs[0].state[&2], IOState::New);
+
+        // The 2nd job should aldo have the dependences for the new repair work
+        assert_eq!(jobs[1].work.deps(), &[1003]);
+        assert_eq!(jobs[1].state[&0], IOState::New);
+        assert_eq!(jobs[1].state[&1], IOState::New);
+        assert_eq!(jobs[1].state[&2], IOState::New);
+    }
 }
