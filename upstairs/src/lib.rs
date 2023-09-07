@@ -6196,6 +6196,10 @@ impl Upstairs {
                     future_repair = true;
                 } else if future_repair && eid > eur {
                     deps_to_add.insert(eid as u32);
+                } else if let Some(rep) =
+                    downstairs.repair_job_ids.get(&(eid as u32))
+                {
+                    dep.push(rep.reopen_id);
                 }
             }
             requests.push(ReadRequest { eid, offset });
