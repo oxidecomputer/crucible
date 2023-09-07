@@ -296,15 +296,15 @@ pub fn extent_from_offset(
 
 pub fn extent_to_impacted_blocks(
     ddef: &RegionDefinition,
-    eid: u32,
+    eid: u64,
 ) -> ImpactedBlocks {
-    assert!(eid < ddef.extent_count());
+    assert!(eid < ddef.extent_count() as u64);
     let one = ImpactedAddr {
-        extent_id: eid as u64,
+        extent_id: eid,
         block: 0,
     };
     let two = ImpactedAddr {
-        extent_id: eid as u64,
+        extent_id: eid,
         block: ddef.extent_size().value - 1,
     };
     ImpactedBlocks::InclusiveRange(one, two)

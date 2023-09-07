@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -308,16 +308,16 @@ mod cdt {
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}
     fn volume__flush__start(_: u32, _: Uuid) {}
-    fn extent__or__start(_: u32) {}
+    fn extent__or__start(_: u64) {}
     fn gw__read__start(_: u64) {}
     fn gw__write__start(_: u64) {}
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__close__start(_: u64, _: u32) {}
-    fn gw__repair__start(_: u64, _: u32) {}
+    fn gw__close__start(_: u64, _: u64) {}
+    fn gw__repair__start(_: u64, _: u64) {}
     fn gw__noop__start(_: u64) {}
-    fn gw__reopen__start(_: u64, _: u32) {}
+    fn gw__reopen__start(_: u64, _: u64) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
@@ -350,7 +350,7 @@ mod cdt {
     fn gw__repair__done(_: u64, _: usize) {}
     fn gw__noop__done(_: u64) {}
     fn gw__reopen__done(_: u64, _: usize) {}
-    fn extent__or__done(_: u32) {}
+    fn extent__or__done(_: u64) {}
     fn reqwest__read__start(_: u32, _: Uuid) {}
     fn reqwest__read__done(_: u32, _: Uuid) {}
     fn volume__read__done(_: u32, _: Uuid) {}
@@ -2998,8 +2998,11 @@ struct Downstairs {
      * future repair work and store them in this hash map.  When it comes time
      * to start a repair and allocate the job IDs we will require, we first
      * check this hash map to see if the IDs were already repaired.
+     *
+     * The key is the extent being repaired; the value is a tuple of reserved
+     * IDs and existing dependencies for the first job in the repair.
      */
-    repair_job_ids: HashMap<u32, ExtentRepairIDs>,
+    repair_job_ids: BTreeMap<u64, (ExtentRepairIDs, Vec<JobId>)>,
 
     /**
      * When repairing, this will be the  minimum job ID the downstairs under
@@ -3053,7 +3056,7 @@ impl Downstairs {
             live_repair_completed: ClientData::new(0),
             live_repair_aborted: ClientData::new(0),
             extent_limit: ClientMap::new(),
-            repair_job_ids: HashMap::new(),
+            repair_job_ids: BTreeMap::new(),
             repair_min_id: None,
             connected: ClientData::new(0),
             replaced: ClientData::new(0),
@@ -3067,7 +3070,7 @@ impl Downstairs {
     fn end_live_repair(&mut self) {
         self.repair_info = ClientMap::new();
         self.extent_limit = ClientMap::new();
-        self.repair_job_ids = HashMap::new();
+        self.repair_job_ids = BTreeMap::new();
         self.repair_min_id = None;
     }
 
@@ -3660,12 +3663,18 @@ impl Downstairs {
                     self.ds_skipped_jobs[cid].insert(io.ds_id);
                 }
                 DsState::LiveRepair => {
-                    let my_limit = self.extent_limit.get(&cid).cloned();
+                    // Pick the latest repair limit that's relevant for this
+                    // downstairs.  This is either the extent under repair (if
+                    // there are no reserved repair jobs), or the last extent
+                    // for which we have reserved a repair job ID.
+                    let my_limit = self.extent_limit.get(&cid).map(|first| {
+                        self.repair_job_ids
+                            .last_key_value()
+                            .map(|(k, _)| *k)
+                            .unwrap_or(*first as u64)
+                    });
                     assert!(self.repair_min_id.is_some());
-                    if io
-                        .work
-                        .send_io_live_repair(my_limit, &self.repair_job_ids)
-                    {
+                    if io.work.send_io_live_repair(my_limit) {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
                         self.ds_new[cid].insert(io.ds_id);
@@ -4750,7 +4759,7 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                self.ds_active.remove(&id).unwrap();
+                let _ = self.ds_active.remove(&id);
             }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
@@ -4801,20 +4810,16 @@ impl Downstairs {
         }
     }
 
-    // Reserve some job IDs for future repair work.
-    // Return the job IDs we reserved.  If the extent already has
-    // job IDs reserved, then use those instead.
-    fn reserve_repair_ids(&mut self, eid: u32) -> ExtentRepairIDs {
-        if let Some(eri) = self.repair_job_ids.get_mut(&eid) {
-            debug!(self.log, "reserve returns existing job ids for {}", eid);
-            let repair_ids = ExtentRepairIDs {
-                close_id: eri.close_id,
-                repair_id: eri.repair_id,
-                noop_id: eri.noop_id,
-                reopen_id: eri.reopen_id,
-            };
-
-            return repair_ids;
+    /// Reserve some job IDs for future repair work on the given extent
+    ///
+    /// This is a no-op if repair IDs were already reserved for this extent
+    fn reserve_repair_ids_for_extent(&mut self, eid: u64) {
+        if self.repair_job_ids.contains_key(&eid) {
+            debug!(
+                self.log,
+                "reserve already has existing job ids for {}", eid
+            );
+            return;
         }
 
         debug!(
@@ -4831,35 +4836,43 @@ impl Downstairs {
             noop_id,
             reopen_id,
         };
-        self.repair_job_ids.insert(eid, repair_ids);
-
-        repair_ids
+        let deps = self.ds_active.deps_for_repair(repair_ids, eid);
+        info!(
+            self.log,
+            "inserting repair IDs {repair_ids:?}; got dep {deps:?}"
+        );
+        self.repair_job_ids.insert(eid, (repair_ids, deps));
     }
 
-    // Get the repair IDs for this extent.
-    // If they were already reserved, then us those values, otherwise,
-    // go get the next set of job IDs.
-    fn get_repair_ids(&mut self, eid: u32) -> ExtentRepairIDs {
-        if let Some(eri) = self.repair_job_ids.remove(&eid) {
+    /// Get the repair IDs and dependencies for this extent.
+    ///
+    /// If they were already reserved, then use those values (removing them from
+    /// the list of reserved IDs), otherwise, go get the next set of job IDs.
+    fn get_repair_ids(&mut self, eid: u64) -> (ExtentRepairIDs, Vec<JobId>) {
+        if let Some((eri, deps)) = self.repair_job_ids.remove(&eid) {
             debug!(self.log, "Return existing job ids for {} GG", eid);
-            eri
+            (eri, deps)
         } else {
             debug!(self.log, "Create new job ids for {}", eid);
             let close_id = self.next_id();
             let repair_id = self.next_id();
             let noop_id = self.next_id();
             let reopen_id = self.next_id();
-            ExtentRepairIDs {
+            let repair_ids = ExtentRepairIDs {
                 close_id,
                 repair_id,
                 noop_id,
                 reopen_id,
-            }
+            };
+
+            let deps = self.ds_active.deps_for_repair(repair_ids, eid);
+            (repair_ids, deps)
         }
     }
+
     // Check to see if any repair IDs have been assigned for this
     // extent.
-    fn query_repair_ids(&mut self, eid: u32) -> bool {
+    fn query_repair_ids(&mut self, eid: u64) -> bool {
         self.repair_job_ids.contains_key(&eid)
     }
 
@@ -4868,7 +4881,7 @@ impl Downstairs {
     /// # Panics
     /// If the different downstairs have different extents under repair (which
     /// is not allowed)
-    fn get_extent_under_repair(&self) -> Option<u64> {
+    fn get_extent_under_repair(&self) -> Option<std::ops::RangeInclusive<u64>> {
         let mut extent_under_repair = None;
         for cid in ClientId::iter() {
             if let Some(&eur) = self.extent_limit.get(&cid) {
@@ -4880,7 +4893,38 @@ impl Downstairs {
                 }
             }
         }
-        extent_under_repair
+        extent_under_repair.map(|extent_under_repair| {
+            extent_under_repair
+                ..=self
+                    .repair_job_ids
+                    .last_key_value()
+                    .map(|(k, _)| *k)
+                    .unwrap_or(extent_under_repair)
+        })
+    }
+
+    /// Reserves repair IDs if impacted blocks overlap our extent under repair
+    fn check_repair_ids_for_range(&mut self, impacted_blocks: ImpactedBlocks) {
+        let Some(eur) = self.get_extent_under_repair() else { return; };
+        let mut future_repair = false;
+        for eid in impacted_blocks.extents().into_iter().flatten() {
+            if eid == *eur.start() {
+                future_repair = true;
+            } else if eid > *eur.start() && (eid <= *eur.end() || future_repair)
+            {
+                self.reserve_repair_ids_for_extent(eid);
+                future_repair = true;
+            }
+        }
+    }
+
+    /// Return the extent range covered by the given job
+    ///
+    /// # Panics
+    /// If the job is not stored in our `Downstairs`
+    #[cfg(test)]
+    fn get_extents_for(&self, job: &DownstairsIO) -> ImpactedBlocks {
+        self.ds_active.get_extents_for(job.ds_id)
     }
 }
 
@@ -5785,7 +5829,7 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
 
-        let mut dep = downstairs.ds_active.deps_for_flush();
+        let dep = downstairs.ds_active.deps_for_flush(next_id);
         debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
 
         /*
@@ -5793,19 +5837,9 @@ impl Upstairs {
          * and make sure it matches.
          */
 
-        let mut extent_under_repair =
-            downstairs.get_extent_under_repair().map(|i| i as usize);
-        for (target_extent, id) in &downstairs.repair_job_ids {
-            // Depend on the final job in the repair jobs
-            dep.push(id.reopen_id);
-            if let Some(eur) = extent_under_repair {
-                if *target_extent as usize > eur {
-                    extent_under_repair = Some(*target_extent as usize);
-                }
-            } else {
-                extent_under_repair = Some(*target_extent as usize);
-            }
-        }
+        let extent_under_repair = downstairs
+            .get_extent_under_repair()
+            .map(|v| *v.end() as usize);
 
         /*
          * Build the flush request, and take note of the request ID that
@@ -5818,7 +5852,6 @@ impl Upstairs {
             gw_id,
             self.get_generation(),
             snapshot_details,
-            ImpactedBlocks::Empty,
             extent_under_repair,
         );
 
@@ -5914,75 +5947,20 @@ impl Upstairs {
             cdt::gw__write__start!(|| (gw_id));
         }
 
-        /*
-         * Now create a downstairs work job for each (eid, bi, len) returned
-         * from extent_from_offset
-         *
-         * Create the list of downstairs request numbers (ds_id) we created
-         * on behalf of this guest job.
-         */
-        let mut dep =
-            downstairs.ds_active.deps_for_write(impacted_blocks, ddef);
-        cdt::gw__write__deps!(|| (
-            downstairs.ds_active.len() as u64,
-            dep.len() as u64
-        ));
+        // The impacted blocks may span our extent under repair.  If that's the
+        // case, then reserve repair jobs now (but do not enqueue them); this
+        // makes our dependencies correct.
+        downstairs.check_repair_ids_for_range(impacted_blocks);
+
+        // After reserving any LiveRepair IDs, go get one for this job.
+        // This is required to avoid circular dependencies.
+        let next_id = downstairs.next_id();
 
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
-        let mut future_repair = false;
-        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
-        let extent_under_repair = downstairs.get_extent_under_repair();
-
         let mut cur_offset: usize = 0;
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
-            if let Some(eur) = extent_under_repair {
-                // We are in the middle of a live repair. See if we
-                // are trying to do IO that needs special dependencies.
-                if eid == eur {
-                    warn!(
-                        self.log,
-                        "Write to Extent {}:{}:{} under repair",
-                        eid,
-                        offset.value,
-                        offset.shift
-                    );
-                    // We are operating on extent_under_repair.  This means
-                    // job IDs for that repair operation have been submitted
-                    // into the work queue, and we should already have found
-                    // them and added them to our dependency list.
-                    //
-                    // If this IO extends beyond the end of this extent, then
-                    // we are in the special case of an IO that spans a
-                    // repaired extent and a not yet repaired extent.  Our
-                    // only path forward here is to let the repair finish
-                    // for all extents covered by this IO before we allow
-                    // this IO to move forward.
-                    //
-                    // If we start our IO above the extent limit, then we
-                    // don't need dependencies as this IO should go out
-                    // before any future repair.
-                    future_repair = true;
-                } else if future_repair && eid > eur {
-                    deps_to_add.insert(eid as u32);
-                    // We crossed the repair extent, depend on future repairs
-                    // for this extent as well.
-                    warn!(
-                        self.log,
-                        "Write {}:{}:{} past extent under repair {}",
-                        eid,
-                        offset.value,
-                        offset.shift,
-                        eur
-                    );
-                } else if let Some(rep) =
-                    downstairs.repair_job_ids.get(&(eid as u32))
-                {
-                    dep.push(rep.reopen_id);
-                    future_repair = true;
-                }
-            }
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
@@ -6035,36 +6013,13 @@ impl Upstairs {
             cur_offset += byte_len;
         }
 
-        for new_dep in deps_to_add.iter() {
-            let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.reopen_id);
-        }
-
-        // After reserving any LiveRepair IDs, go get one for this job.
-        // This is required to avoid circular dependencies.
-        let next_id = downstairs.next_id();
-
-        // debug message printing, not load bearing.
-        for new_dep in deps_to_add.iter() {
-            warn!(
-                self.log,
-                "IO Write {} on eur {} Added deps {}",
-                next_id,
-                extent_under_repair.unwrap(),
-                new_dep
-            );
-        }
-        if deps_to_add.is_empty() {
-            debug!(self.log, "IO Write {} has deps {:?}", next_id, dep);
-        }
-
         let wr = create_write_eob(
+            &mut downstairs,
             next_id,
-            dep.clone(),
+            impacted_blocks,
             gw_id,
             writes,
             is_write_unwritten,
-            impacted_blocks,
         );
 
         let mut sub = HashMap::new();
@@ -6151,11 +6106,13 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
         cdt::gw__read__start!(|| (gw_id));
 
-        let mut dep = downstairs.ds_active.deps_for_read(impacted_blocks, ddef);
+        downstairs.check_repair_ids_for_range(impacted_blocks);
 
-        let mut future_repair = false;
-        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
-        let extent_under_repair = downstairs.get_extent_under_repair();
+        /*
+         * Create the tracking info for downstairs request numbers (ds_id) we
+         * will create on behalf of this guest job.
+         */
+        let next_id = downstairs.next_id();
 
         /*
          * Now create a downstairs work job for each (eid, bo) returned
@@ -6165,55 +6122,19 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
-            if let Some(eur) = extent_under_repair {
-                if eid == eur {
-                    future_repair = true;
-                } else if future_repair && eid > eur {
-                    deps_to_add.insert(eid as u32);
-                } else if let Some(rep) =
-                    downstairs.repair_job_ids.get(&(eid as u32))
-                {
-                    dep.push(rep.reopen_id);
-                    future_repair = true;
-                }
-            }
             requests.push(ReadRequest { eid, offset });
         }
 
-        for new_dep in deps_to_add.iter() {
-            warn!(self.log, "Create read repair deps for extent {}", new_dep);
-            let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.reopen_id);
-        }
-
-        /*
-         * Create the tracking info for downstairs request numbers (ds_id) we
-         * will create on behalf of this guest job.
-         */
         let mut sub = HashMap::new();
-        let next_id = downstairs.next_id();
-
-        for new_dep in deps_to_add.iter() {
-            warn!(
-                self.log,
-                "IO Read  {} extent {} added deps {}",
-                next_id,
-                extent_under_repair.unwrap(),
-                new_dep
-            );
-        }
-        if deps_to_add.is_empty() {
-            debug!(self.log, "IO Read  {} has deps {:?}", next_id, dep);
-        }
 
         sub.insert(next_id, 0); // XXX does this value matter?
 
         let wr = create_read_eob(
+            &mut downstairs,
             next_id,
-            dep.clone(),
+            impacted_blocks,
             gw_id,
             requests,
-            impacted_blocks,
         );
 
         /*
@@ -7861,8 +7782,6 @@ struct DownstairsIO {
      */
     data: Option<Vec<ReadResponse>>,
     read_response_hashes: Vec<Option<u64>>,
-
-    impacted_blocks: ImpactedBlocks,
 }
 
 impl DownstairsIO {
@@ -8235,11 +8154,7 @@ impl IOop {
     // repair), and determine if this IO should be sent to the downstairs or not
     // (skipped).
     // Return true if we should send it.
-    pub fn send_io_live_repair(
-        &self,
-        extent_limit: Option<usize>,
-        repair_job_ids: &HashMap<u32, ExtentRepairIDs>,
-    ) -> bool {
+    pub fn send_io_live_repair(&self, extent_limit: Option<u64>) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -8254,9 +8169,7 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64
-                            || repair_job_ids.contains_key(&(write.eid as u32))
-                        {
+                        if write.eid <= extent_limit {
                             return true;
                         }
                     }
@@ -8267,9 +8180,7 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64
-                            || repair_job_ids.contains_key(&(write.eid as u32))
-                        {
+                        if write.eid <= extent_limit {
                             return true;
                         }
                     }
@@ -8286,9 +8197,7 @@ impl IOop {
                     requests,
                 } => {
                     for req in requests {
-                        if req.eid <= extent_limit as u64
-                            || repair_job_ids.contains_key(&(req.eid as u32))
-                        {
+                        if req.eid <= extent_limit {
                             return true;
                         }
                     }
@@ -10331,17 +10240,20 @@ pub async fn up_main(
  * construct the proper IOop to submit to the downstairs.
  */
 fn create_write_eob(
+    ds: &mut Downstairs,
     ds_id: JobId,
-    dependencies: Vec<JobId>,
+    blocks: ImpactedBlocks,
     gw_id: u64,
     writes: Vec<crucible_protocol::Write>,
     is_write_unwritten: bool,
-    impacted_blocks: ImpactedBlocks,
 ) -> DownstairsIO {
-    /*
-     * Note to self:  Should the dependency list cover everything since
-     * the last flush, or everything that is currently outstanding?
-     */
+    let dependencies = ds.ds_active.deps_for_write(ds_id, blocks);
+    cdt::gw__write__deps!(|| (
+        ds.ds_active.len() as u64,
+        dependencies.len() as u64
+    ));
+    debug!(ds.log, "IO Write {} has deps {:?}", ds_id, dependencies);
+
     let awrite = if is_write_unwritten {
         IOop::WriteUnwritten {
             dependencies,
@@ -10363,7 +10275,6 @@ fn create_write_eob(
         replay: false,
         data: None,
         read_response_hashes: Vec::new(),
-        impacted_blocks,
     }
 }
 
@@ -10373,12 +10284,15 @@ fn create_write_eob(
  * DownstairsIO that the downstairs can understand.
  */
 fn create_read_eob(
+    ds: &mut Downstairs,
     ds_id: JobId,
-    dependencies: Vec<JobId>,
+    blocks: ImpactedBlocks,
     gw_id: u64,
     requests: Vec<ReadRequest>,
-    impacted_blocks: ImpactedBlocks,
 ) -> DownstairsIO {
+    let dependencies = ds.ds_active.deps_for_read(ds_id, blocks);
+    debug!(ds.log, "IO Read  {} has deps {:?}", ds_id, dependencies);
+
     let aread = IOop::Read {
         dependencies,
         requests,
@@ -10393,7 +10307,6 @@ fn create_read_eob(
         replay: false,
         data: None,
         read_response_hashes: Vec::new(),
-        impacted_blocks,
     }
 }
 
@@ -10408,7 +10321,6 @@ fn create_flush(
     guest_id: u64,
     gen_number: u64,
     snapshot_details: Option<SnapshotDetails>,
-    impacted_blocks: ImpactedBlocks,
     extent_limit: Option<usize>,
 ) -> DownstairsIO {
     let flush = IOop::Flush {
@@ -10428,7 +10340,6 @@ fn create_flush(
         replay: false,
         data: None,
         read_response_hashes: Vec::new(),
-        impacted_blocks,
     }
 }
 

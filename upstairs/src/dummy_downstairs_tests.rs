@@ -1169,14 +1169,17 @@ pub(crate) mod protocol_test {
             // IO. Issue some single extent reads and writes to make sure that
             // extent limit is honoured. Do this only after receiving the two
             // above messages as that guarantees we are in the repair task and
-            // that extent_limit is set. Make sure reads and writes to the
-            // extent under repair has the ExtentLiveReopen job as a dependency.
-            // Batch up responses to send after the live repair is done,
-            // otherwise flow control will kick in.
+            // that extent_limit is set. Make sure that the first read to the
+            // extent under repair has the the ExtentLiveReopen job as a
+            // dependency, and that later writes have that read as their
+            // dependency (which works because the read already depended on the
+            // ExtentLiveReopen job). Batch up responses to send after the live
+            // repair is done, otherwise flow control will kick in.
 
             let mut responses = vec![Vec::new(); 3];
 
             for io_eid in 0usize..10 {
+                let mut dep_job_id = [reopen_job_id; 3];
                 // read
 
                 {
@@ -1206,7 +1209,7 @@ pub(crate) mod protocol_test {
                         } => {
                             if io_eid == eid {
                                 bail_assert!(
-                                    dependencies.contains(&reopen_job_id)
+                                    dependencies.contains(&dep_job_id[0])
                                 );
                             }
 
@@ -1216,6 +1219,14 @@ pub(crate) mod protocol_test {
                                 job_id: *job_id,
                                 responses: Ok(vec![make_blank_read_response()]),
                             });
+
+                            // At this point, the next operation is going to be
+                            // a write.  This write will depend on the three
+                            // reads that are already enqueued (but not the
+                            // repair close, because the reads already
+                            // implicitly depend on the repair close id).  We'll
+                            // update our target dep_job_id to match this read.
+                            dep_job_id[0] = *job_id;
                         }
 
                         _ => bail!("saw {:?}", m1),
@@ -1241,7 +1252,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            bail_assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&dep_job_id[1]));
                         }
 
                         responses[1].push(Message::ReadResponse {
@@ -1250,6 +1261,7 @@ pub(crate) mod protocol_test {
                             job_id: *job_id,
                             responses: Ok(vec![make_blank_read_response()]),
                         });
+                        dep_job_id[1] = *job_id;
                     }
 
                     _ => bail!("saw {:?}", m2),
@@ -1264,7 +1276,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            bail_assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&dep_job_id[2]));
                         }
 
                         responses[2].push(Message::ReadResponse {
@@ -1273,6 +1285,7 @@ pub(crate) mod protocol_test {
                             job_id: *job_id,
                             responses: Ok(vec![make_blank_read_response()]),
                         });
+                        dep_job_id[2] = *job_id;
                     }
 
                     _ => bail!("saw {:?}", m3),
@@ -1307,7 +1320,7 @@ pub(crate) mod protocol_test {
                         } => {
                             if io_eid == eid {
                                 bail_assert!(
-                                    dependencies.contains(&reopen_job_id)
+                                    dependencies.contains(&dep_job_id[0])
                                 );
                             }
 
@@ -1317,6 +1330,9 @@ pub(crate) mod protocol_test {
                                 job_id: *job_id,
                                 result: Ok(()),
                             });
+                            // Writes are blocking, so we need to update
+                            // dep_job_id right away:
+                            dep_job_id[0] = *job_id;
                         }
 
                         _ => bail!("saw {:?}", m1),
@@ -1342,7 +1358,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            bail_assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&dep_job_id[1]));
                         }
 
                         responses[1].push(Message::WriteAck {
@@ -1351,6 +1367,7 @@ pub(crate) mod protocol_test {
                             job_id: *job_id,
                             result: Ok(()),
                         });
+                        dep_job_id[1] = *job_id;
                     }
 
                     _ => bail!("saw {:?}", m2),
@@ -1365,7 +1382,7 @@ pub(crate) mod protocol_test {
                         ..
                     } => {
                         if io_eid == eid {
-                            bail_assert!(dependencies.contains(&reopen_job_id));
+                            bail_assert!(dependencies.contains(&dep_job_id[2]));
                         }
 
                         responses[2].push(Message::WriteAck {
@@ -1374,6 +1391,7 @@ pub(crate) mod protocol_test {
                             job_id: *job_id,
                             result: Ok(()),
                         });
+                        dep_job_id[2] = *job_id;
                     }
 
                     _ => bail!("saw {:?}", m3),

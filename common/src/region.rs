@@ -183,6 +183,8 @@ impl RegionDefinition {
     }
 
     pub fn set_block_size(&mut self, bs: u64) {
+        // TODO(matt) this is also stored in self.extent_size.shift, which seems
+        // like bad duplication of state.
         self.block_size = bs;
     }
 
