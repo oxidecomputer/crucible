@@ -6097,46 +6097,27 @@ pub mod repair_test {
 
     #[tokio::test]
     async fn test_spicy_live_repair() {
-        // We have a downstairs that is in LiveRepair, and we have indicated
-        // that this extent is under repair.  The write (that spans extents
-        // should have created IDs for future repair work and then made itself
-        // dependent on those repairs finishing. The write that comes next
-        // lands on the extent that has future repairs reserved, and that
-        // 2nd write needs to also depend on those repair jobs.
+        // We have a downstairs that is in LiveRepair, and send a write which is
+        // above the extent above repair.  This is fine; it's skipped on the
+        // being-repaired downstairs.
         //
-        // We start with extent 0 under repair.
-        //     | Under |       |       |
-        //     | Repair|       |       |
-        //     | block | block | block |
-        // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
-        // ----|-------|-------|-------|
+        // Then, send a write which reserves repair job ids for extent 1 (blocks
+        // 3-5).  This is the same as the test above.
         //
-        // First, a write spanning extents 1 and 2
-        //     | block | block | block
-        //     | 0 1 2 | 3 4 5 | 6 7 8
-        // ----|-------|-------|-------
-        //     |       | W W W | W
-        //
-        // This write is skipped by the under-repair downstairs, because it's
-        // after the under-repair block.
-        //
-        // Then, a write to extents 0 and 1, which reserves a repair job ID for
-        // repairing extent 1.
-        //     | block | block | block
-        //     | 0 1 2 | 3 4 5 | 6 7 8
-        // ----|-------|-------|-------
-        //     |     W | W     |
-        //
-        // Finally, a read to extents 1 and 2.  This must *also* insert a new
-        // repair job and depend on it; otherwise, it would be possible to read
-        // old data from extent 2 (block 6).
+        // Finally, send a read which spans extents 1-2 (blocks 5-6).  This must
+        // depend on the previously-inserted repair jobs.  However, that's not
+        // enough: because the initial write was skipped in the under-repair
+        // downstairs, the read won't depend on that write on that downstairs!
+        // Instead, we have to add *new* repair dependencies for extent 2;
+        // without these dependencies, it would be possible to read old data
+        // from block 6 on the under-repair downstairs.
         //
         //     | Under |       |       |
         //     | Repair|       |       |
         //     | block | block | block |
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
         // ----|-------|-------|-------|-------
-        //   0 |       | W W W | W     | none (skipped in under-repair ds)
+        //   0 |       | W W W | W     | none; skipped in under-repair ds
         //   1 |       | RpRpRp|       | 0
         //   2 |       | RpRpRp|       |
         //   3 |       | RpRpRp|       |
@@ -6147,6 +6128,9 @@ pub mod repair_test {
         //   8 |       |       | RpRpRp|
         //   9 |       |       | RpRpRp|
         //   10|       |     R | R     | 0,4,9
+        //
+        // More broadly: if a job is _not_ going to be skipped, then it needs
+        // reserved repair job IDs for every extent that it touches.
         //
         // TODO: it would be nice to drop the dependency on job 0, since it's
         // fully masked by the repair dependencies.
