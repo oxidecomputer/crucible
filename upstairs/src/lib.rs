@@ -5751,6 +5751,8 @@ impl Upstairs {
                 if *target_extent as usize > eur {
                     extent_under_repair = Some(*target_extent as usize);
                 }
+            } else {
+                extent_under_repair = Some(*target_extent as usize);
             }
         }
 
