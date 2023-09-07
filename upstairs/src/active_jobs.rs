@@ -148,7 +148,8 @@ impl ActiveJobs {
          *
          * - writes have to depend on the last flush completing (because
          *   currently everything has to depend on flushes)
-         * - any overlap of impacted blocks requires a dependency
+         * - any overlap of impacted blocks before the flush requires a
+         *   dependency
          *
          * It's important to remember that jobs may arrive at different
          * Downstairs in different orders but they should still complete in job
