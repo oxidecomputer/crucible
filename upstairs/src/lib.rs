@@ -2996,7 +2996,7 @@ impl Downstairs {
      * has no work to do, so return None.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let job = match self.ds_active.get_mut(&ds_id) {
+        let mut job = match self.ds_active.get_mut(&ds_id) {
             Some(job) => job,
             None => {
                 // This job, that we thought was good, is not.  As we don't
@@ -3293,7 +3293,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
@@ -3304,7 +3304,7 @@ impl Downstairs {
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
             }
-        }
+        });
 
         // All of IOState::New jobs are now IOState::Skipped, so clear our
         // cache of new jobs for this downstairs.
@@ -3336,7 +3336,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let is_read = job.work.is_read();
             let is_write = matches!(job.work, IOop::Write { .. });
             let wc = job.state_count();
@@ -3345,7 +3345,7 @@ impl Downstairs {
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
                 assert_eq!(Some(&IOState::Done), job.state.get(&client_id));
-                continue;
+                return;
             }
 
             /*
@@ -3400,7 +3400,7 @@ impl Downstairs {
                 self.io_state_count.incr(&IOState::New, client_id);
                 self.ds_new[client_id as usize].push(*ds_id);
             }
-        }
+        });
     }
 
     // This method is called when we have decided to fault a downstairs
@@ -3421,7 +3421,7 @@ impl Downstairs {
         let mut retire_check = vec![];
         let mut number_jobs_skipped = 0;
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
@@ -3458,7 +3458,7 @@ impl Downstairs {
                     );
                 }
             }
-        }
+        });
 
         info!(
             self.log,
@@ -3595,14 +3595,14 @@ impl Downstairs {
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
 
             // Move this job to done ourselves.
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut job = self.ds_active.get_mut(&ds_id).unwrap();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
             info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
 
             ds_done_tx.send(ds_id).await.unwrap();
         } else if is_write {
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut job = self.ds_active.get_mut(&ds_id).unwrap();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
 
@@ -3658,7 +3658,7 @@ impl Downstairs {
         /*
          * Move AckReady to Acked.
          */
-        let job = self
+        let mut job = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
@@ -3698,7 +3698,7 @@ impl Downstairs {
 
         let job = self
             .ds_active
-            .get_mut(&ds_id)
+            .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
         let bad_job = match &job.work {
@@ -4057,7 +4057,7 @@ impl Downstairs {
         let wc = self.state_count(ds_id)?;
         let mut jobs_completed_ok = wc.completed_ok();
 
-        let job = self
+        let mut job = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
@@ -4578,6 +4578,7 @@ impl Downstairs {
          * but messages may still be unprocessed.
          */
         if job.ack_status == AckStatus::Acked {
+            drop(job);
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
@@ -7266,7 +7267,7 @@ impl Upstairs {
             extent_info,
         ) {
             Err(e) => {
-                match ds.ds_active.get_mut(&ds_id) {
+                match ds.ds_active.get(&ds_id) {
                     Some(job) => {
                         error!(
                             self.log,
@@ -9511,7 +9512,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let mut ds = up.downstairs.lock().await;
             debug!(up.log, "up_ds_listen process {}", ds_id_done);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let mut done = ds.ds_active.get_mut(ds_id_done).unwrap();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -9530,6 +9531,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let io_size = done.io_size();
             let data = done.data.take();
+            drop(done);
 
             ds.ack(ds_id);
             debug!(ds.log, "[A] ack job {}:{}", ds_id, gw_id);

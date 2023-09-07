@@ -5,6 +5,17 @@ use crucible_common::RegionDefinition;
 use crate::{DownstairsIO, ImpactedBlocks};
 use std::collections::BTreeMap;
 
+/// `ActiveJobs` tracks active jobs by ID
+///
+/// It exposes an API that roughly matches a `BTreeMap<u64, DownstairsIO>`,
+/// but leaves open the possibility for further optimization.
+///
+/// Notably, there is no way to directly modify a `DownstairsIO` contained in
+/// `ActiveJobs`.  Bulk modification can be done with `for_each`, and individual
+/// modification can be done with `get_mut`, which returns a
+/// `DownstairsIOHandle` instead of a raw `&mut DownstairsIO`.  All of this
+/// means that we can keep extra metadata in sync, e.g. a list of all ackable
+/// jobs.
 #[derive(Debug)]
 pub(crate) struct ActiveJobs {
     jobs: BTreeMap<u64, DownstairsIO>,
@@ -25,8 +36,10 @@ impl ActiveJobs {
 
     /// Looks up a job by ID, returning a mutable reference
     #[inline]
-    pub fn get_mut(&mut self, job_id: &u64) -> Option<&mut DownstairsIO> {
-        self.jobs.get_mut(job_id)
+    pub fn get_mut(&mut self, job_id: &u64) -> Option<DownstairsIOHandle> {
+        self.jobs
+            .get_mut(job_id)
+            .map(|job| DownstairsIOHandle { job })
     }
 
     /// Returns the total number of active jobs
@@ -41,12 +54,13 @@ impl ActiveJobs {
         self.jobs.is_empty()
     }
 
-    /// Returns an iterator over all active jobs
+    /// Applies a function across all
     #[inline]
-    pub fn iter_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (&u64, &mut DownstairsIO)> {
-        self.jobs.iter_mut()
+    pub fn for_each<F: FnMut(&u64, &mut DownstairsIO)>(&mut self, mut f: F) {
+        for (job_id, job) in self.jobs.iter_mut() {
+            let handle = DownstairsIOHandle { job };
+            f(job_id, handle.job);
+        }
     }
 
     /// Inserts a new job ID and its associated IO work
@@ -262,5 +276,39 @@ impl<'a> IntoIterator for &'a ActiveJobs {
 
     fn into_iter(self) -> Self::IntoIter {
         self.jobs.iter()
+    }
+}
+
+/// Handle for a `DownstairsIO` that keeps secondary data in sync
+///
+/// Many parts of the code want to modify a `DownstairsIO` by directly poking
+/// its fields.  This makes it hard to keep secondary data in sync, e.g.
+/// maintaining a separate list of all ackable IOs.
+///
+/// The `DownstairsIOHandle` implements `Deref` and `DerefMut` into a
+/// `DownstairsIO`, but also has a `Drop` implementation to keep other metadata
+/// in sync.
+#[derive(Debug)]
+pub(crate) struct DownstairsIOHandle<'a> {
+    job: &'a mut DownstairsIO,
+}
+
+impl<'a> std::ops::Deref for DownstairsIOHandle<'a> {
+    type Target = DownstairsIO;
+
+    fn deref(&self) -> &Self::Target {
+        self.job
+    }
+}
+
+impl<'a> std::ops::DerefMut for DownstairsIOHandle<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.job
+    }
+}
+
+impl<'a> std::ops::Drop for DownstairsIOHandle<'a> {
+    fn drop(&mut self) {
+        // nothing to do here yet
     }
 }

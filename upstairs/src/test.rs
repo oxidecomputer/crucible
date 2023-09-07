@@ -807,7 +807,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
@@ -1002,7 +1002,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
@@ -1086,7 +1086,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.ackable_work().len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
@@ -1283,7 +1283,7 @@ pub(crate) mod up_test {
             // emulated run in up_ds_listen
 
             let mut ds = upstairs.downstairs.lock().await;
-            let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+            let state = ds.ds_active.get(&next_id).unwrap().ack_status;
             assert_eq!(state, AckStatus::AckReady);
             ds.ack(next_id);
 
@@ -1798,7 +1798,7 @@ pub(crate) mod up_test {
         for ds_id_done in ack_list.iter() {
             assert_eq!(*ds_id_done, next_id);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get(ds_id_done).unwrap();
             assert_eq!(done.ack_status, AckStatus::AckReady);
 
             assert_eq!(done.guest_id, gw_id);
@@ -1880,7 +1880,7 @@ pub(crate) mod up_test {
         for ds_id_done in ack_list.iter() {
             assert_eq!(*ds_id_done, next_id);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get(ds_id_done).unwrap();
             assert_eq!(done.ack_status, AckStatus::AckReady);
 
             assert_eq!(done.guest_id, gw_id);
@@ -1980,7 +1980,7 @@ pub(crate) mod up_test {
         for ds_id_done in ack_list.iter() {
             assert_eq!(*ds_id_done, next_id);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get(ds_id_done).unwrap();
             assert_eq!(done.ack_status, AckStatus::AckReady);
 
             assert_eq!(done.guest_id, gw_id);
@@ -2066,7 +2066,7 @@ pub(crate) mod up_test {
         for ds_id_done in ack_list.iter() {
             assert_eq!(*ds_id_done, next_id);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get(ds_id_done).unwrap();
             assert_eq!(done.ack_status, AckStatus::AckReady);
 
             assert_eq!(done.guest_id, gw_id);
@@ -2138,7 +2138,7 @@ pub(crate) mod up_test {
         for ds_id_done in ack_list.iter() {
             assert_eq!(*ds_id_done, next_id);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get(ds_id_done).unwrap();
             assert_eq!(done.ack_status, AckStatus::AckReady);
 
             assert_eq!(done.guest_id, gw_id);
@@ -2227,7 +2227,7 @@ pub(crate) mod up_test {
         for ds_id_done in ack_list.iter() {
             assert_eq!(*ds_id_done, next_id);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = ds.ds_active.get(ds_id_done).unwrap();
             assert_eq!(done.ack_status, AckStatus::AckReady);
 
             assert_eq!(done.guest_id, gw_id);
@@ -2443,7 +2443,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 0);
 
         // The job should still be ack ready
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Ack the job to the guest
@@ -2506,7 +2506,7 @@ pub(crate) mod up_test {
             )
             .unwrap());
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // ACK the flush and let retire_check move things along.
@@ -2559,7 +2559,7 @@ pub(crate) mod up_test {
 
         // But, don't send the ack just yet.
         // The job should be ack ready
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // A flush is required to move work to completed
@@ -2592,7 +2592,7 @@ pub(crate) mod up_test {
             .unwrap();
         }
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // ACK the flush and let retire_check move things along.
@@ -2941,7 +2941,7 @@ pub(crate) mod up_test {
             )
             .unwrap());
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
         ds.retire_check(next_id);
@@ -3190,18 +3190,18 @@ pub(crate) mod up_test {
 
         // One completion should allow for an ACK
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Be sure the job is not yet in replay
-        assert!(!ds.ds_active.get_mut(&next_id).unwrap().replay);
+        assert!(!ds.ds_active.get(&next_id).unwrap().replay);
         ds.re_new(0);
         // Now the IO should be replay
-        assert!(ds.ds_active.get_mut(&next_id).unwrap().replay);
+        assert!(ds.ds_active.get(&next_id).unwrap().replay);
 
         // The act of taking a downstairs offline should move a read
         // back from AckReady if it was the only completed read.
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::NotAcked);
     }
 
@@ -3240,7 +3240,7 @@ pub(crate) mod up_test {
             )
             .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Complete the read on a 2nd downstairs.
@@ -3263,12 +3263,12 @@ pub(crate) mod up_test {
         ds.re_new(0);
 
         // Should still be ok to ACK this IO
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Taking the second downstairs offline should revert the ACK.
         ds.re_new(1);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::NotAcked);
 
         // Redo the read on DS 0, IO should go back to ackable.
@@ -3287,7 +3287,7 @@ pub(crate) mod up_test {
             )
             .unwrap());
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
     }
 
@@ -3326,7 +3326,7 @@ pub(crate) mod up_test {
 
         // Verify the read is now AckReady
         assert_eq!(ds.ackable_work().len(), 1);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         // Ack the read to the guest.
@@ -3344,7 +3344,7 @@ pub(crate) mod up_test {
         ds.re_new(0);
 
         // Acked IO should remain so.
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
 
         // Redo on DS 0, IO should remain acked.
@@ -3362,7 +3362,7 @@ pub(crate) mod up_test {
             )
             .unwrap());
         assert_eq!(ds.ackable_work().len(), 0);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
     }
 
@@ -3426,11 +3426,11 @@ pub(crate) mod up_test {
         ds.ack(next_id);
 
         // Before re re_new, the IO is not replay
-        assert!(!ds.ds_active.get_mut(&next_id).unwrap().replay);
+        assert!(!ds.ds_active.get(&next_id).unwrap().replay);
         // Now, take that downstairs offline
         ds.re_new(0);
         // Now the IO should be replay
-        assert!(ds.ds_active.get_mut(&next_id).unwrap().replay);
+        assert!(ds.ds_active.get(&next_id).unwrap().replay);
 
         // Move it to in-progress.
         ds.in_progress(next_id, 0);
@@ -3458,7 +3458,7 @@ pub(crate) mod up_test {
         // Some final checks.  The replay should behave in every other way
         // like a regular read.
         assert_eq!(ds.ackable_work().len(), 0);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
     }
 
@@ -3539,7 +3539,7 @@ pub(crate) mod up_test {
         // Now, take the second downstairs offline
         ds.re_new(1);
         // Now the IO should be replay
-        assert!(ds.ds_active.get_mut(&next_id).unwrap().replay);
+        assert!(ds.ds_active.get(&next_id).unwrap().replay);
 
         // Move it to in-progress.
         ds.in_progress(next_id, 1);
@@ -3567,7 +3567,7 @@ pub(crate) mod up_test {
         // Some final checks.  The replay should behave in every other way
         // like a regular read.
         assert_eq!(ds.ackable_work().len(), 0);
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
     }
 
@@ -3630,19 +3630,19 @@ pub(crate) mod up_test {
             .unwrap());
 
         // Verify AckReady
-        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
 
         /* Now, take that downstairs offline */
         // Before re re_new, the IO is not replay
-        assert!(!ds.ds_active.get_mut(&id1).unwrap().replay);
+        assert!(!ds.ds_active.get(&id1).unwrap().replay);
         ds.re_new(1);
         // Now the IO should be replay
-        assert!(ds.ds_active.get_mut(&id1).unwrap().replay);
+        assert!(ds.ds_active.get(&id1).unwrap().replay);
 
         // Write Unwritten State goes back to NotAcked,
         // Write will remain AckReady
-        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get(&id1).unwrap().ack_status;
         if is_write_unwritten {
             assert_eq!(state, AckStatus::NotAcked);
         } else {
@@ -3663,7 +3663,7 @@ pub(crate) mod up_test {
             .unwrap());
 
         // State should go back to acked.
-        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
     }
 
@@ -3737,7 +3737,7 @@ pub(crate) mod up_test {
         ds.re_new(0);
 
         // State should stay acked
-        let state = ds.ds_active.get_mut(&id1).unwrap().ack_status;
+        let state = ds.ds_active.get(&id1).unwrap().ack_status;
         assert_eq!(state, AckStatus::Acked);
 
         // Finish the write all the way out.
@@ -6316,8 +6316,8 @@ pub(crate) mod up_test {
             enqueue_read(&up, request.clone(), false, ds_done_tx.clone()).await;
 
         // Verify the read is all new still
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&read_id).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&read_id).unwrap();
 
         assert_eq!(job.state.get(&0).unwrap(), &IOState::New);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::New);
@@ -6355,8 +6355,8 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
 
         // Verify the read switched from new to skipped
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&read_id).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&read_id).unwrap();
 
         assert_eq!(job.state.get(&0).unwrap(), &IOState::New);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Skipped);
@@ -6423,8 +6423,8 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
 
         // Verify the read switched from new to skipped
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&read_id).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&read_id).unwrap();
 
         assert_eq!(job.state.get(&0).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Skipped);
@@ -6476,11 +6476,11 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 2);
 
         // Verify all IOs are done
-        let mut ds = up.downstairs.lock().await;
+        let ds = up.downstairs.lock().await;
         for cid in 0..3 {
-            let job = ds.ds_active.get_mut(&read_one).unwrap();
+            let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
-            let job = ds.ds_active.get_mut(&write_one).unwrap();
+            let job = ds.ds_active.get(&write_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
         }
         assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
@@ -6514,14 +6514,14 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 3);
 
         // Verify all IOs are done
-        let mut ds = up.downstairs.lock().await;
+        let ds = up.downstairs.lock().await;
         for cid in 0..3 {
-            let job = ds.ds_active.get_mut(&read_one).unwrap();
+            let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
-            let job = ds.ds_active.get_mut(&write_one).unwrap();
+            let job = ds.ds_active.get(&write_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
         }
-        let job = ds.ds_active.get_mut(&write_fail).unwrap();
+        let job = ds.ds_active.get(&write_fail).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Done);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
         assert_eq!(
@@ -6579,11 +6579,11 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 2);
 
         // Verify all IOs are done
-        let mut ds = up.downstairs.lock().await;
+        let ds = up.downstairs.lock().await;
         for cid in 0..3 {
-            let job = ds.ds_active.get_mut(&read_one).unwrap();
+            let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
-            let job = ds.ds_active.get_mut(&write_one).unwrap();
+            let job = ds.ds_active.get(&write_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
         }
         drop(ds);
@@ -6618,17 +6618,17 @@ pub(crate) mod up_test {
         assert_eq!(up.downstairs.lock().await.ackable_work().len(), 3);
 
         // Verify all IOs are done
-        let mut ds = up.downstairs.lock().await;
+        let ds = up.downstairs.lock().await;
         for cid in 0..3 {
             // First read, still Done
-            let job = ds.ds_active.get_mut(&read_one).unwrap();
+            let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
             // First write, still Done
-            let job = ds.ds_active.get_mut(&write_one).unwrap();
+            let job = ds.ds_active.get(&write_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
         }
         // The failing write, done on 0,1
-        let job = ds.ds_active.get_mut(&write_fail).unwrap();
+        let job = ds.ds_active.get(&write_fail).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Done);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
         // The failing write, error on 2
@@ -6638,7 +6638,7 @@ pub(crate) mod up_test {
         );
 
         // The reads that were in progress
-        let job = ds.ds_active.get_mut(&read_two).unwrap();
+        let job = ds.ds_active.get(&read_two).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
@@ -6677,18 +6677,18 @@ pub(crate) mod up_test {
 
         let flush_one = enqueue_flush(&up, false, ds_done_tx.clone()).await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&write_one).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::New);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::New);
 
-        let job = ds.ds_active.get_mut(&read_one).unwrap();
+        let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::New);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::New);
 
-        let job = ds.ds_active.get_mut(&flush_one).unwrap();
+        let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::New);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::New);
@@ -6729,18 +6729,18 @@ pub(crate) mod up_test {
         // Finally, add a flush
         let flush_one = enqueue_flush(&up, true, ds_done_tx.clone()).await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&write_one).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::InProgress);
 
-        let job = ds.ds_active.get_mut(&read_one).unwrap();
+        let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::InProgress);
 
-        let job = ds.ds_active.get_mut(&flush_one).unwrap();
+        let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::InProgress);
@@ -6783,13 +6783,13 @@ pub(crate) mod up_test {
         // Verify all IOs are done
         let mut ds = up.downstairs.lock().await;
 
-        let job = ds.ds_active.get_mut(&read_one).unwrap();
+        let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Done);
-        let job = ds.ds_active.get_mut(&write_one).unwrap();
+        let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Done);
-        let job = ds.ds_active.get_mut(&flush_one).unwrap();
+        let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Done);
 
@@ -6842,18 +6842,18 @@ pub(crate) mod up_test {
         // Finally, add a flush
         let flush_one = enqueue_flush(&up, true, ds_done_tx.clone()).await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&write_one).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
 
-        let job = ds.ds_active.get_mut(&read_one).unwrap();
+        let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
 
-        let job = ds.ds_active.get_mut(&flush_one).unwrap();
+        let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
@@ -6887,11 +6887,11 @@ pub(crate) mod up_test {
         // Verify all IOs are done
         let mut ds = up.downstairs.lock().await;
 
-        let job = ds.ds_active.get_mut(&read_one).unwrap();
+        let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
-        let job = ds.ds_active.get_mut(&write_one).unwrap();
+        let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
-        let job = ds.ds_active.get_mut(&flush_one).unwrap();
+        let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Done);
 
         ds.ack(read_one);
@@ -6940,8 +6940,8 @@ pub(crate) mod up_test {
         let read_one =
             enqueue_read(&up, request.clone(), false, ds_done_tx.clone()).await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&read_one).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
@@ -6989,8 +6989,8 @@ pub(crate) mod up_test {
         // Create a write.
         let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&write_one).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
@@ -7038,8 +7038,8 @@ pub(crate) mod up_test {
         // Create a flush.
         let flush_one = enqueue_flush(&up, false, ds_done_tx.clone()).await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&flush_one).unwrap();
+        let ds = up.downstairs.lock().await;
+        let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state.get(&0).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&1).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
