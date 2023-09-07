@@ -5486,7 +5486,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         // Manually move all these jobs to done.
         for job_id in 1000..1003 {
-            let mut job = ds.ds_active.get_mut(&job_id).unwrap();
+            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = handle.job();
             for cid in 0..3 {
                 job.state.insert(cid, IOState::Done);
             }
@@ -5569,7 +5570,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         // Manually move all these jobs to done.
         for job_id in 1000..1003 {
-            let mut job = ds.ds_active.get_mut(&job_id).unwrap();
+            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = handle.job();
             for cid in 0..3 {
                 job.state.insert(cid, IOState::Done);
             }
@@ -5684,7 +5686,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         // Manually move all these jobs to done.
         for job_id in 1000..1003 {
-            let mut job = ds.ds_active.get_mut(&job_id).unwrap();
+            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = handle.job();
             for cid in 0..3 {
                 job.state.insert(cid, IOState::Done);
             }
@@ -5837,11 +5840,12 @@ pub mod repair_test {
 
         let mut ds = up.downstairs.lock().await;
         // Manually move this jobs to done.
-        let mut job = ds.ds_active.get_mut(&1000).unwrap();
+        let mut handle = ds.ds_active.get_mut(&1000).unwrap();
+        let job = handle.job();
         for cid in 0..3 {
             job.state.insert(cid, IOState::Done);
         }
-        drop(job);
+        drop(handle);
         drop(ds);
 
         let eid = 0;

@@ -290,12 +290,8 @@ impl<'a> IntoIterator for &'a ActiveJobs {
 /// Many parts of the code want to modify a `DownstairsIO` by directly poking
 /// its fields.  This makes it hard to keep secondary data in sync, e.g.
 /// maintaining a separate list of all ackable IOs.
-///
-/// The `DownstairsIOHandle` implements `Deref` and `DerefMut` into a
-/// `DownstairsIO`, but also has a `Drop` implementation to keep other metadata
-/// in sync.
 pub(crate) struct DownstairsIOHandle<'a> {
-    job: &'a mut DownstairsIO,
+    pub job: &'a mut DownstairsIO,
     initial_status: AckStatus,
     ackable: &'a mut BTreeSet<u64>,
 }
@@ -318,18 +314,8 @@ impl<'a> DownstairsIOHandle<'a> {
             ackable,
         }
     }
-}
 
-impl<'a> std::ops::Deref for DownstairsIOHandle<'a> {
-    type Target = DownstairsIO;
-
-    fn deref(&self) -> &Self::Target {
-        self.job
-    }
-}
-
-impl<'a> std::ops::DerefMut for DownstairsIOHandle<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
+    pub fn job(&mut self) -> &mut DownstairsIO {
         self.job
     }
 }
@@ -338,12 +324,11 @@ impl<'a> std::ops::Drop for DownstairsIOHandle<'a> {
     fn drop(&mut self) {
         match (self.initial_status, self.job.ack_status) {
             (AckStatus::NotAcked, AckStatus::AckReady) => {
-                let prev = self.ackable.insert(self.ds_id);
+                let prev = self.ackable.insert(self.job.ds_id);
                 assert!(prev);
             }
             (AckStatus::AckReady, AckStatus::Acked | AckStatus::NotAcked) => {
-                let id = self.ds_id;
-                let prev = self.ackable.remove(&id);
+                let prev = self.ackable.remove(&self.job.ds_id);
                 assert!(prev);
             }
             // None transitions

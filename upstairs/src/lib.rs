@@ -2996,8 +2996,8 @@ impl Downstairs {
      * has no work to do, so return None.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let mut job = match self.ds_active.get_mut(&ds_id) {
-            Some(job) => job,
+        let mut handle = match self.ds_active.get_mut(&ds_id) {
+            Some(handle) => handle,
             None => {
                 // This job, that we thought was good, is not.  As we don't
                 // keep the lock when gathering job IDs to work on, it is
@@ -3006,6 +3006,7 @@ impl Downstairs {
                 return None;
             }
         };
+        let job = handle.job();
 
         // If current state is Skipped, then we have nothing to do here.
         if job.state[&client_id] == IOState::Skipped {
@@ -3589,14 +3590,16 @@ impl Downstairs {
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
 
             // Move this job to done ourselves.
-            let mut job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+            let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
             info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
 
             ds_done_tx.send(ds_id).await.unwrap();
         } else if is_write {
-            let mut job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+            let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
 
@@ -3652,11 +3655,12 @@ impl Downstairs {
         /*
          * Move AckReady to Acked.
          */
-        let mut job = self
+        let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
+        let job = handle.job();
 
         if job.ack_status != AckStatus::AckReady {
             panic!(
@@ -4051,10 +4055,11 @@ impl Downstairs {
         let wc = self.state_count(ds_id)?;
         let mut jobs_completed_ok = wc.completed_ok();
 
-        let mut job = self
+        let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        let job = handle.job();
 
         if job.state[&client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
@@ -4572,7 +4577,7 @@ impl Downstairs {
          * but messages may still be unprocessed.
          */
         if job.ack_status == AckStatus::Acked {
-            drop(job);
+            drop(handle);
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
@@ -9506,7 +9511,8 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let mut ds = up.downstairs.lock().await;
             debug!(up.log, "up_ds_listen process {}", ds_id_done);
 
-            let mut done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let mut handle = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = handle.job();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -9525,7 +9531,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let io_size = done.io_size();
             let data = done.data.take();
-            drop(done);
+            drop(handle);
 
             ds.ack(ds_id);
             debug!(ds.log, "[A] ack job {}:{}", ds_id, gw_id);
