@@ -5977,6 +5977,7 @@ impl Upstairs {
                     downstairs.repair_job_ids.get(&(eid as u32))
                 {
                     dep.push(rep.reopen_id);
+                    future_repair = true;
                 }
             }
             let byte_len: usize = ddef.block_size() as usize;
@@ -6199,6 +6200,7 @@ impl Upstairs {
                     downstairs.repair_job_ids.get(&(eid as u32))
                 {
                     dep.push(rep.reopen_id);
+                    future_repair = true;
                 }
             }
             requests.push(ReadRequest { eid, offset });
