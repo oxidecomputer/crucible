@@ -4782,6 +4782,26 @@ impl Downstairs {
     fn query_repair_ids(&mut self, eid: u32) -> bool {
         self.repair_job_ids.contains_key(&eid)
     }
+
+    /// Returns the current extent under repair (from `self.extent_limit`)
+    ///
+    /// # Panics
+    /// If the different downstairs have different extents under repair (which
+    /// is not allowed)
+    fn get_extent_under_repair(&self) -> Option<u64> {
+        let mut extent_under_repair = None;
+        for cid in 0..3 {
+            if let Some(eur) = self.extent_limit[cid] {
+                if extent_under_repair.is_none() {
+                    extent_under_repair = Some(eur as u64);
+                } else {
+                    // We only support one extent being repaired at a time
+                    assert_eq!(Some(eur as u64), extent_under_repair);
+                }
+            }
+        }
+        extent_under_repair
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -5719,17 +5739,8 @@ impl Upstairs {
          * and make sure it matches.
          */
 
-        let mut extent_under_repair = None;
-        for cid in 0..3 {
-            if let Some(eur) = downstairs.extent_limit[cid] {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur), extent_under_repair);
-                }
-            }
-        }
+        let extent_under_repair =
+            downstairs.get_extent_under_repair().map(|i| i as usize);
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
@@ -5905,17 +5916,7 @@ impl Upstairs {
 
         let mut future_repair = false;
         let mut deps_to_add: HashSet<u32> = HashSet::new();
-        let mut extent_under_repair = None;
-        for cid in 0..3 {
-            if let Some(eur) = downstairs.extent_limit[cid] {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur as u64);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur as u64), extent_under_repair);
-                }
-            }
-        }
+        let extent_under_repair = downstairs.get_extent_under_repair();
 
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
             if let Some(eur) = extent_under_repair {
@@ -6163,17 +6164,7 @@ impl Upstairs {
 
         let mut future_repair = false;
         let mut deps_to_add: HashSet<u32> = HashSet::new();
-        let mut extent_under_repair = None;
-        for cid in 0..3 {
-            if let Some(eur) = downstairs.extent_limit[cid] {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur as u64);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur as u64), extent_under_repair);
-                }
-            }
-        }
+        let extent_under_repair = downstairs.get_extent_under_repair();
 
         /*
          * Now create a downstairs work job for each (eid, bo) returned
