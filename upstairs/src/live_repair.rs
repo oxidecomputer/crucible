@@ -6036,8 +6036,8 @@ pub mod repair_test {
         //   1 |       | RpRpRp|
         //   2 |       | RpRpRp|
         //   3 |       | RpRpRp|
-        //   4 |     W | W W   | 0,1,2,3
-        //   6 |       |     W | 0,1,2,3
+        //   4 |     W | W W   | 3
+        //   6 |       |     W | 3
         //
 
         let up = create_test_upstairs(1).await;
