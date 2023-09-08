@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -67,6 +67,9 @@ pub use impacted_blocks::*;
 
 mod live_repair;
 pub use live_repair::{check_for_repair, ExtentInfo, RepairCheck};
+
+mod active_jobs;
+use active_jobs::ActiveJobs;
 
 use async_trait::async_trait;
 
@@ -2774,7 +2777,7 @@ struct Downstairs {
     /**
      * The active list of IO for the downstairs.
      */
-    ds_active: BTreeMap<u64, DownstairsIO>,
+    ds_active: ActiveJobs,
 
     /**
      * Cache of new jobs, indexed by client ID.
@@ -2933,7 +2936,7 @@ impl Downstairs {
             ds_state: vec![DsState::New; 3],
             ds_last_flush: vec![0; 3],
             downstairs_errors: HashMap::new(),
-            ds_active: BTreeMap::new(),
+            ds_active: ActiveJobs::new(),
             ds_new: vec![Vec::new(); 3],
             ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
             completed: AllocRingBuffer::new(2048),
@@ -2993,8 +2996,8 @@ impl Downstairs {
      * has no work to do, so return None.
      */
     fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let job = match self.ds_active.get_mut(&ds_id) {
-            Some(job) => job,
+        let mut handle = match self.ds_active.get_mut(&ds_id) {
+            Some(handle) => handle,
             None => {
                 // This job, that we thought was good, is not.  As we don't
                 // keep the lock when gathering job IDs to work on, it is
@@ -3003,6 +3006,7 @@ impl Downstairs {
                 return None;
             }
         };
+        let job = handle.job();
 
         // If current state is Skipped, then we have nothing to do here.
         if job.state[&client_id] == IOState::Skipped {
@@ -3290,7 +3294,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
@@ -3301,7 +3305,7 @@ impl Downstairs {
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
             }
-        }
+        });
 
         // All of IOState::New jobs are now IOState::Skipped, so clear our
         // cache of new jobs for this downstairs.
@@ -3333,7 +3337,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let is_read = job.work.is_read();
             let is_write = matches!(job.work, IOop::Write { .. });
             let wc = job.state_count();
@@ -3342,7 +3346,7 @@ impl Downstairs {
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
                 assert_eq!(Some(&IOState::Done), job.state.get(&client_id));
-                continue;
+                return;
             }
 
             /*
@@ -3397,7 +3401,7 @@ impl Downstairs {
                 self.io_state_count.incr(&IOState::New, client_id);
                 self.ds_new[client_id as usize].push(*ds_id);
             }
-        }
+        });
     }
 
     // This method is called when we have decided to fault a downstairs
@@ -3418,7 +3422,7 @@ impl Downstairs {
         let mut retire_check = vec![];
         let mut number_jobs_skipped = 0;
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let state = job.state.get(&client_id).unwrap();
 
             if *state == IOState::InProgress || *state == IOState::New {
@@ -3455,7 +3459,7 @@ impl Downstairs {
                     );
                 }
             }
-        }
+        });
 
         info!(
             self.log,
@@ -3515,13 +3519,7 @@ impl Downstairs {
      * Build a list of jobs that are ready to be acked.
      */
     fn ackable_work(&mut self) -> Vec<u64> {
-        let mut ackable = Vec::new();
-        for (ds_id, job) in &self.ds_active {
-            if job.ack_status == AckStatus::AckReady {
-                ackable.push(*ds_id);
-            }
-        }
-        ackable
+        self.ds_active.ackable_work()
     }
 
     /**
@@ -3592,14 +3590,16 @@ impl Downstairs {
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
 
             // Move this job to done ourselves.
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+            let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
             info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
 
             ds_done_tx.send(ds_id).await.unwrap();
         } else if is_write {
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+            let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
 
@@ -3642,11 +3642,11 @@ impl Downstairs {
     /**
      * Collect the state of the jobs from each client.
      */
-    fn state_count(&mut self, ds_id: u64) -> Result<WorkCounts> {
+    fn state_count(&self, ds_id: u64) -> Result<WorkCounts> {
         /* XXX Should this support invalid ds_ids? */
         let job = self
             .ds_active
-            .get_mut(&ds_id)
+            .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         Ok(job.state_count())
     }
@@ -3655,11 +3655,12 @@ impl Downstairs {
         /*
          * Move AckReady to Acked.
          */
-        let job = self
+        let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
+        let job = handle.job();
 
         if job.ack_status != AckStatus::AckReady {
             panic!(
@@ -3695,7 +3696,7 @@ impl Downstairs {
 
         let job = self
             .ds_active
-            .get_mut(&ds_id)
+            .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
         let bad_job = match &job.work {
@@ -4054,10 +4055,11 @@ impl Downstairs {
         let wc = self.state_count(ds_id)?;
         let mut jobs_completed_ok = wc.completed_ok();
 
-        let job = self
+        let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        let job = handle.job();
 
         if job.state[&client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
@@ -4575,6 +4577,7 @@ impl Downstairs {
          * but messages may still be unprocessed.
          */
         if job.ack_status == AckStatus::Acked {
+            drop(handle);
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
@@ -4622,20 +4625,15 @@ impl Downstairs {
             assert_eq!(wc.active, 0);
 
             // Retire all the jobs that happened before and including this
-            // flush, with a few exceptions.  For these, we need to make
-            // a prevent_retire list and keep track of them so we can put
-            // them back on the ds_active list after we have finished
-            // processing it.
+            // flush, with a few exceptions.  Because we can't iterate and
+            // modify the list simultaneously, we mark to-be-retired jobs in
+            // `retired`, then remove them in bulk after checking the list.
             let mut retired = Vec::new();
-            let mut prevent_retire = BTreeMap::new();
 
-            loop {
-                let id = match self.ds_active.keys().next() {
-                    Some(id) if *id > ds_id => break,
-                    None => break,
-                    Some(id) => *id,
+            for (&id, job) in &self.ds_active {
+                if id > ds_id {
+                    break;
                 };
-
                 assert!(id <= ds_id);
 
                 // While we don't expect any jobs to still be in progress,
@@ -4643,7 +4641,6 @@ impl Downstairs {
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
                 let wc = self.state_count(id).unwrap();
-                let job = self.ds_active.remove(&id).unwrap();
                 if wc.active != 0 || job.ack_status != AckStatus::Acked {
                     warn!(
                         self.log,
@@ -4652,7 +4649,6 @@ impl Downstairs {
                         ds_id,
                         wc,
                     );
-                    prevent_retire.insert(id, job);
                     continue;
                 }
 
@@ -4671,7 +4667,10 @@ impl Downstairs {
                     self.io_state_count.decr(old_state, cid);
                 }
             }
-            self.ds_active.extend(prevent_retire);
+            // Now that we've collected jobs to retire, remove them from the map
+            for &id in &retired {
+                self.ds_active.remove(&id).unwrap();
+            }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
@@ -5394,7 +5393,7 @@ impl Upstairs {
             panic!("Can't deactivate with downstairs offline (yet)");
         }
 
-        if ds.ds_active.keys().len() == 0 {
+        if ds.ds_active.is_empty() {
             debug!(self.log, "No work, no need to flush, return OK");
             if let Some(req) = req {
                 req.send_ok().await;
@@ -5708,33 +5707,7 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
 
-        /*
-         * To build the dependency list for this flush, iterate from the end of
-         * the downstairs work active list in reverse order and check each job
-         * in that list to see if this new flush must depend on it.
-         *
-         * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But this flush must depend
-         * on the last flush - flush and gen numbers downstairs need to be
-         * sequential and the same for each downstairs.
-         *
-         * The downstairs currently assumes that all jobs previous to the last
-         * flush have completed, so the Upstairs must set that flushes depend on
-         * all jobs. It's currently important that flushes depend on everything,
-         * and everything depends on flushes.
-         */
-        let num_jobs = downstairs.ds_active.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            // Flushes must depend on everything
-            dep.push(*id);
-
-            // Depend on the last flush, but then bail out
-            if job.work.is_flush() {
-                break;
-            }
-        }
+        let mut dep = downstairs.ds_active.deps_for_flush();
         debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
 
         /*
@@ -5870,61 +5843,12 @@ impl Upstairs {
          * Create the list of downstairs request numbers (ds_id) we created
          * on behalf of this guest job.
          */
-        let mut sub = HashMap::new();
-        let mut cur_offset: usize = 0;
-
-        /*
-         * To build the dependency list for this write, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new write must
-         * depend on it.
-         *
-         * Construct a list of dependencies for this write based on the
-         * following rules:
-         *
-         * - writes have to depend on the last flush completing (because
-         *   currently everything has to depend on flushes)
-         * - any overlap of impacted blocks requires a dependency
-         *
-         * It's important to remember that jobs may arrive at different
-         * Downstairs in different orders but they should still complete in job
-         * dependency order.
-         *
-         * TODO: any overlap of impacted blocks will create a dependency.
-         * take this an example (this shows three writes, all to the
-         * same block, along with the dependency list for each
-         * write):
-         *
-         *       block
-         * op# | 0 1 2 | deps
-         * ----|-------------
-         *   0 | W     |
-         *   1 | W     | 0
-         *   2 | W     | 0,1
-         *
-         * op 2 depends on both op 1 and op 0. If dependencies are transitive
-         * with an existing job, it would be nice if those were removed from
-         * this job's dependencies.
-         */
-        let num_jobs = downstairs.ds_active.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        // Search backwards in the list of active jobs
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            // Depend on the last flush - flushes are a barrier for
-            // all writes.
-            if job.work.is_flush() {
-                dep.push(*id);
-            }
-
-            // If this job impacts the same blocks as something already active,
-            // create a dependency.
-            if impacted_blocks.conflicts(&job.impacted_blocks) {
-                dep.push(*id);
-            }
-        }
-
-        cdt::gw__write__deps!(|| (num_jobs as u64, dep.len() as u64));
+        let mut dep =
+            downstairs.ds_active.deps_for_write(impacted_blocks, ddef);
+        cdt::gw__write__deps!(|| (
+            downstairs.ds_active.len() as u64,
+            dep.len() as u64
+        ));
 
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
@@ -5933,6 +5857,7 @@ impl Upstairs {
         let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
         let extent_under_repair = downstairs.get_extent_under_repair();
 
+        let mut cur_offset: usize = 0;
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
             if let Some(eur) = extent_under_repair {
                 // We are in the middle of a live repair. See if we
@@ -6065,6 +5990,7 @@ impl Upstairs {
             impacted_blocks,
         );
 
+        let mut sub = HashMap::new();
         sub.insert(next_id, 0); // XXX does value here matter?
 
         /*
@@ -6148,36 +6074,7 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
         cdt::gw__read__start!(|| (gw_id));
 
-        /*
-         * To build the dependency list for this read, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new read must
-         * depend on it.
-         *
-         * Construct a list of dependencies for this read based on the
-         * following rules:
-         *
-         * - reads depend on flushes (because currently everything has to depend
-         *   on flushes)
-         * - any write with an overlap of impacted blocks requires a
-         *   dependency
-         */
-        let num_jobs = downstairs.ds_active.keys().len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        // Search backwards in the list of active jobs
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            if job.work.is_flush() {
-                dep.push(*id);
-                break;
-            } else if (job.work.is_write() | job.work.is_repair())
-                && impacted_blocks.conflicts(&job.impacted_blocks)
-            {
-                // If this is a write or repair and it impacts the same blocks
-                // as something already active, create a dependency.
-                dep.push(*id);
-            }
-        }
+        let mut dep = downstairs.ds_active.deps_for_read(impacted_blocks, ddef);
 
         let mut future_repair = false;
         let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
@@ -7369,7 +7266,7 @@ impl Upstairs {
             extent_info,
         ) {
             Err(e) => {
-                match ds.ds_active.get_mut(&ds_id) {
+                match ds.ds_active.get(&ds_id) {
                     Some(job) => {
                         error!(
                             self.log,
@@ -7438,7 +7335,7 @@ impl Upstairs {
                 );
             } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
                 // skip
-            } else if let Some(job) = ds.ds_active.get_mut(&ds_id) {
+            } else if let Some(job) = ds.ds_active.get(&ds_id) {
                 if matches!(
                     job.work,
                     IOop::Write { .. }
@@ -9614,7 +9511,8 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let mut ds = up.downstairs.lock().await;
             debug!(up.log, "up_ds_listen process {}", ds_id_done);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let mut handle = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = handle.job();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -9633,6 +9531,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let io_size = done.io_size();
             let data = done.data.take();
+            drop(handle);
 
             ds.ack(ds_id);
             debug!(ds.log, "[A] ack job {}:{}", ds_id, gw_id);

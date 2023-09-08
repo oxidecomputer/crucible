@@ -611,47 +611,6 @@ fn repair_or_noop(
     }
 }
 
-// Build the list of dependencies for a live repair job.  These are jobs that
-// must finish before this repair job can move begin.  Because we need all
-// three repair jobs to happen lock step, we have to prevent any IO from
-// hitting the same extent, which means any IO going to our ImpactedBlocks
-// (the whole extent) must finish first (or come after) our job.
-fn deps_for_live_repair(
-    ds: &Downstairs,
-    impacted_blocks: ImpactedBlocks,
-    close_id: u64,
-) -> Vec<u64> {
-    let num_jobs = ds.ds_active.keys().len();
-    let mut deps: Vec<u64> = Vec::with_capacity(num_jobs);
-
-    // Search backwards in the list of active jobs, stop at the
-    // last flush
-    for (id, job) in ds.ds_active.iter().rev() {
-        // We are finding dependencies based on impacted blocks.
-        // We may have reserved future job IDs for repair, and it's possible
-        // that this job we are finding dependencies for now is actually a
-        // future repair job we reserved.  If so, don't include ourself in
-        // our own list of dependencies.
-        if job.ds_id > close_id {
-            continue;
-        }
-        // If this operation impacts the same blocks as something
-        // already active, create a dependency.
-        if impacted_blocks.conflicts(&job.impacted_blocks) {
-            deps.push(*id);
-        }
-
-        // A flush job won't show impacted blocks. We can stop looking
-        // for dependencies beyond the last flush.
-        if job.work.is_flush() {
-            deps.push(*id);
-            break;
-        }
-    }
-
-    deps
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn create_and_enqueue_reopen_io(
     ds: &mut Downstairs,
@@ -903,7 +862,9 @@ impl Upstairs {
             let ddef = self.ddef.lock().await.get_def().unwrap();
             let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
-            let deps = deps_for_live_repair(ds, impacted_blocks, ds_id);
+            let deps =
+                ds.ds_active
+                    .deps_for_live_repair(impacted_blocks, ds_id, ddef);
 
             warn!(
                 self.log,
@@ -1117,7 +1078,9 @@ impl Upstairs {
         // time, we go through the list of dependencies and remove jobs
         // that we skipped or finished for that specific downstairs before
         // we send the repair IO over the wire.
-        let mut deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
+        let mut deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, close_id, ddef);
 
         info!(
             self.log,
@@ -1507,7 +1470,7 @@ pub mod repair_test {
     ) {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
-        let state = ds.ds_active.get_mut(&ds_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&ds_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(ds_id);
         gw.gw_ds_complete(gw_id, ds_id, None, result, &up.log).await;
@@ -3820,7 +3783,7 @@ pub mod repair_test {
         )
         .await;
 
-        let job = ds.ds_active.get_mut(&r_id).unwrap();
+        let job = ds.ds_active.get(&r_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -3887,7 +3850,7 @@ pub mod repair_test {
         )
         .await;
 
-        let job = ds.ds_active.get_mut(&close_id).unwrap();
+        let job = ds.ds_active.get(&close_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -3969,7 +3932,7 @@ pub mod repair_test {
         )
         .await;
 
-        let job = ds.ds_active.get_mut(&repair_id).unwrap();
+        let job = ds.ds_active.get(&repair_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -4046,7 +4009,7 @@ pub mod repair_test {
         )
         .await;
 
-        let job = ds.ds_active.get_mut(&repair_id).unwrap();
+        let job = ds.ds_active.get(&repair_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -4101,7 +4064,9 @@ pub mod repair_test {
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = gw.next_gw_id();
         let close_id = ds.next_id();
-        let deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
+        let deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, close_id, ddef);
 
         // let repair = vec![0, 2];
         let _reopen_brw = create_and_enqueue_close_io(
@@ -4140,7 +4105,9 @@ pub mod repair_test {
         let gw_repair_id: u64 = gw.next_gw_id();
         let extent_repair_ids = ds.get_repair_ids(eid);
         let repair_id = extent_repair_ids.repair_id;
-        let deps = deps_for_live_repair(&ds, impacted_blocks, repair_id);
+        let deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, repair_id, ddef);
 
         let _repair_brw = create_and_enqueue_noop_io(
             &mut ds,
@@ -5519,7 +5486,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         // Manually move all these jobs to done.
         for job_id in 1000..1003 {
-            let job = ds.ds_active.get_mut(&job_id).unwrap();
+            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = handle.job();
             for cid in 0..3 {
                 job.state.insert(cid, IOState::Done);
             }
@@ -5546,7 +5514,7 @@ pub mod repair_test {
         // LiveRepair downstairs might need a change
         assert!(ds.dependencies_need_cleanup(1));
         for job_id in 1003..1006 {
-            let job = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = ds.ds_active.get(&job_id).unwrap();
             // jobs 3,4,5 will be skipped for our LiveRepair downstairs.
             assert_eq!(job.state[&0], IOState::New);
             assert_eq!(job.state[&1], IOState::Skipped);
@@ -5558,7 +5526,7 @@ pub mod repair_test {
         // Make the empty dep list for comparison
         let cv: Vec<u64> = vec![];
 
-        let job = ds.ds_active.get_mut(&1003).unwrap();
+        let job = ds.ds_active.get(&1003).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1002, 1001, 1000]);
@@ -5566,7 +5534,7 @@ pub mod repair_test {
         let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
-        let job = ds.ds_active.get_mut(&1004).unwrap();
+        let job = ds.ds_active.get(&1004).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         // Job 1001 is not a dep for 1004
@@ -5574,7 +5542,7 @@ pub mod repair_test {
         let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
-        let job = ds.ds_active.get_mut(&1005).unwrap();
+        let job = ds.ds_active.get(&1005).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1004, 1003, 1002, 1001, 1000]);
@@ -5602,7 +5570,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         // Manually move all these jobs to done.
         for job_id in 1000..1003 {
-            let job = ds.ds_active.get_mut(&job_id).unwrap();
+            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = handle.job();
             for cid in 0..3 {
                 job.state.insert(cid, IOState::Done);
             }
@@ -5638,7 +5607,7 @@ pub mod repair_test {
         // For the three latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
         for job_id in 1006..1009 {
-            let job = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = ds.ds_active.get(&job_id).unwrap();
             assert_eq!(job.state[&0], IOState::New);
             assert_eq!(job.state[&1], IOState::New);
             assert_eq!(job.state[&2], IOState::New);
@@ -5649,21 +5618,21 @@ pub mod repair_test {
         // the jobs that came after the repair.
         let cv: Vec<u64> = vec![];
 
-        let job = ds.ds_active.get_mut(&1006).unwrap();
+        let job = ds.ds_active.get(&1006).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1005, 1004, 1003, 1002, 1001, 1000]);
         let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, cv);
 
-        let job = ds.ds_active.get_mut(&1007).unwrap();
+        let job = ds.ds_active.get(&1007).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(&current_deps, &[1006, 1005, 1003, 1002, 1000]);
         let new_deps = ds.remove_dep_if_live_repair(1, current_deps, 0);
         assert_eq!(new_deps, &[1006]);
 
-        let job = ds.ds_active.get_mut(&1008).unwrap();
+        let job = ds.ds_active.get(&1008).unwrap();
         let current_deps = job.work.deps().to_vec();
 
         assert_eq!(
@@ -5717,7 +5686,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         // Manually move all these jobs to done.
         for job_id in 1000..1003 {
-            let job = ds.ds_active.get_mut(&job_id).unwrap();
+            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
+            let job = handle.job();
             for cid in 0..3 {
                 job.state.insert(cid, IOState::Done);
             }
@@ -5784,7 +5754,7 @@ pub mod repair_test {
         let empty: Vec<u64> = vec![];
 
         let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&1007).unwrap();
+        let job = ds.ds_active.get(&1007).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::Skipped);
         assert_eq!(job.state[&2], IOState::New);
@@ -5802,7 +5772,7 @@ pub mod repair_test {
         // This second write after starting a repair should require jobs 0,4
         // on Active downstairs, and only require the repair on the
         // LiveRepair downstairs.
-        let job = ds.ds_active.get_mut(&1008).unwrap();
+        let job = ds.ds_active.get(&1008).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::New);
         assert_eq!(job.state[&2], IOState::New);
@@ -5816,7 +5786,7 @@ pub mod repair_test {
 
         // This final job depends on everything on Active downstairs, but
         // a smaller subset for the LiveRepair downstairs
-        let job = ds.ds_active.get_mut(&1013).unwrap();
+        let job = ds.ds_active.get(&1013).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::New);
         assert_eq!(job.state[&2], IOState::New);
@@ -5870,12 +5840,14 @@ pub mod repair_test {
 
         let mut ds = up.downstairs.lock().await;
         // Manually move this jobs to done.
-        let job = ds.ds_active.get_mut(&1000).unwrap();
+        let mut handle = ds.ds_active.get_mut(&1000).unwrap();
+        let job = handle.job();
         for cid in 0..3 {
             job.state.insert(cid, IOState::Done);
         }
-
+        drop(handle);
         drop(ds);
+
         let eid = 0;
         let ddef = up.ddef.lock().await.get_def().unwrap();
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
@@ -5906,7 +5878,9 @@ pub mod repair_test {
         let noop_id = extent_repair_ids.noop_id;
         let reopen_id = extent_repair_ids.reopen_id;
 
-        let mut deps = deps_for_live_repair(&ds, impacted_blocks, close_id);
+        let mut deps =
+            ds.ds_active
+                .deps_for_live_repair(impacted_blocks, close_id, ddef);
 
         // The initial close IO has the base set of dependencies.
         // Each additional job will depend on the previous.
@@ -5958,7 +5932,7 @@ pub mod repair_test {
         .unwrap();
 
         let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get_mut(&1004).unwrap();
+        let job = ds.ds_active.get(&1004).unwrap();
 
         let current_deps = job.work.deps().to_vec();
         // We start with repair jobs, plus the original jobs.
@@ -5973,7 +5947,7 @@ pub mod repair_test {
         // This second write after starting a repair should require jobs 0,1,4
         // on Active downstairs, and only require the repair on the
         // LiveRepair downstairs.
-        let job = ds.ds_active.get_mut(&1005).unwrap();
+        let job = ds.ds_active.get(&1005).unwrap();
         assert_eq!(job.state[&0], IOState::New);
         assert_eq!(job.state[&1], IOState::New);
         assert_eq!(job.state[&2], IOState::New);
