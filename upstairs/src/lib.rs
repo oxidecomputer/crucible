@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -3558,7 +3558,10 @@ impl Downstairs {
                 DsState::LiveRepair => {
                     let my_limit = self.extent_limit[cid as usize];
                     assert!(self.repair_min_id.is_some());
-                    if io.work.send_io_live_repair(my_limit) {
+                    if io
+                        .work
+                        .send_io_live_repair(my_limit, &self.repair_job_ids)
+                    {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
                         self.ds_new[cid as usize].push(io.ds_id);
@@ -5739,8 +5742,20 @@ impl Upstairs {
          * and make sure it matches.
          */
 
-        let extent_under_repair =
+        let mut extent_under_repair =
             downstairs.get_extent_under_repair().map(|i| i as usize);
+        for (target_extent, id) in &downstairs.repair_job_ids {
+            // Depend on the final job in the repair jobs
+            dep.push(id.reopen_id);
+            if let Some(eur) = extent_under_repair {
+                if *target_extent as usize > eur {
+                    extent_under_repair = Some(*target_extent as usize);
+                }
+            } else {
+                extent_under_repair = Some(*target_extent as usize);
+            }
+        }
+
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
@@ -5915,7 +5930,7 @@ impl Upstairs {
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
         let mut future_repair = false;
-        let mut deps_to_add: HashSet<u32> = HashSet::new();
+        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
         let extent_under_repair = downstairs.get_extent_under_repair();
 
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
@@ -5958,6 +5973,11 @@ impl Upstairs {
                         offset.shift,
                         eur
                     );
+                } else if let Some(rep) =
+                    downstairs.repair_job_ids.get(&(eid as u32))
+                {
+                    dep.push(rep.reopen_id);
+                    future_repair = true;
                 }
             }
             let byte_len: usize = ddef.block_size() as usize;
@@ -6015,9 +6035,6 @@ impl Upstairs {
 
         for new_dep in deps_to_add.iter() {
             let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.close_id);
-            dep.push(ids.repair_id);
-            dep.push(ids.noop_id);
             dep.push(ids.reopen_id);
         }
 
@@ -6163,7 +6180,7 @@ impl Upstairs {
         }
 
         let mut future_repair = false;
-        let mut deps_to_add: HashSet<u32> = HashSet::new();
+        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
         let extent_under_repair = downstairs.get_extent_under_repair();
 
         /*
@@ -6179,6 +6196,11 @@ impl Upstairs {
                     future_repair = true;
                 } else if future_repair && eid > eur {
                     deps_to_add.insert(eid as u32);
+                } else if let Some(rep) =
+                    downstairs.repair_job_ids.get(&(eid as u32))
+                {
+                    dep.push(rep.reopen_id);
+                    future_repair = true;
                 }
             }
             requests.push(ReadRequest { eid, offset });
@@ -6187,9 +6209,6 @@ impl Upstairs {
         for new_dep in deps_to_add.iter() {
             warn!(self.log, "Create read repair deps for extent {}", new_dep);
             let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.close_id);
-            dep.push(ids.repair_id);
-            dep.push(ids.noop_id);
             dep.push(ids.reopen_id);
         }
 
@@ -8243,12 +8262,16 @@ impl IOop {
         (job_type, num_blocks, deps)
     }
 
-    // We have a downstairs in LiveRepair.
-    // Compare the extent IDs for this IO and where we have repaired
-    // so far, and determine if this IO should be sent to the downstairs
-    // or not (skipped).
+    // We have a downstairs in LiveRepair. Compare the extent IDs for this IO
+    // and where we have repaired so far (or reserved dependencies for a
+    // repair), and determine if this IO should be sent to the downstairs or not
+    // (skipped).
     // Return true if we should send it.
-    pub fn send_io_live_repair(&self, extent_limit: Option<usize>) -> bool {
+    pub fn send_io_live_repair(
+        &self,
+        extent_limit: Option<usize>,
+        repair_job_ids: &HashMap<u32, ExtentRepairIDs>,
+    ) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -8263,7 +8286,9 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64 {
+                        if write.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(write.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8274,7 +8299,9 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64 {
+                        if write.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(write.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8291,7 +8318,9 @@ impl IOop {
                     requests,
                 } => {
                     for req in requests {
-                        if req.eid <= extent_limit as u64 {
+                        if req.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(req.eid as u32))
+                        {
                             return true;
                         }
                     }
