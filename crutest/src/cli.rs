@@ -55,6 +55,11 @@ pub enum DscCommand {
     },
     /// Enable auto restart on all downstairs
     EnableRestartAll,
+    /// Reset (delete and re-create) a downstairs region.
+    Reset {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
     /// Shutdown all downstairs, then shutdown dsc itself.
     Shutdown,
     /// Start the downstairs at the given client ID
@@ -408,6 +413,10 @@ async fn handle_dsc(
             }
             DscCommand::EnableRestartAll => {
                 let res = dsc_client.dsc_enable_restart_all().await;
+                println!("Got res: {:?}", res);
+            }
+            DscCommand::Reset { cid } => {
+                let res = dsc_client.dsc_reset(cid).await;
                 println!("Got res: {:?}", res);
             }
             DscCommand::Shutdown => {

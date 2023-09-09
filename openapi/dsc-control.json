@@ -229,6 +229,35 @@
         }
       }
     },
+    "/reset/cid/{cid}": {
+      "post": {
+        "summary": "Reset a downstairs client, delete the region and recreate it.",
+        "operationId": "dsc_reset",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/shutdown": {
       "post": {
         "summary": "Stop all downstairs, then stop ourselves.",

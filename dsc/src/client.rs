@@ -41,6 +41,11 @@ pub enum ClientCommand {
         #[clap(long, short, action)]
         cid: u32,
     },
+    /// Delete and re-create a downstairs region.
+    Reset {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
     /// Shutdown all downstairs, then shutdown dsc itself.
     Shutdown,
     /// Start the downstairs at the given client ID
@@ -98,6 +103,9 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
         ClientCommand::Pid { cid } => {
             let res = dsc.dsc_get_pid(cid).await.unwrap();
             println!("{:?}", res);
+        }
+        ClientCommand::Reset { cid } => {
+            let _ = dsc.dsc_reset(cid).await.unwrap();
         }
         ClientCommand::Shutdown => {
             let _ = dsc.dsc_shutdown().await.unwrap();

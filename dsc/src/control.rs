@@ -30,6 +30,7 @@ pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     api.register(dsc_disable_restart_all).unwrap();
     api.register(dsc_enable_restart).unwrap();
     api.register(dsc_enable_restart_all).unwrap();
+    api.register(dsc_reset).unwrap();
     api.register(dsc_shutdown).unwrap();
     api.register(dsc_enable_random_stop).unwrap();
     api.register(dsc_disable_random_stop).unwrap();
@@ -369,6 +370,32 @@ async fn dsc_enable_restart_all(
 
     let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRestartAll);
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Reset a downstairs client, delete the region and recreate it.
+ */
+#[endpoint {
+    method = POST,
+    path = "/reset/cid/{cid}",
+}]
+async fn dsc_reset(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+    path: Path<Cid>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let cid = path.cid;
+    let api_context = rqctx.context();
+
+    if cid_bad(&api_context.dsci, cid).await {
+        return Err(HttpError::for_bad_request(
+            None,
+            format!("Invalid client id: {}", cid),
+        ));
+    }
+    let mut dsc_work = api_context.dsci.work.lock().await;
+    dsc_work.add_cmd(DscCmd::Reset(cid));
     Ok(HttpResponseUpdatedNoContent())
 }
 

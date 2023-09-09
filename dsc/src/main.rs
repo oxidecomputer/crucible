@@ -282,6 +282,9 @@ struct RegionSet {
     ds_pid: Vec<Option<u32>>,
     port_base: u32,
     port_step: u32,
+    block_size: Option<u32>,
+    extent_size: Option<u64>,
+    extent_count: Option<u64>,
 }
 
 // This holds the overall info for the regions we have created.
@@ -407,6 +410,9 @@ impl DscInfo {
             ds_pid,
             port_base,
             port_step: 10,
+            block_size: None,
+            extent_size: None,
+            extent_count: None,
         };
 
         let mrs = Mutex::new(rs);
@@ -465,6 +471,15 @@ impl DscInfo {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
         let mut rs = self.rs.lock().await;
+        if rs.block_size.is_none() {
+            rs.block_size = Some(block_size);
+        }
+        if rs.extent_size.is_none() {
+            rs.extent_size = Some(extent_size);
+        }
+        if rs.extent_count.is_none() {
+            rs.extent_count = Some(extent_count);
+        }
         // use port to do this, or make a client ID that is port base, etc
         let port = rs.port_base + (ds_id as u32 * rs.port_step);
         let rd = &rs.region_dir[ds_id];
@@ -863,6 +878,47 @@ async fn start_dsc(
                         DscCmd::RandomStopMax(max) => {
                             restart_max = max;
                         },
+                        DscCmd::Reset(cid) => {
+                            println!("Reset region for {cid}");
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            println!("{:?}", dsci);
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            let rs = dsci.rs.lock().await;
+                            println!("rs: {:?}", rs);
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            let ds = &rs.ds[0];
+                            println!("ds: {:?}", ds);
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            drop(rs);
+                            // What if it is running???
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            println!("First stop {}", cid);
+                            action_tx_list[cid]
+                                .send(DownstairsAction::Stop)
+                                .await
+                                .unwrap();
+
+                            // Wait for stopped?
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            println!("Now delete {}", cid);
+                            dsci.delete_ds_region(cid).await.unwrap();
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            println!("Create new {}", cid);
+                            dsci.create_ds_region(
+                                cid,
+                                100,
+                                15,
+                                4096,
+                                false,
+                                false,
+                            ).await.unwrap();
+                            tokio::time::sleep_until(deadline_secs(2)).await;
+                            println!("Now start new {}", cid);
+                            action_tx_list[cid]
+                                .send(DownstairsAction::Start)
+                                .await
+                                .unwrap();
+                        }
                         DscCmd::Shutdown => {
                             println!("Shutdown");
                             for action_tx in action_tx_list.clone() {
@@ -993,6 +1049,8 @@ enum DscCmd {
     RandomStopMin(u64),
     /// Set the maximum wait time between random stops
     RandomStopMax(u64),
+    /// Delete and re-create a downstairs region.
+    Reset(usize),
 }
 
 /// Start a process for a downstairs.
