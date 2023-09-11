@@ -32,7 +32,7 @@ use dsc_client::{types::DownstairsState, Client};
  * The various tests this program supports.
  */
 /// Client: A Crucible Upstairs test program
-#[allow(clippy::derive_partial_eq_without_eq)]
+#[allow(clippy::derive_partial_eq_without_eq, clippy::upper_case_acronyms)]
 #[derive(Debug, Parser, PartialEq)]
 #[clap(name = "workload", term_width = 80)]
 #[clap(about = "Workload the program will execute.", long_about = None)]
@@ -86,7 +86,6 @@ enum Workload {
         #[clap(long, default_value = "2", action)]
         write_loops: usize,
     },
-    Rand,
     Repair,
     /// Test the downstairs replay path.
     /// Top a downstairs, then run some IO, then start that downstairs back
@@ -110,12 +109,15 @@ enum Workload {
         replacement: SocketAddr,
 
         /// Number of IOs to do after replacement has started.
-        #[clap(long, default_value = "800", action)]
+        #[clap(long, default_value = "1800", action)]
         work: usize,
     },
     Span,
     Verify,
     Version,
+    /// Select a random offset/length, then Write/Flush/Read that
+    /// offset/length.
+    WFR,
 }
 
 #[derive(Debug, Parser)]
@@ -128,8 +130,8 @@ pub struct Opt {
 
     /// For tests that support it, pass this count value for the number
     /// of loops the test should do.
-    #[clap(short, long, global = true, action, default_value = "0")]
-    count: usize,
+    #[clap(short, long, global = true, action)]
+    count: Option<usize>,
 
     #[clap(
         short,
@@ -183,18 +185,24 @@ pub struct Opt {
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
+    #[clap(long, global = true, requires = "verify_in")]
+    verify_at_start: bool,
+
+    /// In addition to any tests, verify the volume after the tests
+    /// have completed.  If you don't supply a verify_in file, then the
+    /// verify will only check what this test run has written.
     #[clap(long, global = true, action)]
-    verify: bool,
+    verify_at_end: bool,
 
     /// For tests that support it, load the expected write count from
-    /// the provided file.  The addition of a --verify option will also
-    /// have the test verify what it imports from the file is valid.
-    #[clap(long, global = true, name = "INFILE", action)]
+    /// the provided file.  The addition of a --verify-at-start option will
+    /// also have the test verify what it imports from the file is valid.
+    #[clap(long, global = true, value_name = "INFILE", action)]
     verify_in: Option<PathBuf>,
 
     ///  For tests that support it, save the write count into the
     ///  provided file.
-    #[clap(long, global = true, name = "FILE", action)]
+    #[clap(long, global = true, value_name = "FILE", action)]
     verify_out: Option<PathBuf>,
 
     // TLS options
@@ -600,9 +608,6 @@ async fn main() -> Result<()> {
     if opt.workload == Workload::Verify && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
     }
-    if opt.verify && opt.verify_in.is_none() {
-        bail!("Initial verify requires verify_in file");
-    }
 
     // If we are running the replace workload, we need to know the
     // current list of targets the upstairs will be started with.
@@ -745,7 +750,7 @@ async fn main() -> Result<()> {
             if opt.workload == Workload::Verify {
                 false
             } else {
-                opt.verify
+                opt.verify_at_start
             }
         };
         load_write_log(&guest, &mut region_info, verify_in, verify).await?;
@@ -791,26 +796,14 @@ async fn main() -> Result<()> {
              * A small default of 5 is okay for a functional test, but
              * not enough for a more exhaustive test.
              */
-            let count = {
-                if opt.count == 0 {
-                    5
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(5);
             println!("Run deactivate test");
             deactivate_workload(&guest, count, &mut region_info, opt.gen)
                 .await?;
         }
         Workload::Demo => {
             println!("Run Demo test");
-            let count = {
-                if opt.count == 0 {
-                    300
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(300);
             /*
              * The count provided here should be greater than the flow
              * control limit if we wish to test flow control.  Also, set
@@ -825,14 +818,7 @@ async fn main() -> Result<()> {
 
         Workload::Dirty => {
             println!("Run dirty test");
-            let count = {
-                if opt.count == 0 {
-                    10
-                } else {
-                    opt.count
-                }
-            };
-
+            let count = opt.count.unwrap_or(10);
             dirty_workload(&guest, &mut region_info, count).await?;
 
             /*
@@ -860,10 +846,9 @@ async fn main() -> Result<()> {
             let mut wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
-                } else if opt.count == 0 {
-                    WhenToQuit::Count { count: 500 }
                 } else {
-                    WhenToQuit::Count { count: opt.count }
+                    let count = opt.count.unwrap_or(500);
+                    WhenToQuit::Count { count }
                 }
             };
 
@@ -886,13 +871,7 @@ async fn main() -> Result<()> {
             // test will be after all the upstairs messages have finised.
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             println!("Perf test");
-            let ops = {
-                if opt.count == 0 {
-                    5000_usize
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(5000);
 
             // NOTICE: The graphing code REQUIRES the data to be in a
             // specific format, where the first 7 columns are as described
@@ -924,7 +903,7 @@ async fn main() -> Result<()> {
                 &guest,
                 &mut region_info,
                 &mut opt_wtr,
-                ops,
+                count,
                 io_depth,
                 io_size,
                 write_loops,
@@ -948,26 +927,9 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Workload::Rand => {
-            println!("Run random test");
-            let count = {
-                if opt.count == 0 {
-                    10
-                } else {
-                    opt.count
-                }
-            };
-            rand_workload(&guest, count, &mut region_info).await?;
-        }
         Workload::Repair => {
             println!("Run Repair workload");
-            let count = {
-                if opt.count == 0 {
-                    10
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(10);
             repair_workload(&guest, count, &mut region_info).await?;
             drop(guest);
             if let Some(vo) = &opt.verify_out {
@@ -982,10 +944,9 @@ async fn main() -> Result<()> {
             let mut wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
-                } else if opt.count == 0 {
-                    WhenToQuit::Count { count: 1 }
                 } else {
-                    WhenToQuit::Count { count: opt.count }
+                    let count = opt.count.unwrap_or(1);
+                    WhenToQuit::Count { count }
                 }
             };
 
@@ -1002,10 +963,9 @@ async fn main() -> Result<()> {
             let mut wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
-                } else if opt.count == 0 {
-                    WhenToQuit::Count { count: 1 }
                 } else {
-                    WhenToQuit::Count { count: opt.count }
+                    let count = opt.count.unwrap_or(1);
+                    WhenToQuit::Count { count }
                 }
             };
 
@@ -1067,6 +1027,17 @@ async fn main() -> Result<()> {
         }
         Workload::Version => {
             panic!("This case handled above");
+        }
+        Workload::WFR => {
+            println!("Run Write-Flush-Read random IO test");
+            let count = opt.count.unwrap_or(10);
+            write_flush_read_workload(&guest, count, &mut region_info).await?;
+        }
+    }
+
+    if opt.verify_at_end {
+        if let Err(e) = verify_volume(&guest, &mut region_info, false).await {
+            bail!("Final volume verify failed: {:?}", e)
         }
     }
 
@@ -1392,7 +1363,6 @@ async fn balloon_workload(
         }
     }
 
-    verify_volume(guest, ri, false).await?;
     Ok(())
 }
 
@@ -2088,7 +2058,6 @@ async fn perf_workload(
     // To make a random block offset, we take the total block count and subtract
     // the IO size in blocks (so that we don't overspill the region)
     let offset_mod = (ri.total_blocks - blocks_per_io) as u64;
-
     for _ in 0..write_loop {
         let mut wtime = Vec::with_capacity(count);
         let big_start = Instant::now();
@@ -2323,10 +2292,6 @@ async fn deactivate_workload(
     let mut wtq = WhenToQuit::Count { count: 20 };
     generic_workload(guest, &mut wtq, ri, false).await?;
 
-    println!("final verify");
-    if let Err(e) = verify_volume(guest, ri, false).await {
-        bail!("Final volume verify failed: {:?}", e)
-    }
     Ok(())
 }
 
@@ -2334,7 +2299,7 @@ async fn deactivate_workload(
  * Generate a random offset and length, and write, flush, then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn rand_workload(
+async fn write_flush_read_workload(
     guest: &Arc<Guest>,
     count: usize,
     ri: &mut RegionInfo,
@@ -2406,10 +2371,6 @@ async fn rand_workload(
             }
             ValidateStatus::Good => {}
         }
-    }
-
-    if let Err(e) = verify_volume(guest, ri, false).await {
-        bail!("Final volume verify failed: {:?}", e)
     }
 
     Ok(())
@@ -2664,9 +2625,6 @@ async fn demo_workload(
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
     println!("All downstairs jobs completed.");
-    if let Err(e) = verify_volume(guest, ri, true).await {
-        bail!("Final volume verify failed: {:?}", e)
-    }
 
     // Commit the current state as the new minimum for any future tests.
     ri.write_log.commit();
