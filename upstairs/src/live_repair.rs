@@ -761,7 +761,7 @@ async fn create_and_enqueue_noop_io(
 // list of downstairs to repair.  If any of those change state from what
 // we expect, we return true here.
 fn repair_ds_state_change(
-    ds: &mut MutexGuard<'_, Downstairs>,
+    ds: &mut Downstairs,
     source: u8,
     repair: &[u8],
 ) -> bool {
@@ -779,7 +779,7 @@ impl Upstairs {
     // IO, then we must indicate that to the ds_done_tx channel.
     async fn abort_repair_ds(
         &self,
-        ds: &mut MutexGuard<'_, Downstairs>,
+        ds: &mut Downstairs,
         up_state: UpState,
         ds_done_tx: &mpsc::Sender<u64>,
     ) {
@@ -818,8 +818,8 @@ impl Upstairs {
     // NoOp jobs for them.
     async fn abort_repair_extent(
         &self,
-        gw: &mut MutexGuard<'_, GuestWork>,
-        ds: &mut MutexGuard<'_, Downstairs>,
+        gw: &mut GuestWork,
+        ds: &mut Downstairs,
         eid: u32,
     ) {
         warn!(self.log, "Extent {} Aborting repair", eid);

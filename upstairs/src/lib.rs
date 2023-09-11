@@ -5346,7 +5346,7 @@ impl Upstairs {
          * guest and downstairs lock at the same time.
          */
         let mut active = self.active.lock().await;
-        let gw = self.guest.guest_work.lock().await;
+        let mut gw = self.guest.guest_work.lock().await;
         let mut ds = self.downstairs.lock().await;
         /*
          * Protect us from double deactivation, or deactivation
@@ -5405,7 +5405,7 @@ impl Upstairs {
          * Now, create the "final" flush and submit it to all the
          * downstairs queues.
          */
-        self.submit_flush_internal(gw, ds, req, None, ds_done_tx)
+        self.submit_flush_internal(&mut gw, &mut ds, req, None, ds_done_tx)
             .await
     }
 
@@ -5670,12 +5670,12 @@ impl Upstairs {
          * then lock the downstairs struct. Once we have both we can proceed
          * to build our flush command.
          */
-        let gw = self.guest.guest_work.lock().await;
-        let downstairs = self.downstairs.lock().await;
+        let mut gw = self.guest.guest_work.lock().await;
+        let mut downstairs = self.downstairs.lock().await;
 
         self.submit_flush_internal(
-            gw,
-            downstairs,
+            &mut gw,
+            &mut downstairs,
             req,
             snapshot_details,
             ds_done_tx,
@@ -5685,8 +5685,8 @@ impl Upstairs {
 
     async fn submit_flush_internal(
         &self,
-        mut gw: MutexGuard<'_, GuestWork>,
-        mut downstairs: MutexGuard<'_, Downstairs>,
+        gw: &mut GuestWork,
+        downstairs: &mut Downstairs,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
         ds_done_tx: mpsc::Sender<u64>,
@@ -6247,7 +6247,7 @@ impl Upstairs {
      */
     fn ds_transition_with_lock(
         &self,
-        ds: &mut MutexGuard<'_, Downstairs>,
+        ds: &mut Downstairs,
         up_state: UpState,
         client_id: u8,
         new_state: DsState,
