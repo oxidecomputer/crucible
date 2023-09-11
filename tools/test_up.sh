@@ -153,8 +153,8 @@ for tt in ${test_list}; do
     echo "" >> "${log_prefix}_out.txt"
     echo "Running test: $tt" | tee -a "${log_prefix}_out.txt"
     echo "Running test: $tt" >> "${log_prefix}_out.txt"
-    echo "$ct" "$tt" -g "$gen" -q "${args[@]}" >> "${log_prefix}_out.txt"
-    if ! "$ct" "$tt" -g "$gen" -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    echo "$ct" "$tt" -g "$gen" --verify-at-end -q "${args[@]}" >> "${log_prefix}_out.txt"
+    if ! "$ct" "$tt" -g "$gen" --verify-at-end -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
         (( res += 1 ))
         echo ""
         echo "Failed crutest $tt test"

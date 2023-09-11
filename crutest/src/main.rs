@@ -130,8 +130,8 @@ pub struct Opt {
 
     /// For tests that support it, pass this count value for the number
     /// of loops the test should do.
-    #[clap(short, long, global = true, action, default_value = "0")]
-    count: usize,
+    #[clap(short, long, global = true, action)]
+    count: Option<usize>,
 
     #[clap(
         short,
@@ -796,26 +796,14 @@ async fn main() -> Result<()> {
              * A small default of 5 is okay for a functional test, but
              * not enough for a more exhaustive test.
              */
-            let count = {
-                if opt.count == 0 {
-                    5
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(5);
             println!("Run deactivate test");
             deactivate_workload(&guest, count, &mut region_info, opt.gen)
                 .await?;
         }
         Workload::Demo => {
             println!("Run Demo test");
-            let count = {
-                if opt.count == 0 {
-                    300
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(300);
             /*
              * The count provided here should be greater than the flow
              * control limit if we wish to test flow control.  Also, set
@@ -830,14 +818,7 @@ async fn main() -> Result<()> {
 
         Workload::Dirty => {
             println!("Run dirty test");
-            let count = {
-                if opt.count == 0 {
-                    10
-                } else {
-                    opt.count
-                }
-            };
-
+            let count = opt.count.unwrap_or(10);
             dirty_workload(&guest, &mut region_info, count).await?;
 
             /*
@@ -865,10 +846,9 @@ async fn main() -> Result<()> {
             let mut wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
-                } else if opt.count == 0 {
-                    WhenToQuit::Count { count: 500 }
                 } else {
-                    WhenToQuit::Count { count: opt.count }
+                    let count = opt.count.unwrap_or(500);
+                    WhenToQuit::Count { count }
                 }
             };
 
@@ -891,13 +871,7 @@ async fn main() -> Result<()> {
             // test will be after all the upstairs messages have finised.
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             println!("Perf test");
-            let ops = {
-                if opt.count == 0 {
-                    5000_usize
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(5000);
 
             // NOTICE: The graphing code REQUIRES the data to be in a
             // specific format, where the first 7 columns are as described
@@ -929,7 +903,7 @@ async fn main() -> Result<()> {
                 &guest,
                 &mut region_info,
                 &mut opt_wtr,
-                ops,
+                count,
                 io_depth,
                 io_size,
                 write_loops,
@@ -955,13 +929,7 @@ async fn main() -> Result<()> {
         }
         Workload::Repair => {
             println!("Run Repair workload");
-            let count = {
-                if opt.count == 0 {
-                    10
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(10);
             repair_workload(&guest, count, &mut region_info).await?;
             drop(guest);
             if let Some(vo) = &opt.verify_out {
@@ -976,10 +944,9 @@ async fn main() -> Result<()> {
             let mut wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
-                } else if opt.count == 0 {
-                    WhenToQuit::Count { count: 1 }
                 } else {
-                    WhenToQuit::Count { count: opt.count }
+                    let count = opt.count.unwrap_or(1);
+                    WhenToQuit::Count { count }
                 }
             };
 
@@ -996,10 +963,9 @@ async fn main() -> Result<()> {
             let mut wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
-                } else if opt.count == 0 {
-                    WhenToQuit::Count { count: 1 }
                 } else {
-                    WhenToQuit::Count { count: opt.count }
+                    let count = opt.count.unwrap_or(1);
+                    WhenToQuit::Count { count }
                 }
             };
 
@@ -1064,13 +1030,7 @@ async fn main() -> Result<()> {
         }
         Workload::WFR => {
             println!("Run Write-Flush-Read random IO test");
-            let count = {
-                if opt.count == 0 {
-                    10
-                } else {
-                    opt.count
-                }
-            };
+            let count = opt.count.unwrap_or(10);
             write_flush_read_workload(&guest, count, &mut region_info).await?;
         }
     }
