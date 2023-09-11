@@ -13,7 +13,7 @@ use clap::Parser;
 use futures::stream::StreamExt;
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crucible::*;
 
@@ -105,7 +105,7 @@ pub fn opts() -> Result<Opt> {
 async fn cmd_read<T: BlockIO>(
     opt: &Opt,
     crucible: Arc<T>,
-    mut early_shutdown: mpsc::Receiver<()>,
+    mut early_shutdown: oneshot::Receiver<()>,
 ) -> Result<usize> {
     let volume_size = crucible.total_size().await?;
 
@@ -337,7 +337,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
 async fn cmd_write<T: BlockIO>(
     opt: &Opt,
     crucible: Arc<T>,
-    mut early_shutdown: mpsc::Receiver<()>,
+    mut early_shutdown: oneshot::Receiver<()>,
 ) -> Result<usize> {
     let mut total_bytes_written = 0;
 
@@ -534,12 +534,13 @@ async fn cmd_write<T: BlockIO>(
 /// This is intended for benchmarking
 async fn handle_signals(
     mut signals: Signals,
-    early_shutdown: mpsc::Sender<()>,
+    early_shutdown: oneshot::Sender<()>,
 ) {
     while let Some(signal) = signals.next().await {
         match signal {
             SIGUSR1 => {
-                early_shutdown.send(()).await.unwrap();
+                early_shutdown.send(()).unwrap();
+                break;
             }
             _ => unreachable!(),
         }
@@ -572,7 +573,7 @@ async fn main() -> Result<()> {
     // IO time
     guest.activate().await?;
 
-    let (early_shutdown_sender, early_shutdown_receiver) = mpsc::channel(1);
+    let (early_shutdown_sender, early_shutdown_receiver) = oneshot::channel();
 
     // Only start the SIGUSR1 handler if we're in benchmarking mode
     if opt.benchmarking_mode.is_some() {

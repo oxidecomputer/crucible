@@ -1,5 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 use super::*;
+use tokio::sync::oneshot;
 
 /**
  * Couple a BlockOp with a notifier for calling code. This uses a single-use
@@ -10,13 +11,13 @@ use super::*;
 #[derive(Debug)]
 pub(crate) struct BlockReq {
     pub op: BlockOp,
-    sender: mpsc::Sender<Result<(), CrucibleError>>,
+    sender: oneshot::Sender<Result<(), CrucibleError>>,
 }
 
 impl BlockReq {
     pub fn new(
         op: BlockOp,
-        sender: mpsc::Sender<Result<(), CrucibleError>>,
+        sender: oneshot::Sender<Result<(), CrucibleError>>,
     ) -> BlockReq {
         Self { op, sender }
     }
@@ -27,19 +28,19 @@ impl BlockReq {
     }
 
     /// Consume this BlockReq and send Ok to the receiver
-    pub async fn send_ok(self) {
-        self.send_result(Ok(())).await;
+    pub fn send_ok(self) {
+        self.send_result(Ok(()))
     }
 
     /// Consume this BlockReq and send an Err to the receiver
-    pub async fn send_err(self, e: CrucibleError) {
-        self.send_result(Err(e)).await;
+    pub fn send_err(self, e: CrucibleError) {
+        self.send_result(Err(e))
     }
 
     /// Consume this BlockReq and send a Result to the receiver
-    pub async fn send_result(self, r: Result<(), CrucibleError>) {
+    pub fn send_result(self, r: Result<(), CrucibleError>) {
         // XXX this eats the result!
-        let _ = self.sender.send(r).await;
+        let _ = self.sender.send(r);
     }
 }
 
@@ -51,21 +52,21 @@ impl BlockReq {
  */
 #[must_use]
 pub(crate) struct BlockReqWaiter {
-    recv: mpsc::Receiver<Result<(), CrucibleError>>,
+    recv: oneshot::Receiver<Result<(), CrucibleError>>,
 }
 
 impl BlockReqWaiter {
     pub fn new(
-        recv: mpsc::Receiver<Result<(), CrucibleError>>,
+        recv: oneshot::Receiver<Result<(), CrucibleError>>,
     ) -> BlockReqWaiter {
         Self { recv }
     }
 
     /// Consume this BlockReqWaiter and wait on the message
-    pub async fn wait(mut self) -> Result<(), CrucibleError> {
-        match self.recv.recv().await {
-            Some(v) => v,
-            None => crucible_bail!(RecvDisconnected),
+    pub async fn wait(self) -> Result<(), CrucibleError> {
+        match self.recv.await {
+            Ok(v) => v,
+            Err(_) => crucible_bail!(RecvDisconnected),
         }
     }
 
@@ -74,8 +75,8 @@ impl BlockReqWaiter {
         match self.recv.try_recv() {
             Ok(v) => Some(v),
             Err(e) => match e {
-                mpsc::error::TryRecvError::Empty => None,
-                mpsc::error::TryRecvError::Disconnected => {
+                oneshot::error::TryRecvError::Empty => None,
+                oneshot::error::TryRecvError::Closed => {
                     Some(Err(CrucibleError::RecvDisconnected))
                 }
             },
@@ -89,17 +90,17 @@ mod test {
 
     #[tokio::test]
     async fn test_blockreqwaiter_send() {
-        let (send, recv) = mpsc::channel(1);
+        let (send, recv) = oneshot::channel();
         let brw = BlockReqWaiter::new(recv);
 
-        send.send(Ok(())).await.unwrap();
+        send.send(Ok(())).unwrap();
 
         brw.wait().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_blockreq_and_blockreqwaiter() {
-        let (send, recv) = mpsc::channel(1);
+        let (send, recv) = oneshot::channel();
 
         let op = BlockOp::Flush {
             snapshot_details: None,
@@ -107,14 +108,14 @@ mod test {
         let br = BlockReq::new(op, send);
         let brw = BlockReqWaiter::new(recv);
 
-        br.send_ok().await;
+        br.send_ok();
 
         brw.wait().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_blockreq_and_blockreqwaiter_err() {
-        let (send, recv) = mpsc::channel(1);
+        let (send, recv) = oneshot::channel();
 
         let op = BlockOp::Flush {
             snapshot_details: None,
@@ -122,7 +123,7 @@ mod test {
         let br = BlockReq::new(op, send);
         let brw = BlockReqWaiter::new(recv);
 
-        br.send_err(CrucibleError::UpstairsInactive).await;
+        br.send_err(CrucibleError::UpstairsInactive);
 
         assert!(brw.wait().await.is_err());
     }

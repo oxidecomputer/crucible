@@ -28,7 +28,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::{mpsc, watch, Mutex, MutexGuard, Notify, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, MutexGuard, Notify, RwLock};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{instrument, span, Level};
@@ -5033,7 +5033,7 @@ impl UpstairsState {
         self.up_state = UpState::Active;
         let req = self.req.take();
         if let Some(req) = req {
-            req.send_ok().await;
+            req.send_ok();
         }
         Ok(())
     }
@@ -5356,7 +5356,7 @@ impl Upstairs {
         // If something is waiting for activation, they can give up now.
         let req = active.req.take();
         if let Some(req) = req {
-            req.send_err(err).await;
+            req.send_err(err);
         }
         info!(
             self.log,
@@ -5415,12 +5415,12 @@ impl Upstairs {
          */
         if active.up_state == UpState::Initializing {
             if let Some(req) = req {
-                req.send_err(CrucibleError::UpstairsInactive).await;
+                req.send_err(CrucibleError::UpstairsInactive);
             }
             return Err(());
         } else if active.up_state == UpState::Deactivating {
             if let Some(req) = req {
-                req.send_err(CrucibleError::UpstairsDeactivating).await;
+                req.send_err(CrucibleError::UpstairsDeactivating);
             }
             return Err(());
         }
@@ -5454,7 +5454,7 @@ impl Upstairs {
         if ds.ds_active.is_empty() {
             debug!(self.log, "No work, no need to flush, return OK");
             if let Some(req) = req {
-                req.send_ok().await;
+                req.send_ok();
             }
             return Ok(());
         }
@@ -5644,7 +5644,7 @@ impl Upstairs {
                     self.log,
                     "{} active denied while Deactivating", self.uuid
                 );
-                req.send_err(CrucibleError::UpstairsDeactivating).await;
+                req.send_err(CrucibleError::UpstairsDeactivating);
                 crucible_bail!(UpstairsDeactivating);
             }
             UpState::Active => {
@@ -5652,7 +5652,7 @@ impl Upstairs {
                     self.log,
                     "{} Request to activate upstairs already active", self.uuid
                 );
-                req.send_err(CrucibleError::UpstairsAlreadyActive).await;
+                req.send_err(CrucibleError::UpstairsAlreadyActive);
                 crucible_bail!(UpstairsAlreadyActive);
             }
         }
@@ -5835,14 +5835,14 @@ impl Upstairs {
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
-                req.send_err(CrucibleError::UpstairsInactive).await;
+                req.send_err(CrucibleError::UpstairsInactive);
             }
             return Err(());
         }
 
         if self.read_only {
             if let Some(req) = req {
-                req.send_err(CrucibleError::ModifyingReadOnlyRegion).await;
+                req.send_err(CrucibleError::ModifyingReadOnlyRegion);
             }
             return Err(());
         }
@@ -5864,7 +5864,7 @@ impl Upstairs {
             Ok(()) => {}
             Err(e) => {
                 if let Some(req) = req {
-                    req.send_err(e).await;
+                    req.send_err(e);
                 }
                 return Err(());
             }
@@ -5979,7 +5979,6 @@ impl Upstairs {
                                 req.send_err(CrucibleError::EncryptionError(
                                     e.to_string(),
                                 ))
-                                .await;
                             }
                             return Err(());
                         }
@@ -6085,7 +6084,7 @@ impl Upstairs {
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
-                req.send_err(CrucibleError::UpstairsInactive).await;
+                req.send_err(CrucibleError::UpstairsInactive);
             }
             return Err(());
         }
@@ -6106,7 +6105,7 @@ impl Upstairs {
             Ok(()) => {}
             Err(e) => {
                 if let Some(req) = req {
-                    req.send_err(e).await;
+                    req.send_err(e);
                 }
                 return Err(());
             }
@@ -8814,7 +8813,7 @@ impl GtoS {
          * guest side reasons.
          */
         if let Some(req) = self.req {
-            req.send_result(result).await;
+            req.send_result(result);
         }
     }
 }
@@ -9067,7 +9066,7 @@ impl Guest {
      * This is used to submit a new BlockOp IO request to Crucible.
      */
     async fn send(&self, op: BlockOp) -> BlockReqWaiter {
-        let (send, recv) = mpsc::channel(1);
+        let (send, recv) = oneshot::channel();
 
         self.reqs.lock().await.push_back(BlockReq::new(op, send));
         self.notify.notify_one();
@@ -9712,11 +9711,11 @@ async fn process_new_io(
         }
         BlockOp::QueryGuestIOReady { data } => {
             *data.lock().await = up.guest_io_ready().await;
-            req.send_ok().await;
+            req.send_ok();
         }
         BlockOp::QueryUpstairsUuid { data } => {
             *data.lock().await = up.uuid;
-            req.send_ok().await;
+            req.send_ok();
         }
         /*
          * These options are only functional once the upstairs is
@@ -9780,7 +9779,7 @@ async fn process_new_io(
              * flush command.
              */
             if !up.guest_io_ready().await {
-                req.send_err(CrucibleError::UpstairsInactive).await;
+                req.send_err(CrucibleError::UpstairsInactive);
                 return;
             }
 
@@ -9806,11 +9805,11 @@ async fn process_new_io(
         } => match up.replace_downstairs(id, old, new, &ds_done_tx).await {
             Ok(v) => {
                 *result.lock().await = v;
-                req.send_ok().await;
+                req.send_ok();
             }
 
             Err(e) => {
-                req.send_err(e).await;
+                req.send_err(e);
             }
         },
         // Query ops
@@ -9825,13 +9824,12 @@ async fn process_new_io(
                     );
                     req.send_err(CrucibleError::PropertyNotAvailable(
                         "block size".to_string(),
-                    ))
-                    .await;
+                    ));
                     return;
                 }
             };
             *data.lock().await = size;
-            req.send_ok().await;
+            req.send_ok();
         }
         BlockOp::QueryTotalSize { data } => {
             let size = match up.ddef.lock().await.get_def() {
@@ -9844,13 +9842,12 @@ async fn process_new_io(
                     );
                     req.send_err(CrucibleError::PropertyNotAvailable(
                         "total size".to_string(),
-                    ))
-                    .await;
+                    ));
                     return;
                 }
             };
             *data.lock().await = size;
-            req.send_ok().await;
+            req.send_ok();
         }
         // Testing options
         BlockOp::QueryExtentSize { data } => {
@@ -9865,13 +9862,12 @@ async fn process_new_io(
                     );
                     req.send_err(CrucibleError::PropertyNotAvailable(
                         "extent size".to_string(),
-                    ))
-                    .await;
+                    ));
                     return;
                 }
             };
             *data.lock().await = size;
-            req.send_ok().await;
+            req.send_ok();
         }
         BlockOp::QueryWorkQueue { data } => {
             // TODO should this first check if the Upstairs is active?
@@ -9887,16 +9883,16 @@ async fn process_new_io(
                 ds_count: up.downstairs.lock().await.ds_active.len(),
                 active_count,
             };
-            req.send_ok().await;
+            req.send_ok();
         }
         BlockOp::ShowWork { data } => {
             // TODO should this first check if the Upstairs is active?
             *data.lock().await = show_all_work(up).await;
-            req.send_ok().await;
+            req.send_ok();
         }
         BlockOp::Commit => {
             if !up.guest_io_ready().await {
-                req.send_err(CrucibleError::UpstairsInactive).await;
+                req.send_err(CrucibleError::UpstairsInactive);
                 return;
             }
             send_work(dst, *lastcast, &up.log).await;
