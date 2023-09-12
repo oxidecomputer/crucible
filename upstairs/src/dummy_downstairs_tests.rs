@@ -22,6 +22,7 @@ pub(crate) mod protocol_test {
     use crucible_common::RegionOptions;
     use crucible_protocol::CrucibleDecoder;
     use crucible_protocol::CrucibleEncoder;
+    use crucible_protocol::JobId;
     use crucible_protocol::Message;
 
     use anyhow::bail;
@@ -355,7 +356,7 @@ pub(crate) mod protocol_test {
 
         pub async fn negotiate_step_last_flush(
             &self,
-            last_flush_number: u64,
+            last_flush_number: JobId,
         ) -> Result<()> {
             let packet = self
                 .fr
@@ -828,7 +829,7 @@ pub(crate) mod protocol_test {
         let ds1 = ds1.into_connected_downstairs().await;
 
         ds1.negotiate_start().await?;
-        ds1.negotiate_step_last_flush(0).await?;
+        ds1.negotiate_step_last_flush(JobId(0)).await?;
 
         let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
 

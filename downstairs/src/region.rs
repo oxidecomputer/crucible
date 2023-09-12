@@ -934,12 +934,12 @@ impl Extent {
     #[instrument]
     pub async fn read(
         &self,
-        job_id: u64,
+        job_id: JobId,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
     ) -> Result<(), CrucibleError> {
         cdt::extent__read__start!(|| {
-            (job_id, self.number, requests.len() as u64)
+            (job_id.0, self.number, requests.len() as u64)
         });
 
         let inner = self.inner.lock().await;
@@ -994,7 +994,7 @@ impl Extent {
 
             // Finally we get to read the actual data. That's why we're here
             cdt::extent__read__file__start!(|| {
-                (job_id, self.number, n_contiguous_requests as u64)
+                (job_id.0, self.number, n_contiguous_requests as u64)
             });
 
             nix::sys::uio::preadv(
@@ -1005,19 +1005,19 @@ impl Extent {
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
             cdt::extent__read__file__done!(|| {
-                (job_id, self.number, n_contiguous_requests as u64)
+                (job_id.0, self.number, n_contiguous_requests as u64)
             });
 
             // Query the block metadata
             cdt::extent__read__get__contexts__start!(|| {
-                (job_id, self.number, n_contiguous_requests as u64)
+                (job_id.0, self.number, n_contiguous_requests as u64)
             });
             let block_contexts = inner.get_block_contexts(
                 first_req.offset.value,
                 n_contiguous_requests as u64,
             )?;
             cdt::extent__read__get__contexts__done!(|| {
-                (job_id, self.number, n_contiguous_requests as u64)
+                (job_id.0, self.number, n_contiguous_requests as u64)
             });
 
             // Now it's time to put block contexts into the responses.
@@ -1038,7 +1038,7 @@ impl Extent {
         }
 
         cdt::extent__read__done!(|| {
-            (job_id, self.number, requests.len() as u64)
+            (job_id.0, self.number, requests.len() as u64)
         });
 
         Ok(())
@@ -1081,7 +1081,7 @@ impl Extent {
     #[instrument]
     pub async fn write(
         &self,
-        job_id: u64,
+        job_id: JobId,
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
@@ -1090,7 +1090,7 @@ impl Extent {
         }
 
         cdt::extent__write__start!(|| {
-            (job_id, self.number, writes.len() as u64)
+            (job_id.0, self.number, writes.len() as u64)
         });
 
         let mut inner_guard = self.inner.lock().await;
@@ -1152,7 +1152,7 @@ impl Extent {
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
             cdt::extent__write__get__hashes__start!(|| {
-                (job_id, self.number, writes.len() as u64)
+                (job_id.0, self.number, writes.len() as u64)
             });
             let mut write_run_start = 0;
             while write_run_start < writes.len() {
@@ -1189,13 +1189,13 @@ impl Extent {
                 write_run_start += n_contiguous_writes;
             }
             cdt::extent__write__get__hashes__done!(|| {
-                (job_id, self.number, writes.len() as u64)
+                (job_id.0, self.number, writes.len() as u64)
             });
 
             if writes_to_skip.len() == writes.len() {
                 // Nothing to do
                 cdt::extent__write__done!(|| {
-                    (job_id, self.number, writes.len() as u64)
+                    (job_id.0, self.number, writes.len() as u64)
                 });
                 return Ok(());
             }
@@ -1214,7 +1214,7 @@ impl Extent {
         // TODO right now we're including the integrity_hash() time in the sqlite time. It's small in
         // comparison right now, but worth being aware of when looking at dtrace numbers
         cdt::extent__write__sqlite__insert__start!(|| {
-            (job_id, self.number, writes.len() as u64)
+            (job_id.0, self.number, writes.len() as u64)
         });
 
         let mut hashes_to_write = Vec::with_capacity(writes.len());
@@ -1252,7 +1252,7 @@ impl Extent {
         tx.commit()?;
 
         cdt::extent__write__sqlite__insert__done!(|| {
-            (job_id, self.number, writes.len() as u64)
+            (job_id.0, self.number, writes.len() as u64)
         });
 
         // PERFORMANCE TODO:
@@ -1273,7 +1273,7 @@ impl Extent {
         // introduces complexity. The time spent implementing that would
         // probably better be spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
-            (job_id, self.number, writes.len() as u64)
+            (job_id.0, self.number, writes.len() as u64)
         });
 
         // Now, batch writes into iovecs and use pwritev to write them all out.
@@ -1316,11 +1316,11 @@ impl Extent {
         }
 
         cdt::extent__write__file__done!(|| {
-            (job_id, self.number, writes.len() as u64)
+            (job_id.0, self.number, writes.len() as u64)
         });
 
         cdt::extent__write__done!(|| {
-            (job_id, self.number, writes.len() as u64)
+            (job_id.0, self.number, writes.len() as u64)
         });
 
         Ok(())
@@ -1331,7 +1331,7 @@ impl Extent {
         &self,
         new_flush: u64,
         new_gen: u64,
-        job_id: u64,
+        job_id: JobId,
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let mut inner = self.inner.lock().await;
@@ -1356,7 +1356,7 @@ impl Extent {
         let n_dirty_blocks = inner.dirty_blocks.len() as u64;
 
         cdt::extent__flush__start!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id.0, self.number, n_dirty_blocks)
         });
 
         /*
@@ -1364,7 +1364,7 @@ impl Extent {
          * This must be done before we update the flush number.
          */
         cdt::extent__flush__file__start!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id.0, self.number, n_dirty_blocks)
         });
         if let Err(e) = inner.file.sync_all() {
             /*
@@ -1378,7 +1378,7 @@ impl Extent {
             );
         }
         cdt::extent__flush__file__done!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id.0, self.number, n_dirty_blocks)
         });
 
         // Clear old block contexts. In order to be crash consistent, only
@@ -1390,7 +1390,7 @@ impl Extent {
         // file is rehashed, since in that case we don't have that luxury.
 
         cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id.0, self.number, n_dirty_blocks)
         });
 
         // Rehash any parts of the file that we *may have written* data to since
@@ -1399,11 +1399,11 @@ impl Extent {
         let n_rehashed = inner.rehash_dirty_blocks(self.block_size)?;
 
         cdt::extent__flush__collect__hashes__done!(|| {
-            (job_id, self.number, n_rehashed as u64)
+            (job_id.0, self.number, n_rehashed as u64)
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id.0, self.number, n_dirty_blocks)
         });
 
         // We put all of our metadb updates into a single transaction to
@@ -1419,7 +1419,7 @@ impl Extent {
         )?;
 
         cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id, self.number, n_dirty_blocks)
+            (job_id.0, self.number, n_dirty_blocks)
         });
 
         inner.set_flush_number(new_flush, new_gen)?;
@@ -1429,7 +1429,9 @@ impl Extent {
         // Finally, reset the file's seek offset to 0
         inner.file.seek(SeekFrom::Start(0))?;
 
-        cdt::extent__flush__done!(|| { (job_id, self.number, n_dirty_blocks) });
+        cdt::extent__flush__done!(|| {
+            (job_id.0, self.number, n_dirty_blocks)
+        });
 
         Ok(())
     }
@@ -2194,7 +2196,7 @@ impl Region {
     pub async fn region_write(
         &mut self,
         writes: &[crucible_protocol::Write],
-        job_id: u64,
+        job_id: JobId,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
@@ -2221,9 +2223,9 @@ impl Region {
         }
 
         if only_write_unwritten {
-            cdt::os__writeunwritten__start!(|| job_id);
+            cdt::os__writeunwritten__start!(|| job_id.0);
         } else {
-            cdt::os__write__start!(|| job_id);
+            cdt::os__write__start!(|| job_id.0);
         }
         for eid in batched_writes.keys() {
             let extent = self.get_opened_extent(*eid).await;
@@ -2237,9 +2239,9 @@ impl Region {
         self.dirty_extents.extend(batched_writes.keys());
 
         if only_write_unwritten {
-            cdt::os__writeunwritten__done!(|| job_id);
+            cdt::os__writeunwritten__done!(|| job_id.0);
         } else {
-            cdt::os__write__done!(|| job_id);
+            cdt::os__write__done!(|| job_id.0);
         }
 
         Ok(())
@@ -2249,7 +2251,7 @@ impl Region {
     pub async fn region_read(
         &self,
         requests: &[crucible_protocol::ReadRequest],
-        job_id: u64,
+        job_id: JobId,
     ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
         let mut responses = Vec::with_capacity(requests.len());
 
@@ -2265,7 +2267,7 @@ impl Region {
         let mut batched_reads: Vec<&crucible_protocol::ReadRequest> =
             Vec::with_capacity(requests.len());
 
-        cdt::os__read__start!(|| job_id);
+        cdt::os__read__start!(|| job_id.0);
         for request in requests {
             if let Some(_eid) = eid {
                 if request.eid == _eid {
@@ -2293,7 +2295,7 @@ impl Region {
                 .read(job_id, &batched_reads[..], &mut responses)
                 .await?;
         }
-        cdt::os__read__done!(|| job_id);
+        cdt::os__read__done!(|| job_id.0);
 
         Ok(responses)
     }
@@ -2308,7 +2310,7 @@ impl Region {
         eid: usize,
         gen_number: u64,
         flush_number: u64,
-        job_id: u64,
+        job_id: JobId, // only used for logging
     ) -> Result<(), CrucibleError> {
         debug!(
             self.log,
@@ -2319,7 +2321,9 @@ impl Region {
         );
 
         let extent = self.get_opened_extent(eid).await;
-        extent.flush(flush_number, gen_number, 0, &self.log).await?;
+        extent
+            .flush(flush_number, gen_number, job_id, &self.log)
+            .await?;
 
         Ok(())
     }
@@ -2334,7 +2338,7 @@ impl Region {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: &Option<SnapshotDetails>,
-        job_id: u64,
+        job_id: JobId,
         extent_limit: Option<usize>,
     ) -> Result<(), CrucibleError> {
         // It should be ok to Flush a read-only region, but not take a snapshot.
@@ -2344,7 +2348,7 @@ impl Region {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        cdt::os__flush__start!(|| job_id);
+        cdt::os__flush__start!(|| job_id.0);
 
         // Select extents we're going to flush, while respecting the
         // extent_limit if one was provided.
@@ -2389,7 +2393,7 @@ impl Region {
             );
         }
 
-        cdt::os__flush__done!(|| job_id);
+        cdt::os__flush__done!(|| job_id.0);
 
         for result in results {
             // If any extent flush failed, then return that as an error. Because
@@ -4129,7 +4133,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // read data into File, compare what was written to buffer
 
@@ -4158,7 +4162,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -4236,7 +4240,7 @@ mod test {
                         hash,
                     },
                 }],
-                124,
+                JobId(124),
                 true, // only_write_unwritten
             )
             .await?;
@@ -4247,7 +4251,7 @@ mod test {
                     eid: 0,
                     offset: Block::new_512(0),
                 }],
-                125,
+                JobId(125),
             )
             .await?;
 
@@ -4285,7 +4289,7 @@ mod test {
                     hash,
                 },
             };
-            ext.write(10, &[&write], false).await?;
+            ext.write(JobId(10), &[&write], false).await?;
         }
 
         // We haven't flushed, but this should leave our context in place.
@@ -4306,14 +4310,14 @@ mod test {
                 data: data.clone(),
                 block_context: block_context.clone(),
             };
-            ext.write(20, &[&write], true).await?;
+            ext.write(JobId(20), &[&write], true).await?;
 
             let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            ext.read(21, &[&read], &mut resp).await?;
+            ext.read(JobId(21), &[&read], &mut resp).await?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
@@ -4341,14 +4345,14 @@ mod test {
                 data: data.clone(),
                 block_context: block_context.clone(),
             };
-            ext.write(30, &[&write], true).await?;
+            ext.write(JobId(30), &[&write], true).await?;
 
             let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            ext.read(31, &[&read], &mut resp).await?;
+            ext.read(JobId(31), &[&read], &mut resp).await?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -4413,14 +4417,14 @@ mod test {
                 data: data.clone(),
                 block_context: block_context.clone(),
             };
-            ext.write(30, &[&write], true).await?;
+            ext.write(JobId(30), &[&write], true).await?;
 
             let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            ext.read(31, &[&read], &mut resp).await?;
+            ext.read(JobId(31), &[&read], &mut resp).await?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -4462,7 +4466,7 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         Ok(())
     }
@@ -4497,7 +4501,7 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Verify the dirty bit is now set.
         // We know our EID, so we can shortcut to getting the actual extent.
@@ -4505,7 +4509,10 @@ mod test {
 
         // Now read back that block, make sure it is updated.
         let responses = region
-            .region_read(&[crucible_protocol::ReadRequest { eid, offset }], 0)
+            .region_read(
+                &[crucible_protocol::ReadRequest { eid, offset }],
+                JobId(0),
+            )
             .await?;
 
         assert_eq!(responses.len(), 1);
@@ -4546,7 +4553,7 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Same block, now try to write something else to it.
         let data = BytesMut::from(&[1u8; 512][..]);
@@ -4566,11 +4573,14 @@ mod test {
                 },
             }];
         // Do the write again, but with only_write_unwritten set now.
-        region.region_write(&writes, 1, true).await?;
+        region.region_write(&writes, JobId(1), true).await?;
 
         // Now read back that block, make sure it has the first write
         let responses = region
-            .region_read(&[crucible_protocol::ReadRequest { eid, offset }], 2)
+            .region_read(
+                &[crucible_protocol::ReadRequest { eid, offset }],
+                JobId(2),
+            )
             .await?;
 
         // We should still have one response.
@@ -4615,13 +4625,15 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Verify the dirty bit is now set.
         assert!(region.get_opened_extent(eid as usize).await.dirty().await);
 
-        // Flush extent with eid, fn, gen, job_id.
-        region.region_flush_extent(eid as usize, 1, 1, 1).await?;
+        // Flush extent with eid, fn, gen
+        region
+            .region_flush_extent(eid as usize, 1, 1, JobId(1))
+            .await?;
 
         // Verify the dirty bit is no longer set.
         assert!(!region.get_opened_extent(eid as usize).await.dirty().await);
@@ -4645,14 +4657,17 @@ mod test {
             }];
 
         // Do the write again, but with only_write_unwritten set now.
-        region.region_write(&writes, 1, true).await?;
+        region.region_write(&writes, JobId(1), true).await?;
 
         // Verify the dirty bit is not set.
         assert!(!region.get_opened_extent(eid as usize).await.dirty().await);
 
         // Read back our block, make sure it has the first write data
         let responses = region
-            .region_read(&[crucible_protocol::ReadRequest { eid, offset }], 2)
+            .region_read(
+                &[crucible_protocol::ReadRequest { eid, offset }],
+                JobId(2),
+            )
             .await?;
 
         // We should still have one response.
@@ -4708,7 +4723,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // read data into File, compare what was written to buffer
         let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
@@ -4734,7 +4749,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -4786,7 +4801,7 @@ mod test {
             }];
 
         // Now write just one block
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
@@ -4816,7 +4831,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
@@ -4849,7 +4864,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -4901,7 +4916,7 @@ mod test {
             }];
 
         // Now write just to the second block.
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Now use region_write to fill entire region
         let mut rng = rand::thread_rng();
@@ -4932,7 +4947,7 @@ mod test {
         }
 
         // send write_unwritten command.
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
@@ -4965,7 +4980,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -5020,7 +5035,7 @@ mod test {
             }];
 
         // Now write just to the second block.
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Now use region_write to fill four blocks
         let mut rng = rand::thread_rng();
@@ -5052,7 +5067,7 @@ mod test {
         }
 
         // send only_write_unwritten command.
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our
@@ -5074,7 +5089,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -5129,7 +5144,7 @@ mod test {
                 }];
 
             // Now write just one block
-            region.region_write(&writes, 0, false).await?;
+            region.region_write(&writes, JobId(0), false).await?;
         }
 
         // Now use region_write to fill entire region
@@ -5160,7 +5175,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Because we did write_unwritten, the block we already written should
         // still have the data from the first write.  Update our buffer
@@ -5185,7 +5200,7 @@ mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -5234,19 +5249,22 @@ mod test {
 
         // Write to extent 0 block 0 first
         let writes = create_generic_write(0, Block::new_512(0));
-        region.region_write(&writes, 0, true).await.unwrap();
+        region.region_write(&writes, JobId(0), true).await.unwrap();
 
         // Now write to extent 1 block 0
         let writes = create_generic_write(1, Block::new_512(0));
 
-        region.region_write(&writes, 0, true).await.unwrap();
+        region.region_write(&writes, JobId(0), true).await.unwrap();
 
         // Verify the dirty bit is now set for both extents.
         assert!(region.get_opened_extent(0).await.dirty().await);
         assert!(region.get_opened_extent(1).await.dirty().await);
 
         // Call flush, but limit the flush to extent 0
-        region.region_flush(1, 2, &None, 3, Some(0)).await.unwrap();
+        region
+            .region_flush(1, 2, &None, JobId(3), Some(0))
+            .await
+            .unwrap();
 
         // Verify the dirty bit is no longer set for 0, but still set
         // for extent 1.
@@ -5266,18 +5284,21 @@ mod test {
 
         // Write to extent 1 block 9 first
         let writes = create_generic_write(1, Block::new_512(9));
-        region.region_write(&writes, 1, true).await.unwrap();
+        region.region_write(&writes, JobId(1), true).await.unwrap();
 
         // Now write to extent 2 block 9
         let writes = create_generic_write(2, Block::new_512(9));
-        region.region_write(&writes, 2, true).await.unwrap();
+        region.region_write(&writes, JobId(2), true).await.unwrap();
 
         // Verify the dirty bit is now set for both extents.
         assert!(region.get_opened_extent(1).await.dirty().await);
         assert!(region.get_opened_extent(2).await.dirty().await);
 
         // Call flush, but limit the flush to extents < 2
-        region.region_flush(1, 2, &None, 3, Some(1)).await.unwrap();
+        region
+            .region_flush(1, 2, &None, JobId(3), Some(1))
+            .await
+            .unwrap();
 
         // Verify the dirty bit is no longer set for 1, but still set
         // for extent 2.
@@ -5285,7 +5306,10 @@ mod test {
         assert!(region.get_opened_extent(2).await.dirty().await);
 
         // Now flush with no restrictions.
-        region.region_flush(1, 2, &None, 3, None).await.unwrap();
+        region
+            .region_flush(1, 2, &None, JobId(3), None)
+            .await
+            .unwrap();
 
         // Extent 2 should no longer be dirty
         assert!(!region.get_opened_extent(2).await.dirty().await);
@@ -5305,7 +5329,10 @@ mod test {
         let mut job_id = 1;
         for ext in 0..10 {
             let writes = create_generic_write(ext, Block::new_512(5));
-            region.region_write(&writes, job_id, true).await.unwrap();
+            region
+                .region_write(&writes, JobId(job_id), true)
+                .await
+                .unwrap();
             job_id += 1;
         }
 
@@ -5319,7 +5346,7 @@ mod test {
         for ext in 0..10 {
             println!("Send flush to extent limit {}", ext);
             region
-                .region_flush(1, 2, &None, 3, Some(ext))
+                .region_flush(1, 2, &None, JobId(3), Some(ext))
                 .await
                 .unwrap();
 
@@ -5346,7 +5373,10 @@ mod test {
         region.extend(1).await.unwrap();
 
         // Call flush with an invalid extent
-        assert!(region.region_flush(1, 2, &None, 3, Some(2)).await.is_err());
+        assert!(region
+            .region_flush(1, 2, &None, JobId(3), Some(2))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -5381,11 +5411,11 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, true).await.unwrap();
+        region.region_write(&writes, JobId(0), true).await.unwrap();
 
-        // Flush extent with eid, fn, gen, job_id.
+        // Flush extent with eid, fn, gen
         region
-            .region_flush_extent(eid as usize, 3, 2, 1)
+            .region_flush_extent(eid as usize, 3, 2, JobId(1))
             .await
             .unwrap();
 
@@ -5432,7 +5462,7 @@ mod test {
                 },
             }];
 
-        region.region_write(&writes, 0, true).await.unwrap();
+        region.region_write(&writes, JobId(0), true).await.unwrap();
 
         // Close extent 0 without a flush
         let (gen, flush, dirty) =
@@ -5457,10 +5487,10 @@ mod test {
         assert_eq!(flush, 0);
         assert!(dirty);
 
-        // Reopen, then flush extent with eid, fn, gen, job_id.
+        // Reopen, then flush extent with eid, fn, gen
         region.reopen_extent(eid as usize).await.unwrap();
         region
-            .region_flush_extent(eid as usize, 4, 9, 1)
+            .region_flush_extent(eid as usize, 4, 9, JobId(1))
             .await
             .unwrap();
 
@@ -5521,12 +5551,12 @@ mod test {
         // Write all the writes
         for write_iteration in &writes {
             for write_chunk in write_iteration {
-                region.region_write(write_chunk, 0, false).await?;
+                region.region_write(write_chunk, JobId(0), false).await?;
             }
         }
 
         // Flush
-        region.region_flush(1, 2, &None, 3, None).await?;
+        region.region_flush(1, 2, &None, JobId(3), None).await?;
 
         // We are gonna compare against the last write iteration
         let last_writes = writes.last().unwrap();
@@ -5602,11 +5632,13 @@ mod test {
 
         // Write all the writes
         for write_iteration in &writes {
-            region.region_write(write_iteration, 0, false).await?;
+            region
+                .region_write(write_iteration, JobId(0), false)
+                .await?;
         }
 
         // Flush
-        region.region_flush(1, 2, &None, 3, None).await?;
+        region.region_flush(1, 2, &None, JobId(3), None).await?;
 
         // compare against the last write iteration
         let last_writes = writes.last().unwrap();
@@ -5667,7 +5699,7 @@ mod test {
                 },
             }];
 
-        let result = region.region_write(&writes, 0, false).await;
+        let result = region.region_write(&writes, JobId(0), false).await;
 
         assert!(result.is_err());
 
@@ -5696,7 +5728,7 @@ mod test {
                     eid: 0,
                     offset: Block::new_512(0),
                 }],
-                0,
+                JobId(0),
             )
             .await?;
 
@@ -5750,7 +5782,7 @@ mod test {
             });
         }
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         Ok((dir, region, buffer))
     }
@@ -5767,7 +5799,7 @@ mod test {
             })
             .collect();
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         // Validate returned data
         assert_eq!(
@@ -5794,7 +5826,7 @@ mod test {
             })
             .collect();
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         // Validate returned data
         assert_eq!(
@@ -5837,7 +5869,7 @@ mod test {
         .flatten()
         .collect();
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         // Validate returned data
         assert_eq!(
@@ -5880,7 +5912,7 @@ mod test {
             },
         ];
 
-        let responses = region.region_read(&requests, 0).await?;
+        let responses = region.region_read(&requests, JobId(0)).await?;
 
         // Validate returned data
         assert_eq!(
@@ -5944,7 +5976,7 @@ mod test {
             })
             .collect();
 
-        let responses = region.region_read(&requests, 1).await?;
+        let responses = region.region_read(&requests, JobId(1)).await?;
 
         assert_eq!(
             &responses
@@ -5964,7 +5996,7 @@ mod test {
         // Call region_write with a single large contiguous range
         let writes = prepare_writes(1..8, &mut data);
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -5979,7 +6011,7 @@ mod test {
         // multiple extents
         let writes = prepare_writes(9..28, &mut data);
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -5998,7 +6030,7 @@ mod test {
         ]
         .concat();
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -6018,7 +6050,7 @@ mod test {
         ]
         .concat();
 
-        region.region_write(&writes, 0, false).await?;
+        region.region_write(&writes, JobId(0), false).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -6042,7 +6074,7 @@ mod test {
         let writes = prepare_writes(1..8, &mut data);
 
         // write_unwritten = true
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -6068,7 +6100,7 @@ mod test {
         let writes = prepare_writes(9..28, &mut data);
 
         // write_unwritten = true
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -6098,7 +6130,7 @@ mod test {
         .concat();
 
         // write_unwritten = true
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -6129,7 +6161,7 @@ mod test {
         .concat();
 
         // write_unwritten = true
-        region.region_write(&writes, 0, true).await?;
+        region.region_write(&writes, JobId(0), true).await?;
 
         // Validate written data by reading everything back and comparing with
         // data buffer

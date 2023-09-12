@@ -16,7 +16,7 @@ pub(crate) mod up_test {
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
 
-    fn hashset(data: &[u64]) -> HashSet<u64> {
+    fn hashset(data: &[JobId]) -> HashSet<JobId> {
         HashSet::from_iter(data.iter().cloned())
     }
 
@@ -31,10 +31,10 @@ pub(crate) mod up_test {
 
     fn extent_repair_ids() -> ExtentRepairIDs {
         ExtentRepairIDs {
-            close_id: 1,
-            repair_id: 2,
-            noop_id: 3,
-            reopen_id: 4,
+            close_id: JobId(1),
+            repair_id: JobId(2),
+            noop_id: JobId(3),
+            reopen_id: JobId(4),
         }
     }
 
@@ -79,7 +79,7 @@ pub(crate) mod up_test {
         (request, iblocks)
     }
 
-    fn create_generic_read_eob(ds_id: u64) -> (ReadRequest, DownstairsIO) {
+    fn create_generic_read_eob(ds_id: JobId) -> (ReadRequest, DownstairsIO) {
         let (request, iblocks) = generic_read_request();
 
         let op =
@@ -1743,7 +1743,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let gw_id = 19;
-        let next_id = 1010;
+        let next_id = JobId(1010);
 
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
@@ -1838,7 +1838,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let gw_id = 19;
-        let next_id = 1010;
+        let next_id = JobId(1010);
 
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
@@ -1920,7 +1920,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let gw_id = 19;
-        let next_id = 1010;
+        let next_id = JobId(1010);
 
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
@@ -2010,7 +2010,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let gw_id = 19;
-        let next_id = 1010;
+        let next_id = JobId(1010);
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
@@ -2095,7 +2095,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let gw_id = 19;
-        let next_id = 1010;
+        let next_id = JobId(1010);
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
@@ -2167,7 +2167,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let gw_id = 19;
-        let next_id = 1010;
+        let next_id = JobId(1010);
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
@@ -2757,7 +2757,7 @@ pub(crate) mod up_test {
         // that downstairs 2 does not.
         assert_eq!(ds.ds_last_flush[0], flush_id);
         assert_eq!(ds.ds_last_flush[1], flush_id);
-        assert_eq!(ds.ds_last_flush[2], 0);
+        assert_eq!(ds.ds_last_flush[2], JobId(0));
 
         // Should not retire yet.
         ds.retire_check(flush_id);
@@ -3106,7 +3106,7 @@ pub(crate) mod up_test {
 
         // Verify who has updated their last flush.
         assert_eq!(ds.ds_last_flush[0], flush_id);
-        assert_eq!(ds.ds_last_flush[1], 0);
+        assert_eq!(ds.ds_last_flush[1], JobId(0));
         assert_eq!(ds.ds_last_flush[2], flush_id);
 
         // Now, finish sending and completing the writes
@@ -3908,7 +3908,7 @@ pub(crate) mod up_test {
         // Create and enqueue the flush by setting deactivate
         // The created flush should be the next ID
         up.set_deactivate(None, ds_done_tx.clone()).await.unwrap();
-        let flush_id = id1 + 1;
+        let flush_id = JobId(id1.0 + 1);
 
         ds = up.downstairs.lock().await;
         // Complete the writes
@@ -5812,7 +5812,7 @@ pub(crate) mod up_test {
 
         // The last skipped flush should still be on the skipped list
         assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert!(ds.ds_skipped_jobs[0].contains(&1002));
+        assert!(ds.ds_skipped_jobs[0].contains(&JobId(1002)));
         assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
     }
@@ -5936,8 +5936,8 @@ pub(crate) mod up_test {
     async fn enqueue_write(
         up: &Arc<Upstairs>,
         make_in_progress: bool,
-        ds_done_tx: mpsc::Sender<u64>,
-    ) -> u64 {
+        ds_done_tx: mpsc::Sender<()>,
+    ) -> JobId {
         let mut ds = up.downstairs.lock().await;
 
         let id = ds.next_id();
@@ -5962,8 +5962,8 @@ pub(crate) mod up_test {
     async fn enqueue_flush(
         up: &Arc<Upstairs>,
         make_in_progress: bool,
-        ds_done_tx: mpsc::Sender<u64>,
-    ) -> u64 {
+        ds_done_tx: mpsc::Sender<()>,
+    ) -> JobId {
         let mut ds = up.downstairs.lock().await;
 
         let id = ds.next_id();
@@ -5995,8 +5995,8 @@ pub(crate) mod up_test {
         up: &Arc<Upstairs>,
         request: ReadRequest,
         make_in_progress: bool,
-        ds_done_tx: mpsc::Sender<u64>,
-    ) -> u64 {
+        ds_done_tx: mpsc::Sender<()>,
+    ) -> JobId {
         let mut ds = up.downstairs.lock().await;
 
         let read_id = ds.next_id();
@@ -6226,7 +6226,7 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert!(ds.ds_skipped_jobs[1].contains(&1001));
+        assert!(ds.ds_skipped_jobs[1].contains(&JobId(1001)));
         assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
         drop(ds);
 
@@ -6284,7 +6284,7 @@ pub(crate) mod up_test {
         // Only the skipped flush should remain.
         assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert!(ds.ds_skipped_jobs[1].contains(&1002));
+        assert!(ds.ds_skipped_jobs[1].contains(&JobId(1002)));
         assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
     }
 
@@ -6800,7 +6800,7 @@ pub(crate) mod up_test {
 
         // Skipped jobs just has the flush
         assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert!(ds.ds_skipped_jobs[0].contains(&1002));
+        assert!(ds.ds_skipped_jobs[0].contains(&JobId(1002)));
         assert_eq!(ds.ackable_work().len(), 0);
 
         // The writes, the read, and the flush should be completed.
@@ -6901,9 +6901,9 @@ pub(crate) mod up_test {
 
         // Skipped jobs now just have the flush.
         assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert!(ds.ds_skipped_jobs[0].contains(&1002));
+        assert!(ds.ds_skipped_jobs[0].contains(&JobId(1002)));
         assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
-        assert!(ds.ds_skipped_jobs[2].contains(&1002));
+        assert!(ds.ds_skipped_jobs[2].contains(&JobId(1002)));
         assert_eq!(ds.ackable_work().len(), 0);
 
         // The writes, the read, and the flush should be completed.
@@ -7045,7 +7045,7 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&2).unwrap(), &IOState::Skipped);
         for cid in 0..3 {
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
-            assert!(ds.ds_skipped_jobs[cid].contains(&1000));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
         }
         drop(ds);
 
@@ -7069,7 +7069,7 @@ pub(crate) mod up_test {
         // Skipped jobs still has the flush.
         for cid in 0..3 {
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
-            assert!(ds.ds_skipped_jobs[cid].contains(&1000));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
         }
         drop(ds);
     }
@@ -7111,9 +7111,9 @@ pub(crate) mod up_test {
 
         // Skipped jobs are not yet cleared.
         for cid in 0..3 {
-            assert!(ds.ds_skipped_jobs[cid].contains(&1000));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1001));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1002));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1001)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 3);
         }
 
@@ -7138,7 +7138,7 @@ pub(crate) mod up_test {
 
         // Skipped jobs now just has the flush
         for cid in 0..3 {
-            assert!(ds.ds_skipped_jobs[cid].contains(&1002));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
         }
     }
@@ -7189,12 +7189,12 @@ pub(crate) mod up_test {
 
         // Six jobs have been skipped.
         for cid in 0..3 {
-            assert!(ds.ds_skipped_jobs[cid].contains(&1000));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1001));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1002));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1003));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1004));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1005));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1001)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1003)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1004)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1005)));
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 6);
         }
 
@@ -7210,10 +7210,10 @@ pub(crate) mod up_test {
         // The first two skipped jobs are now cleared and the non-acked
         // jobs remain on the list, as well as the last flush.
         for cid in 0..3 {
-            assert!(ds.ds_skipped_jobs[cid].contains(&1002));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1003));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1004));
-            assert!(ds.ds_skipped_jobs[cid].contains(&1005));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1003)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1004)));
+            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1005)));
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 4);
         }
     }
@@ -7294,7 +7294,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
@@ -7355,7 +7355,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -7414,7 +7414,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -7481,7 +7481,7 @@ pub(crate) mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 7);
@@ -7543,7 +7543,7 @@ pub(crate) mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
@@ -7615,7 +7615,7 @@ pub(crate) mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 7);
@@ -7683,7 +7683,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
@@ -7736,7 +7736,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
@@ -7787,7 +7787,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 4);
@@ -7841,7 +7841,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
@@ -7900,7 +7900,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -7955,7 +7955,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -7996,7 +7996,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -8073,7 +8073,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 8);
@@ -8152,7 +8152,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 2);
@@ -8211,7 +8211,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -8309,7 +8309,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 6);
@@ -8356,7 +8356,7 @@ pub(crate) mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 5);
@@ -8400,7 +8400,7 @@ pub(crate) mod up_test {
         }
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 5);
@@ -8466,7 +8466,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -8531,7 +8531,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -8628,7 +8628,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 5);
@@ -8714,7 +8714,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);
@@ -8762,7 +8762,7 @@ pub(crate) mod up_test {
 
         {
             let mut ds = upstairs.downstairs.lock().await;
-            let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+            let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
             let jobs: Vec<&DownstairsIO> =
                 keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
             assert_eq!(jobs.len(), 1);
@@ -8800,7 +8800,7 @@ pub(crate) mod up_test {
 
         {
             let ds = upstairs.downstairs.lock().await;
-            let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+            let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
             let jobs: Vec<&DownstairsIO> =
                 keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
 
@@ -8857,7 +8857,7 @@ pub(crate) mod up_test {
             .unwrap();
 
         let ds = upstairs.downstairs.lock().await;
-        let keys: Vec<&u64> = ds.ds_active.keys().sorted().collect();
+        let keys: Vec<&JobId> = ds.ds_active.keys().sorted().collect();
         let jobs: Vec<&DownstairsIO> =
             keys.iter().map(|k| ds.ds_active.get(k).unwrap()).collect();
         assert_eq!(jobs.len(), 3);

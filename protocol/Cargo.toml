@@ -11,6 +11,7 @@ bincode.workspace = true
 bytes.workspace = true
 crucible-common.workspace = true
 num_enum.workspace = true
+schemars.workspace = true
 serde.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true

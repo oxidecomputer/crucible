@@ -1,13 +1,14 @@
 // Copyright 2023 Oxide Computer Company
 
 use crucible_common::RegionDefinition;
+use crucible_protocol::JobId;
 
 use crate::{AckStatus, DownstairsIO, ImpactedBlocks};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `ActiveJobs` tracks active jobs by ID
 ///
-/// It exposes an API that roughly matches a `BTreeMap<u64, DownstairsIO>`,
+/// It exposes an API that roughly matches a `BTreeMap<JobId, DownstairsIO>`,
 /// but leaves open the possibility for further optimization.
 ///
 /// Notably, there is no way to directly modify a `DownstairsIO` contained in
@@ -18,8 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// jobs.
 #[derive(Debug)]
 pub(crate) struct ActiveJobs {
-    jobs: BTreeMap<u64, DownstairsIO>,
-    ackable: BTreeSet<u64>,
+    jobs: BTreeMap<JobId, DownstairsIO>,
+    ackable: BTreeSet<JobId>,
 }
 
 impl ActiveJobs {
@@ -32,13 +33,13 @@ impl ActiveJobs {
 
     /// Looks up a job by ID, returning a reference
     #[inline]
-    pub fn get(&self, job_id: &u64) -> Option<&DownstairsIO> {
+    pub fn get(&self, job_id: &JobId) -> Option<&DownstairsIO> {
         self.jobs.get(job_id)
     }
 
     /// Looks up a job by ID, returning a mutable reference
     #[inline]
-    pub fn get_mut(&mut self, job_id: &u64) -> Option<DownstairsIOHandle> {
+    pub fn get_mut(&mut self, job_id: &JobId) -> Option<DownstairsIOHandle> {
         self.jobs
             .get_mut(job_id)
             .map(|job| DownstairsIOHandle::new(job, &mut self.ackable))
@@ -58,7 +59,7 @@ impl ActiveJobs {
 
     /// Applies a function across all
     #[inline]
-    pub fn for_each<F: FnMut(&u64, &mut DownstairsIO)>(&mut self, mut f: F) {
+    pub fn for_each<F: FnMut(&JobId, &mut DownstairsIO)>(&mut self, mut f: F) {
         for (job_id, job) in self.jobs.iter_mut() {
             let handle = DownstairsIOHandle::new(job, &mut self.ackable);
             f(job_id, handle.job);
@@ -69,7 +70,7 @@ impl ActiveJobs {
     #[inline]
     pub fn insert(
         &mut self,
-        job_id: u64,
+        job_id: JobId,
         io: DownstairsIO,
     ) -> Option<DownstairsIO> {
         self.jobs.insert(job_id, io)
@@ -77,13 +78,15 @@ impl ActiveJobs {
 
     /// Removes a job by ID, returning its IO work
     #[inline]
-    pub fn remove(&mut self, job_id: &u64) -> Option<DownstairsIO> {
+    pub fn remove(&mut self, job_id: &JobId) -> Option<DownstairsIO> {
         self.jobs.remove(job_id)
     }
 
     /// Returns an iterator over job IDs
     #[inline]
-    pub fn keys(&self) -> std::collections::btree_map::Keys<u64, DownstairsIO> {
+    pub fn keys(
+        &self,
+    ) -> std::collections::btree_map::Keys<JobId, DownstairsIO> {
         self.jobs.keys()
     }
 
@@ -92,16 +95,18 @@ impl ActiveJobs {
     #[inline]
     pub fn values(
         &self,
-    ) -> std::collections::btree_map::Values<u64, DownstairsIO> {
+    ) -> std::collections::btree_map::Values<JobId, DownstairsIO> {
         self.jobs.values()
     }
 
     #[inline]
-    pub fn iter(&self) -> std::collections::btree_map::Iter<u64, DownstairsIO> {
+    pub fn iter(
+        &self,
+    ) -> std::collections::btree_map::Iter<JobId, DownstairsIO> {
         self.jobs.iter()
     }
 
-    pub fn deps_for_flush(&self) -> Vec<u64> {
+    pub fn deps_for_flush(&self) -> Vec<JobId> {
         /*
          * To build the dependency list for this flush, iterate from the end of
          * the downstairs work active list in reverse order and check each job
@@ -118,7 +123,7 @@ impl ActiveJobs {
          * and everything depends on flushes.
          */
         let num_jobs = self.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
+        let mut dep: Vec<JobId> = Vec::with_capacity(num_jobs);
 
         for (id, job) in self.iter().rev() {
             // Flushes must depend on everything
@@ -136,7 +141,7 @@ impl ActiveJobs {
         &self,
         impacted_blocks: ImpactedBlocks,
         _ddef: RegionDefinition,
-    ) -> Vec<u64> {
+    ) -> Vec<JobId> {
         /*
          * To build the dependency list for this write, iterate from the end
          * of the downstairs work active list in reverse order and
@@ -171,7 +176,7 @@ impl ActiveJobs {
          * this job's dependencies.
          */
         let num_jobs = self.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
+        let mut dep: Vec<JobId> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
         for (id, job) in self.iter().rev() {
@@ -194,7 +199,7 @@ impl ActiveJobs {
         &self,
         impacted_blocks: ImpactedBlocks,
         _ddef: RegionDefinition,
-    ) -> Vec<u64> {
+    ) -> Vec<JobId> {
         /*
          * To build the dependency list for this read, iterate from the end
          * of the downstairs work active list in reverse order and
@@ -210,7 +215,7 @@ impl ActiveJobs {
          *   dependency
          */
         let num_jobs = self.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
+        let mut dep: Vec<JobId> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs
         for (id, job) in self.iter().rev() {
@@ -236,11 +241,11 @@ impl ActiveJobs {
     pub fn deps_for_live_repair(
         &self,
         impacted_blocks: ImpactedBlocks,
-        close_id: u64,
+        close_id: JobId,
         _ddef: RegionDefinition,
-    ) -> Vec<u64> {
+    ) -> Vec<JobId> {
         let num_jobs = self.len();
-        let mut deps: Vec<u64> = Vec::with_capacity(num_jobs);
+        let mut deps: Vec<JobId> = Vec::with_capacity(num_jobs);
 
         // Search backwards in the list of active jobs, stop at the
         // last flush
@@ -270,14 +275,14 @@ impl ActiveJobs {
         deps
     }
 
-    pub fn ackable_work(&self) -> Vec<u64> {
+    pub fn ackable_work(&self) -> Vec<JobId> {
         self.ackable.iter().cloned().collect()
     }
 }
 
 impl<'a> IntoIterator for &'a ActiveJobs {
-    type Item = (&'a u64, &'a DownstairsIO);
-    type IntoIter = std::collections::btree_map::Iter<'a, u64, DownstairsIO>;
+    type Item = (&'a JobId, &'a DownstairsIO);
+    type IntoIter = std::collections::btree_map::Iter<'a, JobId, DownstairsIO>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.jobs.iter()
@@ -292,7 +297,7 @@ impl<'a> IntoIterator for &'a ActiveJobs {
 pub(crate) struct DownstairsIOHandle<'a> {
     pub job: &'a mut DownstairsIO,
     initial_status: AckStatus,
-    ackable: &'a mut BTreeSet<u64>,
+    ackable: &'a mut BTreeSet<JobId>,
 }
 
 impl<'a> std::fmt::Debug for DownstairsIOHandle<'a> {
@@ -305,7 +310,10 @@ impl<'a> std::fmt::Debug for DownstairsIOHandle<'a> {
 }
 
 impl<'a> DownstairsIOHandle<'a> {
-    fn new(job: &'a mut DownstairsIO, ackable: &'a mut BTreeSet<u64>) -> Self {
+    fn new(
+        job: &'a mut DownstairsIO,
+        ackable: &'a mut BTreeSet<JobId>,
+    ) -> Self {
         let initial_status = job.ack_status;
         Self {
             job,

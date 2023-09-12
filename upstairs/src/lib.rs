@@ -375,7 +375,7 @@ async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
     client_id: u8,
-    ds_done_tx: &mpsc::Sender<u64>,
+    ds_done_tx: &mpsc::Sender<()>,
 ) -> Result<()> {
     let (upstairs_id, session_id, ds_id, result, extent_info) = match m {
         Message::Imok => return Ok(()),
@@ -385,7 +385,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__write__io__done!(|| (job_id.0, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -400,7 +400,10 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__unwritten__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__write__unwritten__io__done!(|| (
+                job_id.0,
+                client_id as u64
+            ));
             (
                 *upstairs_id,
                 *session_id,
@@ -415,7 +418,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__flush__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__flush__io__done!(|| (job_id.0, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -430,7 +433,7 @@ async fn process_message(
             job_id,
             responses,
         } => {
-            cdt::ds__read__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__read__io__done!(|| (job_id.0, client_id as u64));
             (*upstairs_id, *session_id, *job_id, responses.clone(), None)
         }
         Message::ExtentLiveCloseAck {
@@ -459,7 +462,7 @@ async fn process_message(
                     );
                 }
             };
-            cdt::ds__close__done!(|| (job_id, client_id as u64));
+            cdt::ds__close__done!(|| (job_id.0, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -474,8 +477,8 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__noop__done!(|| (job_id, client_id as u64));
-            cdt::ds__reopen__done!(|| (job_id, client_id as u64));
+            cdt::ds__noop__done!(|| (job_id.0, client_id as u64));
+            cdt::ds__reopen__done!(|| (job_id.0, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -490,7 +493,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__repair__done!(|| (job_id, client_id as u64));
+            cdt::ds__repair__done!(|| (job_id.0, client_id as u64));
             (
                 *upstairs_id,
                 *session_id,
@@ -526,7 +529,7 @@ async fn process_message(
                 if job.work.is_repair() {
                     // Return the error and let the previously written error
                     // processing code work.
-                    cdt::ds__repair__done!(|| (job_id, client_id as u64));
+                    cdt::ds__repair__done!(|| (job_id.0, client_id as u64));
 
                     // XXX uncomment this to see the upstairs disconnect this
                     // bad downstairs. test_error_during_live_repair_no_halt
@@ -594,7 +597,7 @@ async fn process_message(
     {
         Ok(notify_guest) => {
             if notify_guest {
-                match ds_done_tx.send(ds_id).await {
+                match ds_done_tx.send(()).await {
                     Ok(()) => {}
                     Err(e) => {
                         error!(
@@ -712,7 +715,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__write__io__start!(|| (new_id, client_id as u64));
+                cdt::ds__write__io__start!(|| (new_id.0, client_id as u64));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -730,7 +733,7 @@ where
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__write__unwritten__io__start!(|| (
-                    new_id,
+                    new_id.0,
                     client_id as u64
                 ));
                 fw.send(Message::WriteUnwritten {
@@ -762,7 +765,7 @@ where
                 } else {
                     None
                 };
-                cdt::ds__flush__io__start!(|| (new_id, client_id as u64));
+                cdt::ds__flush__io__start!(|| (new_id.0, client_id as u64));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -782,7 +785,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__read__io__start!(|| (new_id, client_id as u64));
+                cdt::ds__read__io__start!(|| (new_id.0, client_id as u64));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -812,7 +815,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__close__start!(|| (new_id, client_id as u64, extent));
+                cdt::ds__close__start!(|| (new_id.0, client_id as u64, extent));
                 if repair_downstairs.contains(&client_id) {
                     // We are the downstairs being repaired, so just close.
                     fw.send(Message::ExtentLiveClose {
@@ -846,7 +849,11 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__repair__start!(|| (new_id, client_id as u64, extent));
+                cdt::ds__repair__start!(|| (
+                    new_id.0,
+                    client_id as u64,
+                    extent
+                ));
                 if repair_downstairs.contains(&client_id) {
                     fw.send(Message::ExtentLiveRepair {
                         upstairs_id: u.uuid,
@@ -875,7 +882,11 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__reopen__start!(|| (new_id, client_id as u64, extent));
+                cdt::ds__reopen__start!(|| (
+                    new_id.0,
+                    client_id as u64,
+                    extent
+                ));
                 fw.send(Message::ExtentLiveReopen {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -889,7 +900,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__noop__start!(|| (new_id, client_id as u64));
+                cdt::ds__noop__start!(|| (new_id.0, client_id as u64));
                 fw.send(Message::ExtentLiveNoOp {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -2522,7 +2533,7 @@ struct UpComs {
      * upstairs to all required downstairs has completed. The receiver is
      * the up_ds_listen() task.
      */
-    ds_done_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<()>,
     /**
      * This channel is used to notify the proc task that it's time to
      * promote this downstairs to active.
@@ -2765,9 +2776,11 @@ struct Downstairs {
     ds_state: Vec<DsState>,
 
     /**
-     * The last flush ID that each downstairs has acked.
+     * The last flush job ID that each downstairs has acked.
+     *
+     * Note that this is a job ID; not a flush ID!
      */
-    ds_last_flush: Vec<u64>,
+    ds_last_flush: Vec<JobId>,
 
     /**
      * Errors recorded, indexed by client ID.
@@ -2782,22 +2795,22 @@ struct Downstairs {
     /**
      * Cache of new jobs, indexed by client ID.
      */
-    ds_new: Vec<Vec<u64>>,
+    ds_new: Vec<Vec<JobId>>,
 
     /**
      * Jobs that have been skipped, indexed by client ID.
      */
-    ds_skipped_jobs: [HashSet<u64>; 3],
+    ds_skipped_jobs: [HashSet<JobId>; 3],
 
     /**
      * The next Job ID this Upstairs should use for downstairs work.
      */
-    next_id: u64,
+    next_id: JobId,
 
     /**
      * Ringbuf of completed downstairs job IDs.
      */
-    completed: AllocRingBuffer<u64>,
+    completed: AllocRingBuffer<JobId>,
 
     /**
      * Ringbuf of a summary of each recently completed downstairs IO.
@@ -2909,7 +2922,7 @@ struct Downstairs {
      * indicates a live repair task is running and being `Some` is used to
      * prevent more than one repair task from running at the same time.
      */
-    repair_min_id: Option<u64>,
+    repair_min_id: Option<JobId>,
 
     /**
      * Count of downstairs connections
@@ -2934,14 +2947,14 @@ impl Downstairs {
             ds_target,
             ds_repair: HashMap::new(),
             ds_state: vec![DsState::New; 3],
-            ds_last_flush: vec![0; 3],
+            ds_last_flush: vec![JobId(0); 3],
             downstairs_errors: HashMap::new(),
             ds_active: ActiveJobs::new(),
             ds_new: vec![Vec::new(); 3],
             ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
-            next_id: 1000,
+            next_id: JobId(1000),
             region_metadata: HashMap::new(),
             reconcile_current_work: None,
             reconcile_task_list: VecDeque::new(),
@@ -2976,15 +2989,15 @@ impl Downstairs {
     /**
      * Assign a new downstairs ID.
      */
-    fn next_id(&mut self) -> u64 {
+    fn next_id(&mut self) -> JobId {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id.0 += 1;
         id
     }
     /**
      * See what the next ID will be, without getting it.
      */
-    fn peek_next_id(&self) -> u64 {
+    fn peek_next_id(&self) -> JobId {
         self.next_id
     }
 
@@ -2995,7 +3008,7 @@ impl Downstairs {
      * If the job state is already IOState::Skipped, then this task
      * has no work to do, so return None.
      */
-    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
+    fn in_progress(&mut self, ds_id: JobId, client_id: u8) -> Option<IOop> {
         let mut handle = match self.ds_active.get_mut(&ds_id) {
             Some(handle) => handle,
             None => {
@@ -3039,9 +3052,9 @@ impl Downstairs {
     fn remove_dep_if_live_repair(
         &mut self,
         client_id: u8,
-        mut deps: Vec<u64>,
-        ds_id: u64,
-    ) -> Vec<u64> {
+        mut deps: Vec<JobId>,
+        ds_id: JobId,
+    ) -> Vec<JobId> {
         debug!(
             self.log,
             "[{}] {} Remove check skipped:{:?} from deps:{:?}",
@@ -3485,7 +3498,7 @@ impl Downstairs {
      * Return a list of downstairs request IDs that represent unissued
      * requests for this client.
      */
-    fn new_work(&mut self, client_id: u8) -> Vec<u64> {
+    fn new_work(&mut self, client_id: u8) -> Vec<JobId> {
         self.ds_new[client_id as usize].drain(..).collect()
     }
 
@@ -3493,7 +3506,7 @@ impl Downstairs {
      * Called to requeue work that was previously found by calling
      * [`new_work`], presumably due to flow control.
      */
-    fn requeue_work(&mut self, client_id: u8, work: &[u64]) {
+    fn requeue_work(&mut self, client_id: u8, work: &[JobId]) {
         self.ds_new[client_id as usize].extend_from_slice(work);
     }
 
@@ -3518,7 +3531,7 @@ impl Downstairs {
     /**
      * Build a list of jobs that are ready to be acked.
      */
-    fn ackable_work(&mut self) -> Vec<u64> {
+    fn ackable_work(&mut self) -> Vec<JobId> {
         self.ds_active.ackable_work()
     }
 
@@ -3528,7 +3541,7 @@ impl Downstairs {
     async fn enqueue(
         &mut self,
         mut io: DownstairsIO,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) {
         let mut skipped = 0;
         let is_write = matches!(io.work, IOop::Write { .. });
@@ -3596,14 +3609,14 @@ impl Downstairs {
             job.ack_status = AckStatus::AckReady;
             info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
 
-            ds_done_tx.send(ds_id).await.unwrap();
+            ds_done_tx.send(()).await.unwrap();
         } else if is_write {
             let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
             let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
 
-            ds_done_tx.send(ds_id).await.unwrap();
+            ds_done_tx.send(()).await.unwrap();
         }
     }
 
@@ -3642,7 +3655,7 @@ impl Downstairs {
     /**
      * Collect the state of the jobs from each client.
      */
-    fn state_count(&self, ds_id: u64) -> Result<WorkCounts> {
+    fn state_count(&self, ds_id: JobId) -> Result<WorkCounts> {
         /* XXX Should this support invalid ds_ids? */
         let job = self
             .ds_active
@@ -3651,7 +3664,7 @@ impl Downstairs {
         Ok(job.state_count())
     }
 
-    fn ack(&mut self, ds_id: u64) {
+    fn ack(&mut self, ds_id: JobId) {
         /*
          * Move AckReady to Acked.
          */
@@ -3688,7 +3701,7 @@ impl Downstairs {
      * recover if we are repairing a downstairs and one of the
      * valid remaining downstairs goes offline.
      */
-    fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
+    fn result(&mut self, ds_id: JobId) -> Result<(), CrucibleError> {
         /*
          * TODO: this doesn't tell the Guest what the error(s) were?
          */
@@ -3732,7 +3745,7 @@ impl Downstairs {
      */
     async fn cdt_gw_work_done(
         &self,
-        ds_id: u64,
+        ds_id: JobId,
         gw_id: u64,
         io_size: usize,
         stats: &UpStatOuter,
@@ -4032,7 +4045,7 @@ impl Downstairs {
      */
     fn process_ds_completion(
         &mut self,
-        ds_id: u64,
+        ds_id: JobId,
         client_id: u8,
         responses: Result<Vec<ReadResponse>, CrucibleError>,
         encryption_context: &Option<Arc<EncryptionContext>>,
@@ -4612,7 +4625,7 @@ impl Downstairs {
      * writes and if they aren't included in replay then the write will
      * never start.
      */
-    fn retire_check(&mut self, ds_id: u64) {
+    fn retire_check(&mut self, ds_id: JobId) {
         if !self.is_flush(ds_id).unwrap() {
             return;
         }
@@ -4683,7 +4696,7 @@ impl Downstairs {
     /**
      * Check if an active job is a flush or not.
      */
-    fn is_flush(&self, ds_id: u64) -> Result<bool> {
+    fn is_flush(&self, ds_id: JobId) -> Result<bool> {
         let job = self
             .ds_active
             .get(&ds_id)
@@ -4703,7 +4716,7 @@ impl Downstairs {
 
     fn client_error(
         &self,
-        ds_id: u64,
+        ds_id: JobId,
         client_id: u8,
     ) -> Result<(), CrucibleError> {
         let job = self
@@ -4808,10 +4821,10 @@ impl Downstairs {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ExtentRepairIDs {
-    close_id: u64,
-    repair_id: u64,
-    noop_id: u64,
-    reopen_id: u64,
+    close_id: JobId,
+    repair_id: JobId,
+    noop_id: JobId,
+    reopen_id: JobId,
 }
 
 /// Implement AES-GCM-SIV encryption
@@ -5338,7 +5351,7 @@ impl Upstairs {
     async fn set_deactivate(
         &self,
         req: Option<BlockReq>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         /*
          * We are changing (maybe) the upstairs state, to make
@@ -5464,9 +5477,9 @@ impl Upstairs {
     async fn live_repair_dep_check(
         &self,
         client_id: u8,
-        deps: Vec<u64>,
-        ds_id: u64,
-    ) -> Vec<u64> {
+        deps: Vec<JobId>,
+        ds_id: JobId,
+    ) -> Vec<JobId> {
         let mut ds = self.downstairs.lock().await;
 
         if ds.dependencies_need_cleanup(client_id) {
@@ -5629,7 +5642,7 @@ impl Upstairs {
         fi.get_next_flush()
     }
 
-    async fn last_flush_id(&self, client_id: u8) -> u64 {
+    async fn last_flush_id(&self, client_id: u8) -> JobId {
         let ds = self.downstairs.lock().await;
         ds.ds_last_flush[client_id as usize]
     }
@@ -5663,7 +5676,7 @@ impl Upstairs {
         &self,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         /*
          * Lock first the guest_work struct where this new job will go,
@@ -5689,7 +5702,7 @@ impl Upstairs {
         downstairs: &mut Downstairs,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         self.set_flush_clear().await;
 
@@ -5773,7 +5786,7 @@ impl Upstairs {
         data: Bytes,
         req: Option<BlockReq>,
         is_write_unwritten: bool,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
@@ -6023,7 +6036,7 @@ impl Upstairs {
         offset: Block,
         data: Buffer,
         req: Option<BlockReq>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
@@ -7198,7 +7211,7 @@ impl Upstairs {
      */
     async fn process_ds_operation(
         &self,
-        ds_id: u64,
+        ds_id: JobId,
         client_id: u8,
         read_data: Result<Vec<ReadResponse>, CrucibleError>,
         extent_info: Option<ExtentInfo>,
@@ -7384,7 +7397,7 @@ impl Upstairs {
         id: Uuid,
         old: SocketAddr,
         new: SocketAddr,
-        ds_done_tx: &mpsc::Sender<u64>,
+        ds_done_tx: &mpsc::Sender<()>,
     ) -> Result<ReplaceResult, CrucibleError> {
         warn!(
             self.log,
@@ -7478,7 +7491,7 @@ impl Upstairs {
         ds.ds_target[old_client_id] = new;
 
         if ds.ds_set_faulted(old_client_id as u8) {
-            let _ = ds_done_tx.send(1).await;
+            let _ = ds_done_tx.send(()).await;
         }
         ds.region_metadata.remove(&(old_client_id as u8));
         self.ds_transition_with_lock(
@@ -7753,7 +7766,7 @@ impl std::fmt::Display for DsState {
  */
 #[derive(Debug, Clone)]
 struct DownstairsIO {
-    ds_id: u64, // This MUST match our hashmap index
+    ds_id: JobId, // This MUST match our hashmap index
 
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
@@ -7908,11 +7921,11 @@ impl DownstairsIO {
  */
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct WorkSummary {
-    id: u64,
+    id: JobId,
     replay: bool,
     job_type: String,
     num_blocks: usize,
-    deps: Vec<u64>,
+    deps: Vec<JobId>,
     ack_status: AckStatus,
     state: Vec<String>,
 }
@@ -7940,19 +7953,19 @@ impl ReconcileIO {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOop {
     Write {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
     WriteUnwritten {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
     Read {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         requests: Vec<ReadRequest>,
     },
     Flush {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
@@ -7962,11 +7975,11 @@ pub enum IOop {
      * These operations are for repairing a bad downstairs
      */
     ExtentClose {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
     },
     ExtentFlushClose {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
         flush_number: u64,
         gen_number: u64,
@@ -7974,23 +7987,23 @@ pub enum IOop {
         repair_downstairs: Vec<u8>,
     },
     ExtentLiveRepair {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
         source_downstairs: u8,
         source_repair_address: SocketAddr,
         repair_downstairs: Vec<u8>,
     },
     ExtentLiveReopen {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
     },
     ExtentLiveNoOp {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
     },
 }
 
 impl IOop {
-    pub fn deps(&self) -> &Vec<u64> {
+    pub fn deps(&self) -> &Vec<JobId> {
         match &self {
             IOop::Write {
                 dependencies,
@@ -8070,7 +8083,7 @@ impl IOop {
      * The size of the IO, or extent number if a repair operation.
      * A Vec of the dependencies.
      */
-    pub fn ioop_summary(&self) -> (String, usize, Vec<u64>) {
+    pub fn ioop_summary(&self) -> (String, usize, Vec<JobId>) {
         let (job_type, num_blocks, deps) = match self {
             IOop::Read {
                 dependencies,
@@ -8675,8 +8688,8 @@ struct GtoS {
      * downstairs work. The value is the buffer size of the operation in
      * blocks.
      */
-    submitted: HashMap<u64, u64>,
-    completed: Vec<u64>,
+    submitted: HashMap<JobId, u64>,
+    completed: Vec<JobId>,
 
     /*
      * This buffer is provided by the guest request. If this is a read,
@@ -8693,7 +8706,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
+    downstairs_buffer: HashMap<JobId, Vec<ReadResponse>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -8709,10 +8722,10 @@ struct GtoS {
 
 impl GtoS {
     pub fn new(
-        submitted: HashMap<u64, u64>,
-        completed: Vec<u64>,
+        submitted: HashMap<JobId, u64>,
+        completed: Vec<JobId>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
+        downstairs_buffer: HashMap<JobId, Vec<ReadResponse>>,
         req: Option<BlockReq>,
     ) -> GtoS {
         GtoS {
@@ -8835,7 +8848,7 @@ impl GuestWork {
     async fn gw_ds_complete(
         &mut self,
         gw_id: u64,
-        ds_id: u64,
+        ds_id: JobId,
         data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
         log: &Logger,
@@ -9414,10 +9427,10 @@ struct Repair {
  * Send a message there is repair work to do.
  */
 pub struct Target {
-    ds_work_tx: mpsc::Sender<u64>,
-    ds_done_tx: mpsc::Sender<u64>,
-    ds_active_tx: watch::Sender<u64>,
-    ds_reconcile_work_tx: watch::Sender<u64>,
+    ds_work_tx: mpsc::Sender<u64>, // guest work ID?  lastcast?
+    ds_done_tx: mpsc::Sender<()>,  // just a wake signal
+    ds_active_tx: watch::Sender<u64>, // downstairs ID?
+    ds_reconcile_work_tx: watch::Sender<u64>, // reconciliation ID?
 }
 
 #[derive(Debug)]
@@ -9482,7 +9495,7 @@ fn send_active(t: &[Target], gen: u64) {
  * complete any buffer transfers (reads) and then notify the guest that
  * their work has been completed.
  */
-async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
+async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
     /*
      * Accept _any_ ds_done message, but work on the whole list of ackable
      * work.
@@ -9551,7 +9564,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
     warn!(up.log, "up_ds_listen loop done");
 }
 
-async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
+async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     // Check outstanding IOops for each downstairs.
     // If the number is too high, then mark that downstairs as failed, scrub
     // any outstanding jobs.
@@ -9600,7 +9613,7 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
         }
     }
     if notify_guest {
-        match ds_done_tx.send(0).await {
+        match ds_done_tx.send(()).await {
             Ok(()) => {}
             Err(e) => {
                 error!(
@@ -10254,8 +10267,8 @@ pub async fn up_main(
  * construct the proper IOop to submit to the downstairs.
  */
 fn create_write_eob(
-    ds_id: u64,
-    dependencies: Vec<u64>,
+    ds_id: JobId,
+    dependencies: Vec<JobId>,
     gw_id: u64,
     writes: Vec<crucible_protocol::Write>,
     is_write_unwritten: bool,
@@ -10301,8 +10314,8 @@ fn create_write_eob(
  * DownstairsIO that the downstairs can understand.
  */
 fn create_read_eob(
-    ds_id: u64,
-    dependencies: Vec<u64>,
+    ds_id: JobId,
+    dependencies: Vec<JobId>,
     gw_id: u64,
     requests: Vec<ReadRequest>,
     impacted_blocks: ImpactedBlocks,
@@ -10335,8 +10348,8 @@ fn create_read_eob(
  */
 #[allow(clippy::too_many_arguments)]
 fn create_flush(
-    ds_id: u64,
-    dependencies: Vec<u64>,
+    ds_id: JobId,
+    dependencies: Vec<JobId>,
     flush_number: u64,
     guest_id: u64,
     gen_number: u64,

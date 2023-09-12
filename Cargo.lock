@@ -1034,6 +1034,7 @@ dependencies = [
  "bytes",
  "crucible-common",
  "num_enum",
+ "schemars",
  "serde",
  "tokio-util",
  "uuid",
