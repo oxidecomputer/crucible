@@ -9427,10 +9427,23 @@ struct Repair {
  * Send a message there is repair work to do.
  */
 pub struct Target {
-    ds_work_tx: mpsc::Sender<u64>, // guest work ID?  lastcast?
-    ds_done_tx: mpsc::Sender<()>,  // just a wake signal
-    ds_active_tx: watch::Sender<u64>, // downstairs ID?
-    ds_reconcile_work_tx: watch::Sender<u64>, // reconciliation ID?
+    /// Used to indicate that new work has arrived for a downstairs
+    ///
+    /// This is a doorbell; the value is not used
+    ds_work_tx: mpsc::Sender<u64>,
+
+    /// Indicates that we can send a reply to a guest
+    ds_done_tx: mpsc::Sender<()>,
+
+    /// Receives an activation request
+    ///
+    /// The value being sent is the generation number, but is not used
+    ds_active_tx: watch::Sender<u64>,
+
+    /// Notifies a downstairs that reconciliation work needs to happen
+    ///
+    /// The value is unused
+    ds_reconcile_work_tx: watch::Sender<u64>,
 }
 
 #[derive(Debug)]

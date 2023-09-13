@@ -17,7 +17,6 @@ use crucible_common::{Block, CrucibleError, RegionDefinition};
 ///
 /// A job ID is used to identify a specific job to the downstairs.  It is used
 /// in resolving dependencies.
-// TODO(matt) do we need to manually implement JsonSchema?
 #[derive(
     Copy,
     Clone,
@@ -296,8 +295,6 @@ pub enum Message {
      * this is reconciliation work and not actual IO.  The reconciliation work
      * uses a different work queue and each reconciliation job must finish on
      * all three downstairs before the next one can be sent.
-     *
-     * TODO(matt) is this comment still correct?
      */
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
