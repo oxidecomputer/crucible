@@ -36,7 +36,7 @@ pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
 pub async fn start(
     up: &Arc<Upstairs>,
     addr: SocketAddr,
-    ds_done_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<()>,
 ) -> Result<(), String> {
     /*
      * Setup dropshot
@@ -86,7 +86,7 @@ pub struct UpstairsInfo {
     /**
      * Notify channel for work completed by the downstairs.
      */
-    ds_done_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<()>,
 }
 
 impl UpstairsInfo {
@@ -95,7 +95,7 @@ impl UpstairsInfo {
      */
     pub fn new(
         up: &Arc<Upstairs>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> UpstairsInfo {
         UpstairsInfo {
             up: up.clone(),
@@ -175,7 +175,7 @@ struct DownstairsWork {
 
 async fn build_downstairs_job_list(up: &Arc<Upstairs>) -> Vec<WorkSummary> {
     let ds = up.downstairs.lock().await;
-    let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
+    let mut kvec: Vec<_> = ds.ds_active.keys().cloned().collect();
     kvec.sort_unstable();
 
     let mut jobs = Vec::new();
@@ -278,7 +278,7 @@ async fn fault_downstairs(
      * a job was "completed" (aka, skipped).
      */
     if ds.ds_set_faulted(cid) {
-        let _ = api_context.ds_done_tx.send(0).await;
+        let _ = api_context.ds_done_tx.send(()).await;
     }
 
     Ok(HttpResponseUpdatedNoContent())

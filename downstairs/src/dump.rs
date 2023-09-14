@@ -555,7 +555,7 @@ async fn show_extent(
                         eid: cmp_extent as u64,
                         offset: Block::new_with_ddef(block, &region.def()),
                     }],
-                    0,
+                    JobId(0),
                 )
                 .await?;
             let response = responses.pop().unwrap();
@@ -673,7 +673,7 @@ async fn show_extent_block(
                         &region.def(),
                     ),
                 }],
-                0,
+                JobId(0),
             )
             .await?;
         let response = responses.pop().unwrap();

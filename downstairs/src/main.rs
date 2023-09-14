@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crucible_common::build_logger;
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
-use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
+use crucible_protocol::{JobId, CRUCIBLE_MESSAGE_VERSION};
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None, 0, None).await?;
+                region.region_flush(1, 0, &None, JobId(0), None).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());

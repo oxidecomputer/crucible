@@ -13,6 +13,35 @@ const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
 use crucible_common::{Block, CrucibleError, RegionDefinition};
 
+/// Wrapper type for a job ID
+///
+/// A job ID is used to identify a specific job to the downstairs.  It is used
+/// in resolving dependencies.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct JobId(pub u64);
+
+impl std::fmt::Display for JobId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.fmt(f)
+    }
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Write {
@@ -319,16 +348,16 @@ pub enum Message {
     ExtentLiveClose {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         extent_id: usize,
     },
     /// Flush and then close an extent.
     ExtentLiveFlushClose {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         extent_id: usize,
         flush_number: u64,
         gen_number: u64,
@@ -337,8 +366,8 @@ pub enum Message {
     ExtentLiveRepair {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         extent_id: usize,
         source_client_id: u8,
         source_repair_address: SocketAddr,
@@ -347,16 +376,16 @@ pub enum Message {
     ExtentLiveReopen {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         extent_id: usize,
     },
     /// There is no real work to do, but we need to complete this job id
     ExtentLiveNoOp {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
     },
 
     /*
@@ -372,7 +401,7 @@ pub enum Message {
     ExtentLiveCloseAck {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         result: Result<(u64, u64, bool), CrucibleError>,
     },
 
@@ -382,7 +411,7 @@ pub enum Message {
     ExtentLiveRepairAckId {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         result: Result<(), CrucibleError>,
     },
 
@@ -391,7 +420,7 @@ pub enum Message {
     ExtentLiveAckId {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         result: Result<(), CrucibleError>,
     },
 
@@ -411,10 +440,10 @@ pub enum Message {
     },
 
     LastFlush {
-        last_flush_number: u64,
+        last_flush_number: JobId,
     },
     LastFlushAck {
-        last_flush_number: u64,
+        last_flush_number: JobId,
     },
 
     /*
@@ -423,22 +452,22 @@ pub enum Message {
     Write {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         writes: Vec<Write>,
     },
     WriteAck {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         result: Result<(), CrucibleError>,
     },
 
     Flush {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
@@ -451,42 +480,42 @@ pub enum Message {
     FlushAck {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         result: Result<(), CrucibleError>,
     },
 
     ReadRequest {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         requests: Vec<ReadRequest>,
     },
     ReadResponse {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         responses: Result<Vec<ReadResponse>, CrucibleError>,
     },
 
     WriteUnwritten {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
-        dependencies: Vec<u64>,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
         writes: Vec<Write>,
     },
     WriteUnwrittenAck {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         result: Result<(), CrucibleError>,
     },
 
     ErrorReport {
         upstairs_id: Uuid,
         session_id: Uuid,
-        job_id: u64,
+        job_id: JobId,
         error: CrucibleError,
     },
 
@@ -609,8 +638,8 @@ impl CrucibleEncoder {
         let lower_size_write_message = Message::Write {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            job_id: 1,
-            dependencies: vec![1],
+            job_id: JobId(1),
+            dependencies: vec![JobId(1)],
             writes: (0..(MAX_FRM_LEN / size_of_write_message))
                 .map(|_| CrucibleEncoder::a_write(bs))
                 .collect(),
@@ -626,8 +655,8 @@ impl CrucibleEncoder {
         let upper_size_write_message = Message::Write {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            job_id: 1,
-            dependencies: vec![1],
+            job_id: JobId(1),
+            dependencies: vec![JobId(1)],
             writes: (0..(MAX_FRM_LEN / bs))
                 .map(|_| CrucibleEncoder::a_write(bs))
                 .collect(),
@@ -677,8 +706,8 @@ impl CrucibleEncoder {
             let mid_size_write_message = Message::Write {
                 upstairs_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
-                job_id: 1,
-                dependencies: vec![1],
+                job_id: JobId(1),
+                dependencies: vec![JobId(1)],
                 writes: (0..mid)
                     .map(|_| CrucibleEncoder::a_write(bs))
                     .collect(),
