@@ -349,22 +349,49 @@ impl DataFile {
                 return Ok(());
             }
 
-            Some(request) => {
-                info!(
-                    self.log,
-                    "removing snapshot {}-{}", request.id.0, request.name
-                );
+            Some(existing) => {
+                match existing.state {
+                    State::Tombstoned | State::Destroyed => {
+                        /*
+                         * Either:
+                         * - Destroy already scheduled.
+                         * - Already destroyed; no more work to do.
+                         */
+                    }
 
-                request.state = State::Tombstoned;
+                    State::Requested | State::Created => {
+                        info!(
+                            self.log,
+                            "removing running snapshot {}-{}",
+                            request.id.0,
+                            request.name
+                        );
+
+                        existing.state = State::Tombstoned;
+
+                        /*
+                         * Wake the worker thread to remove the snapshot we've created.
+                         */
+                        self.bell.notify_all();
+
+                        self.store(inner);
+                    }
+
+                    State::Failed => {
+                        /*
+                         * For now, this terminal state will preserve evidence for
+                         * investigation.
+                         */
+                        bail!(
+                            "region {} running snapshot {} failed to provision \
+                            and cannot be destroyed",
+                            request.id.0,
+                            request.name,
+                        );
+                    }
+                }
             }
         }
-
-        /*
-         * Wake the worker thread to remove the snapshot we've created.
-         */
-        self.bell.notify_all();
-
-        self.store(inner);
 
         Ok(())
     }
@@ -464,8 +491,9 @@ impl DataFile {
 
         info!(
             self.log,
-            "running snapshot {} state: {:?} -> {:?}",
+            "region {} running snapshot {} state: {:?} -> {:?}",
             rs.id.0,
+            rs.name,
             rs.state,
             nstate,
         );
@@ -545,19 +573,26 @@ impl DataFile {
                  */
                 error!(
                     self.log,
-                    "running snapshot {} is currently in unexpected state: {:?}",
+                    "region {} running snapshot {} is currently in unexpected state: {:?}",
                     rs.id.0,
+                    rs.name,
                     rs.state,
                 );
 
-                bail!("created running_snapshot in weird state {:?}", x);
+                bail!(
+                    "created region {} running_snapshot {} in weird state {:?}",
+                    rs.id.0,
+                    rs.name,
+                    x
+                );
             }
         }
 
         info!(
             self.log,
-            "running snapshot {} state: {:?} -> {:?}",
+            "region {} running snapshot {} state: {:?} -> {:?}",
             rs.id.0,
+            rs.name,
             rs.state,
             nstate,
         );
@@ -615,8 +650,9 @@ impl DataFile {
 
         info!(
             self.log,
-            "running snapshot {} state: {:?} -> {:?}",
+            "region {} running snapshot {} state: {:?} -> {:?}",
             rs.id.0,
+            rs.name,
             rs.state,
             nstate,
         );
@@ -627,11 +663,9 @@ impl DataFile {
     }
 
     /**
-     * Nexus has requested that we destroy this particular region. Returns
-     * true if the region is already destroyed, false if not destroyed
-     * yet.
+     * Nexus has requested that we destroy this particular region.
      */
-    pub fn destroy(&self, id: &RegionId) -> Result<bool> {
+    pub fn destroy(&self, id: &RegionId) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
 
         let r = inner
@@ -639,12 +673,13 @@ impl DataFile {
             .get_mut(id)
             .ok_or_else(|| anyhow!("region {} does not exist", id.0))?;
 
-        Ok(match r.state {
-            State::Tombstoned => {
+        match r.state {
+            State::Tombstoned | State::Destroyed => {
                 /*
-                 * Destroy already scheduled.
+                 * Either:
+                 * - Destroy already scheduled.
+                 * - Already destroyed; no more work to do.
                  */
-                false
             }
             State::Requested | State::Created => {
                 /*
@@ -660,13 +695,6 @@ impl DataFile {
                 r.state = State::Tombstoned;
                 self.bell.notify_all();
                 self.store(inner);
-                false
-            }
-            State::Destroyed => {
-                /*
-                 * Already destroyed; no more work to do.
-                 */
-                true
             }
             State::Failed => {
                 /*
@@ -679,7 +707,9 @@ impl DataFile {
                     r.id.0
                 );
             }
-        })
+        }
+
+        Ok(())
     }
 
     /**
