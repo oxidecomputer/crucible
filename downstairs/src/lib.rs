@@ -813,7 +813,7 @@ where
                         flush_number,
                         // TODO(matt) this is a repair ID, not a job ID, but is
                         // only used for logging, so ¯\_(ツ)_/¯
-                        JobId(repair_id),
+                        JobId(repair_id.0),
                     )
                     .await
                 {

@@ -42,6 +42,32 @@ impl std::fmt::Display for JobId {
     }
 }
 
+/// Wrapper type for a repair ID, used during initial volume repair
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct RepairId(pub u64);
+
+impl std::fmt::Display for RepairId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.fmt(f)
+    }
+}
+
 /// Wrapper type for a client ID
 ///
 /// This is guaranteed by construction to be in the range `0..3`
@@ -344,19 +370,19 @@ pub enum Message {
      */
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
-        repair_id: u64,
+        repair_id: RepairId,
         extent_id: usize,
     },
 
     /// Send a request to reopen the given extent.
     ExtentReopen {
-        repair_id: u64,
+        repair_id: RepairId,
         extent_id: usize,
     },
 
     /// Flush just this extent on just this downstairs client.
     ExtentFlush {
-        repair_id: u64,
+        repair_id: RepairId,
         extent_id: usize,
         client_id: ClientId,
         flush_number: u64,
@@ -365,7 +391,7 @@ pub enum Message {
 
     /// Replace an extent with data from the given downstairs.
     ExtentRepair {
-        repair_id: u64,
+        repair_id: RepairId,
         extent_id: usize,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
@@ -374,12 +400,12 @@ pub enum Message {
 
     /// The given repair job ID has finished without error
     RepairAckId {
-        repair_id: u64,
+        repair_id: RepairId,
     },
 
     /// A problem with the given extent
     ExtentError {
-        repair_id: u64,
+        repair_id: RepairId,
         extent_id: usize,
         error: CrucibleError,
     },
