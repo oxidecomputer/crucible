@@ -3,7 +3,7 @@
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
-use slog::{error, info, o, warn, Logger};
+use slog::{debug, error, info, o, Logger};
 use std::collections::HashSet;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -433,8 +433,21 @@ where
         // snapshot-6dec576f-0655-4f90-afd6-93ce0f5aacb9-1644509677
         if n.starts_with(&format!("{}-", downstairs_prefix)) {
             if !expected_downstairs_instances.contains(&n) {
-                error!(log, "remove downstairs instance: {}", n);
-                info!(log, "instance states: {:?}", inst.states()?);
+                let states = inst.states()?;
+                match states {
+                    (Some(crucible_smf::State::Disabled), _) => {
+                        // already disabled, no message required
+                    }
+
+                    _ => {
+                        info!(
+                            log,
+                            "disabling downstairs instance: {} (instance states: {:?})",
+                            n,
+                            states,
+                        );
+                    }
+                }
 
                 /*
                  * XXX just disable for now.
@@ -443,11 +456,24 @@ where
                 continue;
             }
 
-            info!(log, "found expected downstairs instance: {}", n);
+            debug!(log, "found expected downstairs instance: {}", n);
         } else if n.starts_with(&format!("{}-", snapshot_prefix)) {
             if !expected_snapshot_instances.contains(&n) {
-                error!(log, "remove snapshot instance: {}", n);
-                info!(log, "instance states: {:?}", inst.states()?);
+                let states = inst.states()?;
+                match states {
+                    (Some(crucible_smf::State::Disabled), _) => {
+                        // already disabled, no message required
+                    }
+
+                    _ => {
+                        info!(
+                            log,
+                            "disabling snapshot instance: {} (instance states: {:?})",
+                            n,
+                            states,
+                        );
+                    }
+                }
 
                 /*
                  * XXX just disable for now.
@@ -456,9 +482,9 @@ where
                 continue;
             }
 
-            info!(log, "found expected snapshot instance: {}", n);
+            debug!(log, "found expected snapshot instance: {}", n);
         } else {
-            warn!(log, "ignoring instance: {:?}", n);
+            debug!(log, "ignoring instance: {:?}", n);
         }
     }
 
@@ -602,7 +628,7 @@ where
                 }
             }
         } else {
-            info!(log, "do not need to reconfigure {}", inst.fmri()?);
+            debug!(log, "do not need to reconfigure {}", inst.fmri()?);
         }
 
         /*
@@ -769,7 +795,7 @@ where
                     }
                 }
             } else {
-                info!(log, "do not need to reconfigure {}", inst.fmri()?);
+                debug!(log, "do not need to reconfigure {}", inst.fmri()?);
             }
 
             /*
@@ -1264,7 +1290,6 @@ mod test {
 
         // The running snapshot should exist
         {
-            eprintln!("{:?}", harness.smf_interface);
             let instance = harness
                 .smf_interface
                 .get_instance(&format!(
@@ -1289,6 +1314,201 @@ mod test {
         // from the datafile, then creates running snapshots for objects in
         // state Created too.
         harness.df.created_rs(&region_id, &snapshot_name)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_smf_datafile_race_running_snapshots() -> Result<()> {
+        // Test a race between the state changes that occur from what the user
+        // is requesting, and the state changes that occur from worker.
+
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+        let snapshot_name = Uuid::new_v4().to_string();
+
+        // Submit a create region request (http)
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // Pretend to actually create the region (worker)
+        harness.df.created(&region_id)?;
+
+        // Now call apply_smf (worker)
+        harness.apply_smf()?;
+
+        // The downstairs SMF instance was created
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!("downstairs-{}", region_id.0))?
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.region_path_string(&region_id)
+            );
+        }
+
+        // Pretend to create a snapshot (pantry, or from propolis)
+        harness.create_snapshot(region_id.0.to_string(), snapshot_name.clone());
+
+        // Submit a create running snapshot request
+        harness.df.create_running_snapshot_request(
+            CreateRunningSnapshotRequest {
+                id: region_id.clone(),
+                name: snapshot_name.clone(),
+
+                cert_pem: None,
+                key_pem: None,
+                root_pem: None,
+            },
+        )?;
+
+        // From Nexus's perspective, the saga to create a snapshot might have
+        // already completed before apply_smf runs.
+
+        // Call apply_smf (worker)
+        harness.apply_smf()?;
+
+        // The running snapshot should exist
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!(
+                    "snapshot-{}-{}",
+                    region_id.0, snapshot_name
+                ))?
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config")?.unwrap();
+
+            let directory = pg.get_property("directory")?.unwrap();
+            assert_eq!(
+                directory.value()?.unwrap().as_string()?,
+                harness.snapshot_path_string(&region_id, snapshot_name.clone())
+            );
+        }
+
+        // After apply_smf, the running snapshot will be in state Requested
+        {
+            let running_snapshots = harness.df.running_snapshots();
+            let region_running_snapshots =
+                running_snapshots.get(&region_id).unwrap();
+            let running_snapshot =
+                region_running_snapshots.get(&snapshot_name).unwrap();
+            assert_eq!(running_snapshot.state, State::Requested);
+        }
+
+        // Say a snapshot_delete saga runs now. Before the worker can call
+        // `df.created_rs`, there's a destroy_rs call that comes in and sets it
+        // to tombstoned.
+        harness.df.delete_running_snapshot_request(
+            DeleteRunningSnapshotRequest {
+                id: region_id.clone(),
+                name: snapshot_name.clone(),
+            },
+        )?;
+
+        // Now it's in state Tombstoned
+        {
+            let running_snapshots = harness.df.running_snapshots();
+            let region_running_snapshots =
+                running_snapshots.get(&region_id).unwrap();
+            let running_snapshot =
+                region_running_snapshots.get(&snapshot_name).unwrap();
+            assert_eq!(running_snapshot.state, State::Tombstoned);
+        }
+
+        // worker finishes up with calling `created_rs`
+        harness.df.created_rs(&region_id, &snapshot_name)?;
+
+        // There's a check in `created_rs` that sees if the RunningSnapshot is
+        // in state Tombstoned, and bails out. The state should still be
+        // Tombstoned.
+        {
+            let running_snapshots = harness.df.running_snapshots();
+            let region_running_snapshots =
+                running_snapshots.get(&region_id).unwrap();
+            let running_snapshot =
+                region_running_snapshots.get(&snapshot_name).unwrap();
+            assert_eq!(running_snapshot.state, State::Tombstoned);
+        }
+
+        // `delete_running_snapshot_request` will notify the worker to run, so
+        // run apply_smf.
+        harness.apply_smf()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_smf_datafile_race_region() -> Result<()> {
+        // Test a race between the state changes that occur from what the user
+        // is requesting, and the state changes that occur from worker.
+
+        let harness = TestSmfHarness::new()?;
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+
+        // Submit a create region request (http)
+        harness.df.create_region_request(CreateRegion {
+            id: region_id.clone(),
+
+            block_size: 512,
+            extent_size: 10,
+            extent_count: 10,
+            encrypted: true,
+
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        })?;
+
+        // The Region is Requested before `worker` ensures that the child
+        // dataset exists.
+        {
+            let region = harness.df.get(&region_id).unwrap();
+            assert_eq!(region.state, State::Requested);
+        }
+
+        // If Nexus then requests to destroy the region,
+        harness.df.destroy(&region_id)?;
+
+        // the State will be Tombstoned
+        {
+            let region = harness.df.get(&region_id).unwrap();
+            assert_eq!(region.state, State::Tombstoned);
+        }
+
+        // Worker will create the child dataset, then call `df.created`:
+        harness.df.created(&region_id)?;
+
+        // It should still be Tombstoned
+        {
+            let region = harness.df.get(&region_id).unwrap();
+            assert_eq!(region.state, State::Tombstoned);
+        }
+
+        // `apply_smf` will be called twice
+        harness.apply_smf()?;
+        harness.apply_smf()?;
 
         Ok(())
     }
@@ -1352,6 +1572,7 @@ fn worker(
                             reservation,
                             quota,
                         );
+
                         // if regions need to be created, do that before apply_smf.
                         let region_dataset = regions_dataset
                             .ensure_child_dataset(
@@ -1362,6 +1583,15 @@ fn worker(
                             )
                             .unwrap();
 
+                        // It's important that a region transition to "Created"
+                        // only after it has been created as a dataset:
+                        // after the crucible agent restarts, `apply_smf` will
+                        // only start downstairs services for those in
+                        // "Created". If the `df.created` is moved to after this
+                        // function's `apply_smf` call, and there is a crash
+                        // before that moved `df.created` is set, then the agent
+                        // will not start a downstairs service for this region
+                        // when rebooted.
                         let res = worker_region_create(
                             &log,
                             &downstairs_program,
@@ -1386,6 +1616,7 @@ fn worker(
                             &downstairs_prefix,
                             &snapshot_prefix,
                         );
+
                         if let Err(e) = result {
                             error!(log, "SMF application failure: {:?}", e);
                         } else {
@@ -1452,8 +1683,9 @@ fn worker(
                  */
                 info!(
                     log,
-                    "applying SMF actions for running snapshot {} (state {:?})...",
+                    "applying SMF actions for region {} running snapshot {} (state {:?})...",
                     rs.id.0,
+                    rs.name,
                     rs.state,
                 );
 
