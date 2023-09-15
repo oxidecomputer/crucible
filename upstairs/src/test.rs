@@ -894,9 +894,9 @@ pub(crate) mod up_test {
 
         assert_eq!(ds.completed.len(), 1);
         // No skipped jobs here.
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
     }
 
     #[tokio::test]
@@ -1418,7 +1418,7 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
-        let mut ds = Downstairs::new(csl(), Vec::new());
+        let mut ds = Downstairs::new(csl(), ClientData::new(None));
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let id = ds.next_id();
@@ -1795,7 +1795,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -1889,7 +1889,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -1972,7 +1972,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -2062,7 +2062,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -2146,7 +2146,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -2218,7 +2218,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -2642,7 +2642,7 @@ pub(crate) mod up_test {
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         // Send and complete the Flush at each downstairs.
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             ds.in_progress(next_id, cid);
             ds.process_ds_completion(
                 next_id,
@@ -2818,9 +2818,9 @@ pub(crate) mod up_test {
 
         // Make sure downstairs 0 and 1 update their last flush id and
         // that downstairs 2 does not.
-        assert_eq!(ds.ds_last_flush[0], flush_id);
-        assert_eq!(ds.ds_last_flush[1], flush_id);
-        assert_eq!(ds.ds_last_flush[2], JobId(0));
+        assert_eq!(ds.ds_last_flush[ClientId(0)], flush_id);
+        assert_eq!(ds.ds_last_flush[ClientId(1)], flush_id);
+        assert_eq!(ds.ds_last_flush[ClientId(2)], JobId(0));
 
         // Should not retire yet.
         ds.retire_check(flush_id);
@@ -2873,7 +2873,7 @@ pub(crate) mod up_test {
         // All three jobs should now move to completed
         assert_eq!(ds.completed.len(), 3);
         // Downstairs 2 should update the last flush it just did.
-        assert_eq!(ds.ds_last_flush[2], flush_id);
+        assert_eq!(ds.ds_last_flush[ClientId(2)], flush_id);
     }
 
     #[tokio::test]
@@ -3168,9 +3168,9 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 0);
 
         // Verify who has updated their last flush.
-        assert_eq!(ds.ds_last_flush[0], flush_id);
-        assert_eq!(ds.ds_last_flush[1], JobId(0));
-        assert_eq!(ds.ds_last_flush[2], flush_id);
+        assert_eq!(ds.ds_last_flush[ClientId(0)], flush_id);
+        assert_eq!(ds.ds_last_flush[ClientId(1)], JobId(0));
+        assert_eq!(ds.ds_last_flush[ClientId(2)], flush_id);
 
         // Now, finish sending and completing the writes
         assert!(ds.in_progress(id1, ClientId(2)).is_some());
@@ -3216,7 +3216,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 3);
 
         // downstairs 1 should now have that flush
-        assert_eq!(ds.ds_last_flush[1], flush_id);
+        assert_eq!(ds.ds_last_flush[ClientId(1)], flush_id);
     }
 
     #[tokio::test]
@@ -3943,9 +3943,9 @@ pub(crate) mod up_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[0] = DsState::Active;
-        ds.ds_state[1] = DsState::Active;
-        ds.ds_state[2] = DsState::Active;
+        ds.ds_state[ClientId(0)] = DsState::Active;
+        ds.ds_state[ClientId(1)] = DsState::Active;
+        ds.ds_state[ClientId(2)] = DsState::Active;
 
         // Build a write, put it on the work queue.
         let id1 = ds.next_id();
@@ -4050,9 +4050,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure the correct DS have changed state.
-        assert_eq!(ds.ds_state[0], DsState::Deactivated);
-        assert_eq!(ds.ds_state[2], DsState::Deactivated);
-        assert_eq!(ds.ds_state[1], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::Deactivated);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::Deactivated);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::Active);
 
         // Send and complete the flush
         ds.in_progress(flush_id, ClientId(1));
@@ -4083,9 +4083,9 @@ pub(crate) mod up_test {
 
         // Verify after the ds_missing, all downstairs are New
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[0], DsState::New);
-        assert_eq!(ds.ds_state[1], DsState::New);
-        assert_eq!(ds.ds_state[2], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::New);
     }
 
     #[tokio::test]
@@ -4099,9 +4099,9 @@ pub(crate) mod up_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[0] = DsState::Active;
-        ds.ds_state[1] = DsState::Active;
-        ds.ds_state[2] = DsState::Active;
+        ds.ds_state[ClientId(0)] = DsState::Active;
+        ds.ds_state[ClientId(1)] = DsState::Active;
+        ds.ds_state[ClientId(2)] = DsState::Active;
 
         drop(ds);
         up.set_deactivate(None, ds_done_tx.clone()).await.unwrap();
@@ -4113,9 +4113,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure the correct DS have changed state.
-        assert_eq!(ds.ds_state[0], DsState::Deactivated);
-        assert_eq!(ds.ds_state[1], DsState::Deactivated);
-        assert_eq!(ds.ds_state[2], DsState::Deactivated);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::Deactivated);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::Deactivated);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::Deactivated);
         drop(ds);
 
         // Mark all three DS as missing, which moves their state to New
@@ -4146,9 +4146,9 @@ pub(crate) mod up_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[0] = DsState::Active;
-        ds.ds_state[1] = DsState::Active;
-        ds.ds_state[2] = DsState::Active;
+        ds.ds_state[ClientId(0)] = DsState::Active;
+        ds.ds_state[ClientId(1)] = DsState::Active;
+        ds.ds_state[ClientId(2)] = DsState::Active;
 
         // Build a write, put it on the work queue.
         let id1 = ds.next_id();
@@ -4217,9 +4217,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure no DS have changed state.
-        assert_eq!(ds.ds_state[0], DsState::Active);
-        assert_eq!(ds.ds_state[2], DsState::Active);
-        assert_eq!(ds.ds_state[1], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::Active);
     }
 
     #[tokio::test]
@@ -4245,9 +4245,9 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[0] = DsState::Active;
-        ds.ds_state[1] = DsState::Active;
-        ds.ds_state[2] = DsState::Active;
+        ds.ds_state[ClientId(0)] = DsState::Active;
+        ds.ds_state[ClientId(1)] = DsState::Active;
+        ds.ds_state[ClientId(2)] = DsState::Active;
 
         drop(ds);
 
@@ -4258,9 +4258,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure no DS have changed state.
-        assert_eq!(ds.ds_state[0], DsState::Active);
-        assert_eq!(ds.ds_state[1], DsState::Active);
-        assert_eq!(ds.ds_state[2], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::Active);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::Active);
     }
 
     #[tokio::test]
@@ -4276,9 +4276,9 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         // Make sure no DS have changed state.
-        assert_eq!(ds.ds_state[0], DsState::New);
-        assert_eq!(ds.ds_state[1], DsState::New);
-        assert_eq!(ds.ds_state[2], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::New);
     }
 
     #[tokio::test]
@@ -4427,9 +4427,9 @@ pub(crate) mod up_test {
         // No repairs on the queue, should return None
         let up = Upstairs::test_default(None);
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[0] = DsState::Repair;
-        ds.ds_state[1] = DsState::Repair;
-        ds.ds_state[2] = DsState::Repair;
+        ds.ds_state[ClientId(0)] = DsState::Repair;
+        ds.ds_state[ClientId(1)] = DsState::Repair;
+        ds.ds_state[ClientId(2)] = DsState::Repair;
         let w = ds.rep_in_progress(ClientId(0));
         assert_eq!(w, None);
     }
@@ -4452,17 +4452,17 @@ pub(crate) mod up_test {
                 },
             ));
             // A downstairs is not in Repair state
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::WaitQuorum;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::WaitQuorum;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
         }
         // Move that job to next to do.
         let nw = up.new_rec_work().await;
         assert!(nw.is_err());
         let mut ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[0], DsState::FailedRepair);
-        assert_eq!(ds.ds_state[1], DsState::WaitQuorum);
-        assert_eq!(ds.ds_state[2], DsState::FailedRepair);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::FailedRepair);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::WaitQuorum);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::FailedRepair);
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
@@ -4480,9 +4480,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4502,7 +4502,7 @@ pub(crate) mod up_test {
         assert!(ds.rep_in_progress(ClientId(2)).is_some());
 
         // Now verify we can be done even if a DS is gone
-        ds.ds_state[1] = DsState::New;
+        ds.ds_state[ClientId(1)] = DsState::New;
         // Now, make sure we consider this done only after all three are done
         assert!(!ds.rep_done(ClientId(0), rep_id));
         assert!(!ds.rep_done(ClientId(1), rep_id));
@@ -4514,9 +4514,9 @@ pub(crate) mod up_test {
         let nw = up.new_rec_work().await;
         assert!(nw.is_err());
         let mut ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[0], DsState::FailedRepair);
-        assert_eq!(ds.ds_state[1], DsState::New);
-        assert_eq!(ds.ds_state[2], DsState::FailedRepair);
+        assert_eq!(ds.ds_state[ClientId(0)], DsState::FailedRepair);
+        assert_eq!(ds.ds_state[ClientId(1)], DsState::New);
+        assert_eq!(ds.ds_state[ClientId(2)], DsState::FailedRepair);
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
@@ -4533,9 +4533,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4552,12 +4552,12 @@ pub(crate) mod up_test {
         // Mark all three as in progress
         assert!(ds.rep_in_progress(ClientId(0)).is_some());
         assert!(ds.rep_in_progress(ClientId(1)).is_some());
-        ds.ds_state[2] = DsState::New;
+        ds.ds_state[ClientId(2)] = DsState::New;
         assert!(ds.rep_in_progress(ClientId(2)).is_none());
 
         // Okay, now the DS is back and ready for repair, verify it will
         // start taking work.
-        ds.ds_state[2] = DsState::Repair;
+        ds.ds_state[ClientId(2)] = DsState::Repair;
         assert!(ds.rep_in_progress(ClientId(2)).is_some());
     }
 
@@ -4569,9 +4569,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4596,9 +4596,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4620,9 +4620,9 @@ pub(crate) mod up_test {
         let mut rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4682,9 +4682,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4728,9 +4728,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4769,9 +4769,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4805,9 +4805,9 @@ pub(crate) mod up_test {
         let rep_id = 0;
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[0] = DsState::Repair;
-            ds.ds_state[1] = DsState::Repair;
-            ds.ds_state[2] = DsState::Repair;
+            ds.ds_state[ClientId(0)] = DsState::Repair;
+            ds.ds_state[ClientId(1)] = DsState::Repair;
+            ds.ds_state[ClientId(2)] = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -5181,7 +5181,7 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let mut ds = Downstairs::new(csl(), Vec::new());
+        let mut ds = Downstairs::new(csl(), ClientData::new(None));
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         let next_id = ds.next_id();
 
@@ -5633,7 +5633,7 @@ pub(crate) mod up_test {
         // process_ds_operation.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -5711,7 +5711,7 @@ pub(crate) mod up_test {
         // clear the jobs (some now failed/skipped) from the work queue.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -5803,9 +5803,9 @@ pub(crate) mod up_test {
             assert!(ds.in_progress(next_id, ClientId(2)).is_some());
 
             // We should have one job on the skipped job list for failed DS
-            assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-            assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-            assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+            assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+            assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+            assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
 
             next_id
         };
@@ -5884,10 +5884,10 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 3);
 
         // The last skipped flush should still be on the skipped list
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert!(ds.ds_skipped_jobs[0].contains(&JobId(1002)));
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert!(ds.ds_skipped_jobs[ClientId(0)].contains(&JobId(1002)));
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
     }
 
     #[tokio::test]
@@ -5895,7 +5895,7 @@ pub(crate) mod up_test {
         // Verify that if two writes fail, a read can still be acked.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -5991,9 +5991,9 @@ pub(crate) mod up_test {
             assert!(ds.in_progress(next_id, ClientId(2)).is_some());
 
             // Two downstairs should have a skipped job on their lists.
-            assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-            assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-            assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+            assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+            assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+            assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
 
             next_id
         };
@@ -6226,7 +6226,7 @@ pub(crate) mod up_test {
         // Then, send a flush and verify the work queue is cleared.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6275,9 +6275,9 @@ pub(crate) mod up_test {
 
         // A faulted write won't change skipped job count.
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
 
         // Verify we can ack this work
@@ -6317,10 +6317,10 @@ pub(crate) mod up_test {
 
         // One downstairs should have a skipped job on its list.
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert!(ds.ds_skipped_jobs[1].contains(&JobId(1001)));
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert!(ds.ds_skipped_jobs[ClientId(1)].contains(&JobId(1001)));
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
 
         // Enqueue the flush.
@@ -6380,10 +6380,10 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 3);
 
         // Only the skipped flush should remain.
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert!(ds.ds_skipped_jobs[1].contains(&JobId(1002)));
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert!(ds.ds_skipped_jobs[ClientId(1)].contains(&JobId(1002)));
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
     }
 
     #[tokio::test]
@@ -6395,7 +6395,7 @@ pub(crate) mod up_test {
         // to it.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6460,9 +6460,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
 
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
 
         drop(ds);
     }
@@ -6474,7 +6474,7 @@ pub(crate) mod up_test {
         // to IOState::Skipped.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6528,9 +6528,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::InProgress);
 
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
     }
 
@@ -6541,7 +6541,7 @@ pub(crate) mod up_test {
         // skipped.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6561,7 +6561,7 @@ pub(crate) mod up_test {
         // Make the read ok response
         let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.process_ds_operation(write_one, cid, Ok(vec![]), None)
                 .await
                 .unwrap();
@@ -6575,15 +6575,15 @@ pub(crate) mod up_test {
 
         // Verify all IOs are done
         let ds = up.downstairs.lock().await;
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
             let job = ds.ds_active.get(&write_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
         }
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
 
         // New write, this one will have a failure
@@ -6613,7 +6613,7 @@ pub(crate) mod up_test {
 
         // Verify all IOs are done
         let ds = up.downstairs.lock().await;
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
             let job = ds.ds_active.get(&write_one).unwrap();
@@ -6628,9 +6628,9 @@ pub(crate) mod up_test {
         );
 
         // A failed job does not change the skipped count.
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
     }
 
@@ -6642,7 +6642,7 @@ pub(crate) mod up_test {
         // transitioned to skipped.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6664,7 +6664,7 @@ pub(crate) mod up_test {
         // Make the read ok response
         let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.process_ds_operation(write_one, cid, Ok(vec![]), None)
                 .await
                 .unwrap();
@@ -6678,7 +6678,7 @@ pub(crate) mod up_test {
 
         // Verify all IOs are done
         let ds = up.downstairs.lock().await;
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
             let job = ds.ds_active.get(&write_one).unwrap();
@@ -6717,7 +6717,7 @@ pub(crate) mod up_test {
 
         // Verify all IOs are done
         let ds = up.downstairs.lock().await;
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             // First read, still Done
             let job = ds.ds_active.get(&read_one).unwrap();
             assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
@@ -6741,9 +6741,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
 
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 1);
         drop(ds);
     }
 
@@ -6753,7 +6753,7 @@ pub(crate) mod up_test {
         // automatically moved to skipped.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6792,9 +6792,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
 
         // Three skipped jobs for downstairs zero
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 3);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 3);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
     }
 
@@ -6804,7 +6804,7 @@ pub(crate) mod up_test {
         // downstairs has failed. One write, one read, and one flush.
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6844,9 +6844,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::InProgress);
 
         // Three skipped jobs on downstairs client 0
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 3);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 3);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 0);
         drop(ds);
 
         // Do the write
@@ -6897,8 +6897,8 @@ pub(crate) mod up_test {
         ds.retire_check(flush_one);
 
         // Skipped jobs just has the flush
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert!(ds.ds_skipped_jobs[0].contains(&JobId(1002)));
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert!(ds.ds_skipped_jobs[ClientId(0)].contains(&JobId(1002)));
         assert_eq!(ds.ackable_work().len(), 0);
 
         // The writes, the read, and the flush should be completed.
@@ -6916,7 +6916,7 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
@@ -6957,9 +6957,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
 
         // Skipped jobs added on downstairs client 0
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 3);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 3);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 3);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 3);
         drop(ds);
 
         // Do the write
@@ -6998,10 +6998,10 @@ pub(crate) mod up_test {
         ds.retire_check(flush_one);
 
         // Skipped jobs now just have the flush.
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert!(ds.ds_skipped_jobs[0].contains(&JobId(1002)));
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
-        assert!(ds.ds_skipped_jobs[2].contains(&JobId(1002)));
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert!(ds.ds_skipped_jobs[ClientId(0)].contains(&JobId(1002)));
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 1);
+        assert!(ds.ds_skipped_jobs[ClientId(2)].contains(&JobId(1002)));
         assert_eq!(ds.ackable_work().len(), 0);
 
         // The writes, the read, and the flush should be completed.
@@ -7019,13 +7019,13 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::Faulted).await;
         }
 
@@ -7044,9 +7044,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
 
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 1);
         drop(ds);
 
         // Verify jobs can be acked.
@@ -7061,9 +7061,9 @@ pub(crate) mod up_test {
         ds.retire_check(read_one);
 
         // Our skipped jobs have not yet been cleared.
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 1);
         assert_eq!(ds.ackable_work().len(), 0);
     }
 
@@ -7074,13 +7074,13 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::Faulted).await;
         }
 
@@ -7093,9 +7093,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
 
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 1);
         drop(ds);
 
         // Verify jobs can be acked.
@@ -7109,9 +7109,9 @@ pub(crate) mod up_test {
 
         ds.retire_check(write_one);
         // No flush, no change in skipped jobs.
-        assert_eq!(ds.ds_skipped_jobs[0].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[1].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[2].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
+        assert_eq!(ds.ds_skipped_jobs[ClientId(2)].len(), 1);
 
         assert_eq!(ds.ackable_work().len(), 0);
     }
@@ -7123,13 +7123,13 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::Faulted).await;
         }
 
@@ -7141,7 +7141,7 @@ pub(crate) mod up_test {
         assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
         assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
         }
@@ -7165,7 +7165,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.ds_active.len(), 0);
 
         // Skipped jobs still has the flush.
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
         }
@@ -7180,13 +7180,13 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::Faulted).await;
         }
 
@@ -7208,7 +7208,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.ackable_work().len(), 3);
 
         // Skipped jobs are not yet cleared.
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1001)));
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
@@ -7235,7 +7235,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.ds_active.len(), 0);
 
         // Skipped jobs now just has the flush
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
         }
@@ -7251,13 +7251,13 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::WaitActive).await;
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
         up.set_active().await.unwrap();
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             up.ds_transition(cid, DsState::Faulted).await;
         }
 
@@ -7286,7 +7286,7 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         // Six jobs have been skipped.
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1001)));
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
@@ -7307,7 +7307,7 @@ pub(crate) mod up_test {
 
         // The first two skipped jobs are now cleared and the non-acked
         // jobs remain on the list, as well as the last flush.
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1003)));
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1004)));
@@ -8867,7 +8867,7 @@ pub(crate) mod up_test {
 
             let ds_id = jobs[0].ds_id;
 
-            for client_id in (0..3).map(ClientId) {
+            for client_id in ClientId::iter() {
                 ds.in_progress(ds_id, client_id);
                 ds.process_ds_completion(
                     ds_id,

@@ -59,12 +59,6 @@ impl std::fmt::Display for JobId {
 #[serde(transparent)]
 pub struct ClientId(pub u8);
 
-impl From<ClientId> for usize {
-    fn from(c: ClientId) -> usize {
-        usize::from(c.0)
-    }
-}
-
 impl ClientId {
     pub fn iter() -> impl Iterator<Item = Self> {
         (0..3).map(Self)

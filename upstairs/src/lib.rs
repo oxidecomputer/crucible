@@ -364,6 +364,44 @@ pub fn deadline_secs(secs: f32) -> Instant {
         .unwrap()
 }
 
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ClientData<T>([T; 3]);
+
+impl<T> std::ops::Index<ClientId> for ClientData<T> {
+    type Output = T;
+    fn index(&self, index: ClientId) -> &Self::Output {
+        &self.0[index.0 as usize]
+    }
+}
+
+impl<T> std::ops::IndexMut<ClientId> for ClientData<T> {
+    fn index_mut(&mut self, index: ClientId) -> &mut Self::Output {
+        &mut self.0[index.0 as usize]
+    }
+}
+
+impl<T: Clone> ClientData<T> {
+    pub fn new(t: T) -> Self {
+        Self([t.clone(), t.clone(), t])
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.0.iter()
+    }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.0.iter_mut()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a ClientData<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 /*
  * We are taking a message from the downstairs and translating it into
  * something we can process.  There is some stuff going on here and we
@@ -675,7 +713,7 @@ where
             // our remaining work to assure it isn't dropped
             let mut ds = u.downstairs.lock().await;
             ds.requeue_work(client_id, &new_work[ndx..]);
-            ds.flow_control[usize::from(client_id)] += 1;
+            ds.flow_control[client_id] += 1;
             drop(ds);
             return Ok(true);
         }
@@ -755,7 +793,7 @@ where
                 // If our downstairs is under repair, then include any extent
                 // limit sent in the IOop.
                 let my_extent_limit = if u.downstairs.lock().await.ds_state
-                    [usize::from(client_id)]
+                    [client_id]
                     == DsState::LiveRepair
                 {
                     extent_limit
@@ -962,7 +1000,7 @@ where
     // re_new.
     {
         let mut ds = up.downstairs.lock().await;
-        let my_state = ds.ds_state[usize::from(up_coms.client_id)];
+        let my_state = ds.ds_state[up_coms.client_id];
 
         info!(
             up.log,
@@ -993,9 +1031,7 @@ where
                  * any work that we were holding that we did not flush.
                  */
                 ds.re_new(up_coms.client_id);
-                assert!(
-                    ds.extent_limit[usize::from(up_coms.client_id)].is_none()
-                );
+                assert!(ds.extent_limit[up_coms.client_id].is_none());
             }
             _ => {
                 panic!(
@@ -1475,7 +1511,7 @@ where
                         // Match on the current state of this downstairs
                         let my_state = {
                             let state = &up.downstairs.lock().await.ds_state;
-                            state[usize::from(up_coms.client_id)]
+                            state[up_coms.client_id]
                         };
                         match my_state {
                             DsState::Offline => {
@@ -1542,7 +1578,7 @@ where
                         let mut ds = up.downstairs.lock().await;
                         drop(active);
 
-                        let my_state = ds.ds_state[usize::from(up_coms.client_id)];
+                        let my_state = ds.ds_state[up_coms.client_id];
                         if my_state == DsState::Replacing {
                             bail!(
                                 "[{}] exits negotiation, replacing",
@@ -1560,7 +1596,7 @@ where
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            ds.ds_last_flush[usize::from(up_coms.client_id)],
+                            ds.ds_last_flush[up_coms.client_id],
                             last_flush_number
                         );
                         up.ds_transition_with_lock(
@@ -1586,7 +1622,7 @@ where
                         let mut ds = up.downstairs.lock().await;
                         drop(active);
 
-                        let my_state = ds.ds_state[usize::from(up_coms.client_id)];
+                        let my_state = ds.ds_state[up_coms.client_id];
                         match my_state {
                             DsState::WaitActive => {
                                 up.ds_transition_with_lock(
@@ -1786,7 +1822,7 @@ where
     };
     {
         let mut ds = up.downstairs.lock().await;
-        let state = ds.ds_state[usize::from(up_coms.client_id)];
+        let state = ds.ds_state[up_coms.client_id];
         match state {
             DsState::Replay => {
                 info!(
@@ -1892,8 +1928,7 @@ where
                  * tear down this connection and require the downstairs to
                  * reconnect and eventually go into LiveRepair mode.
                  */
-                let my_state = up_c.downstairs.lock().await.ds_state
-                    [usize::from(client_id)];
+                let my_state = up_c.downstairs.lock().await.ds_state[client_id];
                 if my_state == DsState::Faulted
                     || my_state == DsState::Replacing
                 {
@@ -2582,7 +2617,7 @@ async fn looper(
         }
         // Get the specific information for the downstairs we will operate on.
         let ds = up.downstairs.lock().await;
-        let target: SocketAddr = ds.ds_target[usize::from(up_coms.client_id)];
+        let target: SocketAddr = ds.ds_target[up_coms.client_id].unwrap();
         drop(ds);
 
         /*
@@ -2659,8 +2694,7 @@ async fn looper(
             }
         };
 
-        up.downstairs.lock().await.connected[usize::from(up_coms.client_id)] +=
-            1;
+        up.downstairs.lock().await.connected[up_coms.client_id] += 1;
 
         /*
          * Once we have a connected downstairs, the proc task takes over and
@@ -2750,10 +2784,10 @@ struct Downstairs {
      */
     ds_uuid: HashMap<ClientId, Uuid>,
 
-    /**
-     * The IP:Port of each of the downstairs
-     */
-    ds_target: Vec<SocketAddr>,
+    /// The IP:Port of each of the downstairs
+    ///
+    /// This is left unpopulated in some unit tests
+    ds_target: ClientData<Option<SocketAddr>>,
 
     /**
      * The IP:Port for repair when contacting the downstairs, hashed by
@@ -2765,14 +2799,14 @@ struct Downstairs {
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
      */
-    ds_state: Vec<DsState>,
+    ds_state: ClientData<DsState>,
 
     /**
      * The last flush job ID that each downstairs has acked.
      *
      * Note that this is a job ID; not a flush ID!
      */
-    ds_last_flush: Vec<JobId>,
+    ds_last_flush: ClientData<JobId>,
 
     /**
      * Errors recorded, indexed by client ID.
@@ -2787,12 +2821,12 @@ struct Downstairs {
     /**
      * Cache of new jobs, indexed by client ID.
      */
-    ds_new: Vec<Vec<JobId>>,
+    ds_new: ClientData<Vec<JobId>>,
 
     /**
      * Jobs that have been skipped, indexed by client ID.
      */
-    ds_skipped_jobs: [HashSet<JobId>; 3],
+    ds_skipped_jobs: ClientData<HashSet<JobId>>,
 
     /**
      * The next Job ID this Upstairs should use for downstairs work.
@@ -2861,22 +2895,22 @@ struct Downstairs {
     /**
      * Count of extents repaired live.
      */
-    extents_repaired: Vec<usize>,
+    extents_repaired: ClientData<usize>,
 
     /**
      * Count of extents checked but not needing live repair.
      */
-    extents_confirmed: Vec<usize>,
+    extents_confirmed: ClientData<usize>,
 
     /**
      * Count of time a downstairs LiveRepair completed.
      */
-    live_repair_completed: Vec<usize>,
+    live_repair_completed: ClientData<usize>,
 
     /**
      * Count of time a downstairs LiveRepair was aborted.
      */
-    live_repair_aborted: Vec<usize>,
+    live_repair_aborted: ClientData<usize>,
 
     /**
      * Extent limit, if set, indicates the extent where LiveRepair has already
@@ -2896,7 +2930,7 @@ struct Downstairs {
      * This is only used during live repair, and will only ever be
      * set on a downstairs that is undergoing live repair.
      */
-    extent_limit: Vec<Option<usize>>,
+    extent_limit: ClientData<Option<usize>>,
 
     /**
      * Live Repair Job IDs
@@ -2919,31 +2953,31 @@ struct Downstairs {
     /**
      * Count of downstairs connections
      */
-    connected: Vec<usize>,
+    connected: ClientData<usize>,
 
     /**
      * Count of downstairs replacements
      */
-    replaced: Vec<usize>,
+    replaced: ClientData<usize>,
 
     /**
      * Count of times a downstairs has had flow control turned on
      */
-    flow_control: Vec<usize>,
+    flow_control: ClientData<usize>,
 }
 
 impl Downstairs {
-    fn new(log: Logger, ds_target: Vec<SocketAddr>) -> Self {
+    fn new(log: Logger, ds_target: ClientData<Option<SocketAddr>>) -> Self {
         Self {
             ds_uuid: HashMap::new(),
             ds_target,
             ds_repair: HashMap::new(),
-            ds_state: vec![DsState::New; 3],
-            ds_last_flush: vec![JobId(0); 3],
+            ds_state: ClientData::new(DsState::New),
+            ds_last_flush: ClientData::new(JobId(0)),
             downstairs_errors: HashMap::new(),
             ds_active: ActiveJobs::new(),
-            ds_new: vec![Vec::new(); 3],
-            ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
+            ds_new: ClientData::new(vec![]),
+            ds_skipped_jobs: ClientData::new(HashSet::new()),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
@@ -2955,16 +2989,16 @@ impl Downstairs {
             log: log.new(o!("" => "downstairs".to_string())),
             io_state_count: IOStateCount::new(),
             repair_info: HashMap::new(),
-            extents_repaired: vec![0; 3],
-            extents_confirmed: vec![0; 3],
-            live_repair_completed: vec![0; 3],
-            live_repair_aborted: vec![0; 3],
-            extent_limit: vec![None; 3],
+            extents_repaired: ClientData::new(0),
+            extents_confirmed: ClientData::new(0),
+            live_repair_completed: ClientData::new(0),
+            live_repair_aborted: ClientData::new(0),
+            extent_limit: ClientData::new(None),
             repair_job_ids: HashMap::new(),
             repair_min_id: None,
-            connected: vec![0; 3],
-            replaced: vec![0; 3],
-            flow_control: vec![0; 3],
+            connected: ClientData::new(0),
+            replaced: ClientData::new(0),
+            flow_control: ClientData::new(0),
         }
     }
 
@@ -2973,7 +3007,7 @@ impl Downstairs {
      */
     fn end_live_repair(&mut self) {
         self.repair_info = HashMap::new();
-        self.extent_limit = vec![None; 3];
+        self.extent_limit = ClientData::new(None);
         self.repair_job_ids = HashMap::new();
         self.repair_min_id = None;
     }
@@ -3037,8 +3071,8 @@ impl Downstairs {
      * jobs for this downstairs.
      */
     fn dependencies_need_cleanup(&mut self, client_id: ClientId) -> bool {
-        self.ds_state[usize::from(client_id)] == DsState::LiveRepair
-            && !self.ds_skipped_jobs[usize::from(client_id)].is_empty()
+        self.ds_state[client_id] == DsState::LiveRepair
+            && !self.ds_skipped_jobs[client_id].is_empty()
     }
 
     // Given a client ID that is undergoing LiveRepair, go through the list
@@ -3056,15 +3090,13 @@ impl Downstairs {
             "[{}] {} Remove check skipped:{:?} from deps:{:?}",
             client_id,
             ds_id,
-            self.ds_skipped_jobs[usize::from(client_id)],
+            self.ds_skipped_jobs[client_id],
             deps
         );
-        assert_eq!(self.ds_state[usize::from(client_id)], DsState::LiveRepair);
+        assert_eq!(self.ds_state[client_id], DsState::LiveRepair);
         assert!(self.repair_min_id.is_some());
 
-        deps.retain(|x| {
-            !self.ds_skipped_jobs[usize::from(client_id)].contains(x)
-        });
+        deps.retain(|x| !self.ds_skipped_jobs[client_id].contains(x));
 
         // If we are repairing, then there must be a repair_min_id set so we
         // know where to stop with dependency inclusion.
@@ -3151,7 +3183,7 @@ impl Downstairs {
      *    should just continue waiting for work to show up.
      */
     fn rep_in_progress(&mut self, client_id: ClientId) -> Option<Message> {
-        if self.ds_state[usize::from(client_id)] != DsState::Repair {
+        if self.ds_state[client_id] != DsState::Repair {
             return None;
         }
         if let Some(job) = &mut self.reconcile_current_work {
@@ -3314,13 +3346,13 @@ impl Downstairs {
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
-                self.ds_skipped_jobs[usize::from(client_id)].insert(*ds_id);
+                self.ds_skipped_jobs[client_id].insert(*ds_id);
             }
         });
 
         // All of IOState::New jobs are now IOState::Skipped, so clear our
         // cache of new jobs for this downstairs.
-        self.ds_new[usize::from(client_id)].clear();
+        self.ds_new[client_id].clear();
     }
 
     /**
@@ -3340,7 +3372,7 @@ impl Downstairs {
      * happen.
      */
     fn re_new(&mut self, client_id: ClientId) {
-        let lf = self.ds_last_flush[usize::from(client_id)];
+        let lf = self.ds_last_flush[client_id];
 
         info!(
             self.log,
@@ -3410,7 +3442,7 @@ impl Downstairs {
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::New, client_id);
-                self.ds_new[usize::from(client_id)].push(*ds_id);
+                self.ds_new[client_id].push(*ds_id);
             }
         });
     }
@@ -3441,7 +3473,7 @@ impl Downstairs {
                     job.state.insert(client_id, IOState::Skipped).unwrap();
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
-                self.ds_skipped_jobs[usize::from(client_id)].insert(*ds_id);
+                self.ds_skipped_jobs[client_id].insert(*ds_id);
                 number_jobs_skipped += 1;
 
                 // Check to see if this being skipped means we can ACK
@@ -3485,10 +3517,10 @@ impl Downstairs {
 
         // We have eliminated all of our jobs in IOState::New above; flush
         // our cache to reflect that.
-        self.ds_new[usize::from(client_id)].clear();
+        self.ds_new[client_id].clear();
 
         // As this downstairs is now faulted, we clear the extent_limit.
-        self.extent_limit[usize::from(client_id)] = None;
+        self.extent_limit[client_id] = None;
         notify_guest
     }
 
@@ -3497,7 +3529,7 @@ impl Downstairs {
      * requests for this client.
      */
     fn new_work(&mut self, client_id: ClientId) -> Vec<JobId> {
-        self.ds_new[usize::from(client_id)].drain(..).collect()
+        self.ds_new[client_id].drain(..).collect()
     }
 
     /**
@@ -3505,7 +3537,7 @@ impl Downstairs {
      * [`new_work`], presumably due to flow control.
      */
     fn requeue_work(&mut self, client_id: ClientId, work: &[JobId]) {
-        self.ds_new[usize::from(client_id)].extend_from_slice(work);
+        self.ds_new[client_id].extend_from_slice(work);
     }
 
     /**
@@ -3513,7 +3545,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: ClientId) -> usize {
-        self.io_state_count.in_progress[usize::from(client_id)] as usize
+        self.io_state_count.in_progress[client_id.0 as usize] as usize
     }
 
     /**
@@ -3521,8 +3553,8 @@ impl Downstairs {
      * work we have for a downstairs.
      */
     fn total_live_work(&self, client_id: ClientId) -> usize {
-        (self.io_state_count.new[usize::from(client_id)]
-            + self.io_state_count.in_progress[usize::from(client_id)])
+        (self.io_state_count.new[client_id.0 as usize]
+            + self.io_state_count.in_progress[client_id.0 as usize])
             as usize
     }
 
@@ -3546,7 +3578,7 @@ impl Downstairs {
         for cid in (0..3).map(ClientId) {
             assert_eq!(io.state[&cid], IOState::New);
 
-            let current = self.ds_state[usize::from(cid)];
+            let current = self.ds_state[cid];
             // If a downstairs is faulted or ready for repair, we can move
             // that job directly to IOState::Skipped
             // If a downstairs is in repair, then we need to see if this
@@ -3562,10 +3594,10 @@ impl Downstairs {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;
-                    self.ds_skipped_jobs[usize::from(cid)].insert(io.ds_id);
+                    self.ds_skipped_jobs[cid].insert(io.ds_id);
                 }
                 DsState::LiveRepair => {
-                    let my_limit = self.extent_limit[usize::from(cid)];
+                    let my_limit = self.extent_limit[cid];
                     assert!(self.repair_min_id.is_some());
                     if io
                         .work
@@ -3573,19 +3605,19 @@ impl Downstairs {
                     {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
-                        self.ds_new[usize::from(cid)].push(io.ds_id);
+                        self.ds_new[cid].push(io.ds_id);
                     } else {
                         // Move this IO to skipped, we are not ready for
                         // the downstairs to receive it.
                         io.state.insert(cid, IOState::Skipped);
                         self.io_state_count.incr(&IOState::Skipped, cid);
                         skipped += 1;
-                        self.ds_skipped_jobs[usize::from(cid)].insert(io.ds_id);
+                        self.ds_skipped_jobs[cid].insert(io.ds_id);
                     }
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[usize::from(cid)].push(io.ds_id);
+                    self.ds_new[cid].push(io.ds_id);
                 }
             }
         }
@@ -3626,7 +3658,7 @@ impl Downstairs {
         for cid in (0..3).map(ClientId) {
             assert_eq!(io.state[&cid], IOState::New);
 
-            let current = self.ds_state[usize::from(cid)];
+            let current = self.ds_state[cid];
             // If a downstairs is faulted, we can move that job directly
             // to IOState::Skipped.
             match current {
@@ -3636,11 +3668,11 @@ impl Downstairs {
                 | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
-                    self.ds_skipped_jobs[usize::from(cid)].insert(io.ds_id);
+                    self.ds_skipped_jobs[cid].insert(io.ds_id);
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[usize::from(cid)].push(io.ds_id);
+                    self.ds_new[cid].push(io.ds_id);
                 }
             }
         }
@@ -4318,7 +4350,7 @@ impl Downstairs {
                     snapshot_details: _,
                     extent_limit: _,
                 } => {
-                    self.ds_last_flush[usize::from(client_id)] = ds_id;
+                    self.ds_last_flush[client_id] = ds_id;
                 }
                 IOop::Read {
                     dependencies: _dependencies,
@@ -4489,7 +4521,7 @@ impl Downstairs {
                             );
                         }
                     }
-                    self.ds_last_flush[usize::from(client_id)] = ds_id;
+                    self.ds_last_flush[client_id] = ds_id;
                 }
                 IOop::ExtentClose {
                     dependencies: _,
@@ -4686,7 +4718,7 @@ impl Downstairs {
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
             for cid in (0..3).map(ClientId) {
-                self.ds_skipped_jobs[usize::from(cid)].retain(|&x| x >= ds_id);
+                self.ds_skipped_jobs[cid].retain(|&x| x >= ds_id);
             }
         }
     }
@@ -4804,7 +4836,7 @@ impl Downstairs {
     fn get_extent_under_repair(&self) -> Option<u64> {
         let mut extent_under_repair = None;
         for cid in (0..3).map(ClientId) {
-            if let Some(eur) = self.extent_limit[usize::from(cid)] {
+            if let Some(eur) = self.extent_limit[cid] {
                 if extent_under_repair.is_none() {
                     extent_under_repair = Some(eur as u64);
                 } else {
@@ -5204,7 +5236,15 @@ impl Upstairs {
             guest,
             downstairs: Mutex::new(Downstairs::new(
                 log.clone(),
-                opt.target.to_owned(),
+                if opt.target.is_empty() {
+                    ClientData::new(None) // only used in tests
+                } else {
+                    ClientData([
+                        Some(opt.target[0]),
+                        Some(opt.target[1]),
+                        Some(opt.target[2]),
+                    ])
+                },
             )),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(rd_status),
@@ -5236,29 +5276,29 @@ impl Upstairs {
         let ds_io_count = ds.io_state_count;
         let ds_reconciled = ds.reconcile_repaired;
         let ds_reconcile_needed = ds.reconcile_repair_needed;
-        let ds_live_repair_completed = ds.live_repair_completed.clone();
-        let ds_live_repair_aborted = ds.live_repair_aborted.clone();
-        let ds_connected = ds.connected.clone();
-        let ds_replaced = ds.replaced.clone();
-        let ds_flow_control = ds.flow_control.clone();
-        let ds_extents_repaired = ds.extents_repaired.clone();
-        let ds_extents_confirmed = ds.extents_confirmed.clone();
+        let ds_live_repair_completed = ds.live_repair_completed;
+        let ds_live_repair_aborted = ds.live_repair_aborted;
+        let ds_connected = ds.connected;
+        let ds_replaced = ds.replaced;
+        let ds_flow_control = ds.flow_control;
+        let ds_extents_repaired = ds.extents_repaired;
+        let ds_extents_confirmed = ds.extents_confirmed;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 ds_count,
-                ds_state,
+                ds_state: ds_state.0.to_vec(),
                 ds_io_count,
                 ds_reconciled,
                 ds_reconcile_needed,
-                ds_live_repair_completed,
-                ds_live_repair_aborted,
-                ds_connected,
-                ds_replaced,
-                ds_flow_control,
-                ds_extents_repaired,
-                ds_extents_confirmed,
+                ds_live_repair_completed: ds_live_repair_completed.0.to_vec(),
+                ds_live_repair_aborted: ds_live_repair_aborted.0.to_vec(),
+                ds_connected: ds_connected.0.to_vec(),
+                ds_replaced: ds_replaced.0.to_vec(),
+                ds_flow_control: ds_flow_control.0.to_vec(),
+                ds_extents_repaired: ds_extents_repaired.0.to_vec(),
+                ds_extents_confirmed: ds_extents_confirmed.0.to_vec(),
             };
             (msg, arg)
         });
@@ -5642,7 +5682,7 @@ impl Upstairs {
 
     async fn last_flush_id(&self, client_id: ClientId) -> JobId {
         let ds = self.downstairs.lock().await;
-        ds.ds_last_flush[usize::from(client_id)]
+        ds.ds_last_flush[client_id]
     }
 
     async fn set_flush_clear(&self) {
@@ -6179,7 +6219,7 @@ impl Upstairs {
      */
     async fn ds_missing(&self, client_id: ClientId) {
         let mut ds = self.downstairs.lock().await;
-        let current = ds.ds_state[usize::from(client_id)];
+        let current = ds.ds_state[client_id];
         let new_state = match current {
             DsState::Active => DsState::Offline,
             DsState::Replay => DsState::Offline,
@@ -6213,7 +6253,7 @@ impl Upstairs {
 
         // Should we move jobs now?  When do we move work that has
         // been submitted over to "skipped"
-        ds.ds_state[usize::from(client_id)] = new_state;
+        ds.ds_state[client_id] = new_state;
     }
 
     /*
@@ -6227,14 +6267,14 @@ impl Upstairs {
      */
     async fn _ds_is_replay(&self, client_id: ClientId) -> bool {
         let mut ds = self.downstairs.lock().await;
-        if ds.ds_state[usize::from(client_id)] == DsState::Replay {
+        if ds.ds_state[client_id] == DsState::Replay {
             info!(
                 self.log,
                 "[{}] {} Transition from Replay to Active",
                 client_id,
                 self.uuid
             );
-            ds.ds_state[usize::from(client_id)] = DsState::Active;
+            ds.ds_state[client_id] = DsState::Active;
             return true;
         }
         false
@@ -6269,13 +6309,13 @@ impl Upstairs {
             client_id,
             self.uuid,
             self.session_id,
-            ds.ds_state[0],
-            ds.ds_state[1],
-            ds.ds_state[2],
+            ds.ds_state[ClientId(0)],
+            ds.ds_state[ClientId(1)],
+            ds.ds_state[ClientId(2)],
             new_state
         );
 
-        let old_state = ds.ds_state[usize::from(client_id)];
+        let old_state = ds.ds_state[client_id];
 
         /*
          * Check that this is a valid transition
@@ -6441,10 +6481,10 @@ impl Upstairs {
                 self.log,
                 "[{}] Transition from {} to {}",
                 client_id,
-                ds.ds_state[usize::from(client_id)],
+                ds.ds_state[client_id],
                 new_state,
             );
-            ds.ds_state[usize::from(client_id)] = new_state;
+            ds.ds_state[client_id] = new_state;
         } else {
             panic!("[{}] transition to same state: {}", client_id, new_state);
         }
@@ -6452,7 +6492,7 @@ impl Upstairs {
 
     async fn ds_state(&self, client_id: ClientId) -> DsState {
         let ds = self.downstairs.lock().await;
-        ds.ds_state[usize::from(client_id)]
+        ds.ds_state[client_id]
     }
 
     /*
@@ -7061,8 +7101,8 @@ impl Upstairs {
      * Return a copy of the DsState vec.
      * DTraces uses this.
      */
-    async fn ds_state_copy(&self) -> Vec<DsState> {
-        self.downstairs.lock().await.ds_state.clone()
+    async fn ds_state_copy(&self) -> ClientData<DsState> {
+        self.downstairs.lock().await.ds_state
     }
 
     /**
@@ -7135,7 +7175,7 @@ impl Upstairs {
             if *uuid != client_ddef.uuid() {
                 // If we are replacing the downstairs, then a new UUID is
                 // okay.
-                if ds.ds_state[usize::from(client_id)] == DsState::Replaced {
+                if ds.ds_state[client_id] == DsState::Replaced {
                     warn!(
                         self.log,
                         "[{}] replace downstairs uuid:{} with {}",
@@ -7243,7 +7283,7 @@ impl Upstairs {
          * While the downstairs is away, it's OK to act on the result that
          * we already received, because it may never come back.
          */
-        let ds_state = ds.ds_state[usize::from(client_id)];
+        let ds_state = ds.ds_state[client_id];
         match ds_state {
             DsState::Active | DsState::Repair | DsState::LiveRepair => {}
             DsState::Faulted => {
@@ -7414,7 +7454,9 @@ impl Upstairs {
         // for a different downstairs.
         let mut new_client_id: Option<ClientId> = None;
         let mut old_client_id: Option<ClientId> = None;
-        for (client_id, ds_target) in ds.ds_target.iter_mut().enumerate() {
+        for (client_id, ds_target) in
+            ds.ds_target.iter_mut().flatten().enumerate()
+        {
             if *ds_target == new {
                 new_client_id = Some(ClientId(client_id as u8));
                 info!(self.log, "{id} found new target: {new} at {client_id}");
@@ -7440,7 +7482,7 @@ impl Upstairs {
 
             // We don't really know if the "old" matches what was old,
             // as that info is gone to us now, so assume it was true.
-            match ds.ds_state[usize::from(new_client_id.unwrap())] {
+            match ds.ds_state[new_client_id.unwrap()] {
                 DsState::Replacing
                 | DsState::Replaced
                 | DsState::LiveRepairReady
@@ -7471,7 +7513,7 @@ impl Upstairs {
             if client_id == old_client_id {
                 continue;
             }
-            match ds.ds_state[usize::from(client_id)] {
+            match ds.ds_state[client_id] {
                 DsState::Replacing
                 | DsState::Replaced
                 | DsState::LiveRepairReady
@@ -7479,7 +7521,7 @@ impl Upstairs {
                     crucible_bail!(
                         ReplaceRequestInvalid,
                         "Replace {old} failed, downstairs {client_id} is {:?}",
-                        ds.ds_state[usize::from(client_id)]
+                        ds.ds_state[client_id]
                     );
                 }
                 _ => {}
@@ -7490,7 +7532,7 @@ impl Upstairs {
         // elsewhere, verified no other downstairs are in a bad state, we can
         // move forward with the replacement.
         info!(self.log, "{id} replacing old: {old} at {old_client_id}");
-        ds.ds_target[usize::from(old_client_id)] = new;
+        ds.ds_target[old_client_id] = Some(new);
 
         if ds.ds_set_faulted(old_client_id) {
             let _ = ds_done_tx.send(()).await;
@@ -7502,7 +7544,7 @@ impl Upstairs {
             old_client_id,
             DsState::Replacing,
         );
-        ds.replaced[usize::from(old_client_id)] += 1;
+        ds.replaced[old_client_id] += 1;
 
         Ok(ReplaceResult::Started)
     }
@@ -8349,7 +8391,7 @@ impl IOStateCount {
             }
         }
         let mut sum = 0;
-        for ds_stat in state_stat {
+        for ds_stat in &state_stat {
             print!("{:4}   ", ds_stat);
             sum += ds_stat;
         }
@@ -8357,7 +8399,7 @@ impl IOStateCount {
     }
 
     pub fn incr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = usize::from(cid);
+        let cid = cid.0 as usize;
         assert!(cid < 3);
         match state {
             IOState::New => {
@@ -8379,7 +8421,7 @@ impl IOStateCount {
     }
 
     pub fn decr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = usize::from(cid);
+        let cid = cid.0 as usize;
         assert!(cid < 3);
         match state {
             IOState::New => {
@@ -9595,7 +9637,7 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     let mut notify_guest = false;
     for cid in (0..3).map(ClientId) {
         // Only downstairs in these states are checked.
-        match ds.ds_state[usize::from(cid)] {
+        match ds.ds_state[cid] {
             DsState::Active
             | DsState::LiveRepair
             | DsState::Offline

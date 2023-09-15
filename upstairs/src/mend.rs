@@ -250,7 +250,7 @@ fn find_source(
      * index being the client ID.  We use the max_gen vec to see if any
      * of the remaining client IDs have a higher flush number.
      */
-    let rec = vec![c0, c1, c2];
+    let rec = ClientData([c0, c1, c2]);
 
     info!(
         log,
@@ -266,12 +266,12 @@ fn find_source(
     let mut max_flush = Vec::new();
 
     for sc in max_gen.iter() {
-        if rec[usize::from(*sc)].flush_numbers[i] > max {
-            max = rec[usize::from(*sc)].flush_numbers[i];
+        if rec[*sc].flush_numbers[i] > max {
+            max = rec[*sc].flush_numbers[i];
         }
     }
     for sc in max_gen.iter() {
-        if rec[usize::from(*sc)].flush_numbers[i] == max {
+        if rec[*sc].flush_numbers[i] == max {
             max_flush.push(*sc);
         }
     }
@@ -291,7 +291,7 @@ fn find_source(
         "extent:{}  dirty: {} {} {}", i, c0.dirty[i], c1.dirty[i], c2.dirty[i],
     );
     for sc in max_flush.iter() {
-        if rec[usize::from(*sc)].dirty[i] {
+        if rec[*sc].dirty[i] {
             return *sc;
         }
     }
@@ -333,7 +333,7 @@ fn find_dest(
      * Put the three downstairs RegionMetadata structs into an array with the
      * index being the client ID.
      */
-    let rec = vec![c0, c1, c2];
+    let rec = ClientData([c0, c1, c2]);
 
     info!(
         log,
@@ -346,16 +346,13 @@ fn find_dest(
         ClientId(_) => vec![ClientId(0), ClientId(1)],
     };
 
-    let source = usize::from(source);
     for dc in to_check.iter() {
-        if rec[source].generation[i] != rec[usize::from(*dc)].generation[i] {
+        if rec[source].generation[i] != rec[*dc].generation[i] {
             dest.push(*dc);
             info!(log, "source {}, add dest {} gen", source, dc);
             continue;
         }
-        if rec[source].flush_numbers[i]
-            != rec[usize::from(*dc)].flush_numbers[i]
-        {
+        if rec[source].flush_numbers[i] != rec[*dc].flush_numbers[i] {
             dest.push(*dc);
             info!(log, "source {}, add dest {} flush", source, dc);
             continue;
@@ -365,7 +362,7 @@ fn find_dest(
             info!(log, "source {}, add dest {} source flush", source, dc);
             continue;
         }
-        if rec[usize::from(*dc)].dirty[i] {
+        if rec[*dc].dirty[i] {
             dest.push(*dc);
             info!(log, "source {}, add dest {} dc flush", source, dc);
             continue;

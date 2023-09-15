@@ -111,16 +111,16 @@ impl UpstairsInfo {
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct UpstairsStats {
     state: UpState,
-    ds_state: Vec<DsState>,
+    ds_state: ClientData<DsState>,
     up_jobs: usize,
     ds_jobs: usize,
     repair_done: usize,
     repair_needed: usize,
-    extents_repaired: Vec<usize>,
-    extents_confirmed: Vec<usize>,
-    extent_limit: Vec<Option<usize>>,
-    live_repair_completed: Vec<usize>,
-    live_repair_aborted: Vec<usize>,
+    extents_repaired: ClientData<usize>,
+    extents_confirmed: ClientData<usize>,
+    extent_limit: ClientData<Option<usize>>,
+    live_repair_completed: ClientData<usize>,
+    live_repair_aborted: ClientData<usize>,
 }
 
 /**
@@ -143,11 +143,11 @@ async fn upstairs_fill_info(
     let ds_jobs = ds.ds_active.len();
     let repair_done = ds.reconcile_repaired;
     let repair_needed = ds.reconcile_repair_needed;
-    let extents_repaired = ds.extents_repaired.clone();
-    let extents_confirmed = ds.extents_confirmed.clone();
-    let extent_limit = ds.extent_limit.clone();
-    let live_repair_completed = ds.live_repair_completed.clone();
-    let live_repair_aborted = ds.live_repair_aborted.clone();
+    let extents_repaired = ds.extents_repaired;
+    let extents_confirmed = ds.extents_confirmed;
+    let extent_limit = ds.extent_limit;
+    let live_repair_completed = ds.live_repair_completed;
+    let live_repair_aborted = ds.live_repair_aborted;
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
@@ -249,7 +249,7 @@ async fn fault_downstairs(
         ));
     }
     let mut ds = api_context.up.downstairs.lock().await;
-    match ds.ds_state[usize::from(cid)] {
+    match ds.ds_state[cid] {
         DsState::Active
         | DsState::Offline
         | DsState::LiveRepair
