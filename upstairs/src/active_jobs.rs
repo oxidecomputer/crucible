@@ -523,16 +523,22 @@ impl BlockMap {
 
     /// Removes the given job from its range
     fn remove_job(&mut self, job: JobId) {
-        let mut to_remove = vec![];
-        let r = self.job_to_range.remove(&job).unwrap();
+        // The given job ID may not be stored in the map (e.g. if it was a
+        // repair close operation, which is always masked and therefore never
+        // stored).
+        let Some(r) = self
+            .job_to_range
+            .remove(&job)
+            .and_then(Self::blocks_to_range)
+            else { return; };
 
-        let Some(r) = Self::blocks_to_range(r) else { return; };
         self.insert_splits(r.clone());
 
         // Iterate over the range covered by our to-be-removed job, removing
         // it from any existing ranges.  The job's original range may have
         // been split or masked by later jobs, so we can't assume that it
         // exists as a single range in the map!
+        let mut to_remove = vec![];
         let mut pos = r.start;
         while pos != r.end {
             let mut next_start = self
