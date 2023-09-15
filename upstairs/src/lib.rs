@@ -5288,17 +5288,17 @@ impl Upstairs {
             let arg = Arg {
                 up_count,
                 ds_count,
-                ds_state: ds_state.0.to_vec(),
+                ds_state: ds_state.0,
                 ds_io_count,
                 ds_reconciled,
                 ds_reconcile_needed,
-                ds_live_repair_completed: ds_live_repair_completed.0.to_vec(),
-                ds_live_repair_aborted: ds_live_repair_aborted.0.to_vec(),
-                ds_connected: ds_connected.0.to_vec(),
-                ds_replaced: ds_replaced.0.to_vec(),
-                ds_flow_control: ds_flow_control.0.to_vec(),
-                ds_extents_repaired: ds_extents_repaired.0.to_vec(),
-                ds_extents_confirmed: ds_extents_confirmed.0.to_vec(),
+                ds_live_repair_completed: ds_live_repair_completed.0,
+                ds_live_repair_aborted: ds_live_repair_aborted.0,
+                ds_connected: ds_connected.0,
+                ds_replaced: ds_replaced.0,
+                ds_flow_control: ds_flow_control.0,
+                ds_extents_repaired: ds_extents_repaired.0,
+                ds_extents_confirmed: ds_extents_confirmed.0,
             };
             (msg, arg)
         });
@@ -9937,17 +9937,17 @@ async fn process_new_io(
 pub struct Arg {
     pub up_count: u32,
     pub ds_count: u32,
-    pub ds_state: Vec<DsState>,
+    pub ds_state: [DsState; 3],
     pub ds_io_count: IOStateCount,
     pub ds_reconciled: usize,
     pub ds_reconcile_needed: usize,
-    pub ds_live_repair_completed: Vec<usize>,
-    pub ds_live_repair_aborted: Vec<usize>,
-    pub ds_connected: Vec<usize>,
-    pub ds_replaced: Vec<usize>,
-    pub ds_flow_control: Vec<usize>,
-    pub ds_extents_repaired: Vec<usize>,
-    pub ds_extents_confirmed: Vec<usize>,
+    pub ds_live_repair_completed: [usize; 3],
+    pub ds_live_repair_aborted: [usize; 3],
+    pub ds_connected: [usize; 3],
+    pub ds_replaced: [usize; 3],
+    pub ds_flow_control: [usize; 3],
+    pub ds_extents_repaired: [usize; 3],
+    pub ds_extents_confirmed: [usize; 3],
 }
 
 /**

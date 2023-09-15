@@ -111,16 +111,16 @@ impl UpstairsInfo {
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct UpstairsStats {
     state: UpState,
-    ds_state: ClientData<DsState>,
+    ds_state: Vec<DsState>,
     up_jobs: usize,
     ds_jobs: usize,
     repair_done: usize,
     repair_needed: usize,
-    extents_repaired: ClientData<usize>,
-    extents_confirmed: ClientData<usize>,
-    extent_limit: ClientData<Option<usize>>,
-    live_repair_completed: ClientData<usize>,
-    live_repair_aborted: ClientData<usize>,
+    extents_repaired: Vec<usize>,
+    extents_confirmed: Vec<usize>,
+    extent_limit: Vec<Option<usize>>,
+    live_repair_completed: Vec<usize>,
+    live_repair_aborted: Vec<usize>,
 }
 
 /**
@@ -151,16 +151,16 @@ async fn upstairs_fill_info(
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
-        ds_state,
+        ds_state: ds_state.0.to_vec(),
         up_jobs,
         ds_jobs,
         repair_done,
         repair_needed,
-        extents_repaired,
-        extents_confirmed,
-        extent_limit,
-        live_repair_completed,
-        live_repair_aborted,
+        extents_repaired: extents_repaired.0.to_vec(),
+        extents_confirmed: extents_confirmed.0.to_vec(),
+        extent_limit: extent_limit.0.to_vec(),
+        live_repair_completed: live_repair_completed.0.to_vec(),
+        live_repair_aborted: live_repair_aborted.0.to_vec(),
     }))
 }
 
