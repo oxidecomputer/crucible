@@ -417,6 +417,9 @@ impl<T> ClientMap<T> {
     fn new() -> Self {
         Self(ClientData([None, None, None]))
     }
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
     /// Removes a value, returning the old value (or `None`)
     fn remove(&mut self, c: &ClientId) -> Option<T> {
         self.0.insert(*c, None)
@@ -433,6 +436,13 @@ impl<T> ClientMap<T> {
     }
     pub fn get(&self, c: &ClientId) -> Option<&T> {
         self.0[*c].as_ref()
+    }
+}
+
+impl<T> std::ops::Index<ClientId> for ClientMap<T> {
+    type Output = T;
+    fn index(&self, index: ClientId) -> &Self::Output {
+        self.get(&index).unwrap()
     }
 }
 
@@ -2651,7 +2661,7 @@ async fn looper(
         }
         // Get the specific information for the downstairs we will operate on.
         let ds = up.downstairs.lock().await;
-        let target: SocketAddr = ds.ds_target[up_coms.client_id].unwrap();
+        let target: SocketAddr = ds.ds_target[up_coms.client_id];
         drop(ds);
 
         /*
@@ -2816,18 +2826,18 @@ struct Downstairs {
     /**
      * UUID for each downstairs, index by client ID
      */
-    ds_uuid: HashMap<ClientId, Uuid>,
+    ds_uuid: ClientMap<Uuid>,
 
     /// The IP:Port of each of the downstairs
     ///
     /// This is left unpopulated in some unit tests
-    ds_target: ClientData<Option<SocketAddr>>,
+    ds_target: ClientMap<SocketAddr>,
 
     /**
      * The IP:Port for repair when contacting the downstairs, hashed by
      * the client index the upstairs gives it.
      */
-    ds_repair: HashMap<ClientId, SocketAddr>,
+    ds_repair: ClientMap<SocketAddr>,
 
     /**
      * The state of a downstairs connection, based on client ID
@@ -2924,7 +2934,7 @@ struct Downstairs {
      * by those downstairs and is used to decide if an extent requires
      * repair or not.
      */
-    repair_info: HashMap<ClientId, ExtentInfo>,
+    repair_info: ClientMap<ExtentInfo>,
 
     /**
      * Count of extents repaired live.
@@ -3001,11 +3011,11 @@ struct Downstairs {
 }
 
 impl Downstairs {
-    fn new(log: Logger, ds_target: ClientData<Option<SocketAddr>>) -> Self {
+    fn new(log: Logger, ds_target: ClientMap<SocketAddr>) -> Self {
         Self {
-            ds_uuid: HashMap::new(),
+            ds_uuid: ClientMap::new(),
             ds_target,
-            ds_repair: HashMap::new(),
+            ds_repair: ClientMap::new(),
             ds_state: ClientData::new(DsState::New),
             ds_last_flush: ClientData::new(JobId(0)),
             downstairs_errors: ClientData::new(0),
@@ -3022,7 +3032,7 @@ impl Downstairs {
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             io_state_count: IOStateCount::new(),
-            repair_info: HashMap::new(),
+            repair_info: ClientMap::new(),
             extents_repaired: ClientData::new(0),
             extents_confirmed: ClientData::new(0),
             live_repair_completed: ClientData::new(0),
@@ -3040,7 +3050,7 @@ impl Downstairs {
      * Live repair is over, Clean up any repair related settings.
      */
     fn end_live_repair(&mut self) {
-        self.repair_info = HashMap::new();
+        self.repair_info = ClientMap::new();
         self.extent_limit = ClientData::new(None);
         self.repair_job_ids = HashMap::new();
         self.repair_min_id = None;
@@ -5215,6 +5225,13 @@ impl Upstairs {
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
+        // Build the target map, which is either empty (during some tests) or
+        // fully populated with all three targets.
+        let mut ds_target = ClientMap::new();
+        for (i, v) in opt.target.iter().enumerate() {
+            ds_target.insert(ClientId(i as u8), *v);
+        }
+
         // Create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
             Arc::new(EncryptionContext::new(
@@ -5251,18 +5268,7 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(
-                log.clone(),
-                if opt.target.is_empty() {
-                    ClientData::new(None) // only used in tests
-                } else {
-                    ClientData([
-                        Some(opt.target[0]),
-                        Some(opt.target[1]),
-                        Some(opt.target[2]),
-                    ])
-                },
-            )),
+            downstairs: Mutex::new(Downstairs::new(log.clone(), ds_target)),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(rd_status),
             encryption_context,
@@ -7471,15 +7477,13 @@ impl Upstairs {
         // for a different downstairs.
         let mut new_client_id: Option<ClientId> = None;
         let mut old_client_id: Option<ClientId> = None;
-        for (client_id, ds_target) in
-            ds.ds_target.iter_mut().flatten().enumerate()
-        {
+        for (client_id, ds_target) in ds.ds_target.iter() {
             if *ds_target == new {
-                new_client_id = Some(ClientId(client_id as u8));
+                new_client_id = Some(client_id);
                 info!(self.log, "{id} found new target: {new} at {client_id}");
             }
             if *ds_target == old {
-                old_client_id = Some(ClientId(client_id as u8));
+                old_client_id = Some(client_id);
                 info!(self.log, "{id} found old target: {old} at {client_id}");
             }
         }
@@ -7549,7 +7553,7 @@ impl Upstairs {
         // elsewhere, verified no other downstairs are in a bad state, we can
         // move forward with the replacement.
         info!(self.log, "{id} replacing old: {old} at {old_client_id}");
-        ds.ds_target[old_client_id] = Some(new);
+        ds.ds_target.insert(old_client_id, new);
 
         if ds.ds_set_faulted(old_client_id) {
             let _ = ds_done_tx.send(()).await;

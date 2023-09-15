@@ -558,7 +558,7 @@ fn repair_or_noop(
 
     // Now that we have consumed the contents, be sure to clear
     // out anything we did not look at.  There could be something left
-    ds.repair_info = HashMap::new();
+    ds.repair_info = ClientMap::new();
 
     if need_repair.is_empty() {
         info!(ds.log, "No repair needed for extent {}", extent);
@@ -1378,7 +1378,7 @@ pub mod repair_test {
 
     // Test function to create a downstairs.
     fn create_test_downstairs() -> Downstairs {
-        let mut ds = Downstairs::new(csl(), ClientData::new(None));
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
         for cid in ClientId::iter() {
             ds.ds_repair.insert(cid, "127.0.0.1:1234".parse().unwrap());
         }

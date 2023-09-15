@@ -1418,7 +1418,7 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
-        let mut ds = Downstairs::new(csl(), ClientData::new(None));
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let id = ds.next_id();
@@ -1773,7 +1773,7 @@ pub(crate) mod up_test {
 
         assert!(ds.downstairs_errors[ClientId(0)] > 0);
         assert!(ds.downstairs_errors[ClientId(1)] > 0);
-        assert!(ds.downstairs_errors[ClientId(2)] > 0);
+        assert_eq!(ds.downstairs_errors[ClientId(2)], 0);
     }
 
     #[tokio::test]
@@ -2370,9 +2370,9 @@ pub(crate) mod up_test {
             Some(vec![Bytes::from_static(&[3])]),
         );
 
-        assert!(ds.downstairs_errors[ClientId(0)] > 0);
-        assert!(ds.downstairs_errors[ClientId(1)] > 0);
-        assert!(ds.downstairs_errors[ClientId(2)] > 0);
+        assert_eq!(ds.downstairs_errors[ClientId(0)], 0);
+        assert_eq!(ds.downstairs_errors[ClientId(1)], 0);
+        assert_eq!(ds.downstairs_errors[ClientId(2)], 0);
 
         // send another read, and expect all to return something
         // (reads shouldn't cause a Failed transition)
@@ -5181,7 +5181,7 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let mut ds = Downstairs::new(csl(), ClientData::new(None));
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         let next_id = ds.next_id();
 
