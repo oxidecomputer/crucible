@@ -43,6 +43,8 @@ impl std::fmt::Display for JobId {
 }
 
 /// Wrapper type for a client ID
+///
+/// This is guaranteed by construction to be in the range `0..3`
 #[derive(
     Copy,
     Clone,
@@ -60,6 +62,10 @@ impl std::fmt::Display for JobId {
 pub struct ClientId(u8);
 
 impl ClientId {
+    /// Builds a new client ID
+    ///
+    /// # Panics
+    /// If `i >= 3`, the ID is invalid and this constructor will panic
     pub fn new(i: u8) -> Self {
         assert!(i < 3);
         Self(i)
