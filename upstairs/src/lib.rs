@@ -401,15 +401,6 @@ impl<T> ClientData<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a ClientData<T> {
-    type Item = &'a T;
-    type IntoIter = std::slice::Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
 /// Map of data associated with clients, keyed by `ClientId`
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
