@@ -1509,7 +1509,7 @@ pub(crate) mod protocol_test {
                     source_client_id,
                     ..
                 } => {
-                    bail_assert!(*source_client_id != ClientId(0));
+                    bail_assert!(*source_client_id != ClientId::new(0));
                     bail_assert!(*extent_id == eid);
 
                     ds1.fw
@@ -2304,7 +2304,7 @@ pub(crate) mod protocol_test {
                 source_client_id,
                 ..
             } => {
-                bail_assert!(*source_client_id != ClientId(0));
+                bail_assert!(*source_client_id != ClientId::new(0));
                 bail_assert!(*extent_id == 0);
 
                 // send back error report here!

@@ -233,7 +233,7 @@ async fn fault_downstairs(
             format!("Invalid downstairs client id: {}", cid),
         ));
     }
-    let cid = ClientId(cid);
+    let cid = ClientId::new(cid);
 
     /*
      * Verify the downstairs is currently in a state where we can

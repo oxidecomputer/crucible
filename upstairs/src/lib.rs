@@ -371,13 +371,13 @@ pub struct ClientData<T>([T; 3]);
 impl<T> std::ops::Index<ClientId> for ClientData<T> {
     type Output = T;
     fn index(&self, index: ClientId) -> &Self::Output {
-        &self.0[index.0 as usize]
+        &self.0[index.get() as usize]
     }
 }
 
 impl<T> std::ops::IndexMut<ClientId> for ClientData<T> {
     fn index_mut(&mut self, index: ClientId) -> &mut Self::Output {
-        &mut self.0[index.0 as usize]
+        &mut self.0[index.get() as usize]
     }
 }
 
@@ -432,7 +432,7 @@ impl<T> ClientMap<T> {
         self.0
             .iter()
             .enumerate()
-            .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId(i as u8), v)))
+            .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId::new(i as u8), v)))
     }
     pub fn get(&self, c: &ClientId) -> Option<&T> {
         self.0[*c].as_ref()
@@ -467,7 +467,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__io__done!(|| (job_id.0, client_id.0));
+            cdt::ds__write__io__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -482,7 +482,10 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__unwritten__io__done!(|| (job_id.0, client_id.0));
+            cdt::ds__write__unwritten__io__done!(|| (
+                job_id.0,
+                client_id.get()
+            ));
             (
                 *upstairs_id,
                 *session_id,
@@ -497,7 +500,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__flush__io__done!(|| (job_id.0, client_id.0));
+            cdt::ds__flush__io__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -512,7 +515,7 @@ async fn process_message(
             job_id,
             responses,
         } => {
-            cdt::ds__read__io__done!(|| (job_id.0, client_id.0));
+            cdt::ds__read__io__done!(|| (job_id.0, client_id.get()));
             (*upstairs_id, *session_id, *job_id, responses.clone(), None)
         }
         Message::ExtentLiveCloseAck {
@@ -541,7 +544,7 @@ async fn process_message(
                     );
                 }
             };
-            cdt::ds__close__done!(|| (job_id.0, client_id.0));
+            cdt::ds__close__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -556,8 +559,8 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__noop__done!(|| (job_id.0, client_id.0));
-            cdt::ds__reopen__done!(|| (job_id.0, client_id.0));
+            cdt::ds__noop__done!(|| (job_id.0, client_id.get()));
+            cdt::ds__reopen__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -572,7 +575,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__repair__done!(|| (job_id.0, client_id.0));
+            cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -608,7 +611,7 @@ async fn process_message(
                 if job.work.is_repair() {
                     // Return the error and let the previously written error
                     // processing code work.
-                    cdt::ds__repair__done!(|| (job_id.0, client_id.0));
+                    cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
 
                     // XXX uncomment this to see the upstairs disconnect this
                     // bad downstairs. test_error_during_live_repair_no_halt
@@ -794,7 +797,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__write__io__start!(|| (new_id.0, client_id.0));
+                cdt::ds__write__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -813,7 +816,7 @@ where
                     .await;
                 cdt::ds__write__unwritten__io__start!(|| (
                     new_id.0,
-                    client_id.0
+                    client_id.get()
                 ));
                 fw.send(Message::WriteUnwritten {
                     upstairs_id: u.uuid,
@@ -844,7 +847,7 @@ where
                 } else {
                     None
                 };
-                cdt::ds__flush__io__start!(|| (new_id.0, client_id.0));
+                cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -864,7 +867,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__read__io__start!(|| (new_id.0, client_id.0));
+                cdt::ds__read__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -894,7 +897,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__close__start!(|| (new_id.0, client_id.0, extent));
+                cdt::ds__close__start!(|| (new_id.0, client_id.get(), extent));
                 if repair_downstairs.contains(&client_id) {
                     // We are the downstairs being repaired, so just close.
                     fw.send(Message::ExtentLiveClose {
@@ -928,7 +931,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__repair__start!(|| (new_id.0, client_id.0, extent));
+                cdt::ds__repair__start!(|| (new_id.0, client_id.get(), extent));
                 if repair_downstairs.contains(&client_id) {
                     fw.send(Message::ExtentLiveRepair {
                         upstairs_id: u.uuid,
@@ -957,7 +960,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__reopen__start!(|| (new_id.0, client_id.0, extent));
+                cdt::ds__reopen__start!(|| (new_id.0, client_id.get(), extent));
                 fw.send(Message::ExtentLiveReopen {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -971,7 +974,7 @@ where
                 let deps = u
                     .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__noop__start!(|| (new_id.0, client_id.0));
+                cdt::ds__noop__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::ExtentLiveNoOp {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
@@ -2152,7 +2155,7 @@ where
                  */
                 fw.send(Message::Ruok).await?;
                 ping_count += 1;
-                cdt::ds__ping__sent!(|| (ping_count, up_coms.client_id.0));
+                cdt::ds__ping__sent!(|| (ping_count, up_coms.client_id.get()));
 
                 if up.lossy {
                     /*
@@ -3587,7 +3590,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: ClientId) -> usize {
-        self.io_state_count.in_progress[client_id.0 as usize] as usize
+        self.io_state_count.in_progress[client_id.get() as usize] as usize
     }
 
     /**
@@ -3595,8 +3598,8 @@ impl Downstairs {
      * work we have for a downstairs.
      */
     fn total_live_work(&self, client_id: ClientId) -> usize {
-        (self.io_state_count.new[client_id.0 as usize]
-            + self.io_state_count.in_progress[client_id.0 as usize])
+        (self.io_state_count.new[client_id.get() as usize]
+            + self.io_state_count.in_progress[client_id.get() as usize])
             as usize
     }
 
@@ -3617,7 +3620,7 @@ impl Downstairs {
     ) {
         let mut skipped = 0;
         let is_write = matches!(io.work, IOop::Write { .. });
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             assert_eq!(io.state[cid], IOState::New);
 
             let current = self.ds_state[cid];
@@ -3697,7 +3700,7 @@ impl Downstairs {
      */
     async fn enqueue_repair(&mut self, mut io: DownstairsIO) {
         // Puts the repair IO onto the downstairs work queue.
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             assert_eq!(io.state[cid], IOState::New);
 
             let current = self.ds_state[cid];
@@ -4862,7 +4865,7 @@ impl Downstairs {
     /// is not allowed)
     fn get_extent_under_repair(&self) -> Option<u64> {
         let mut extent_under_repair = None;
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             if let Some(eur) = self.extent_limit[cid] {
                 if extent_under_repair.is_none() {
                     extent_under_repair = Some(eur as u64);
@@ -5229,7 +5232,7 @@ impl Upstairs {
         // fully populated with all three targets.
         let mut ds_target = ClientMap::new();
         for (i, v) in opt.target.iter().enumerate() {
-            ds_target.insert(ClientId(i as u8), *v);
+            ds_target.insert(ClientId::new(i as u8), *v);
         }
 
         // Create an encryption context if a key is supplied.
@@ -5455,7 +5458,7 @@ impl Upstairs {
         let mut offline_ds = Vec::new();
         for (index, state) in ds.ds_state.iter().enumerate() {
             if *state == DsState::Offline {
-                offline_ds.push(ClientId(index as u8));
+                offline_ds.push(ClientId::new(index as u8));
             }
         }
 
@@ -6332,9 +6335,9 @@ impl Upstairs {
             client_id,
             self.uuid,
             self.session_id,
-            ds.ds_state[ClientId(0)],
-            ds.ds_state[ClientId(1)],
-            ds.ds_state[ClientId(2)],
+            ds.ds_state[ClientId::new(0)],
+            ds.ds_state[ClientId::new(1)],
+            ds.ds_state[ClientId::new(2)],
             new_state
         );
 
@@ -6525,9 +6528,9 @@ impl Upstairs {
      * at it.
      */
     fn mismatch_list(&self, ds: &Downstairs) -> Option<DownstairsMend> {
-        let c0_rec = ds.region_metadata.get(&ClientId(0)).unwrap();
-        let c1_rec = ds.region_metadata.get(&ClientId(1)).unwrap();
-        let c2_rec = ds.region_metadata.get(&ClientId(2)).unwrap();
+        let c0_rec = ds.region_metadata.get(&ClientId::new(0)).unwrap();
+        let c1_rec = ds.region_metadata.get(&ClientId::new(1)).unwrap();
+        let c2_rec = ds.region_metadata.get(&ClientId::new(2)).unwrap();
 
         let log = self.log.new(o!("" => "mend".to_string()));
         DownstairsMend::new(c0_rec, c1_rec, c2_rec, log)
@@ -7530,7 +7533,7 @@ impl Upstairs {
         // Check for and Block a replacement if any (other) downstairs are
         // in any of these states as we don't want to take more than one
         // downstairs offline at the same time.
-        for client_id in (0..3).map(ClientId) {
+        for client_id in ClientId::iter() {
             if client_id == old_client_id {
                 continue;
             }
@@ -8409,7 +8412,7 @@ impl IOStateCount {
     }
 
     pub fn incr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = cid.0 as usize;
+        let cid = cid.get() as usize;
         assert!(cid < 3);
         match state {
             IOState::New => {
@@ -8431,7 +8434,7 @@ impl IOStateCount {
     }
 
     pub fn decr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = cid.0 as usize;
+        let cid = cid.get() as usize;
         assert!(cid < 3);
         match state {
             IOState::New => {
@@ -9645,7 +9648,7 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     drop(active);
 
     let mut notify_guest = false;
-    for cid in (0..3).map(ClientId) {
+    for cid in ClientId::iter() {
         // Only downstairs in these states are checked.
         match ds.ds_state[cid] {
             DsState::Active
@@ -10258,7 +10261,7 @@ pub async fn up_main(
      * tasks.
      */
     let mut dst = Vec::new();
-    for client_id in (0..3).map(ClientId) {
+    for client_id in ClientId::iter() {
         /*
          * Create the channel that we will use to request that the loop
          * check for work to do in the central structure.

@@ -57,11 +57,18 @@ impl std::fmt::Display for JobId {
     schemars::JsonSchema,
 )]
 #[serde(transparent)]
-pub struct ClientId(pub u8);
+pub struct ClientId(u8);
 
 impl ClientId {
+    pub fn new(i: u8) -> Self {
+        assert!(i < 3);
+        Self(i)
+    }
     pub fn iter() -> impl Iterator<Item = Self> {
         (0..3).map(Self)
+    }
+    pub fn get(&self) -> u8 {
+        self.0
     }
 }
 

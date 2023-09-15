@@ -203,7 +203,8 @@ fn find_source(
      * All three client IDs are candidates for the max generation number,
      * remove a client ID as we find it has a lower value than the others.
      */
-    let mut max_gen = vec![ClientId(0), ClientId(1), ClientId(2)];
+    let mut max_gen =
+        vec![ClientId::new(0), ClientId::new(1), ClientId::new(2)];
 
     info!(log, "First source client ID for extent {}", i);
 
@@ -219,11 +220,11 @@ fn find_source(
          * so this first check will see if one is the largest.
          */
         if gen0 > gen1 && gen0 > gen2 {
-            return ClientId(0);
+            return ClientId::new(0);
         } else if gen1 > gen0 && gen1 > gen2 {
-            return ClientId(1);
+            return ClientId::new(1);
         } else if gen2 > gen0 && gen2 > gen1 {
-            return ClientId(2);
+            return ClientId::new(2);
         }
 
         /*
@@ -326,7 +327,7 @@ fn find_dest(
     c2: &RegionMetadata,
     log: &Logger,
 ) -> Vec<ClientId> {
-    assert!(source.0 < 3);
+    assert!(source.get() < 3);
     let mut dest: Vec<ClientId> = Vec::new();
 
     /*
@@ -340,10 +341,11 @@ fn find_dest(
         "find dest for source {} for extent at index {}", source, i
     );
 
-    let to_check = match source {
-        ClientId(0) => vec![ClientId(1), ClientId(2)],
-        ClientId(1) => vec![ClientId(0), ClientId(2)],
-        ClientId(_) => vec![ClientId(0), ClientId(1)],
+    let to_check = match source.get() {
+        0 => vec![ClientId::new(1), ClientId::new(2)],
+        1 => vec![ClientId::new(0), ClientId::new(2)],
+        2 => vec![ClientId::new(0), ClientId::new(1)],
+        _ => panic!("invalid client ID"),
     };
 
     for dc in to_check.iter() {
@@ -508,11 +510,11 @@ mod test {
         let mut ef = fix.mend.remove(&2).unwrap();
 
         // As gen agree, we look to flush to break the tie.
-        assert_eq!(ef.source, ClientId(2));
+        assert_eq!(ef.source, ClientId::new(2));
 
         // Both extents should be candidates for destination.
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -545,8 +547,8 @@ mod test {
         let mut ef = fix.mend.remove(&1).unwrap();
 
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
         assert!(fix.mend.is_empty());
     }
@@ -577,11 +579,11 @@ mod test {
         let mut ef = fix.mend.remove(&2).unwrap();
 
         // As gen and flush agree, we pick the dirty extent for source.
-        assert_eq!(ef.source, ClientId(1));
+        assert_eq!(ef.source, ClientId::new(1));
 
         // Both extents should be candidates for destination.
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -604,16 +606,16 @@ mod test {
         // Extents 0 and 3 have the mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
 
-        assert_eq!(ef.source, ClientId(0));
+        assert_eq!(ef.source, ClientId::new(0));
         println!("ef.dest {:#?}", ef.dest);
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         let mut ef = fix.mend.remove(&3).unwrap();
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -642,9 +644,9 @@ mod test {
         let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
         let mut ef = fix.mend.remove(&0).unwrap();
 
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -676,8 +678,8 @@ mod test {
         let mut ef = fix.mend.remove(&0).unwrap();
         println!("my ef is: {:?}", ef);
 
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
 
         // Verify there are no more items on the dest list
         assert!(ef.dest.is_empty());
@@ -719,24 +721,24 @@ mod test {
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
 
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has the 2nd mismatch
         let mut ef = fix.mend.remove(&1).unwrap();
 
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 3 has the 3rd mismatch
         let mut ef = fix.mend.remove(&3).unwrap();
 
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -770,8 +772,8 @@ mod test {
 
         // Client 1 (and 2) have the higher flush numbers.
         // Only client 0 needs repair.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -811,52 +813,52 @@ mod test {
         let mut ef = fix.mend.remove(&0).unwrap();
 
         // Client 2 has the higher flush numbers.
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has the next mismatch
         let mut ef = fix.mend.remove(&1).unwrap();
 
         // Client 2 has the higher flush numbers.
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2 has the next mismatch
         let mut ef = fix.mend.remove(&2).unwrap();
 
         // Client 0,2 have the higher flush numbers.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 3 has the next mismatch
         let mut ef = fix.mend.remove(&3).unwrap();
 
         // Client 0 has the higher flush numbers. 1,2 need repair
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 4 has the next mismatch
         let mut ef = fix.mend.remove(&4).unwrap();
 
         // Client 1,2 have the higher flush numbers. 0 needs repair
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         // Extent 5 has the final mismatch
         let mut ef = fix.mend.remove(&5).unwrap();
 
         // Client 1 has the higher flush numbers. 0,2 needs repair
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -889,18 +891,18 @@ mod test {
         let mut ef = fix.mend.remove(&0).unwrap();
 
         // Client 2 has the higher flush numbers. 0,1 need repair
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 3 has the last mismatch
         let mut ef = fix.mend.remove(&3).unwrap();
 
         // Client 2 has the higher flush numbers. 0,1 need repair
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -933,26 +935,26 @@ mod test {
         let mut ef = fix.mend.remove(&0).unwrap();
 
         // Client 2 has the higher flush numbers. 0,1 need repair
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has gen mismatch
         let mut ef = fix.mend.remove(&1).unwrap();
 
         // Client 0 has the higher flush numbers. Only 1 needs repair
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2 has a gen mismatch, with dirty bits set.
         let mut ef = fix.mend.remove(&2).unwrap();
 
         // Client 2 has the higher gen number. 0,1 need repair
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 3 has the last mismatch
@@ -960,9 +962,9 @@ mod test {
 
         // All extents have the dirty bit, but everything else is the same.
         // Use 0 for source, and fix 1,2
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -1000,9 +1002,9 @@ mod test {
         // Client 0 and 1 have the higher gen numbers, but client 1
         // has a higher flush number.  We need that 2nd level check to pick
         // the proper source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has a gen mismatch.
@@ -1010,18 +1012,18 @@ mod test {
 
         // Client 1,2 has the higher gen number.
         // Client 2 has the higher flush number.
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2 has a gen mismatch.
         let mut ef = fix.mend.remove(&2).unwrap();
 
         // Client 1 has the higher gen number. 0,2 need repair
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 3 has the last mismatch
@@ -1030,9 +1032,9 @@ mod test {
         // Client 2 has the highest generation, with 0,1 having higher
         // flush numbers.  Verify C2 is the source.
         // Use 0 for source, and fix 1,2
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -1076,61 +1078,61 @@ mod test {
         // Extent 1 has a mismatch, so we should find it in the HM.
         let mut ef = fix.mend.remove(&1).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 2
         let mut ef = fix.mend.remove(&2).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
 
         // Extent 3
         let mut ef = fix.mend.remove(&3).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
 
         // Extent 4
         let mut ef = fix.mend.remove(&4).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 5
         let mut ef = fix.mend.remove(&5).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 6
         let mut ef = fix.mend.remove(&6).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 7
         let mut ef = fix.mend.remove(&7).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 8
         let mut ef = fix.mend.remove(&8).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -1173,62 +1175,62 @@ mod test {
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has a mismatch, so we should find it in the HM.
         let mut ef = fix.mend.remove(&1).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2
         let mut ef = fix.mend.remove(&2).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
 
         // Extent 3
         let mut ef = fix.mend.remove(&3).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
 
         // Extent 4 has no mismatch
 
         // Extent 5
         let mut ef = fix.mend.remove(&5).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 6
         let mut ef = fix.mend.remove(&6).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 7
         let mut ef = fix.mend.remove(&7).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 8
         let mut ef = fix.mend.remove(&8).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -1270,54 +1272,54 @@ mod test {
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has a mismatch
         let mut ef = fix.mend.remove(&1).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2
         let mut ef = fix.mend.remove(&2).unwrap();
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 3
         let mut ef = fix.mend.remove(&3).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 4
         let mut ef = fix.mend.remove(&4).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 5
         let mut ef = fix.mend.remove(&5).unwrap();
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 6
         let mut ef = fix.mend.remove(&6).unwrap();
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         // Extent 7
         let mut ef = fix.mend.remove(&7).unwrap();
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         // Extent 8  No mismatch
@@ -1366,61 +1368,61 @@ mod test {
         // Extent 1 has a mismatch, so we should find it in the HM.
         let mut ef = fix.mend.remove(&1).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 2
         let mut ef = fix.mend.remove(&2).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
 
         // Extent 3
         let mut ef = fix.mend.remove(&3).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
 
         // Extent 4
         let mut ef = fix.mend.remove(&4).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 5
         let mut ef = fix.mend.remove(&5).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 6
         let mut ef = fix.mend.remove(&6).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 7
         let mut ef = fix.mend.remove(&7).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 8
         let mut ef = fix.mend.remove(&8).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -1462,62 +1464,62 @@ mod test {
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has a mismatch, so we should find it in the HM.
         let mut ef = fix.mend.remove(&1).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2
         let mut ef = fix.mend.remove(&2).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
 
         // Extent 3
         let mut ef = fix.mend.remove(&3).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
 
         // Extent 4 has no mismatch
 
         // Extent 5
         let mut ef = fix.mend.remove(&5).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 6
         let mut ef = fix.mend.remove(&6).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 7
         let mut ef = fix.mend.remove(&7).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         // Extent 8
         let mut ef = fix.mend.remove(&8).unwrap();
         // Pick the higher gen for source.
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(2));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(2));
         assert!(ef.dest.is_empty());
 
         assert!(fix.mend.is_empty());
@@ -1559,54 +1561,54 @@ mod test {
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&0).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 1 has a mismatch
         let mut ef = fix.mend.remove(&1).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 2
         let mut ef = fix.mend.remove(&2).unwrap();
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 3
         let mut ef = fix.mend.remove(&3).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 4
         let mut ef = fix.mend.remove(&4).unwrap();
-        assert_eq!(ef.source, ClientId(2));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(2));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 5
         let mut ef = fix.mend.remove(&5).unwrap();
-        assert_eq!(ef.source, ClientId(0));
-        assert_eq!(ef.dest.remove(0), ClientId(1));
+        assert_eq!(ef.source, ClientId::new(0));
+        assert_eq!(ef.dest.remove(0), ClientId::new(1));
         assert!(ef.dest.is_empty());
 
         // Extent 6
         let mut ef = fix.mend.remove(&6).unwrap();
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         // Extent 7
         let mut ef = fix.mend.remove(&7).unwrap();
-        assert_eq!(ef.source, ClientId(1));
-        assert_eq!(ef.dest.remove(0), ClientId(0));
+        assert_eq!(ef.source, ClientId::new(1));
+        assert_eq!(ef.dest.remove(0), ClientId::new(0));
         assert!(ef.dest.is_empty());
 
         // Extent 8  No mismatch

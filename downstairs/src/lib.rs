@@ -690,8 +690,8 @@ where
                 extent: extent_id,
                 flush_number,
                 gen_number,
-                source_downstairs: ClientId(0), // Unused in the downstairs
-                repair_downstairs: vec![],      // Unused in the downstairs
+                source_downstairs: ClientId::new(0), // Unused in the downstairs
+                repair_downstairs: vec![],           // Unused in the downstairs
             };
 
             let d = ad.lock().await;
@@ -3554,8 +3554,8 @@ mod test {
             extent: 1,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId(0),
-            repair_downstairs: vec![ClientId(1)],
+            source_downstairs: ClientId::new(0),
+            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -3644,8 +3644,8 @@ mod test {
             extent: 1,
             flush_number: 1,
             gen_number: gen,
-            source_downstairs: ClientId(0),
-            repair_downstairs: vec![ClientId(1)],
+            source_downstairs: ClientId::new(0),
+            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -4076,8 +4076,8 @@ mod test {
             extent: eid as usize,
             flush_number: 3,
             gen_number: gen,
-            source_downstairs: ClientId(0),
-            repair_downstairs: vec![ClientId(1)],
+            source_downstairs: ClientId::new(0),
+            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -4206,8 +4206,8 @@ mod test {
             extent: eid_one as usize,
             flush_number: 6,
             gen_number: gen,
-            source_downstairs: ClientId(0),
-            repair_downstairs: vec![ClientId(1)],
+            source_downstairs: ClientId::new(0),
+            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1002), rio).await?;
 
@@ -4376,8 +4376,8 @@ mod test {
             extent: eid,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId(0),
-            repair_downstairs: vec![ClientId(1)],
+            source_downstairs: ClientId::new(0),
+            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
@@ -4393,9 +4393,9 @@ mod test {
         let ioop = IOop::ExtentLiveRepair {
             dependencies: vec![],
             extent: eid,
-            source_downstairs: ClientId(0),
+            source_downstairs: ClientId::new(0),
             source_repair_address,
-            repair_downstairs: vec![ClientId(1)],
+            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
