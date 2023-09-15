@@ -42,6 +42,45 @@ impl std::fmt::Display for JobId {
     }
 }
 
+/// Wrapper type for a client ID
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct ClientId(pub u8);
+
+impl From<ClientId> for usize {
+    fn from(c: ClientId) -> usize {
+        usize::from(c.0)
+    }
+}
+
+impl ClientId {
+    pub fn iter() -> impl Iterator<Item = Self> {
+        (0..3).map(Self)
+    }
+}
+
+impl std::fmt::Display for ClientId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        // TODO: this could include brackets, e.g. "[0]"
+        self.0.fmt(f)
+    }
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Write {
@@ -312,7 +351,7 @@ pub enum Message {
     ExtentFlush {
         repair_id: u64,
         extent_id: usize,
-        client_id: u8,
+        client_id: ClientId,
         flush_number: u64,
         gen_number: u64,
     },
@@ -321,9 +360,9 @@ pub enum Message {
     ExtentRepair {
         repair_id: u64,
         extent_id: usize,
-        source_client_id: u8,
+        source_client_id: ClientId,
         source_repair_address: SocketAddr,
-        dest_clients: Vec<u8>,
+        dest_clients: Vec<ClientId>,
     },
 
     /// The given repair job ID has finished without error
@@ -369,7 +408,7 @@ pub enum Message {
         job_id: JobId,
         dependencies: Vec<JobId>,
         extent_id: usize,
-        source_client_id: u8,
+        source_client_id: ClientId,
         source_repair_address: SocketAddr,
     },
     /// Reopen this extent, for use when upstairs is active.

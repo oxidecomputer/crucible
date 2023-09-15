@@ -233,6 +233,7 @@ async fn fault_downstairs(
             format!("Invalid downstairs client id: {}", cid),
         ));
     }
+    let cid = ClientId(cid);
 
     /*
      * Verify the downstairs is currently in a state where we can
@@ -248,7 +249,7 @@ async fn fault_downstairs(
         ));
     }
     let mut ds = api_context.up.downstairs.lock().await;
-    match ds.ds_state[cid as usize] {
+    match ds.ds_state[usize::from(cid)] {
         DsState::Active
         | DsState::Offline
         | DsState::LiveRepair
