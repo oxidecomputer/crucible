@@ -1771,9 +1771,9 @@ pub(crate) mod up_test {
         // if it's just a write, then it should be false.
         assert_eq!(res, is_write_unwritten);
 
-        assert!(ds.downstairs_errors.get(&ClientId(0)).is_some());
-        assert!(ds.downstairs_errors.get(&ClientId(1)).is_some());
-        assert!(ds.downstairs_errors.get(&ClientId(2)).is_none());
+        assert!(ds.downstairs_errors[ClientId(0)] > 0);
+        assert!(ds.downstairs_errors[ClientId(1)] > 0);
+        assert!(ds.downstairs_errors[ClientId(2)] > 0);
     }
 
     #[tokio::test]
@@ -2370,9 +2370,9 @@ pub(crate) mod up_test {
             Some(vec![Bytes::from_static(&[3])]),
         );
 
-        assert!(ds.downstairs_errors.get(&ClientId(0)).is_none());
-        assert!(ds.downstairs_errors.get(&ClientId(1)).is_none());
-        assert!(ds.downstairs_errors.get(&ClientId(2)).is_none());
+        assert!(ds.downstairs_errors[ClientId(0)] > 0);
+        assert!(ds.downstairs_errors[ClientId(1)] > 0);
+        assert!(ds.downstairs_errors[ClientId(2)] > 0);
 
         // send another read, and expect all to return something
         // (reads shouldn't cause a Failed transition)

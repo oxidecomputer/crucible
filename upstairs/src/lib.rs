@@ -385,6 +385,8 @@ impl<T: Clone> ClientData<T> {
     pub fn new(t: T) -> Self {
         Self([t.clone(), t.clone(), t])
     }
+}
+impl<T> ClientData<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.0.iter()
     }
@@ -404,6 +406,33 @@ impl<'a, T> IntoIterator for &'a ClientData<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ClientMap<T>(ClientData<Option<T>>);
+
+impl<T> ClientMap<T> {
+    fn new() -> Self {
+        Self(ClientData([None, None, None]))
+    }
+    /// Removes a value, returning the old value (or `None`)
+    fn remove(&mut self, c: &ClientId) -> Option<T> {
+        self.0.insert(*c, None)
+    }
+    /// Inserts a new value, returning the old value (or `None`)
+    pub fn insert(&mut self, c: ClientId, v: T) -> Option<T> {
+        self.0.insert(c, Some(v))
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (ClientId, &T)> {
+        self.0
+            .iter()
+            .enumerate()
+            .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId(i as u8), v)))
+    }
+    pub fn get(&self, c: &ClientId) -> Option<&T> {
+        self.0[*c].as_ref()
     }
 }
 
@@ -2816,7 +2845,7 @@ struct Downstairs {
     /**
      * Errors recorded, indexed by client ID.
      */
-    downstairs_errors: HashMap<ClientId, u64>, // client id -> errors
+    downstairs_errors: ClientData<usize>,
 
     /**
      * The active list of IO for the downstairs.
@@ -2857,7 +2886,7 @@ struct Downstairs {
      * We also determine the next flush ID and verify the generation
      * number.
      */
-    region_metadata: HashMap<ClientId, RegionMetadata>,
+    region_metadata: ClientMap<RegionMetadata>,
 
     /**
      * This holds the current piece of repair work that the three
@@ -2979,14 +3008,14 @@ impl Downstairs {
             ds_repair: HashMap::new(),
             ds_state: ClientData::new(DsState::New),
             ds_last_flush: ClientData::new(JobId(0)),
-            downstairs_errors: HashMap::new(),
+            downstairs_errors: ClientData::new(0),
             ds_active: ActiveJobs::new(),
             ds_new: ClientData::new(vec![]),
             ds_skipped_jobs: ClientData::new(HashSet::new()),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
-            region_metadata: HashMap::new(),
+            region_metadata: ClientMap::new(),
             reconcile_current_work: None,
             reconcile_task_list: VecDeque::new(),
             reconcile_repaired: 0,
@@ -4251,13 +4280,7 @@ impl Downstairs {
                             snapshot_details: _,
                             extent_limit: _,
                         } => {
-                            let errors: u64 =
-                                match self.downstairs_errors.get(&client_id) {
-                                    Some(v) => *v,
-                                    None => 0,
-                                };
-                            self.downstairs_errors
-                                .insert(client_id, errors + 1);
+                            self.downstairs_errors[client_id] += 1;
                         }
 
                         // If a repair job errors, mark that downstairs as bad
@@ -4291,13 +4314,7 @@ impl Downstairs {
                             // well as throw out the whole repair and start
                             // over as we can no longer trust results from
                             // the downstairs under repair.
-                            let errors: u64 =
-                                match self.downstairs_errors.get(&client_id) {
-                                    Some(v) => *v,
-                                    None => 0,
-                                };
-                            self.downstairs_errors
-                                .insert(client_id, errors + 1);
+                            self.downstairs_errors[client_id] += 1;
                         }
 
                         // If a read job fails, we sometimes need to panic.
@@ -6603,7 +6620,7 @@ impl Upstairs {
          */
         let mut max_flush = 0;
         let mut max_gen = 0;
-        for (cid, rec) in &ds.region_metadata {
+        for (cid, rec) in ds.region_metadata.iter() {
             let mf = rec.flush_numbers.iter().max().unwrap() + 1;
             if mf > max_flush {
                 max_flush = mf;
