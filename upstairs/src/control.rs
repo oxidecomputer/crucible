@@ -149,6 +149,11 @@ async fn upstairs_fill_info(
     let live_repair_completed = ds.live_repair_completed;
     let live_repair_aborted = ds.live_repair_aborted;
 
+    // Convert from a map of extent limits to a Vec<Option<usize>>
+    let extent_limit = ClientId::iter()
+        .map(|i| extent_limit.get(&i).cloned())
+        .collect();
+
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
         ds_state: ds_state.0.to_vec(),
@@ -158,7 +163,7 @@ async fn upstairs_fill_info(
         repair_needed,
         extents_repaired: extents_repaired.0.to_vec(),
         extents_confirmed: extents_confirmed.0.to_vec(),
-        extent_limit: extent_limit.0.to_vec(),
+        extent_limit,
         live_repair_completed: live_repair_completed.0.to_vec(),
         live_repair_aborted: live_repair_aborted.0.to_vec(),
     }))

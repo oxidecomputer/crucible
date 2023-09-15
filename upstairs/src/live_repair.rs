@@ -225,7 +225,7 @@ async fn live_repair_main(
     // Make sure things are as we expect them to be.
     assert!(ds.repair_job_ids.is_empty());
     // Verify no extent_limits are Some
-    assert_eq!(ds.extent_limit.iter().flatten().count(), 0);
+    assert_eq!(ds.extent_limit.iter().count(), 0);
     // When we transitioned this downstairs to LiveRepair, it should have set
     // the minimum for repair, though we will update it again below.
     assert!(ds.repair_min_id.is_some());
@@ -309,7 +309,7 @@ async fn live_repair_main(
 
             // Verify state has been cleared.
             for cid in ClientId::iter() {
-                assert_eq!(ds.extent_limit[cid], None);
+                assert!(ds.extent_limit.get(&cid).is_none());
                 assert!(ds.ds_state[cid] != DsState::LiveRepair);
             }
             // This will not be set until the repair task exits.
@@ -387,7 +387,7 @@ async fn live_repair_main(
 
     if failed_repair {
         for cid in ClientId::iter() {
-            assert!(ds.extent_limit[cid].is_none());
+            assert!(ds.extent_limit.get(&cid).is_none());
             assert!(ds.ds_state[cid] != DsState::LiveRepair);
         }
         for &cid in repair_downstairs.iter() {
@@ -1022,11 +1022,14 @@ impl Upstairs {
         for ds_repair in repair.iter() {
             // We should be walking up the extents one at a time.
             if eid > 0 {
-                assert_eq!(ds.extent_limit[*ds_repair], Some(eid as usize - 1));
+                assert_eq!(
+                    ds.extent_limit.get(ds_repair).cloned(),
+                    Some(eid as usize - 1)
+                );
             } else {
-                assert!(ds.extent_limit[*ds_repair].is_none())
+                assert!(ds.extent_limit.get(ds_repair).is_none())
             }
-            ds.extent_limit[*ds_repair] = Some(eid as usize);
+            ds.extent_limit.insert(*ds_repair, eid as usize);
         }
         let ddef = self.ddef.lock().await.get_def().unwrap();
 
@@ -2738,7 +2741,7 @@ pub mod repair_test {
         let id = 1000;
 
         let mut ds = up.downstairs.lock().await;
-        assert!(ds.extent_limit[ClientId::new(1)].is_none());
+        assert!(ds.extent_limit.get(&ClientId::new(1)).is_none());
         // Check all three IOs.
         for job_id in (id..id + 3).map(JobId) {
             assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
@@ -2756,7 +2759,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -2812,7 +2815,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         up.submit_write(
@@ -2864,7 +2867,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         up.submit_write(
@@ -2957,7 +2960,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3048,7 +3051,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3114,7 +3117,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3186,7 +3189,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3225,7 +3228,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         let ddef = up.ddef.lock().await.get_def().unwrap();
         let eid = 1;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
         let close_id = JobId(1000);
@@ -3821,7 +3825,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let ddef = up.ddef.lock().await.get_def().unwrap();
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
@@ -3880,7 +3885,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let ddef = up.ddef.lock().await.get_def().unwrap();
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
@@ -3959,7 +3965,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let ddef = up.ddef.lock().await.get_def().unwrap();
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
@@ -4029,7 +4036,8 @@ pub mod repair_test {
         let ddef = up.ddef.lock().await.get_def().unwrap();
 
         let eid = 1;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
         // Upstairs "guest" work IDs.
@@ -4121,7 +4129,8 @@ pub mod repair_test {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
         let ddef = up.ddef.lock().await.get_def().unwrap();
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
         // Upstairs "guest" work IDs.
@@ -4162,7 +4171,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         let ddef = up.ddef.lock().await.get_def().unwrap();
 
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         let impacted_blocks = extent_to_impacted_blocks(&ddef, eid);
 
         let gw_repair_id: u64 = gw.next_gw_id();
@@ -4223,7 +4233,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_close_op(&up, eid).await;
@@ -4276,7 +4287,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_close_op(&up, eid).await;
@@ -4340,7 +4352,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_close_op(&up, eid).await;
@@ -4375,7 +4388,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
 
         drop(ds);
 
@@ -4416,7 +4430,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_close_op(&up, eid).await;
@@ -4455,7 +4470,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit[ClientId::new(1)] = Some(eid.try_into().unwrap());
+        ds.extent_limit
+            .insert(ClientId::new(1), eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_close_op(&up, eid).await;
@@ -5188,7 +5204,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         // A write of blocks 2,3,4 which spans extents.
@@ -5243,7 +5259,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         // A read of blocks 2,3,4 which spans extents.
@@ -5296,7 +5312,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         up.submit_flush(None, None, ds_done_tx.clone())
@@ -5318,7 +5334,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         let job_id = JobId(1000);
@@ -5392,7 +5408,7 @@ pub mod repair_test {
 
         let eid = 0;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(eid);
+        ds.extent_limit.insert(ClientId::new(1), eid);
         drop(ds);
 
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5416,7 +5432,7 @@ pub mod repair_test {
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
             assert_eq!(job.state[ClientId::new(2)], IOState::New);
         }
-        assert_eq!(ds.extent_limit[ClientId::new(1)], None);
+        assert_eq!(ds.extent_limit.get(&ClientId::new(1)), None);
     }
 
     #[tokio::test]
@@ -5430,7 +5446,7 @@ pub mod repair_test {
 
         let eid = 0;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(eid);
+        ds.extent_limit.insert(ClientId::new(1), eid);
         drop(ds);
 
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5477,9 +5493,9 @@ pub mod repair_test {
 
         let eid = 0;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(0)] = Some(eid);
-        ds.extent_limit[ClientId::new(1)] = Some(eid);
-        ds.extent_limit[ClientId::new(2)] = Some(eid);
+        ds.extent_limit.insert(ClientId::new(0), eid);
+        ds.extent_limit.insert(ClientId::new(1), eid);
+        ds.extent_limit.insert(ClientId::new(2), eid);
         drop(ds);
 
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5678,7 +5694,7 @@ pub mod repair_test {
         submit_three_ios(&up, &ds_done_tx).await;
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit[ClientId::new(1)] = Some(1);
+        ds.extent_limit.insert(ClientId::new(1), 1);
         drop(ds);
 
         // New jobs will go -> Skipped for the downstairs in repair.
@@ -6020,7 +6036,7 @@ pub mod repair_test {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
-        ds.extent_limit[ClientId::new(1)] = Some(eid as usize);
+        ds.extent_limit.insert(ClientId::new(1), eid as usize);
 
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = gw.next_gw_id();
@@ -6192,7 +6208,7 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         // Make extent 0 under repair
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         // A write of blocks 2,3,4 which spans extents 0-1.
@@ -6289,7 +6305,7 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         // Make extent 0 under repair
-        ds.extent_limit[ClientId::new(1)] = Some(0);
+        ds.extent_limit.insert(ClientId::new(1), 0);
         drop(ds);
 
         // A write of blocks 3,4,5,6 which spans extents 1-2.

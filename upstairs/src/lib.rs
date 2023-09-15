@@ -1078,7 +1078,7 @@ where
                  * any work that we were holding that we did not flush.
                  */
                 ds.re_new(up_coms.client_id);
-                assert!(ds.extent_limit[up_coms.client_id].is_none());
+                assert!(ds.extent_limit.get(&up_coms.client_id).is_none());
             }
             _ => {
                 panic!(
@@ -2977,7 +2977,7 @@ struct Downstairs {
      * This is only used during live repair, and will only ever be
      * set on a downstairs that is undergoing live repair.
      */
-    extent_limit: ClientData<Option<usize>>,
+    extent_limit: ClientMap<usize>,
 
     /**
      * Live Repair Job IDs
@@ -3040,7 +3040,7 @@ impl Downstairs {
             extents_confirmed: ClientData::new(0),
             live_repair_completed: ClientData::new(0),
             live_repair_aborted: ClientData::new(0),
-            extent_limit: ClientData::new(None),
+            extent_limit: ClientMap::new(),
             repair_job_ids: HashMap::new(),
             repair_min_id: None,
             connected: ClientData::new(0),
@@ -3054,7 +3054,7 @@ impl Downstairs {
      */
     fn end_live_repair(&mut self) {
         self.repair_info = ClientMap::new();
-        self.extent_limit = ClientData::new(None);
+        self.extent_limit = ClientMap::new();
         self.repair_job_ids = HashMap::new();
         self.repair_min_id = None;
     }
@@ -3565,7 +3565,7 @@ impl Downstairs {
         self.ds_new[client_id].clear();
 
         // As this downstairs is now faulted, we clear the extent_limit.
-        self.extent_limit[client_id] = None;
+        self.extent_limit.remove(&client_id);
         notify_guest
     }
 
@@ -3642,7 +3642,7 @@ impl Downstairs {
                     self.ds_skipped_jobs[cid].insert(io.ds_id);
                 }
                 DsState::LiveRepair => {
-                    let my_limit = self.extent_limit[cid];
+                    let my_limit = self.extent_limit.get(&cid).cloned();
                     assert!(self.repair_min_id.is_some());
                     if io
                         .work
@@ -4866,7 +4866,7 @@ impl Downstairs {
     fn get_extent_under_repair(&self) -> Option<u64> {
         let mut extent_under_repair = None;
         for cid in ClientId::iter() {
-            if let Some(eur) = self.extent_limit[cid] {
+            if let Some(&eur) = self.extent_limit.get(&cid) {
                 if extent_under_repair.is_none() {
                     extent_under_repair = Some(eur as u64);
                 } else {
