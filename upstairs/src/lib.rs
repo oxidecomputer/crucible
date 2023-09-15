@@ -364,6 +364,7 @@ pub fn deadline_secs(secs: f32) -> Instant {
         .unwrap()
 }
 
+/// Array of data associated with three clients, indexed by `ClientId`
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ClientData<T>([T; 3]);
@@ -409,6 +410,7 @@ impl<'a, T> IntoIterator for &'a ClientData<T> {
     }
 }
 
+/// Map of data associated with clients, keyed by `ClientId`
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ClientMap<T>(ClientData<Option<T>>);
