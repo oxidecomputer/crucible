@@ -391,6 +391,11 @@ impl<T: Clone> ClientData<T> {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.0.iter_mut()
     }
+    /// Inserts a new value, returning the old value
+    pub fn insert(&mut self, c: ClientId, mut v: T) -> T {
+        std::mem::swap(&mut self[c], &mut v);
+        v
+    }
 }
 
 impl<'a, T> IntoIterator for &'a ClientData<T> {
@@ -3052,12 +3057,12 @@ impl Downstairs {
         let job = handle.job();
 
         // If current state is Skipped, then we have nothing to do here.
-        if job.state[&client_id] == IOState::Skipped {
+        if matches!(job.state[client_id], IOState::Skipped) {
             return None;
         }
 
         let new_state = IOState::InProgress;
-        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone());
         assert_eq!(old_state, IOState::New);
         self.io_state_count.decr(&old_state, client_id);
         self.io_state_count.incr(&new_state, client_id);
@@ -3195,7 +3200,7 @@ impl Downstairs {
              * work for this client to do. Make sure we don't send the the
              * same message twice.
              */
-            if old_state != Some(IOState::New) {
+            if old_state != IOState::New {
                 info!(
                     self.log,
                     "[{}] rep_in_progress ignore submitted job {:?}",
@@ -3220,12 +3225,12 @@ impl Downstairs {
      */
     fn rep_done(&mut self, client_id: ClientId, rep_id: u64) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
-            let old_state = job.state.insert(client_id, IOState::Done).unwrap();
+            let old_state = job.state.insert(client_id, IOState::Done);
             assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
             let mut done = 0;
 
-            for (_, s) in job.state.iter() {
+            for s in job.state.iter() {
                 if s == &IOState::Done || s == &IOState::Skipped {
                     done += 1;
                 }
@@ -3338,12 +3343,11 @@ impl Downstairs {
         );
 
         self.ds_active.for_each(|ds_id, job| {
-            let state = job.state.get(&client_id).unwrap();
+            let state = &job.state[client_id];
 
-            if *state == IOState::InProgress || *state == IOState::New {
+            if matches!(state, IOState::InProgress | IOState::New) {
                 info!(self.log, "{} change {} to skipped", client_id, ds_id);
-                let old_state =
-                    job.state.insert(client_id, IOState::Skipped).unwrap();
+                let old_state = job.state.insert(client_id, IOState::Skipped);
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id].insert(*ds_id);
@@ -3388,7 +3392,7 @@ impl Downstairs {
 
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
-                assert_eq!(Some(&IOState::Done), job.state.get(&client_id));
+                assert_eq!(IOState::Done, job.state[client_id]);
                 return;
             }
 
@@ -3397,7 +3401,7 @@ impl Downstairs {
              * to New and no extra work is required.
              * If it's Done, then we need to look further
              */
-            if Some(&IOState::Done) == job.state.get(&client_id) {
+            if IOState::Done == job.state[client_id] {
                 /*
                  * If the job is acked, then we are good to go and
                  * we can re-send it downstairs and the upstairs ack
@@ -3437,7 +3441,7 @@ impl Downstairs {
                     }
                 }
             }
-            let old_state = job.state.insert(client_id, IOState::New).unwrap();
+            let old_state = job.state.insert(client_id, IOState::New);
             job.replay = true;
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
@@ -3466,11 +3470,10 @@ impl Downstairs {
         let mut number_jobs_skipped = 0;
 
         self.ds_active.for_each(|ds_id, job| {
-            let state = job.state.get(&client_id).unwrap();
+            let state = &job.state[client_id];
 
-            if *state == IOState::InProgress || *state == IOState::New {
-                let old_state =
-                    job.state.insert(client_id, IOState::Skipped).unwrap();
+            if matches!(state, IOState::InProgress | IOState::New) {
+                let old_state = job.state.insert(client_id, IOState::Skipped);
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
                 self.ds_skipped_jobs[client_id].insert(*ds_id);
@@ -3576,7 +3579,7 @@ impl Downstairs {
         let mut skipped = 0;
         let is_write = matches!(io.work, IOop::Write { .. });
         for cid in (0..3).map(ClientId) {
-            assert_eq!(io.state[&cid], IOState::New);
+            assert_eq!(io.state[cid], IOState::New);
 
             let current = self.ds_state[cid];
             // If a downstairs is faulted or ready for repair, we can move
@@ -3656,7 +3659,7 @@ impl Downstairs {
     async fn enqueue_repair(&mut self, mut io: DownstairsIO) {
         // Puts the repair IO onto the downstairs work queue.
         for cid in (0..3).map(ClientId) {
-            assert_eq!(io.state[&cid], IOState::New);
+            assert_eq!(io.state[cid], IOState::New);
 
             let current = self.ds_state[cid];
             // If a downstairs is faulted, we can move that job directly
@@ -4104,7 +4107,7 @@ impl Downstairs {
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         let job = handle.job();
 
-        if job.state[&client_id] == IOState::Skipped {
+        if job.state[client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
             // all required action was taken on it.  We can drop any more
             // processing of it here and return.
@@ -4202,7 +4205,7 @@ impl Downstairs {
             IOState::Done
         };
 
-        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone());
         self.io_state_count.decr(&old_state, client_id);
         self.io_state_count.incr(&new_state, client_id);
 
@@ -4705,8 +4708,8 @@ impl Downstairs {
                 self.completed.push(id);
                 let summary = job.io_summarize();
                 self.completed_jobs.push(summary);
-                for cid in (0..3).map(ClientId) {
-                    let old_state = job.state.get(&cid).unwrap();
+                for cid in ClientId::iter() {
+                    let old_state = &job.state[cid];
                     self.io_state_count.decr(old_state, cid);
                 }
             }
@@ -4717,7 +4720,7 @@ impl Downstairs {
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
-            for cid in (0..3).map(ClientId) {
+            for cid in ClientId::iter() {
                 self.ds_skipped_jobs[cid].retain(|&x| x >= ds_id);
             }
         }
@@ -4754,10 +4757,7 @@ impl Downstairs {
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let state = job
-            .state
-            .get(&client_id)
-            .ok_or_else(|| anyhow!("state for client {} missing", client_id))?;
+        let state = &job.state[client_id];
 
         if let IOState::Error(e) = state {
             Err(e.clone())
@@ -5576,7 +5576,7 @@ impl Upstairs {
              * we are not ready to deactivate.
              */
             for (id, job) in &ds.ds_active {
-                let state = job.state.get(&client_id).unwrap();
+                let state = &job.state[client_id];
                 if state == &IOState::New || state == &IOState::InProgress {
                     info!(
                         self.log,
@@ -6566,7 +6566,7 @@ impl Upstairs {
             // Assert if not None, then job is all done.
             if let Some(job) = &mut ds.reconcile_current_work {
                 let mut done = 0;
-                for (_, s) in job.state.iter() {
+                for s in job.state.iter() {
                     if s == &IOState::Done || s == &IOState::Skipped {
                         done += 1;
                     }
@@ -7815,16 +7815,8 @@ struct DownstairsIO {
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
 
-    /*
-     * Hash of work status where key is the downstairs "client id" and the
-     * hash value is the current state of the IO request with respect to the
-     * upstairs.
-     * The length and keys on this hashmap will be used to determine which
-     * downstairs will receive the IO request.
-     * XXX Determine if it is required for all downstairs to get an entry
-     * or if by not putting a downstairs in the hash, if that is valid.
-     */
-    state: HashMap<ClientId, IOState>,
+    /// Map of work status, tracked on a per-client basis
+    state: ClientData<IOState>,
 
     /*
      * Has this been acked to the guest yet?
@@ -7852,7 +7844,7 @@ impl DownstairsIO {
     fn state_count(&self) -> WorkCounts {
         let mut wc: WorkCounts = Default::default();
 
-        for state in self.state.values() {
+        for state in self.state.iter() {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
                 IOState::Error(_) => wc.error += 1,
@@ -7935,16 +7927,13 @@ impl DownstairsIO {
         /*
          * Convert the possible job states (and handle the None)
          */
-        for cid in (0..3).map(ClientId) {
+        for cid in ClientId::iter() {
             /*
              * We don't ever expect the job state to return None, but
              * if it does because something else is wrong, I don't want
              * to panic here while trying to debug it.
              */
-            let dss = match self.state.get(&cid) {
-                Some(x) => format!("{}", x).to_string(),
-                None => " ???".to_string(),
-            };
+            let dss = format!("{}", self.state[cid]);
             state.push(dss);
         }
 
@@ -7978,16 +7967,16 @@ struct WorkSummary {
 struct ReconcileIO {
     id: u64,
     op: Message,
-    state: HashMap<ClientId, IOState>,
+    state: ClientData<IOState>,
 }
 
 impl ReconcileIO {
     fn new(id: u64, op: Message) -> ReconcileIO {
-        let mut state = HashMap::new();
-        for cl in (0..3).map(ClientId) {
-            state.insert(cl, IOState::New);
+        ReconcileIO {
+            id,
+            op,
+            state: ClientData::new(IOState::New),
         }
-        ReconcileIO { id, op, state }
     }
 }
 /*
@@ -10347,16 +10336,11 @@ fn create_write_eob(
         }
     };
 
-    let mut state = HashMap::new();
-    for cl in (0..3).map(ClientId) {
-        state.insert(cl, IOState::New);
-    }
-
     DownstairsIO {
         ds_id,
         guest_id: gw_id,
         work: awrite,
-        state,
+        state: ClientData::new(IOState::New),
         ack_status: AckStatus::NotAcked,
         replay: false,
         data: None,
@@ -10382,16 +10366,11 @@ fn create_read_eob(
         requests,
     };
 
-    let mut state = HashMap::new();
-    for cl in (0..3).map(ClientId) {
-        state.insert(cl, IOState::New);
-    }
-
     DownstairsIO {
         ds_id,
         guest_id: gw_id,
         work: aread,
-        state,
+        state: ClientData::new(IOState::New),
         ack_status: AckStatus::NotAcked,
         replay: false,
         data: None,
@@ -10422,15 +10401,11 @@ fn create_flush(
         extent_limit,
     };
 
-    let mut state = HashMap::new();
-    for cl in (0..3).map(ClientId) {
-        state.insert(cl, IOState::New);
-    }
     DownstairsIO {
         ds_id,
         guest_id,
         work: flush,
-        state,
+        state: ClientData::new(IOState::New),
         ack_status: AckStatus::NotAcked,
         replay: false,
         data: None,
@@ -10575,18 +10550,11 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                 job.guest_id, ack, id, job_type, num_blocks
             );
 
-            for cid in (0..3).map(ClientId) {
-                let state = job.state.get(&cid);
-                match state {
-                    Some(state) => {
-                        // XXX I have no idea why this is two spaces instead of
-                        // one...
-                        print!("  {0:>5}", state);
-                    }
-                    _x => {
-                        print!("  {0:>5}", "????");
-                    }
-                }
+            for cid in ClientId::iter() {
+                let state = &job.state[cid];
+                // XXX I have no idea why this is two spaces instead of
+                // one...
+                print!("  {0:>5}", state);
             }
             print!(" {0:>6}", job.replay);
 

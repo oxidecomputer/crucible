@@ -4748,7 +4748,7 @@ pub(crate) mod up_test {
         assert!(ds.rep_in_progress(ClientId(0)).is_some());
         if let Some(job) = &mut ds.reconcile_current_work {
             let oldstate = job.state.insert(ClientId(1), IOState::Skipped);
-            assert_eq!(oldstate, Some(IOState::New));
+            assert_eq!(oldstate, IOState::New);
         } else {
             panic!("Failed to find next task");
         }
@@ -4788,7 +4788,7 @@ pub(crate) mod up_test {
         // Mark one as skipped
         if let Some(job) = &mut ds.reconcile_current_work {
             let oldstate = job.state.insert(ClientId(1), IOState::Skipped);
-            assert_eq!(oldstate, Some(IOState::New));
+            assert_eq!(oldstate, IOState::New);
         } else {
             panic!("Failed to find next task");
         }
@@ -4875,9 +4875,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentFlush()", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
 
         // Second task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -4894,9 +4894,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
 
         // Third task, repair extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -4919,9 +4919,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentRepair", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
 
         // Third task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -4938,9 +4938,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
     }
 
     #[tokio::test]
@@ -4992,9 +4992,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentFlush()", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
 
         // Second task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -5011,9 +5011,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
 
         // Third task, repair extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -5036,9 +5036,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentRepair", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
 
         // Third task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -5055,9 +5055,9 @@ pub(crate) mod up_test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(0)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(1)));
-        assert_eq!(Some(&IOState::New), rio.state.get(&ClientId(2)));
+        assert_eq!(IOState::New, rio.state[ClientId(0)]);
+        assert_eq!(IOState::New, rio.state[ClientId(1)]);
+        assert_eq!(IOState::New, rio.state[ClientId(2)]);
     }
 
     #[tokio::test]
@@ -6417,9 +6417,9 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&read_id).unwrap();
 
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::New);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::New);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
+        assert_eq!(job.state[ClientId(0)], IOState::New);
+        assert_eq!(job.state[ClientId(1)], IOState::New);
+        assert_eq!(job.state[ClientId(2)], IOState::New);
 
         drop(ds);
 
@@ -6456,9 +6456,9 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&read_id).unwrap();
 
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::New);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
+        assert_eq!(job.state[ClientId(0)], IOState::New);
+        assert_eq!(job.state[ClientId(1)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(2)], IOState::New);
 
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
@@ -6524,9 +6524,9 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&read_id).unwrap();
 
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::InProgress);
+        assert_eq!(job.state[ClientId(0)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(1)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(2)], IOState::InProgress);
 
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
@@ -6577,9 +6577,9 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
             let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
             let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
         }
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
@@ -6615,16 +6615,16 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
             let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
             let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
         }
         let job = ds.ds_active.get(&write_fail).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Done);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(0)], IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
         assert_eq!(
-            job.state.get(&ClientId(2)).unwrap(),
-            &IOState::Error(CrucibleError::GenericError("bad".to_string()))
+            job.state[ClientId(2)],
+            IOState::Error(CrucibleError::GenericError("bad".to_string()))
         );
 
         // A failed job does not change the skipped count.
@@ -6680,9 +6680,9 @@ pub(crate) mod up_test {
         let ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
             let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
             let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
         }
         drop(ds);
 
@@ -6720,26 +6720,26 @@ pub(crate) mod up_test {
         for cid in ClientId::iter() {
             // First read, still Done
             let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
             // First write, still Done
             let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state.get(&cid).unwrap(), &IOState::Done);
+            assert_eq!(job.state[cid], IOState::Done);
         }
         // The failing write, done on 0,1
         let job = ds.ds_active.get(&write_fail).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Done);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(0)], IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
         // The failing write, error on 2
         assert_eq!(
-            job.state.get(&ClientId(2)).unwrap(),
-            &IOState::Error(CrucibleError::GenericError("bad".to_string()))
+            job.state[ClientId(2)],
+            IOState::Error(CrucibleError::GenericError("bad".to_string()))
         );
 
         // The reads that were in progress
         let job = ds.ds_active.get(&read_two).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
 
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 0);
         assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 0);
@@ -6777,19 +6777,19 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::New);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::New);
+        assert_eq!(job.state[ClientId(2)], IOState::New);
 
         let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::New);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::New);
+        assert_eq!(job.state[ClientId(2)], IOState::New);
 
         let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::New);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::New);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::New);
+        assert_eq!(job.state[ClientId(2)], IOState::New);
 
         // Three skipped jobs for downstairs zero
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 3);
@@ -6829,19 +6829,19 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::InProgress);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::InProgress);
 
         let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::InProgress);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::InProgress);
 
         let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::InProgress);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::InProgress);
 
         // Three skipped jobs on downstairs client 0
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 3);
@@ -6882,14 +6882,14 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
+        assert_eq!(job.state[ClientId(2)], IOState::Done);
         let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
+        assert_eq!(job.state[ClientId(2)], IOState::Done);
         let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
+        assert_eq!(job.state[ClientId(2)], IOState::Done);
 
         ds.ack(read_one);
         ds.ack(write_one);
@@ -6942,19 +6942,19 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
 
         let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
 
         let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::InProgress);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
 
         // Skipped jobs added on downstairs client 0
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 3);
@@ -6986,11 +6986,11 @@ pub(crate) mod up_test {
         let mut ds = up.downstairs.lock().await;
 
         let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
         let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
         let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Done);
+        assert_eq!(job.state[ClientId(1)], IOState::Done);
 
         ds.ack(read_one);
         ds.ack(write_one);
@@ -7040,9 +7040,9 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
 
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
         assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
@@ -7089,9 +7089,9 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
 
         assert_eq!(ds.ds_skipped_jobs[ClientId(0)].len(), 1);
         assert_eq!(ds.ds_skipped_jobs[ClientId(1)].len(), 1);
@@ -7138,9 +7138,9 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state.get(&ClientId(0)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(1)).unwrap(), &IOState::Skipped);
-        assert_eq!(job.state.get(&ClientId(2)).unwrap(), &IOState::Skipped);
+        assert_eq!(job.state[ClientId(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(1)], IOState::Skipped);
+        assert_eq!(job.state[ClientId(2)], IOState::Skipped);
         for cid in ClientId::iter() {
             assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
             assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
