@@ -2778,13 +2778,13 @@ mod test {
         guest.activate().await?;
         guest.query_work_queue().await?;
 
-        // Verify contents are zero on init
+        // Read of length 0
         let buffer = Buffer::new(0);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
-        // Write zero data in
+        // Write of length 0
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
