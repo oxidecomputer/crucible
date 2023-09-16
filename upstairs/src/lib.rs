@@ -8406,7 +8406,6 @@ impl IOStateCount {
 
     pub fn incr(&mut self, state: &IOState, cid: ClientId) {
         let cid = cid.get() as usize;
-        assert!(cid < 3);
         match state {
             IOState::New => {
                 self.new[cid] += 1;
@@ -8428,7 +8427,6 @@ impl IOStateCount {
 
     pub fn decr(&mut self, state: &IOState, cid: ClientId) {
         let cid = cid.get() as usize;
-        assert!(cid < 3);
         match state {
             IOState::New => {
                 self.new[cid] -= 1;

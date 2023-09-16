@@ -327,7 +327,6 @@ fn find_dest(
     c2: &RegionMetadata,
     log: &Logger,
 ) -> Vec<ClientId> {
-    assert!(source.get() < 3);
     let mut dest: Vec<ClientId> = Vec::new();
 
     /*
