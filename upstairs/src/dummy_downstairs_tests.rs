@@ -20,6 +20,7 @@ pub(crate) mod protocol_test {
     use crucible_common::Block;
     use crucible_common::RegionDefinition;
     use crucible_common::RegionOptions;
+    use crucible_protocol::ClientId;
     use crucible_protocol::CrucibleDecoder;
     use crucible_protocol::CrucibleEncoder;
     use crucible_protocol::JobId;
@@ -1508,7 +1509,7 @@ pub(crate) mod protocol_test {
                     source_client_id,
                     ..
                 } => {
-                    bail_assert!(*source_client_id != 0);
+                    bail_assert!(*source_client_id != ClientId::new(0));
                     bail_assert!(*extent_id == eid);
 
                     ds1.fw
@@ -2303,7 +2304,7 @@ pub(crate) mod protocol_test {
                 source_client_id,
                 ..
             } => {
-                bail_assert!(*source_client_id != 0);
+                bail_assert!(*source_client_id != ClientId::new(0));
                 bail_assert!(*extent_id == 0);
 
                 // send back error report here!

@@ -143,24 +143,29 @@ async fn upstairs_fill_info(
     let ds_jobs = ds.ds_active.len();
     let repair_done = ds.reconcile_repaired;
     let repair_needed = ds.reconcile_repair_needed;
-    let extents_repaired = ds.extents_repaired.clone();
-    let extents_confirmed = ds.extents_confirmed.clone();
-    let extent_limit = ds.extent_limit.clone();
-    let live_repair_completed = ds.live_repair_completed.clone();
-    let live_repair_aborted = ds.live_repair_aborted.clone();
+    let extents_repaired = ds.extents_repaired;
+    let extents_confirmed = ds.extents_confirmed;
+    let extent_limit = ds.extent_limit;
+    let live_repair_completed = ds.live_repair_completed;
+    let live_repair_aborted = ds.live_repair_aborted;
+
+    // Convert from a map of extent limits to a Vec<Option<usize>>
+    let extent_limit = ClientId::iter()
+        .map(|i| extent_limit.get(&i).cloned())
+        .collect();
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
-        ds_state,
+        ds_state: ds_state.0.to_vec(),
         up_jobs,
         ds_jobs,
         repair_done,
         repair_needed,
-        extents_repaired,
-        extents_confirmed,
+        extents_repaired: extents_repaired.0.to_vec(),
+        extents_confirmed: extents_confirmed.0.to_vec(),
         extent_limit,
-        live_repair_completed,
-        live_repair_aborted,
+        live_repair_completed: live_repair_completed.0.to_vec(),
+        live_repair_aborted: live_repair_aborted.0.to_vec(),
     }))
 }
 
@@ -233,6 +238,7 @@ async fn fault_downstairs(
             format!("Invalid downstairs client id: {}", cid),
         ));
     }
+    let cid = ClientId::new(cid);
 
     /*
      * Verify the downstairs is currently in a state where we can
@@ -248,7 +254,7 @@ async fn fault_downstairs(
         ));
     }
     let mut ds = api_context.up.downstairs.lock().await;
-    match ds.ds_state[cid as usize] {
+    match ds.ds_state[cid] {
         DsState::Active
         | DsState::Offline
         | DsState::LiveRepair
