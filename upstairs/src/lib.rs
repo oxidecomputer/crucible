@@ -3720,18 +3720,6 @@ impl Downstairs {
         self.ds_active.insert(ds_id, io);
     }
 
-    /**
-     * Collect the state of the jobs from each client.
-     */
-    fn state_count(&self, ds_id: JobId) -> Result<WorkCounts> {
-        /* XXX Should this support invalid ds_ids? */
-        let job = self
-            .ds_active
-            .get(&ds_id)
-            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
-        Ok(job.state_count())
-    }
-
     fn ack(&mut self, ds_id: JobId) {
         /*
          * Move AckReady to Acked.
@@ -3773,12 +3761,12 @@ impl Downstairs {
         /*
          * TODO: this doesn't tell the Guest what the error(s) were?
          */
-        let wc = self.state_count(ds_id).unwrap();
 
         let job = self
             .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        let wc = job.state_count();
 
         let bad_job = match &job.work {
             IOop::Read { .. } => wc.error == 3,
@@ -4127,20 +4115,12 @@ impl Downstairs {
         let mut notify_guest = false;
         let deactivate = up_state == UpState::Deactivating;
 
-        /*
-         * Get the completed count now,
-         * because the job self ref won't let us call state_count once we are
-         * using that ref, and the number won't change while we are in
-         * this method (you did get the lock first, right??).
-         */
-        let wc = self.state_count(ds_id)?;
-        let mut jobs_completed_ok = wc.completed_ok();
-
         let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         let job = handle.job();
+        let mut jobs_completed_ok = job.state_count().completed_ok();
 
         if job.state[client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
@@ -4688,7 +4668,7 @@ impl Downstairs {
 
         // Only a completed flush will remove jobs from the active queue -
         // currently we have to keep everything around for use during replay
-        let wc = self.state_count(ds_id).unwrap();
+        let wc = self.ds_active.get(&ds_id).unwrap().state_count();
         if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
@@ -4709,7 +4689,7 @@ impl Downstairs {
                 // there is nothing to prevent a flush ACK from getting
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
-                let wc = self.state_count(id).unwrap();
+                let wc = job.state_count();
                 if wc.active != 0 || job.ack_status != AckStatus::Acked {
                     warn!(
                         self.log,
