@@ -740,25 +740,18 @@ where
      * lock for the hashmap while we do work, and if we release the lock
      * to do work, we would have to start over and look at all jobs in the
      * map to see if they are new.
-     *
-     * This also allows us to sort the job ids and do them in order they
-     * were put into the hashmap, though I don't think that is required.
      */
-    new_work.sort_unstable();
-
     let mut active_count = u.downstairs.lock().await.submitted_work(client_id);
-    for ndx in 0..new_work.len() {
+    while let Some(new_id) = new_work.pop_first() {
         if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
+            new_work.insert(new_id);
             let mut ds = u.downstairs.lock().await;
-            ds.requeue_work(client_id, &new_work[ndx..]);
+            ds.requeue_work(client_id, new_work);
             ds.flow_control[client_id] += 1;
-            drop(ds);
             return Ok(true);
         }
-
-        let new_id = new_work[ndx];
 
         /*
          * Walk the list of work to do, update its status as in progress
@@ -768,7 +761,7 @@ where
             /*
              * Requeue this work so it isn't completely lost.
              */
-            u.downstairs.lock().await.requeue_work(client_id, &[new_id]);
+            u.downstairs.lock().await.requeue_one(client_id, new_id);
             continue;
         }
 
@@ -2861,7 +2854,7 @@ struct Downstairs {
     /**
      * Cache of new jobs, indexed by client ID.
      */
-    ds_new: ClientData<Vec<JobId>>,
+    ds_new: ClientData<BTreeSet<JobId>>,
 
     /**
      * Jobs that have been skipped, indexed by client ID.
@@ -3016,7 +3009,7 @@ impl Downstairs {
             ds_last_flush: ClientData::new(JobId(0)),
             downstairs_errors: ClientData::new(0),
             ds_active: ActiveJobs::new(),
-            ds_new: ClientData::new(vec![]),
+            ds_new: ClientData::new(BTreeSet::new()),
             ds_skipped_jobs: ClientData::new(HashSet::new()),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
@@ -3481,7 +3474,7 @@ impl Downstairs {
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::New, client_id);
-                self.ds_new[client_id].push(*ds_id);
+                self.ds_new[client_id].insert(*ds_id);
             }
         });
     }
@@ -3566,16 +3559,24 @@ impl Downstairs {
      * Return a list of downstairs request IDs that represent unissued
      * requests for this client.
      */
-    fn new_work(&mut self, client_id: ClientId) -> Vec<JobId> {
-        self.ds_new[client_id].drain(..).collect()
+    fn new_work(&mut self, client_id: ClientId) -> BTreeSet<JobId> {
+        std::mem::take(&mut self.ds_new[client_id])
     }
 
     /**
      * Called to requeue work that was previously found by calling
      * [`new_work`], presumably due to flow control.
      */
-    fn requeue_work(&mut self, client_id: ClientId, work: &[JobId]) {
-        self.ds_new[client_id].extend_from_slice(work);
+    fn requeue_work(&mut self, client_id: ClientId, mut work: BTreeSet<JobId>) {
+        self.ds_new[client_id].append(&mut work);
+    }
+
+    /**
+     * Called to requeue a single job that was previously found by calling
+     * [`new_work`], presumably due to flow control.
+     */
+    fn requeue_one(&mut self, client_id: ClientId, work: JobId) {
+        self.ds_new[client_id].insert(work);
     }
 
     /**
@@ -3643,7 +3644,7 @@ impl Downstairs {
                     {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
-                        self.ds_new[cid].push(io.ds_id);
+                        self.ds_new[cid].insert(io.ds_id);
                     } else {
                         // Move this IO to skipped, we are not ready for
                         // the downstairs to receive it.
@@ -3655,7 +3656,7 @@ impl Downstairs {
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[cid].push(io.ds_id);
+                    self.ds_new[cid].insert(io.ds_id);
                 }
             }
         }
@@ -3710,7 +3711,7 @@ impl Downstairs {
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[cid].push(io.ds_id);
+                    self.ds_new[cid].insert(io.ds_id);
                 }
             }
         }
